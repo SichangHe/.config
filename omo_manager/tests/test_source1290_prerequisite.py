@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stderr
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -33,10 +34,37 @@ PANE_ID = "%3389"
 PANE_PID = 3176274
 PANE_START_TICKS = 91827364
 CAPTURE_SHA256 = "c" * 64
+OBSERVED_SOURCE_HEAD = "c99d7d8a1b436f9f3e0d3bba20a75c8c84e8935f"
+STALE_SOURCE_HEAD = "2e168e0744c976fad65308633e157cbe3942c107"
 
 
 def digest(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def repository_head(root: Path) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def source_record_paths(value: object) -> list[str]:
+    if not isinstance(value, list):
+        raise AssertionError("source records are not a list")
+    paths: list[str] = []
+    for record in value:
+        if not isinstance(record, dict):
+            raise AssertionError("source record is not an object")
+        path = record.get("path")
+        if not isinstance(path, str):
+            raise AssertionError("source record path is not a string")
+        paths.append(path)
+    return paths
 
 
 def task_text(
@@ -189,7 +217,7 @@ class Fixture:
         self.report_status = prerequisite.CANONICAL_REPORT_STATUS
         self.replay_id = digest(b"source1290-report-replay")
         self.refresh_report_artifacts()
-        head = prerequisite.git_head(SOURCE_ROOT)
+        head = repository_head(SOURCE_ROOT)
         self.args = prerequisite.Args(
             self.root.resolve(),
             digest(self.task.read_bytes()),
@@ -208,7 +236,6 @@ class Fixture:
             digest(self.audit.read_bytes()),
             self.ownership_manifest.resolve(),
             digest(self.ownership_manifest.read_bytes()),
-            SOURCE_ROOT,
             head,
             self.terminal_receipt.resolve(),
             1.0,
@@ -238,6 +265,53 @@ class Fixture:
             todo_sha256=digest(self.todo.read_bytes()),
             ownership_manifest_sha256=digest(self.ownership_manifest.read_bytes()),
         )
+
+    def cli_arguments(self, source_head: str) -> list[str]:
+        args = self.args
+        return [
+            "--root",
+            str(args.root),
+            "--task-sha256",
+            args.task_sha256,
+            "--todo-sha256",
+            args.todo_sha256,
+            "--archive-todo-sha256",
+            args.archive_todo_sha256,
+            "--pane-id",
+            args.pane_id,
+            "--pane-pid",
+            str(args.pane_pid),
+            "--pane-start-ticks",
+            str(args.pane_start_ticks),
+            "--session-id",
+            args.session_id,
+            "--report-file",
+            str(args.report_file),
+            "--report-sha256",
+            args.report_sha256,
+            "--report-status",
+            args.report_status,
+            "--acceptance-file",
+            str(args.acceptance_file),
+            "--acceptance-sha256",
+            args.acceptance_sha256,
+            "--completed-audit",
+            str(args.completed_audit),
+            "--completed-audit-sha256",
+            args.completed_audit_sha256,
+            "--ownership-manifest",
+            str(args.ownership_manifest),
+            "--ownership-manifest-sha256",
+            args.ownership_manifest_sha256,
+            "--source-head",
+            source_head,
+            "--terminal-receipt",
+            str(args.terminal_receipt),
+            "--wait-s",
+            str(args.wait_s),
+            "--lines",
+            str(args.lines),
+        ]
 
     def refresh_report_artifacts(self) -> None:
         evidence = [route_state(path.resolve()) for path in sorted((self.task, self.todo, self.manager))]
@@ -402,7 +476,6 @@ class Fixture:
         stack = ExitStack()
         stack.enter_context(patch.object(prerequisite, "SOURCE1290_AUDIT_SHA256", digest(self.audit.read_bytes())))
         stack.enter_context(patch.object(prerequisite, "CANONICAL_SOURCE_ROOT", SOURCE_ROOT))
-        stack.enter_context(patch.object(prerequisite, "CANONICAL_SOURCE_HEAD", self.args.source_head))
         stack.enter_context(
             patch.object(
                 prerequisite,
@@ -894,37 +967,87 @@ class Source1290PrerequisiteTests(unittest.TestCase):
             prerequisite.reconcile(case.args)
         self.assertEqual("prepared", json.loads(case.terminal_receipt.read_bytes())["phase"])
 
-    def test_canonical_source_head_observation_accepts_fresh_and_rejects_stale(self) -> None:
-        temporary, case = self.fixture()
+    def test_canonical_source_head_command_ignores_repository_environment_overrides(self) -> None:
+        temporary, _case = self.fixture()
         self.addCleanup(temporary.cleanup)
-        self.assertEqual("2e168e0744c976fad65308633e157cbe3942c107", prerequisite.CANONICAL_SOURCE_HEAD)
-        with patch.dict(os.environ, {"HOME": str(Path(temporary.name) / "untrusted-home")}):
-            self.assertEqual(prerequisite.CANONICAL_SOURCE_ROOT, prerequisite.canonical_source_root())
-        observation = subprocess.CompletedProcess([], 0, f"{prerequisite.CANONICAL_SOURCE_HEAD}\n", "")
-        with patch.object(subprocess, "run", return_value=observation) as run:
-            self.assertEqual(prerequisite.CANONICAL_SOURCE_HEAD, prerequisite.git_head(prerequisite.CANONICAL_SOURCE_ROOT))
-        run.assert_called_once_with(
-            ["git", "-C", str(prerequisite.CANONICAL_SOURCE_ROOT), "rev-parse", "--verify", "HEAD"],
-            text=True,
-            capture_output=True,
-            timeout=10,
-            check=False,
+        self.assertEqual(Path("/home/sichangheagent/.config"), prerequisite.CANONICAL_SOURCE_ROOT)
+        observation = subprocess.CompletedProcess([], 0, f"{OBSERVED_SOURCE_HEAD}\n", "")
+        overrides = {
+            "GIT_COMMON_DIR": str(SOURCE_ROOT / ".git"),
+            "GIT_DIR": str(SOURCE_ROOT / ".git"),
+            "GIT_WORK_TREE": str(SOURCE_ROOT),
+            "HOME": str(Path(temporary.name) / "untrusted-home"),
+        }
+        with patch.dict(os.environ, overrides), patch.object(subprocess, "run", return_value=observation) as run:
+            self.assertEqual(OBSERVED_SOURCE_HEAD, prerequisite.git_head())
+        run.assert_called_once()
+        positional, keywords = run.call_args
+        self.assertEqual(
+            (["git", "-C", "/home/sichangheagent/.config", "rev-parse", "HEAD"],),
+            positional,
+        )
+        self.assertEqual("untrusted-home", Path(keywords["env"]["HOME"]).name)
+        self.assertFalse(any(name.startswith("GIT_") for name in keywords["env"]))
+        self.assertEqual(
+            {"capture_output": True, "check": False, "text": True, "timeout": 10},
+            {name: value for name, value in keywords.items() if name != "env"},
         )
 
+    def test_source_head_claim_accepts_current_and_rejects_stale_different_or_non_full_sha(self) -> None:
+        with patch.object(prerequisite, "git_head", return_value=OBSERVED_SOURCE_HEAD) as observe:
+            prerequisite.require_source_head(OBSERVED_SOURCE_HEAD)
+            for source_head in (STALE_SOURCE_HEAD, "f" * 40):
+                with self.subTest(source_head=source_head), self.assertRaisesRegex(prerequisite.PrerequisiteError, "differs from --source-head"):
+                    prerequisite.require_source_head(source_head)
+        self.assertEqual(3, observe.call_count)
+
+        for source_head in (OBSERVED_SOURCE_HEAD[:12], OBSERVED_SOURCE_HEAD.upper(), "not-a-sha"):
+            with (
+                self.subTest(source_head=source_head),
+                patch.object(prerequisite, "git_head") as observe,
+                self.assertRaisesRegex(prerequisite.PrerequisiteError, "full lowercase Git SHA"),
+            ):
+                prerequisite.require_source_head(source_head)
+            observe.assert_not_called()
+
+    def test_source_cli_manifest_has_only_fresh_head_evidence(self) -> None:
+        temporary, case = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        with (
+            patch.object(prerequisite, "SOURCE1290_AUDIT_SHA256", case.args.completed_audit_sha256),
+            patch.object(prerequisite, "git_head", return_value=OBSERVED_SOURCE_HEAD),
+        ):
+            parsed = prerequisite.parse_args(case.cli_arguments(OBSERVED_SOURCE_HEAD))
+            self.assertEqual(OBSERVED_SOURCE_HEAD, parsed.source_head)
+            for source_head in (STALE_SOURCE_HEAD, "f" * 40, OBSERVED_SOURCE_HEAD[:12], OBSERVED_SOURCE_HEAD.upper(), "not-a-sha"):
+                with self.subTest(source_head=source_head), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    prerequisite.parse_args(case.cli_arguments(source_head))
+            for option in ("--source-root", "--source-ref", "--work-tree"):
+                with self.subTest(option=option), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    prerequisite.parse_args([*case.cli_arguments(OBSERVED_SOURCE_HEAD), option, str(SOURCE_ROOT)])
+
+    def test_source_binding_authenticates_every_installed_source_file(self) -> None:
+        temporary, case = self.fixture()
+        self.addCleanup(temporary.cleanup)
         command = {"value": "bunx"}
         with case.patches(command), patch.object(prerequisite, "git_head", return_value=case.args.source_head) as observe:
             binding = prerequisite.source_binding(case.args)
-            self.assertEqual(case.args.source_head, binding["head"])
-            stale = replace(case.args, source_head="543475ccf538d3b27114cf4f2f3e257b4790ace3")
-            with self.assertRaisesRegex(prerequisite.PrerequisiteError, "not the canonical Source-1290 observation"):
-                prerequisite.source_binding(stale)
-        observe.assert_called_once_with(SOURCE_ROOT)
+        self.assertEqual(case.args.source_head, binding["head"])
+        self.assertEqual(
+            [str((SOURCE_ROOT / relative).resolve()) for relative in prerequisite.SOURCE_FILES],
+            source_record_paths(binding["files"]),
+        )
+        self.assertEqual(2, observe.call_count)
 
+    def test_concurrent_source_head_drift_during_snapshot_refuses_before_intent_or_input(self) -> None:
+        temporary, case = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        command = {"value": "bunx"}
         with (
             case.patches(command),
-            patch.object(prerequisite, "git_head", return_value="543475ccf538d3b27114cf4f2f3e257b4790ace3"),
+            patch.object(prerequisite, "git_head", side_effect=(case.args.source_head, "f" * 40)),
             patch.object(prerequisite, "terminalize_bound_codex_to_shell") as terminalize,
-            self.assertRaisesRegex(prerequisite.PrerequisiteError, "source repository HEAD drifted"),
+            self.assertRaisesRegex(prerequisite.PrerequisiteError, "differs from --source-head"),
         ):
             prerequisite.reconcile(case.args)
         terminalize.assert_not_called()
@@ -943,12 +1066,47 @@ class Source1290PrerequisiteTests(unittest.TestCase):
 
         with (
             case.patches(command),
-            patch.object(prerequisite, "git_head", side_effect=(case.args.source_head, "f" * 40)),
+            patch.object(prerequisite, "git_head", side_effect=(case.args.source_head, case.args.source_head, "f" * 40)),
             patch.object(prerequisite, "terminalize_bound_codex_to_shell", side_effect=terminalize),
             self.assertRaisesRegex(prerequisite.PrerequisiteError, "lifecycle evidence drifted"),
         ):
             prerequisite.reconcile(case.args)
         self.assertEqual("prepared", json.loads(case.terminal_receipt.read_bytes())["phase"])
+
+    def test_unrelated_installed_source_byte_drift_is_detected_before_input(self) -> None:
+        temporary, case = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        source_root = Path(temporary.name) / "installed-source"
+        for relative in prerequisite.SOURCE_FILES:
+            destination = source_root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes((SOURCE_ROOT / relative).read_bytes())
+        unrelated = source_root / prerequisite.SOURCE_FILES[-1]
+        command = {"value": "bunx"}
+
+        def terminalize(*args: object, **_kwargs: object) -> codex_stop.ExitedCodexShell:
+            unrelated.write_bytes(unrelated.read_bytes() + b"\n")
+            callback = args[6]
+            assert callable(callback)
+            callback()
+            raise AssertionError("unreachable")
+
+        with (
+            case.patches(command),
+            patch.object(prerequisite, "CANONICAL_SOURCE_ROOT", source_root),
+            patch.object(prerequisite, "__file__", str(source_root / prerequisite.SOURCE_FILES[0])),
+            patch.object(prerequisite, "git_head", return_value=case.args.source_head),
+            patch.object(prerequisite, "terminalize_bound_codex_to_shell", side_effect=terminalize),
+            self.assertRaisesRegex(prerequisite.PrerequisiteError, "lifecycle evidence drifted"),
+        ):
+            prerequisite.reconcile(case.args)
+        prepared = json.loads(case.terminal_receipt.read_bytes())
+        self.assertEqual("prepared", prepared["phase"])
+        self.assertEqual(
+            [str((source_root / relative).resolve()) for relative in prerequisite.SOURCE_FILES],
+            source_record_paths(prepared["binding"]["source"]["files"]),
+        )
+        self.assertEqual("bunx", command["value"])
 
     def test_concurrent_second_owner_after_intent_is_detected_before_input(self) -> None:
         temporary, case = self.fixture()

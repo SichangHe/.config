@@ -14,7 +14,7 @@ inputs
 - original owner-private report draft and saved canonical acceptance output
 - accepted durable report receipt, publication, and transaction commitment
 - immutable completed memory audit
-- canonical `~sichangheagent/.config` source HEAD `2e168e0744c976fad65308633e157cbe3942c107` and executed helper-source set
+- explicit full lowercase `--source-head` evidence freshly observed from the canonical `/home/sichangheagent/.config` repository and the executed helper-source set
 - owner-private terminal receipt path outside the work-log root
 
 carrier state
@@ -27,9 +27,17 @@ carrier state
 
 source observation
 
-- use only `git -C ~sichangheagent/.config rev-parse --verify HEAD`
-- require exact output `2e168e0744c976fad65308633e157cbe3942c107`
-- reject another source path, the stale `543475ccf538d3b27114cf4f2f3e257b4790ace3` value, or any later observed HEAD
+- observe with exactly `git -C /home/sichangheagent/.config rev-parse HEAD`
+- pass that full 40-character lowercase output as the required `--source-head`; the helper contains no fixed accepted HEAD
+- the revision evidence was `c99d7d8a1b436f9f3e0d3bba20a75c8c84e8935f`; the former `2e168e0744c976fad65308633e157cbe3942c107` observation is stale, and either value must be rejected whenever it is not the live canonical HEAD
+- remove all caller `GIT_*` environment overrides before observation and reject malformed, abbreviated, uppercase, stale, or different claims
+- observe HEAD before and after individually authenticating every source file, then repeat the same source binding at every prepared, terminalized, and pre-input/pre-receipt custody revalidation gate
+
+terminalization CLI manifest
+
+- source evidence has exactly one option: required `--source-head SHA`
+- there is no source-repository, source-ref, Git-dir, or work-tree option; callers cannot select another repository, worktree, or ref
+- `/home/sichangheagent/.config` and `HEAD` are fixed by the helper, and the source root is not derived from `HOME`
 
 ownership preflight
 

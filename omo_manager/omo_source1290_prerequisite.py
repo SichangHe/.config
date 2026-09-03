@@ -7,7 +7,6 @@ import argparse
 import hashlib
 import json
 import os
-import pwd
 import re
 import stat
 import subprocess
@@ -75,7 +74,6 @@ DUPLICATE_CARRIER_BLOCKER = "duplicate authority carrier created during concurre
 SOURCE1290_AUDIT_SHA256 = "eafa5c27d35ea2dacb4c94a0c53619f06acfb66bef703bf63dc569ac7af5fedf"
 SOURCE1290_AUTHORITY = "202608/manager_mail/85c5dff58359-1290.txt:3-4"
 SOURCE1290_EXCERPT = "Close the “memory” thing. It is so old.\nWhich email report was for the transcription thing\n"
-CANONICAL_SOURCE_HEAD = "2e168e0744c976fad65308633e157cbe3942c107"
 POST_ARCHIVE_SHA256 = {
     CANONICAL_CARRIER: "f3d0e041d72ac26cf421b914e9d154a93d8db6304503338f25995119e8d3fc4a",
     DUPLICATE_CARRIER: "3a0291e6ea4c6aa8ef59055d65e97c53a8468d1a29d6e41c9aad7e760f59c811",
@@ -120,11 +118,7 @@ SOURCE_FILES = (
 )
 
 
-def canonical_source_root() -> Path:
-    return (Path(pwd.getpwnam("sichangheagent").pw_dir) / ".config").resolve()
-
-
-CANONICAL_SOURCE_ROOT = canonical_source_root()
+CANONICAL_SOURCE_ROOT = Path("/home/sichangheagent/.config")
 
 
 class PrerequisiteError(RuntimeError):
@@ -150,7 +144,6 @@ class Args:
     completed_audit_sha256: str
     ownership_manifest: Path
     ownership_manifest_sha256: str
-    source_root: Path
     source_head: str
     terminal_receipt: Path
     wait_s: float
@@ -610,13 +603,15 @@ def active_target_owners(
     return tuple(item.todo.relative for item in indexed if item.status != "done" and canonical_target(item.target) == canonical)
 
 
-def git_head(root: Path) -> str:
+def git_head() -> str:
+    environment = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
     result = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
+        ["git", "-C", str(CANONICAL_SOURCE_ROOT), "rev-parse", "HEAD"],
         text=True,
         capture_output=True,
         timeout=10,
         check=False,
+        env=environment,
     )
     value = result.stdout.strip()
     if result.returncode != 0 or COMMIT_RE.fullmatch(value) is None:
@@ -624,17 +619,21 @@ def git_head(root: Path) -> str:
     return value
 
 
+def require_source_head(source_head: str) -> None:
+    if COMMIT_RE.fullmatch(source_head) is None:
+        raise PrerequisiteError("--source-head is not one full lowercase Git SHA")
+    if git_head() != source_head:
+        raise PrerequisiteError("canonical source repository HEAD differs from --source-head")
+
+
 def source_binding(args: Args) -> dict[str, object]:
-    if args.source_root != CANONICAL_SOURCE_ROOT or args.source_head != CANONICAL_SOURCE_HEAD:
-        raise PrerequisiteError("source repository claim is not the canonical Source-1290 observation")
     expected_helper = (CANONICAL_SOURCE_ROOT / SOURCE_FILES[0]).resolve(strict=False)
     if Path(__file__).resolve() != expected_helper:
         raise PrerequisiteError("executed prerequisite helper is outside the bound source repository")
-    head = git_head(CANONICAL_SOURCE_ROOT)
-    if head != CANONICAL_SOURCE_HEAD:
-        raise PrerequisiteError("source repository HEAD drifted")
+    require_source_head(args.source_head)
     files = [stable_owned_read((CANONICAL_SOURCE_ROOT / relative).resolve(), label=f"source file {relative}").record() for relative in SOURCE_FILES]
-    return {"files": files, "head": head, "root": str(CANONICAL_SOURCE_ROOT)}
+    require_source_head(args.source_head)
+    return {"files": files, "head": args.source_head, "root": str(CANONICAL_SOURCE_ROOT)}
 
 
 def route_state(path: Path) -> dict[str, object]:
@@ -1332,7 +1331,7 @@ def reconcile(args: Args) -> bytes:
             paths.commitment,
             args.terminal_receipt,
             *(args.root / relative for relative in POST_ARCHIVE_FILES),
-            *(args.source_root / relative for relative in SOURCE_FILES),
+            *(CANONICAL_SOURCE_ROOT / relative for relative in SOURCE_FILES),
             *paths.route_evidence,
         }
         with ExitStack() as locks:
@@ -1425,8 +1424,11 @@ def parse_args(argv: list[str] | None = None) -> Args:
     _ = parser.add_argument("--completed-audit-sha256", required=True)
     _ = parser.add_argument("--ownership-manifest", type=Path, required=True)
     _ = parser.add_argument("--ownership-manifest-sha256", required=True)
-    _ = parser.add_argument("--source-root", type=Path, required=True)
-    _ = parser.add_argument("--source-head", required=True)
+    _ = parser.add_argument(
+        "--source-head",
+        required=True,
+        help="full lowercase SHA from: git -C /home/sichangheagent/.config rev-parse HEAD",
+    )
     _ = parser.add_argument("--terminal-receipt", type=Path, required=True)
     _ = parser.add_argument("--wait-s", type=float, default=10.0)
     _ = parser.add_argument("--lines", type=int, default=2000)
@@ -1443,7 +1445,11 @@ def parse_args(argv: list[str] | None = None) -> Args:
     if any(HASH_RE.fullmatch(value) is None for value in hashes):
         parser.error("all artifact digests must be lowercase SHA-256 values")
     if COMMIT_RE.fullmatch(parsed.source_head) is None:
-        parser.error("--source-head must be one exact lowercase Git commit")
+        parser.error("--source-head must be one full lowercase Git SHA")
+    try:
+        require_source_head(parsed.source_head)
+    except PrerequisiteError as exc:
+        parser.error(str(exc))
     if PANE_RE.fullmatch(parsed.pane_id) is None or parsed.pane_pid <= 1 or parsed.pane_start_ticks <= 0 or UUID_RE.fullmatch(parsed.session_id) is None:
         parser.error("pane, process, and Codex session identities must be exact")
     if parsed.completed_audit_sha256 != SOURCE1290_AUDIT_SHA256:
@@ -1471,7 +1477,6 @@ def parse_args(argv: list[str] | None = None) -> Args:
         parsed.completed_audit_sha256,
         paths[3],
         parsed.ownership_manifest_sha256,
-        parsed.source_root.expanduser().resolve(),
         parsed.source_head,
         paths[4],
         parsed.wait_s,
