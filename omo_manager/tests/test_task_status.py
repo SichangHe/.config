@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import subprocess
 import tempfile
@@ -47,6 +48,7 @@ from omo_manager.omo_task_status import stop_done_agent
 from omo_manager.omo_task_status import tracked_dirty_state
 from omo_manager.omo_task_status import update_frontmatter_status
 from omo_manager.omo_task_status import Args as StatusArgs
+from omo_manager.omo_codex_stop import ExitedCodexShell
 from omo_manager.omo_codex_stop import write_bound_close_proof
 from omo_manager.omo_codex_stop import close_note
 from omo_manager.omo_task_metadata import frontmatter_parts
@@ -1716,6 +1718,65 @@ class TaskStatusTests(unittest.TestCase):
         self.assertEqual("manager_mail/authority.txt", args.human_close_authorization_source)
         self.assertEqual("a" * 64, args.human_close_authorization_sha256)
 
+    def write_done_live_close_case(self, root: Path) -> tuple[Path, str, Path, str, StatusArgs]:
+        task = root / "task.md"
+        text = task_frontmatter(status="done", runat="wl:2") + "body\n"
+        task.write_text(text, encoding="utf-8")
+        todo = root / "TODO.md"
+        todo_text = "current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\ntask.md wl:2\n"
+        todo.write_text(todo_text, encoding="utf-8")
+        private = root / "private"
+        private.mkdir(mode=0o700)
+        args = StatusArgs(
+            root,
+            Path("task.md"),
+            "done",
+            "",
+            close_done_live_no_mail=True,
+            active_target="wl:2",
+            manager_target="wl:1",
+            expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+            expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+            expected_pane_id="%42",
+            expected_pane_pid=4242,
+            expected_pane_start_ticks=73,
+            expected_session_id="019e9ed9-6262-71c0-b4b3-72ffd4182e98",
+            terminal_evidence="accepted-report-receipt-token",
+            audit_output=(private / "done-live-close.json").resolve(),
+        )
+        return task, text, todo, todo_text, args
+
+    def test_done_live_no_mail_parser_requires_bound_close_evidence(self) -> None:
+        complete = [
+            "--root", "/tmp/work_logs", "--close-done-live-no-mail",
+            "--active-target", "wl:2", "--manager-target", "wl:1",
+            "--expected-task-sha256", "a" * 64,
+            "--expected-todo-sha256", "b" * 64,
+            "--expected-pane-id", "%42", "--expected-pane-pid", "4242",
+            "--expected-pane-start-ticks", "73",
+            "--expected-session-id", "019e9ed9-6262-71c0-b4b3-72ffd4182e98",
+            "--terminal-evidence", "accepted-report-receipt-token",
+            "--audit-output", "/tmp/done-live-close.json", "task.md",
+        ]
+        args = parse_args(complete)
+        self.assertTrue(args.close_done_live_no_mail)
+        self.assertEqual("done", args.status)
+        for option in (
+            "--active-target", "--manager-target", "--expected-task-sha256",
+            "--expected-todo-sha256", "--expected-pane-id", "--expected-pane-pid",
+            "--expected-pane-start-ticks", "--expected-session-id",
+            "--terminal-evidence", "--audit-output",
+        ):
+            candidate = complete.copy()
+            index = candidate.index(option)
+            del candidate[index : index + 2]
+            with self.subTest(option=option), self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                parse_args(candidate)
+        human_target = complete.copy()
+        human_target[human_target.index("--active-target") + 1] = "hwork:2"
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args(human_target)
+
     def test_live_no_mail_parser_requires_exact_cas_evidence(self) -> None:
         complete = [
             "--root", "/tmp/work_logs", "--complete-live-no-mail",
@@ -1950,6 +2011,317 @@ class TaskStatusTests(unittest.TestCase):
 
             finish_done_transaction(root, task, updated_task, task.stat())
             self.assertEqual(updated_task, task.read_text(encoding="utf-8"))
+
+    def test_done_live_close_is_idempotent_and_sends_no_mail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_done_live_close_case(root)
+            state = {"live": True}
+            capture_sha256 = "c" * 64
+
+            def target_pane(_target: str) -> str:
+                return "%42" if state["live"] else ""
+
+            def start_ticks(_pid: int) -> int | None:
+                return 73 if state["live"] else None
+
+            def terminalize(*values: object) -> ExitedCodexShell:
+                callback = values[6]
+                assert callable(callback)
+                callback()
+                return ExitedCodexShell(args.expected_session_id, capture_sha256)
+
+            def close(*values: object) -> None:
+                identity = values[1]
+                pre_close = values[10]
+                assert callable(identity) and identity()
+                assert callable(pre_close)
+                pre_close()
+                write_bound_close_proof(Path(str(values[4])), Path(str(values[5])), str(values[6]), str(values[7]))
+                state["live"] = False
+
+            output = io.StringIO()
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_task_status.pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_task_status.process_start_ticks", side_effect=start_ticks),
+                patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell", side_effect=terminalize) as terminalize_call,
+                patch("omo_manager.omo_task_status.validate_exited_codex_shell", return_value=capture_sha256),
+                patch("omo_manager.omo_task_status.close_bound_tmux_target", side_effect=close) as guarded_close,
+                patch("omo_manager.omo_task_status.require_owner_completion") as email,
+                patch("omo_manager.omo_task_status.stop") as ordinary_stop,
+                redirect_stdout(output),
+            ):
+                self.assertEqual(0, run(args))
+                self.assertEqual(0, run(args))
+            self.assertEqual(1, terminalize_call.call_count)
+            self.assertEqual(1, guarded_close.call_count)
+            self.assertEqual("done-live-no-mail-close", guarded_close.call_args.args[-1])
+            email.assert_not_called()
+            ordinary_stop.assert_not_called()
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            closed_text = task.read_text(encoding="utf-8")
+            self.assertTrue(closed_text.startswith(text))
+            self.assertEqual(1, closed_text.count("manager closed Codex agent"))
+            audit = json.loads(args.audit_output.read_text(encoding="utf-8"))
+            self.assertEqual("complete", audit["state"])
+            self.assertEqual(hashlib.sha256(closed_text.encode()).hexdigest(), audit["completed_task_sha256"])
+            proof = args.audit_output.with_name(f".{args.audit_output.name}.owner-stopped")
+            self.assertTrue(proof.is_file())
+            self.assertIn("no email or task reopening", output.getvalue())
+
+    def test_done_live_close_rejects_metadata_custody_owner_and_pane_drift(self) -> None:
+        for case in ("status", "queue", "pending", "manager", "tool", "task digest", "todo", "todo digest", "owner", "pane", "process"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, todo, todo_text, args = self.write_done_live_close_case(root)
+                if case == "status":
+                    text = task_frontmatter(status="running", runat="wl:2") + "body\n"
+                elif case == "queue":
+                    text = task_frontmatter(status="done", runat="wl:2", pending_items=("unfinished",)) + "body\n"
+                elif case == "pending":
+                    text += "(pending)\nreport\n"
+                elif case == "manager":
+                    text = task_frontmatter(status="done", runat="wl:2", managerat="wl:9") + "body\n"
+                elif case == "tool":
+                    text = text.replace("tool: codex", "tool: cursor")
+                if text != task.read_text(encoding="utf-8"):
+                    task.write_text(text, encoding="utf-8")
+                    args = replace(args, expected_task_sha256=hashlib.sha256(text.encode()).hexdigest())
+                if case == "task digest":
+                    args = replace(args, expected_task_sha256="0" * 64)
+                if case == "todo":
+                    todo_text = "current:\ntask.md wl:2\n\nprevious:\n"
+                    todo.write_text(todo_text, encoding="utf-8")
+                    args = replace(args, expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest())
+                elif case == "todo digest":
+                    args = replace(args, expected_todo_sha256="0" * 64)
+                if case == "owner":
+                    (root / "other.md").write_text(task_frontmatter(status="running", runat="wl:2") + "body\n", encoding="utf-8")
+                target_pane = "%41" if case == "pane" else "%42"
+                ticks = 74 if case == "process" else 73
+                with (
+                    patch("omo_manager.omo_task_status.park_target_pane_id", return_value=target_pane),
+                    patch("omo_manager.omo_task_status.pane_id", return_value=target_pane),
+                    patch("omo_manager.omo_task_status.process_start_ticks", return_value=ticks),
+                    patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell") as terminalize,
+                    patch("omo_manager.omo_task_status.close_bound_tmux_target") as close,
+                    redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(2, run(args))
+                terminalize.assert_not_called()
+                close.assert_not_called()
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_done_live_close_requires_accepted_report_evidence_before_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_done_live_close_case(root)
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.process_start_ticks", return_value=73),
+                patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell", side_effect=RuntimeError("accepted terminal report evidence is absent")) as terminalize,
+                patch("omo_manager.omo_task_status.close_bound_tmux_target") as close,
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(2, run(args))
+            terminalize.assert_called_once()
+            close.assert_not_called()
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            self.assertEqual("reserved", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+
+    def test_done_live_close_rejects_a_different_terminalized_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_done_live_close_case(root)
+
+            def terminalize(*values: object) -> ExitedCodexShell:
+                callback = values[6]
+                assert callable(callback)
+                callback()
+                return ExitedCodexShell("11111111-2222-3333-4444-555555555555", "c" * 64)
+
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.process_start_ticks", return_value=73),
+                patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell", side_effect=terminalize),
+                patch("omo_manager.omo_task_status.close_bound_tmux_target") as close,
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(2, run(args))
+            close.assert_not_called()
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            self.assertEqual("prepared", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+
+    def test_done_live_close_detects_concurrent_todo_change_before_terminal_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_done_live_close_case(root)
+
+            def terminalize(*values: object) -> ExitedCodexShell:
+                callback = values[6]
+                assert callable(callback)
+                callback()
+                todo.write_text(f"{todo_text}concurrent\n", encoding="utf-8")
+                callback()
+                raise AssertionError("unreachable")
+
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.process_start_ticks", return_value=73),
+                patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell", side_effect=terminalize),
+                patch("omo_manager.omo_task_status.close_bound_tmux_target") as close,
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(2, run(args))
+            close.assert_not_called()
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(f"{todo_text}concurrent\n", todo.read_text(encoding="utf-8"))
+            self.assertEqual("prepared", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+
+    def test_done_live_close_rejects_terminal_capture_drift_before_guarded_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_done_live_close_case(root)
+
+            def terminalize(*values: object) -> ExitedCodexShell:
+                callback = values[6]
+                assert callable(callback)
+                callback()
+                return ExitedCodexShell(args.expected_session_id, "c" * 64)
+
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.process_start_ticks", return_value=73),
+                patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell", side_effect=terminalize),
+                patch("omo_manager.omo_task_status.validate_exited_codex_shell", return_value="d" * 64),
+                patch("omo_manager.omo_task_status.close_bound_tmux_target") as close,
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(2, run(args))
+            close.assert_not_called()
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            self.assertEqual("terminalized", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+
+    def test_done_live_close_recovers_after_close_before_audit_advance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_done_live_close_case(root)
+            state = {"live": True}
+            capture_sha256 = "d" * 64
+
+            def target_pane(_target: str) -> str:
+                return "%42" if state["live"] else ""
+
+            def start_ticks(_pid: int) -> int | None:
+                return 73 if state["live"] else None
+
+            def terminalize(*values: object) -> ExitedCodexShell:
+                callback = values[6]
+                assert callable(callback)
+                callback()
+                return ExitedCodexShell(args.expected_session_id, capture_sha256)
+
+            def close_then_interrupt(*values: object) -> None:
+                pre_close = values[10]
+                assert callable(pre_close)
+                pre_close()
+                write_bound_close_proof(Path(str(values[4])), Path(str(values[5])), str(values[6]), str(values[7]))
+                state["live"] = False
+                raise KeyboardInterrupt
+
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_task_status.pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_task_status.process_start_ticks", side_effect=start_ticks),
+                patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell", side_effect=terminalize),
+                patch("omo_manager.omo_task_status.validate_exited_codex_shell", return_value=capture_sha256),
+                patch("omo_manager.omo_task_status.close_bound_tmux_target", side_effect=close_then_interrupt),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                run(args)
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual("terminalized", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_task_status.pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_task_status.process_start_ticks", side_effect=start_ticks),
+                patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell") as terminalize_again,
+                patch("omo_manager.omo_task_status.close_bound_tmux_target") as close_again,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(0, run(args))
+            terminalize_again.assert_not_called()
+            close_again.assert_not_called()
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            self.assertEqual(1, task.read_text(encoding="utf-8").count("manager closed Codex agent"))
+            self.assertEqual("complete", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+
+    def test_done_live_close_recovers_after_note_before_final_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, _text, _todo, _todo_text, args = self.write_done_live_close_case(root)
+            state = {"live": True, "interrupted": False}
+            capture_sha256 = "e" * 64
+            original_replace = replace_private_audit
+
+            def target_pane(_target: str) -> str:
+                return "%42" if state["live"] else ""
+
+            def start_ticks(_pid: int) -> int | None:
+                return 73 if state["live"] else None
+
+            def terminalize(*values: object) -> ExitedCodexShell:
+                callback = values[6]
+                assert callable(callback)
+                callback()
+                return ExitedCodexShell(args.expected_session_id, capture_sha256)
+
+            def close(*values: object) -> None:
+                pre_close = values[10]
+                assert callable(pre_close)
+                pre_close()
+                write_bound_close_proof(Path(str(values[4])), Path(str(values[5])), str(values[6]), str(values[7]))
+                state["live"] = False
+
+            def interrupt_final_audit(path: Path, expected: str, updated: str) -> None:
+                if json.loads(updated)["state"] == "complete" and not state["interrupted"]:
+                    state["interrupted"] = True
+                    raise KeyboardInterrupt
+                original_replace(path, expected, updated)
+
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_task_status.pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_task_status.process_start_ticks", side_effect=start_ticks),
+                patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell", side_effect=terminalize),
+                patch("omo_manager.omo_task_status.validate_exited_codex_shell", return_value=capture_sha256),
+                patch("omo_manager.omo_task_status.close_bound_tmux_target", side_effect=close),
+                patch("omo_manager.omo_task_status.replace_private_audit", side_effect=interrupt_final_audit),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                run(args)
+            self.assertEqual("note-prepared", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+            self.assertEqual(1, task.read_text(encoding="utf-8").count("manager closed Codex agent"))
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_task_status.pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_task_status.process_start_ticks", side_effect=start_ticks),
+                patch("omo_manager.omo_task_status.close_bound_tmux_target") as close_again,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(0, run(args))
+            close_again.assert_not_called()
+            self.assertEqual(1, task.read_text(encoding="utf-8").count("manager closed Codex agent"))
+            self.assertEqual("complete", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
 
     def test_normal_done_refuses_human_target_before_state_or_tmux_change_without_compatible_close_helper(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

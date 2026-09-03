@@ -54,6 +54,16 @@ UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA
 RESUME_RE = re.compile(rf"(?i)\bcodex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
 EXIT_RESUME_RE = re.compile(rf"(?i)\bTo\s+(?:resume|continue this session),\s+run\s+codex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
 STATUS_SESSION_RE = re.compile(rf"\bSession:\s*({UUID_RE})\b")
+DONE_LIVE_CLOSE_OPERATION = "done-live-no-mail-close"
+DONE_LIVE_CLOSE_AUDIT_KEYS = frozenset(
+    {
+        "version", "operation", "state", "task", "target", "manager_target",
+        "task_sha256", "todo_sha256", "pane_id", "pane_pid",
+        "pane_start_ticks", "session_id", "terminal_evidence_sha256",
+        "terminal_capture_sha256", "close_proof_commitment", "close_note",
+        "completed_task_sha256",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -813,6 +823,7 @@ def close_bound_tmux_target(
     expected_pane_pid: int = 0,
     expected_pane_start_ticks: int = 0,
     pre_input_check: Callable[[], None] | None = None,
+    proof_operation: str = "",
 ) -> None:
     """Close a non-human pane only while its symbolic and numeric identities agree."""
 
@@ -849,6 +860,7 @@ def close_bound_tmux_target(
                     audit_path,
                     proof_secret,
                     proof_commitment,
+                    *([proof_operation] if proof_operation else []),
                 ]
             )
             commands = [["run-shell", writer]]
@@ -875,8 +887,124 @@ def close_bound_tmux_target(
         raise RuntimeError("guarded tmux close produced unexpected output")
 
 
+def done_live_close_audit_authorizes(
+    audit_text: str,
+    audit: object,
+    commitment: str,
+    *,
+    target: str = "",
+    pane_id_value: str = "",
+    pane_pid: int = 0,
+    pane_start_ticks: int = 0,
+) -> bool:
+    """Validate the exact terminalized audit permitted to close a done worker."""
+
+    if not isinstance(audit, dict):
+        return False
+    record: dict[str, object] = {}
+    for key, value in audit.items():
+        if not isinstance(key, str):
+            return False
+        record[key] = value
+    if set(record) != DONE_LIVE_CLOSE_AUDIT_KEYS:
+        return False
+    canonical = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+    task = record.get("task")
+    owner_target = record.get("target")
+    manager_target = record.get("manager_target")
+    audit_pane_id = record.get("pane_id")
+    audit_pane_pid = record.get("pane_pid")
+    audit_start_ticks = record.get("pane_start_ticks")
+    task_path_value = Path(task) if isinstance(task, str) else Path()
+    exact_target = r"[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?"
+    if (
+        audit_text != canonical
+        or record.get("version") != "v1.0.0"
+        or record.get("operation") != DONE_LIVE_CLOSE_OPERATION
+        or record.get("state") != "terminalized"
+        or not isinstance(task, str)
+        or not task.endswith(".md")
+        or task_path_value.is_absolute()
+        or not task_path_value.parts
+        or any(part in {"", ".", ".."} for part in task_path_value.parts)
+        or not isinstance(owner_target, str)
+        or re.fullmatch(exact_target, owner_target) is None
+        or owner_target.partition(":")[0].startswith("h")
+        or not isinstance(manager_target, str)
+        or re.fullmatch(exact_target, manager_target) is None
+        or manager_target.partition(":")[0].startswith("h")
+        or not isinstance(audit_pane_id, str)
+        or re.fullmatch(r"%[0-9]+", audit_pane_id) is None
+        or type(audit_pane_pid) is not int
+        or audit_pane_pid <= 1
+        or type(audit_start_ticks) is not int
+        or audit_start_ticks <= 0
+        or not isinstance(record.get("session_id"), str)
+        or re.fullmatch(UUID_RE, str(record.get("session_id"))) is None
+        or any(SHA256_RE.fullmatch(str(record.get(field))) is None for field in ("task_sha256", "todo_sha256", "terminal_evidence_sha256", "terminal_capture_sha256"))
+        or record.get("close_proof_commitment") != commitment
+        or record.get("close_note") != ""
+        or record.get("completed_task_sha256") != ""
+    ):
+        return False
+    if target and (owner_target, audit_pane_id, audit_pane_pid, audit_start_ticks) != (target, pane_id_value, pane_pid, pane_start_ticks):
+        return False
+    return True
+
+
+def validate_done_live_close_audit_file(
+    audit_path: Path,
+    commitment: str,
+    target: str,
+    pane_id_value: str,
+    pane_pid: int,
+    pane_start_ticks: int,
+) -> None:
+    """Revalidate the done-live close authority inside the bound child."""
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd: int | None = None
+    try:
+        fd = os.open(audit_path, flags)
+        before = os.fstat(fd)
+        with os.fdopen(os.dup(fd), "r", encoding="utf-8") as source:
+            audit_text = source.read(65537)
+        after = os.fstat(fd)
+        current = audit_path.lstat()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RuntimeError("done-live close audit is unavailable inside the bound close") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
+    try:
+        audit: object = json.loads(audit_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("done-live close audit is invalid inside the bound close") from exc
+    identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+    after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+    current_identity = (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or len(audit_text.encode()) > 65536
+        or identity != after_identity
+        or identity != current_identity
+        or not done_live_close_audit_authorizes(
+            audit_text,
+            audit,
+            commitment,
+            target=target,
+            pane_id_value=pane_id_value,
+            pane_pid=pane_pid,
+            pane_start_ticks=pane_start_ticks,
+        )
+    ):
+        raise RuntimeError("done-live close audit drifted before exact pane kill")
+
+
 def write_bound_close_proof(path: Path, audit_path: Path, secret: str, commitment: str) -> None:
-    """Persist a guarded close capability committed by one prepared park audit."""
+    """Persist a guarded close capability committed by one exact lifecycle audit."""
 
     expected_path = audit_path.with_name(f".{audit_path.name}.owner-stopped")
     if (
@@ -904,15 +1032,19 @@ def write_bound_close_proof(path: Path, audit_path: Path, secret: str, commitmen
         audit = yaml.safe_load(audit_text)
     except yaml.YAMLError as exc:
         raise RuntimeError("bound close proof audit is invalid") from exc
+    legacy_authorized = (
+        isinstance(audit, dict)
+        and audit.get("operation") in {"park-unlinked", "manager-replace"}
+        and audit.get("state") == "prepared"
+        and audit.get("close_proof_commitment") == commitment
+    )
+    done_live_authorized = done_live_close_audit_authorizes(audit_text, audit, commitment)
     if (
         not stat.S_ISREG(audit_info.st_mode)
         or audit_info.st_uid != os.getuid()
         or stat.S_IMODE(audit_info.st_mode) != 0o600
         or len(audit_text.encode()) > 65536
-        or not isinstance(audit, dict)
-        or audit.get("operation") not in {"park-unlinked", "manager-replace"}
-        or audit.get("state") != "prepared"
-        or audit.get("close_proof_commitment") != commitment
+        or not (legacy_authorized or done_live_authorized)
     ):
         raise RuntimeError("bound close proof audit does not authorize this exact capability")
     if audit.get("operation") == "manager-replace":
@@ -1036,10 +1168,22 @@ def kill_bound_and_write_close_proof(
     audit_path: Path,
     secret: str,
     commitment: str,
+    proof_operation: str = "",
 ) -> None:
     """Kill one revalidated pane, then persist its prepared close capability."""
 
     # 🧑 "Atomically close only exact failed `guest_hees:0` ... Verify old owner absent"
+    if proof_operation:
+        if proof_operation != DONE_LIVE_CLOSE_OPERATION:
+            raise RuntimeError("bound close proof operation is unsupported")
+        validate_done_live_close_audit_file(
+            audit_path,
+            commitment,
+            symbolic_target,
+            expected_pane_id,
+            expected_pane_pid,
+            expected_pane_start_ticks,
+        )
     if (
         expected_pane_pid <= 0
         or expected_pane_start_ticks <= 0
@@ -1048,7 +1192,17 @@ def kill_bound_and_write_close_proof(
         or process_start_ticks(expected_pane_pid) != expected_pane_start_ticks
     ):
         raise RuntimeError("bound close identity changed before exact pane kill")
-    _ = tmux(["kill-pane", "-t", expected_pane_id], check=True)
+    if proof_operation:
+        output = guarded_tmux_sequence(
+            symbolic_target,
+            expected_pane_id,
+            [["kill-pane", "-t", expected_pane_id]],
+            expected_pane_pid,
+        )
+        if output:
+            raise RuntimeError("bound close produced unexpected output")
+    else:
+        _ = tmux(["kill-pane", "-t", expected_pane_id], check=True)
     deadline_s = time.monotonic() + 5.0
     while process_start_ticks(expected_pane_pid) is not None and time.monotonic() < deadline_s:
         time.sleep(0.05)
@@ -1616,7 +1770,7 @@ def stop(args: Args) -> str:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) == 9 and argv[0] == "--kill-bound-and-write-close-proof":
+    if len(argv) in {9, 10} and argv[0] == "--kill-bound-and-write-close-proof":
         try:
             kill_bound_and_write_close_proof(
                 argv[1],
@@ -1627,6 +1781,7 @@ def main(argv: list[str]) -> int:
                 Path(argv[6]),
                 argv[7],
                 argv[8],
+                argv[9] if len(argv) == 10 else "",
             )
         except (OSError, RuntimeError, ValueError) as exc:
             print(f"omo_codex_stop.py: {exc}", file=sys.stderr)
