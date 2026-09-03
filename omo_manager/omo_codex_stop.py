@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Stop a Codex tmux pane and print the captured resume id if Codex exposes one."""
+
 from __future__ import annotations
 
 import argparse
@@ -41,9 +42,7 @@ STOPPABLE_CODEX_STATUSES = {"error", "ready", "running", "stuck_input", "waiting
 LOCAL_ENV_PATH = Path(__file__).resolve().with_name("local.env")
 HUMAN_CLOSE_SOURCE_RE = re.compile(r"manager_mail/[A-Za-z0-9_.-]+\.txt\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
-HUMAN_CLOSE_DIRECTIVE_RE = re.compile(
-    r"(?im)^\s*close\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?=$|[\s,.;:])"
-)
+HUMAN_CLOSE_DIRECTIVE_RE = re.compile(r"(?im)^\s*close\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?=$|[\s,.;:])")
 HUMAN_CLOSE_REPLY_DIRECTIVE_RE = re.compile(r"(?im)^\s*cancel\s+this\s+task(?=$|[\s,.;:])")
 HUMAN_REPLACE_DIRECTIVE_RE = re.compile(
     r"(?m)^Replace the failed PCODX manager (?P<task>[A-Za-z0-9_./-]+\.md) at "
@@ -53,9 +52,7 @@ HUMAN_REPLACE_DIRECTIVE_RE = re.compile(
 HUMAN_REPLACE_CANDIDATE_RE = re.compile(r"(?m)^Replace the failed PCODX manager\b.*$")
 UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 RESUME_RE = re.compile(rf"(?i)\bcodex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
-EXIT_RESUME_RE = re.compile(
-    rf"(?i)\bTo\s+(?:resume|continue this session),\s+run\s+codex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b"
-)
+EXIT_RESUME_RE = re.compile(rf"(?i)\bTo\s+(?:resume|continue this session),\s+run\s+codex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
 STATUS_SESSION_RE = re.compile(rf"\bSession:\s*({UUID_RE})\b")
 
 
@@ -113,7 +110,7 @@ def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-epilog="""This is the lower-level stop helper used by
+        epilog="""This is the lower-level stop helper used by
 `omo_task_status.py TASK.md done`. Use it directly only for a non-task pane;
 normal task closure goes through `omo_task_status.py`. The sole exception is
 an exact `h*` task target with hash-bound human-close authority; it requires
@@ -222,12 +219,7 @@ def extract_exit_resume_id(before: str, after: str) -> str:
     if session_id:
         return session_id
     before_lines = {line.strip() for line in before.splitlines() if line.strip()}
-    matches = [
-        match.group(1)
-        for line in after.splitlines()
-        if line.strip() not in before_lines
-        for match in EXIT_RESUME_RE.finditer(line)
-    ]
+    matches = [match.group(1) for line in after.splitlines() if line.strip() not in before_lines for match in EXIT_RESUME_RE.finditer(line)]
     return matches[-1] if matches else ""
 
 
@@ -283,11 +275,7 @@ def configured_mail_root() -> Path:
         payload = LOCAL_ENV_PATH.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         raise RuntimeError("trusted manager-mail configuration is unavailable") from exc
-    if (
-        not stat.S_ISREG(info.st_mode)
-        or info.st_uid != os.getuid()
-        or stat.S_IMODE(info.st_mode) & 0o022
-    ):
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o022:
         raise RuntimeError("trusted manager-mail configuration is unsafe")
     matches = re.findall(r'^export OMO_WORK_LOGS_ROOT="([^"\n]+)"$', payload, flags=re.MULTILINE)
     if len(matches) != 1 or not Path(matches[0]).is_absolute():
@@ -416,18 +404,10 @@ def validate_human_close_authorization(args: Args) -> None:
     subject_lines = [line[len("Subject:") :].strip() for line in authority_text.splitlines() if line.startswith("Subject:")]
     task_token = re.compile(rf"(?<![A-Za-z0-9_./-]){re.escape(task_reference)}(?![A-Za-z0-9_./-])")
     body = authority_text.replace("\r\n", "\n").partition("\n\n")[2]
-    replacements = [
-        match
-        for match in HUMAN_REPLACE_DIRECTIVE_RE.finditer(body)
-        if match.group("task") == task_reference and match.group("target") in target_aliases(target)
-    ]
+    replacements = [match for match in HUMAN_REPLACE_DIRECTIVE_RE.finditer(body) if match.group("task") == task_reference and match.group("target") in target_aliases(target)]
     replacement_candidates = HUMAN_REPLACE_CANDIDATE_RE.findall(body)
     body_nonempty_lines = [line.strip() for line in body.splitlines() if line.strip()]
-    exact_replacement = (
-        len(replacement_candidates) == 1
-        and len(replacements) == 1
-        and body_nonempty_lines == [replacements[0].group(0).strip(), "Just do it"]
-    )
+    exact_replacement = len(replacement_candidates) == 1 and len(replacements) == 1 and body_nonempty_lines == [replacements[0].group(0).strip(), "Just do it"]
     subject_names_task = len(subject_lines) == 1 and task_token.search(subject_lines[0]) is not None
     reply_binds_task = len(subject_lines) == 1 and reply_authorizes_bound_task(subject_lines[0], body, target)
     if replacement_candidates and not exact_replacement:
@@ -518,14 +498,8 @@ def resume_cmd(args: Args, session_id: str) -> str:
 def close_note(target: str, session_id: str, now: datetime | None = None) -> str:
     stamp = (now or datetime.now().astimezone()).strftime("%m-%d %H:%M %Z")
     if session_id:
-        return (
-            f"\n(manager closed Codex agent {stamp}; tmux target `{target}`; "
-            f"session_id: `{session_id}`.)\n"
-        )
-    return (
-        f"\n(manager closed Codex agent {stamp}; tmux target `{target}`; "
-        "Codex session id not found in captured tmux output.)\n"
-    )
+        return f"\n(manager closed Codex agent {stamp}; tmux target `{target}`; session_id: `{session_id}`.)\n"
+    return f"\n(manager closed Codex agent {stamp}; tmux target `{target}`; Codex session id not found in captured tmux output.)\n"
 
 
 def has_close_note(text: str, target: str, session_id: str) -> bool:
@@ -1009,9 +983,7 @@ def write_bound_close_proof(path: Path, audit_path: Path, secret: str, commitmen
         os.close(directory_fd)
 
 
-def manager_replace_close_identity_matches(
-    replacement: dict[str, object], authority: dict[str, object], commitment: str
-) -> bool:
+def manager_replace_close_identity_matches(replacement: dict[str, object], authority: dict[str, object], commitment: str) -> bool:
     expected = {
         "id": authority.get("old_pane_id"),
         "pid": authority.get("old_pane_pid"),
@@ -1036,9 +1008,7 @@ def manager_replace_close_identity_matches(
     return False
 
 
-def manager_replace_close_authority_paths(
-    replacement_path: Path, replacement: dict[str, object], manager_authority: Path
-) -> set[Path]:
+def manager_replace_close_authority_paths(replacement_path: Path, replacement: dict[str, object], manager_authority: Path) -> set[Path]:
     paths = {manager_authority}
     descendants = replacement.get("descendants")
     if not isinstance(descendants, list):
@@ -1090,11 +1060,7 @@ def has_bound_close_proof(path: Path, commitment: str) -> bool:
         parent_info = path.parent.stat()
     except OSError:
         return False
-    if (
-        not stat.S_ISDIR(parent_info.st_mode)
-        or parent_info.st_uid != os.getuid()
-        or stat.S_IMODE(parent_info.st_mode) & 0o077
-    ):
+    if not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != os.getuid() or stat.S_IMODE(parent_info.st_mode) & 0o077:
         return False
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -1177,6 +1143,125 @@ def close_exited_codex_shell(target: str, expected_pane_id: str, session_id: str
         raise RuntimeError(f"exact stale shell pane remained live after close: {expected_pane_id}")
 
 
+def close_exited_codex_shell_with_task_receipt(
+    target: str,
+    expected_pane_id: str,
+    session_id: str,
+    task_payload: bytes,
+    expected_task_sha256: str,
+    task_receipt: str,
+    accepted_message_id: str,
+    *,
+    session_payload: bytes,
+    expected_session_sha256: str,
+    expected_completion_command: str,
+    n_lines: int = 2000,
+) -> None:
+    """Close one exited shell by cross-binding task, session, and pane evidence."""
+
+    if SHA256_RE.fullmatch(expected_task_sha256) is None or hashlib.sha256(task_payload).hexdigest() != expected_task_sha256:
+        raise RuntimeError("exited-shell task bytes do not match the supplied immutable digest")
+    try:
+        task_text = task_payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("exited-shell task evidence is not UTF-8") from exc
+    receipt = task_receipt.strip()
+    message_id = accepted_message_id.strip()
+    if len(receipt) < 12 or len(message_id) < 12:
+        raise RuntimeError("exited-shell task receipt and Message-ID must be specific evidence tokens")
+    compact_task = re.sub(r"\s+", "", task_text)
+    if receipt not in compact_task or f"acceptedasMessage-ID<{message_id}>" not in compact_task:
+        raise RuntimeError("immutable task bytes do not bind the accepted receipt and Message-ID")
+    if SHA256_RE.fullmatch(expected_session_sha256) is None or hashlib.sha256(session_payload).hexdigest() != expected_session_sha256:
+        raise RuntimeError("exited-shell session bytes do not match the supplied immutable digest")
+    try:
+        session_text = session_payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("exited-shell session evidence is not UTF-8") from exc
+    records: list[dict[str, object]] = []
+    try:
+        for line in session_text.splitlines():
+            value = json.loads(line)
+            if not isinstance(value, dict):
+                raise RuntimeError("exited-shell session JSONL contains a non-object record")
+            records.append(value)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("exited-shell session evidence is not valid JSONL") from exc
+    session_metadata = [value.get("payload") for value in records if value.get("type") == "session_meta"]
+    if len(session_metadata) != 1 or not isinstance(session_metadata[0], dict) or session_metadata[0].get("id") != session_id:
+        raise RuntimeError("exited-shell session evidence does not bind one exact session id")
+    accepted_indexes: list[int] = []
+    completion_indexes: list[int] = []
+    expected_completion_output = f"Emailed the human\nMessage-ID: <{message_id}>\n"
+    for index, value in enumerate(records):
+        payload = value.get("payload")
+        if value.get("type") != "event_msg" or not isinstance(payload, dict) or payload.get("type") != "item_completed":
+            continue
+        item = payload.get("item")
+        if not isinstance(item, dict) or item.get("type") != "CommandExecution" or item.get("status") != "completed":
+            continue
+        stdout = item.get("stdout")
+        if isinstance(stdout, str):
+            try:
+                accepted = json.loads(stdout)
+            except json.JSONDecodeError:
+                accepted = None
+            if (
+                isinstance(accepted, dict)
+                and accepted.get("accepted") is True
+                and accepted.get("manager_acknowledged") is True
+                and accepted.get("reason") == "manager acknowledged routed report"
+                and accepted.get("receipt_id") == receipt
+            ):
+                if item.get("exit_code") != 0 or item.get("aggregated_output") != stdout:
+                    raise RuntimeError("accepted task receipt command did not complete cleanly")
+                accepted_indexes.append(index)
+        if stdout == expected_completion_output:
+            if item.get("exit_code") != 0 or item.get("aggregated_output") != expected_completion_output or item.get("command") != ["/usr/bin/zsh", "-lc", expected_completion_command]:
+                raise RuntimeError("completion notice command does not match the bound successful invocation")
+            completion_indexes.append(index)
+    if len(accepted_indexes) != 1 or len(completion_indexes) != 1 or accepted_indexes[0] >= completion_indexes[0]:
+        raise RuntimeError("immutable session does not bind one accepted receipt followed by one completion notice")
+    if not re.fullmatch(r"%[0-9]+", expected_pane_id):
+        raise RuntimeError("expected pane id must be an exact numeric tmux pane id")
+    if is_human_owned_target(target) or is_human_owned_target(target_session_name(expected_pane_id)):
+        raise RuntimeError(f"refusing to close human-owned target: {target}")
+    if not re.fullmatch(UUID_RE, session_id):
+        raise RuntimeError("session id must be an exact Codex UUID")
+    if pane_id(target) != expected_pane_id or pane_id(expected_pane_id) != expected_pane_id:
+        raise RuntimeError(f"target no longer resolves to expected pane {expected_pane_id}")
+    if expected_pane_id == current_pane_id():
+        raise RuntimeError(f"refusing to close the current pane: {expected_pane_id}")
+    numeric_target = pane_target(expected_pane_id)
+    report = inspect(StatusArgs(numeric_target, 80)) if numeric_target else None
+    if report is None or report.status != "not_codex" or current_command(expected_pane_id) not in SHELL_COMMANDS:
+        actual = report.status if report is not None else "missing"
+        raise RuntimeError(f"expected an exited non-Codex shell: {expected_pane_id} status={actual}")
+    before = capture(expected_pane_id, n_lines)
+    interrupted_at = before.rfind("Conversation interrupted")
+    if before.count("Conversation interrupted") != 1 or interrupted_at < 0:
+        raise RuntimeError("terminal transcript lacks one unambiguous final Codex exit marker")
+    exit_text = before[interrupted_at:]
+    resume_matches = list(EXIT_RESUME_RE.finditer(exit_text))
+    if len(resume_matches) != 1 or resume_matches[0].group(1) != session_id or extract_resume_id(exit_text) != session_id:
+        raise RuntimeError("captured terminal Codex session does not match the supplied session id")
+    shell_tail = exit_text[resume_matches[0].end() :].strip("\r\n")
+    if not shell_tail or len(shell_tail.splitlines()) != 1:
+        raise RuntimeError("pane contains shell activity after the terminal Codex exit")
+    if (
+        pane_id(target) != expected_pane_id
+        or pane_id(expected_pane_id) != expected_pane_id
+        or pane_target(expected_pane_id) != numeric_target
+        or current_command(expected_pane_id) not in SHELL_COMMANDS
+        or inspect(StatusArgs(numeric_target, 80)).status != "not_codex"
+        or capture(expected_pane_id, n_lines) != before
+    ):
+        raise RuntimeError("pane identity or cross-bound evidence changed during recovery; retry")
+    close_tmux_target(expected_pane_id)
+    if pane_id(expected_pane_id):
+        raise RuntimeError(f"exact stale shell pane remained live after close: {expected_pane_id}")
+
+
 def codex_status(target: str) -> str:
     lines = tail_pane_id(target, 80) if re.fullmatch(r"%[0-9]+", target) else tail(target, 80)
     if is_cursor_agent_capture(lines):
@@ -1189,7 +1274,7 @@ def feedback_prompt(task_file: str) -> str:
         "Before the manager closes this session, please send concise process feedback if this was a non-trivial task. "
         "If there is anything worth preserving, first run `REPORT_FILE=$(omo_report.sh --alloc-message-file)`, "
         "write the report file through an editor, apply_patch, or another non-shell text channel, "
-        "then run `omo_report.sh --status done --message-file \"$REPORT_FILE\"`. "
+        'then run `omo_report.sh --status done --message-file "$REPORT_FILE"`. '
         "Do not use cat, heredocs, or shell text injection for report bodies. "
         "Say whether you had partial-compaction access, whether you used it, why or why not, and any feedback about the PCODX instructions, tools, or compaction triggers. "
         "Mention unclear instructions, routing/communication gaps, missing tooling/docs, check friction, or whether manager-triggered compaction would have helped you continue. "
@@ -1241,10 +1326,7 @@ def stop(args: Args) -> str:
             or bool(args.bound_pane_pid) != bool(args.bound_pane_start_ticks)
             or args.bound_pane_pid < 0
             or args.bound_pane_start_ticks < 0
-            or (
-                args.bound_expected_session_id
-                and re.fullmatch(UUID_RE, args.bound_expected_session_id) is None
-            )
+            or (args.bound_expected_session_id and re.fullmatch(UUID_RE, args.bound_expected_session_id) is None)
         ):
             raise RuntimeError("bound target does not resolve to the exact pinned pane")
         tmux_guard = (args.bound_symbolic_target, args.bound_pane_id)
@@ -1300,6 +1382,7 @@ def stop(args: Args) -> str:
         raise RuntimeError(f"refusing to stop human-owned target: {args.target}")
     if human_authorized and numeric_target not in target_aliases(authorized_target):
         raise RuntimeError("human-close target no longer resolves to the exact authorized tmux pane")
+
     def identity_is_current() -> bool:
         if tmux_guard is not None:
             if args.bound_pane_start_ticks and process_start_ticks(args.bound_pane_pid) != args.bound_pane_start_ticks:
@@ -1322,11 +1405,9 @@ def stop(args: Args) -> str:
         if pane_id(target_pane) != target_pane or pane_target(target_pane) != numeric_target:
             return False
         if human_authorized:
-            return (
-                target_session_name(target_pane) == authorized_target.partition(":")[0]
-                and numeric_target in target_aliases(authorized_target)
-            )
+            return target_session_name(target_pane) == authorized_target.partition(":")[0] and numeric_target in target_aliases(authorized_target)
         return True
+
     if tmux_guard is None:
         report = inspect(StatusArgs(numeric_target, 80)) if numeric_target else None
     else:
@@ -1347,18 +1428,12 @@ def stop(args: Args) -> str:
         # Re-read both durable authority bindings after the pane is pinned and
         # immediately before the first human-pane input.
         validate_human_close_authorization(args)
-    if args.bound_pre_input_check is not None and (
-        tmux_guard is None
-        or not all(proof_fields)
-        or (not human_authorized and not args.bound_expected_session_id)
-    ):
+    if args.bound_pre_input_check is not None and (tmux_guard is None or not all(proof_fields) or (not human_authorized and not args.bound_expected_session_id)):
         raise RuntimeError("bound pre-input check requires a session-bound guarded close capability")
     identity_check = identity_is_current if human_authorized or args.bound_symbolic_target else None
     if task_tool(args) == "cursor":
         before_close = (
-            capture(resolved_args.target, resolved_args.lines)
-            if tmux_guard is None
-            else guarded_capture(resolved_args.target, resolved_args.lines, tmux_guard, resolved_args.bound_pane_pid)
+            capture(resolved_args.target, resolved_args.lines) if tmux_guard is None else guarded_capture(resolved_args.target, resolved_args.lines, tmux_guard, resolved_args.bound_pane_pid)
         )
         session_id = ""
     elif identity_check is None:
@@ -1374,14 +1449,8 @@ def stop(args: Args) -> str:
             expected_pane_pid=resolved_args.bound_pane_pid,
             pre_input_check=resolved_args.bound_pre_input_check,
         )
-    if (
-        resolved_args.bound_expected_session_id
-        and session_id.lower() != resolved_args.bound_expected_session_id.lower()
-    ):
-        raise RuntimeError(
-            "bound Codex session id mismatch before interrupt: "
-            f"expected {resolved_args.bound_expected_session_id.lower()}, found {session_id or '<missing>'}"
-        )
+    if resolved_args.bound_expected_session_id and session_id.lower() != resolved_args.bound_expected_session_id.lower():
+        raise RuntimeError(f"bound Codex session id mismatch before interrupt: expected {resolved_args.bound_expected_session_id.lower()}, found {session_id or '<missing>'}")
     if (identity_check is not None and not identity_is_current()) or (identity_check is None and pane_id(resolved_args.target) != target_pane):
         raise RuntimeError(f"tmux target disappeared before interrupt: {args.target}")
     if identity_check is None:
@@ -1395,11 +1464,7 @@ def stop(args: Args) -> str:
             resolved_args.bound_pre_input_check,
         )
     _ = wait_shell(resolved_args.target, time.monotonic() + resolved_args.wait_s, tmux_guard, resolved_args.bound_pane_pid)
-    after = (
-        capture(resolved_args.target, resolved_args.lines)
-        if tmux_guard is None
-        else guarded_capture(resolved_args.target, resolved_args.lines, tmux_guard, resolved_args.bound_pane_pid)
-    )
+    after = capture(resolved_args.target, resolved_args.lines) if tmux_guard is None else guarded_capture(resolved_args.target, resolved_args.lines, tmux_guard, resolved_args.bound_pane_pid)
     if identity_check is not None and not identity_is_current():
         raise RuntimeError("tmux pane identity changed before close")
     if identity_check is not None and tmux_guard is not None:
