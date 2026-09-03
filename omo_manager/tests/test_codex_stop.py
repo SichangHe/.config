@@ -24,6 +24,7 @@ from omo_manager.omo_codex_stop import (
     close_tmux_target,
     codex_status,
     current_pane_id,
+    done_live_close_started_path,
     extract_exit_resume_id,
     extract_new_status_session_id,
     extract_resume_id,
@@ -1792,6 +1793,7 @@ class CodexStopTests(unittest.TestCase):
     def test_done_live_bound_close_passes_operation_to_server_guarded_child(self) -> None:
         secret = "a" * 64
         commitment = hashlib.sha256(secret.encode()).hexdigest()
+        audit_sha256 = "b" * 64
         with tempfile.TemporaryDirectory() as tmp:
             audit = Path(tmp) / "done-live.json"
             proof = Path(tmp) / ".done-live.json.owner-stopped"
@@ -1803,12 +1805,33 @@ class CodexStopTests(unittest.TestCase):
                     "%42", lambda: True, "vl:2", "%42",
                     str(proof), str(audit), secret, commitment, 4242, 999,
                     proof_operation="done-live-no-mail-close",
+                    proof_audit_sha256=audit_sha256,
                 )
         commands = guarded.call_args.args[2]
         self.assertEqual("run-shell", commands[0][0])
         self.assertIn("done-live-no-mail-close", commands[0][1])
+        self.assertIn(audit_sha256, commands[0][1])
         guarded.assert_called_once()
         self.assertEqual(("vl:2", "%42"), guarded.call_args.args[:2])
+
+    def test_done_live_bound_close_rejects_operation_without_process_identity(self) -> None:
+        secret = "a" * 64
+        commitment = hashlib.sha256(secret.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = Path(tmp) / "done-live.json"
+            proof = Path(tmp) / ".done-live.json.owner-stopped"
+            with (
+                patch("omo_manager.omo_codex_stop.guarded_current_command", return_value="zsh"),
+                patch("omo_manager.omo_codex_stop.guarded_tmux_sequence") as guarded,
+                self.assertRaisesRegex(RuntimeError, "exact audit and process binding"),
+            ):
+                codex_stop.close_bound_tmux_target(
+                    "%42", lambda: True, "vl:2", "%42",
+                    str(proof), str(audit), secret, commitment,
+                    proof_operation="done-live-no-mail-close",
+                    proof_audit_sha256="b" * 64,
+                )
+        guarded.assert_not_called()
 
     def test_done_live_bound_child_rejects_audit_identity_drift_before_kill(self) -> None:
         secret = "a" * 64
@@ -1817,7 +1840,8 @@ class CodexStopTests(unittest.TestCase):
             private = Path(tmp)
             private.chmod(0o700)
             audit = private / "done-live.json"
-            audit.write_text(done_live_close_audit(commitment, target="vl:9"), encoding="utf-8")
+            audit_text = done_live_close_audit(commitment, target="vl:9")
+            audit.write_text(audit_text, encoding="utf-8")
             audit.chmod(0o600)
             proof = private / ".done-live.json.owner-stopped"
             with (
@@ -1827,10 +1851,113 @@ class CodexStopTests(unittest.TestCase):
             ):
                 codex_stop.kill_bound_and_write_close_proof(
                     "vl:2", "%42", 4242, 999, proof, audit, secret, commitment,
-                    "done-live-no-mail-close",
+                    "done-live-no-mail-close", hashlib.sha256(audit_text.encode()).hexdigest(),
                 )
         tmux.assert_not_called()
         writer.assert_not_called()
+
+    def test_done_live_bound_child_rejects_full_audit_replacement_before_kill(self) -> None:
+        secret = "a" * 64
+        commitment = hashlib.sha256(secret.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp)
+            private.chmod(0o700)
+            audit = private / "done-live.json"
+            original = done_live_close_audit(commitment)
+            audit.write_text(original, encoding="utf-8")
+            audit.chmod(0o600)
+            changed = json.loads(original)
+            changed["terminal_evidence_sha256"] = "e" * 64
+            audit.write_text(json.dumps(changed, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+            proof = private / ".done-live.json.owner-stopped"
+            with (
+                patch("omo_manager.omo_codex_stop.pane_id") as pane,
+                patch("omo_manager.omo_codex_stop.guarded_tmux_sequence") as guarded,
+                self.assertRaisesRegex(RuntimeError, "audit drifted"),
+            ):
+                codex_stop.kill_bound_and_write_close_proof(
+                    "vl:2", "%42", 4242, 999, proof, audit, secret, commitment,
+                    "done-live-no-mail-close", hashlib.sha256(original.encode()).hexdigest(),
+                )
+            self.assertFalse(done_live_close_started_path(audit).exists())
+        pane.assert_not_called()
+        guarded.assert_not_called()
+
+    def test_done_live_bound_child_recovers_kill_before_final_proof(self) -> None:
+        secret = "a" * 64
+        commitment = hashlib.sha256(secret.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp)
+            private.chmod(0o700)
+            audit = private / "done-live.json"
+            audit_text = done_live_close_audit(commitment)
+            audit_sha256 = hashlib.sha256(audit_text.encode()).hexdigest()
+            audit.write_text(audit_text, encoding="utf-8")
+            audit.chmod(0o600)
+            proof = private / ".done-live.json.owner-stopped"
+            state = {"live": True}
+
+            def target_pane(_target: str) -> str:
+                return "%42" if state["live"] else ""
+
+            def start_ticks(_pid: int) -> int | None:
+                return 999 if state["live"] else None
+
+            def kill(*_values: object) -> str:
+                state["live"] = False
+                return ""
+
+            with (
+                patch("omo_manager.omo_codex_stop.pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_codex_stop.process_start_ticks", side_effect=start_ticks),
+                patch("omo_manager.omo_codex_stop.guarded_tmux_sequence", side_effect=kill),
+                patch("omo_manager.omo_codex_stop.promote_done_live_close_started", side_effect=KeyboardInterrupt),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                codex_stop.kill_bound_and_write_close_proof(
+                    "vl:2", "%42", 4242, 999, proof, audit, secret, commitment,
+                    "done-live-no-mail-close", audit_sha256,
+                )
+            started = done_live_close_started_path(audit)
+            self.assertTrue(started.is_file())
+            self.assertFalse(proof.exists())
+            with (
+                patch("omo_manager.omo_codex_stop.pane_id", return_value=""),
+                patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=None),
+            ):
+                recovered = codex_stop.promote_done_live_close_started(
+                    proof, audit, commitment, audit_sha256, "vl:2", "%42", 4242, 999,
+                )
+            self.assertEqual(secret, recovered)
+            self.assertTrue(codex_stop.has_bound_close_proof(proof, commitment, audit_sha256))
+            self.assertFalse(started.exists())
+
+    def test_done_live_close_promotion_recovers_link_before_started_cleanup(self) -> None:
+        secret = "a" * 64
+        commitment = hashlib.sha256(secret.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp)
+            private.chmod(0o700)
+            audit = private / "done-live.json"
+            audit_text = done_live_close_audit(commitment)
+            audit_sha256 = hashlib.sha256(audit_text.encode()).hexdigest()
+            audit.write_text(audit_text, encoding="utf-8")
+            audit.chmod(0o600)
+            proof = private / ".done-live.json.owner-stopped"
+            started = codex_stop.write_done_live_close_started(
+                proof, audit, secret, commitment, audit_sha256, "vl:2", "%42", 4242, 999,
+            )
+            os.link(started, proof)
+            with (
+                patch("omo_manager.omo_codex_stop.pane_id", return_value=""),
+                patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=None),
+            ):
+                recovered = codex_stop.promote_done_live_close_started(
+                    proof, audit, commitment, audit_sha256, "vl:2", "%42", 4242, 999,
+                )
+            self.assertEqual(secret, recovered)
+            self.assertTrue(codex_stop.has_bound_close_proof(proof, commitment, audit_sha256))
+            self.assertFalse(started.exists())
 
     def test_done_live_bound_child_kills_only_through_server_identity_predicate(self) -> None:
         secret = "a" * 64
@@ -1839,23 +1966,36 @@ class CodexStopTests(unittest.TestCase):
             private = Path(tmp)
             private.chmod(0o700)
             audit = private / "done-live.json"
-            audit.write_text(done_live_close_audit(commitment), encoding="utf-8")
+            audit_text = done_live_close_audit(commitment)
+            audit.write_text(audit_text, encoding="utf-8")
             audit.chmod(0o600)
             proof = private / ".done-live.json.owner-stopped"
+            state = {"live": True}
+
+            def target_pane(_target: str) -> str:
+                return "%42" if state["live"] else ""
+
+            def start_ticks(_pid: int) -> int | None:
+                return 999 if state["live"] else None
+
+            def kill(*_values: object) -> str:
+                state["live"] = False
+                return ""
+
             with (
-                patch("omo_manager.omo_codex_stop.pane_id", side_effect=["%42", "%42", "", ""]),
-                patch("omo_manager.omo_codex_stop.process_start_ticks", side_effect=[999, None, None]),
-                patch("omo_manager.omo_codex_stop.guarded_tmux_sequence", return_value="") as guarded,
+                patch("omo_manager.omo_codex_stop.pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_codex_stop.process_start_ticks", side_effect=start_ticks),
+                patch("omo_manager.omo_codex_stop.guarded_tmux_sequence", side_effect=kill) as guarded,
                 patch("omo_manager.omo_codex_stop.tmux") as raw_tmux,
-                patch("omo_manager.omo_codex_stop.write_bound_close_proof") as writer,
             ):
                 codex_stop.kill_bound_and_write_close_proof(
                     "vl:2", "%42", 4242, 999, proof, audit, secret, commitment,
-                    "done-live-no-mail-close",
+                    "done-live-no-mail-close", hashlib.sha256(audit_text.encode()).hexdigest(),
                 )
+            self.assertTrue(codex_stop.has_bound_close_proof(proof, commitment, hashlib.sha256(audit_text.encode()).hexdigest()))
+            self.assertFalse(done_live_close_started_path(audit).exists())
         guarded.assert_called_once_with("vl:2", "%42", [["kill-pane", "-t", "%42"]], 4242)
         raw_tmux.assert_not_called()
-        writer.assert_called_once_with(proof, audit, secret, commitment)
 
     def test_bound_close_accepts_lost_guard_marker_only_with_durable_proof(self) -> None:
         secret = "a" * 64

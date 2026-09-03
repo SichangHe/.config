@@ -49,7 +49,10 @@ from omo_manager.omo_task_status import tracked_dirty_state
 from omo_manager.omo_task_status import update_frontmatter_status
 from omo_manager.omo_task_status import Args as StatusArgs
 from omo_manager.omo_codex_stop import ExitedCodexShell
+from omo_manager.omo_codex_stop import done_live_close_started_path
 from omo_manager.omo_codex_stop import write_bound_close_proof
+from omo_manager.omo_codex_stop import write_done_live_close_started
+from omo_manager.omo_codex_stop import promote_done_live_close_started
 from omo_manager.omo_codex_stop import close_note
 from omo_manager.omo_task_metadata import frontmatter_parts
 from omo_manager.omo_blocking import ENABLE_FILE, load_yaml_mapping, render_task, split_task_text, sync_generated_blocker
@@ -2037,8 +2040,21 @@ class TaskStatusTests(unittest.TestCase):
                 assert callable(identity) and identity()
                 assert callable(pre_close)
                 pre_close()
-                write_bound_close_proof(Path(str(values[4])), Path(str(values[5])), str(values[6]), str(values[7]))
+                proof = Path(str(values[4]))
+                audit = Path(str(values[5]))
+                write_done_live_close_started(
+                    proof, audit, str(values[6]), str(values[7]), str(values[12]),
+                    args.active_target, args.expected_pane_id, args.expected_pane_pid, args.expected_pane_start_ticks,
+                )
                 state["live"] = False
+                with (
+                    patch("omo_manager.omo_codex_stop.pane_id", return_value=""),
+                    patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=None),
+                ):
+                    promote_done_live_close_started(
+                        proof, audit, str(values[7]), str(values[12]),
+                        args.active_target, args.expected_pane_id, args.expected_pane_pid, args.expected_pane_start_ticks,
+                    )
 
             output = io.StringIO()
             with (
@@ -2056,7 +2072,8 @@ class TaskStatusTests(unittest.TestCase):
                 self.assertEqual(0, run(args))
             self.assertEqual(1, terminalize_call.call_count)
             self.assertEqual(1, guarded_close.call_count)
-            self.assertEqual("done-live-no-mail-close", guarded_close.call_args.args[-1])
+            self.assertEqual("done-live-no-mail-close", guarded_close.call_args.args[-2])
+            self.assertRegex(guarded_close.call_args.args[-1], r"[0-9a-f]{64}\Z")
             email.assert_not_called()
             ordinary_stop.assert_not_called()
             self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
@@ -2234,7 +2251,17 @@ class TaskStatusTests(unittest.TestCase):
                 pre_close = values[10]
                 assert callable(pre_close)
                 pre_close()
-                write_bound_close_proof(Path(str(values[4])), Path(str(values[5])), str(values[6]), str(values[7]))
+                write_done_live_close_started(
+                    Path(str(values[4])),
+                    Path(str(values[5])),
+                    str(values[6]),
+                    str(values[7]),
+                    str(values[12]),
+                    args.active_target,
+                    args.expected_pane_id,
+                    args.expected_pane_pid,
+                    args.expected_pane_start_ticks,
+                )
                 state["live"] = False
                 raise KeyboardInterrupt
 
@@ -2250,10 +2277,14 @@ class TaskStatusTests(unittest.TestCase):
                 run(args)
             self.assertEqual(text, task.read_text(encoding="utf-8"))
             self.assertEqual("terminalized", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+            self.assertTrue(done_live_close_started_path(args.audit_output).is_file())
+            self.assertFalse(args.audit_output.with_name(f".{args.audit_output.name}.owner-stopped").exists())
             with (
                 patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=target_pane),
                 patch("omo_manager.omo_task_status.pane_id", side_effect=target_pane),
                 patch("omo_manager.omo_task_status.process_start_ticks", side_effect=start_ticks),
+                patch("omo_manager.omo_codex_stop.pane_id", return_value=""),
+                patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=None),
                 patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell") as terminalize_again,
                 patch("omo_manager.omo_task_status.close_bound_tmux_target") as close_again,
                 redirect_stdout(io.StringIO()),
@@ -2289,8 +2320,21 @@ class TaskStatusTests(unittest.TestCase):
                 pre_close = values[10]
                 assert callable(pre_close)
                 pre_close()
-                write_bound_close_proof(Path(str(values[4])), Path(str(values[5])), str(values[6]), str(values[7]))
+                proof = Path(str(values[4]))
+                audit = Path(str(values[5]))
+                write_done_live_close_started(
+                    proof, audit, str(values[6]), str(values[7]), str(values[12]),
+                    args.active_target, args.expected_pane_id, args.expected_pane_pid, args.expected_pane_start_ticks,
+                )
                 state["live"] = False
+                with (
+                    patch("omo_manager.omo_codex_stop.pane_id", return_value=""),
+                    patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=None),
+                ):
+                    promote_done_live_close_started(
+                        proof, audit, str(values[7]), str(values[12]),
+                        args.active_target, args.expected_pane_id, args.expected_pane_pid, args.expected_pane_start_ticks,
+                    )
 
             def interrupt_final_audit(path: Path, expected: str, updated: str) -> None:
                 if json.loads(updated)["state"] == "complete" and not state["interrupted"]:

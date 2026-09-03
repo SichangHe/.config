@@ -12,6 +12,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -824,6 +825,7 @@ def close_bound_tmux_target(
     expected_pane_start_ticks: int = 0,
     pre_input_check: Callable[[], None] | None = None,
     proof_operation: str = "",
+    proof_audit_sha256: str = "",
 ) -> None:
     """Close a non-human pane only while its symbolic and numeric identities agree."""
 
@@ -846,6 +848,16 @@ def close_bound_tmux_target(
             or hashlib.sha256(proof_secret.encode()).hexdigest() != proof_commitment
         ):
             raise RuntimeError("bound close proof identity is invalid")
+        if proof_operation:
+            if (
+                proof_operation != DONE_LIVE_CLOSE_OPERATION
+                or SHA256_RE.fullmatch(proof_audit_sha256) is None
+                or expected_pane_pid <= 1
+                or expected_pane_start_ticks <= 0
+            ):
+                raise RuntimeError("done-live bound close requires one exact audit and process binding")
+        elif proof_audit_sha256:
+            raise RuntimeError("bound close audit digest requires an explicit proof operation")
         if expected_pane_pid and expected_pane_start_ticks:
             writer = shlex.join(
                 [
@@ -860,7 +872,7 @@ def close_bound_tmux_target(
                     audit_path,
                     proof_secret,
                     proof_commitment,
-                    *([proof_operation] if proof_operation else []),
+                    *([proof_operation, proof_audit_sha256] if proof_operation else []),
                 ]
             )
             commands = [["run-shell", writer]]
@@ -880,7 +892,7 @@ def close_bound_tmux_target(
     try:
         output = guarded_tmux_sequence(symbolic_target, expected_pane_id, commands, expected_pane_pid) if expected_pane_pid else guarded_tmux_sequence(symbolic_target, expected_pane_id, commands)
     except RuntimeError:
-        if proof_path and has_bound_close_proof(Path(proof_path), proof_commitment):
+        if proof_path and has_bound_close_proof(Path(proof_path), proof_commitment, proof_audit_sha256):
             return
         raise
     if output:
@@ -959,6 +971,7 @@ def validate_done_live_close_audit_file(
     pane_id_value: str,
     pane_pid: int,
     pane_start_ticks: int,
+    expected_audit_sha256: str,
 ) -> None:
     """Revalidate the done-live close authority inside the bound child."""
 
@@ -988,6 +1001,8 @@ def validate_done_live_close_audit_file(
         or before.st_uid != os.getuid()
         or stat.S_IMODE(before.st_mode) != 0o600
         or len(audit_text.encode()) > 65536
+        or SHA256_RE.fullmatch(expected_audit_sha256) is None
+        or hashlib.sha256(audit_text.encode()).hexdigest() != expected_audit_sha256
         or identity != after_identity
         or identity != current_identity
         or not done_live_close_audit_authorizes(
@@ -1001,6 +1016,180 @@ def validate_done_live_close_audit_file(
         )
     ):
         raise RuntimeError("done-live close audit drifted before exact pane kill")
+
+
+def done_live_close_started_path(audit_path: Path) -> Path:
+    """Return the durable pre-kill marker path for one done-live audit."""
+
+    return audit_path.with_name(f".{audit_path.name}.owner-close-started")
+
+
+def done_live_close_marker_text(secret: str, audit_sha256: str) -> str:
+    """Render one canonical proof marker bound to exact terminalized audit bytes."""
+
+    record = {
+        "audit_sha256": audit_sha256,
+        "operation": DONE_LIVE_CLOSE_OPERATION,
+        "secret": secret,
+        "version": "v1.0.0",
+    }
+    return json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def path_entry_exists(path: Path) -> bool:
+    """Return whether a directory entry exists without following symlinks."""
+
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def bound_close_secret(path: Path, commitment: str, expected_audit_sha256: str = "") -> str:
+    """Read an exact owner-private close proof, returning its committed secret."""
+
+    if (
+        not path.is_absolute()
+        or SHA256_RE.fullmatch(commitment) is None
+        or (expected_audit_sha256 and SHA256_RE.fullmatch(expected_audit_sha256) is None)
+    ):
+        return ""
+    try:
+        parent_info = path.parent.stat()
+    except OSError:
+        return ""
+    if not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != os.getuid() or stat.S_IMODE(parent_info.st_mode) & 0o077:
+        return ""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return ""
+    try:
+        before = os.fstat(fd)
+        with os.fdopen(os.dup(fd), "r", encoding="utf-8") as source:
+            content = source.read(1025)
+        after = os.fstat(fd)
+        current = path.lstat()
+    except (OSError, UnicodeDecodeError):
+        return ""
+    finally:
+        os.close(fd)
+    identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or len(content.encode()) > 1024
+        or identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        or identity != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
+    ):
+        return ""
+    secret = ""
+    if expected_audit_sha256:
+        try:
+            record: object = json.loads(content)
+        except json.JSONDecodeError:
+            return ""
+        if not isinstance(record, dict) or set(record) != {"audit_sha256", "operation", "secret", "version"}:
+            return ""
+        secret_value = record.get("secret")
+        if (
+            content != json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+            or record.get("version") != "v1.0.0"
+            or record.get("operation") != DONE_LIVE_CLOSE_OPERATION
+            or record.get("audit_sha256") != expected_audit_sha256
+            or not isinstance(secret_value, str)
+        ):
+            return ""
+        secret = secret_value
+    elif len(content) == 65 and content.endswith("\n"):
+        secret = content[:-1]
+    if SHA256_RE.fullmatch(secret) is None or hashlib.sha256(secret.encode()).hexdigest() != commitment:
+        return ""
+    return secret
+
+
+def write_done_live_close_started(
+    proof_path: Path,
+    audit_path: Path,
+    secret: str,
+    commitment: str,
+    expected_audit_sha256: str,
+    target: str,
+    pane_id_value: str,
+    pane_pid: int,
+    pane_start_ticks: int,
+) -> Path:
+    """Durably record the exact close intent before the pane kill."""
+
+    started_path = done_live_close_started_path(audit_path)
+    expected_proof_path = audit_path.with_name(f".{audit_path.name}.owner-stopped")
+    if (
+        not proof_path.is_absolute()
+        or not audit_path.is_absolute()
+        or proof_path != expected_proof_path
+        or SHA256_RE.fullmatch(secret) is None
+        or hashlib.sha256(secret.encode()).hexdigest() != commitment
+    ):
+        raise RuntimeError("done-live close-started identity is invalid")
+    validate_done_live_close_audit_file(
+        audit_path,
+        commitment,
+        target,
+        pane_id_value,
+        pane_pid,
+        pane_start_ticks,
+        expected_audit_sha256,
+    )
+    if path_entry_exists(proof_path):
+        raise RuntimeError("done-live final close proof already exists before pane kill")
+    existing = bound_close_secret(started_path, commitment, expected_audit_sha256)
+    if existing:
+        if existing != secret:
+            raise RuntimeError("done-live close-started marker secret drifted")
+        return started_path
+    if path_entry_exists(started_path):
+        raise RuntimeError("done-live close-started marker is malformed")
+    parent_info = audit_path.parent.stat()
+    if not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != os.getuid() or stat.S_IMODE(parent_info.st_mode) & 0o077:
+        raise RuntimeError("done-live close-started directory must be owner-private")
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=audit_path.parent, prefix=f".{audit_path.name}.close-started.", delete=False) as output:
+            temporary = Path(output.name)
+            os.fchmod(output.fileno(), 0o600)
+            output.write(done_live_close_marker_text(secret, expected_audit_sha256))
+            output.flush()
+            os.fsync(output.fileno())
+        validate_done_live_close_audit_file(
+            audit_path,
+            commitment,
+            target,
+            pane_id_value,
+            pane_pid,
+            pane_start_ticks,
+            expected_audit_sha256,
+        )
+        if path_entry_exists(proof_path):
+            raise RuntimeError("done-live final close proof appeared before pane kill")
+        try:
+            os.link(temporary, started_path, follow_symlinks=False)
+        except FileExistsError:
+            existing = bound_close_secret(started_path, commitment, expected_audit_sha256)
+            if existing != secret:
+                raise RuntimeError("done-live close-started marker raced with different evidence") from None
+        directory_fd = os.open(audit_path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        if bound_close_secret(started_path, commitment, expected_audit_sha256) != secret:
+            raise RuntimeError("done-live close-started marker changed after durable creation")
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return started_path
 
 
 def write_bound_close_proof(path: Path, audit_path: Path, secret: str, commitment: str) -> None:
@@ -1038,13 +1227,12 @@ def write_bound_close_proof(path: Path, audit_path: Path, secret: str, commitmen
         and audit.get("state") == "prepared"
         and audit.get("close_proof_commitment") == commitment
     )
-    done_live_authorized = done_live_close_audit_authorizes(audit_text, audit, commitment)
     if (
         not stat.S_ISREG(audit_info.st_mode)
         or audit_info.st_uid != os.getuid()
         or stat.S_IMODE(audit_info.st_mode) != 0o600
         or len(audit_text.encode()) > 65536
-        or not (legacy_authorized or done_live_authorized)
+        or not legacy_authorized
     ):
         raise RuntimeError("bound close proof audit does not authorize this exact capability")
     if audit.get("operation") == "manager-replace":
@@ -1169,12 +1357,13 @@ def kill_bound_and_write_close_proof(
     secret: str,
     commitment: str,
     proof_operation: str = "",
+    expected_audit_sha256: str = "",
 ) -> None:
-    """Kill one revalidated pane, then persist its prepared close capability."""
+    """Kill one revalidated pane with a crash-recoverable close capability."""
 
     # 🧑 "Atomically close only exact failed `guest_hees:0` ... Verify old owner absent"
     if proof_operation:
-        if proof_operation != DONE_LIVE_CLOSE_OPERATION:
+        if proof_operation != DONE_LIVE_CLOSE_OPERATION or SHA256_RE.fullmatch(expected_audit_sha256) is None:
             raise RuntimeError("bound close proof operation is unsupported")
         validate_done_live_close_audit_file(
             audit_path,
@@ -1183,6 +1372,7 @@ def kill_bound_and_write_close_proof(
             expected_pane_id,
             expected_pane_pid,
             expected_pane_start_ticks,
+            expected_audit_sha256,
         )
     if (
         expected_pane_pid <= 0
@@ -1193,6 +1383,43 @@ def kill_bound_and_write_close_proof(
     ):
         raise RuntimeError("bound close identity changed before exact pane kill")
     if proof_operation:
+        write_done_live_close_started(
+            proof_path,
+            audit_path,
+            secret,
+            commitment,
+            expected_audit_sha256,
+            symbolic_target,
+            expected_pane_id,
+            expected_pane_pid,
+            expected_pane_start_ticks,
+        )
+        validate_done_live_close_audit_file(
+            audit_path,
+            commitment,
+            symbolic_target,
+            expected_pane_id,
+            expected_pane_pid,
+            expected_pane_start_ticks,
+            expected_audit_sha256,
+        )
+        if (
+            pane_id(symbolic_target) != expected_pane_id
+            or pane_id(expected_pane_id) != expected_pane_id
+            or process_start_ticks(expected_pane_pid) != expected_pane_start_ticks
+        ):
+            raise RuntimeError("bound close identity changed after durable close-started evidence")
+        validate_done_live_close_audit_file(
+            audit_path,
+            commitment,
+            symbolic_target,
+            expected_pane_id,
+            expected_pane_pid,
+            expected_pane_start_ticks,
+            expected_audit_sha256,
+        )
+        if bound_close_secret(done_live_close_started_path(audit_path), commitment, expected_audit_sha256) != secret:
+            raise RuntimeError("done-live close-started marker drifted before exact pane kill")
         output = guarded_tmux_sequence(
             symbolic_target,
             expected_pane_id,
@@ -1208,40 +1435,114 @@ def kill_bound_and_write_close_proof(
         time.sleep(0.05)
     if pane_id(symbolic_target) or pane_id(expected_pane_id) or process_start_ticks(expected_pane_pid) is not None:
         raise RuntimeError("bound close could not prove exact pane and process absence")
-    write_bound_close_proof(proof_path, audit_path, secret, commitment)
+    if proof_operation:
+        promote_done_live_close_started(
+            proof_path,
+            audit_path,
+            commitment,
+            expected_audit_sha256,
+            symbolic_target,
+            expected_pane_id,
+            expected_pane_pid,
+            expected_pane_start_ticks,
+        )
+    else:
+        write_bound_close_proof(proof_path, audit_path, secret, commitment)
 
 
-def has_bound_close_proof(path: Path, commitment: str) -> bool:
+def has_bound_close_proof(path: Path, commitment: str, expected_audit_sha256: str = "") -> bool:
     """Verify one exact durable close proof without targeting any pane."""
 
-    if not path.is_absolute() or SHA256_RE.fullmatch(commitment) is None:
-        return False
-    try:
-        parent_info = path.parent.stat()
-    except OSError:
-        return False
-    if not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != os.getuid() or stat.S_IMODE(parent_info.st_mode) & 0o077:
-        return False
-    try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    except OSError:
-        return False
-    try:
-        info = os.fstat(fd)
-        with os.fdopen(os.dup(fd), "r", encoding="utf-8") as source:
-            content = source.read(66)
-    except (OSError, UnicodeDecodeError):
-        return False
-    finally:
-        os.close(fd)
-    secret = content[:-1] if len(content) == 65 and content.endswith("\n") else ""
-    return (
-        stat.S_ISREG(info.st_mode)
-        and info.st_uid == os.getuid()
-        and stat.S_IMODE(info.st_mode) == 0o600
-        and SHA256_RE.fullmatch(secret) is not None
-        and hashlib.sha256(secret.encode()).hexdigest() == commitment
+    return bool(bound_close_secret(path, commitment, expected_audit_sha256))
+
+
+def done_live_close_identity_is_absent(symbolic_target: str, expected_pane_id: str, expected_pane_pid: int) -> bool:
+    """Require both tmux names and the pinned process identity to be absent."""
+
+    return not pane_id(symbolic_target) and not pane_id(expected_pane_id) and process_start_ticks(expected_pane_pid) is None
+
+
+def promote_done_live_close_started(
+    proof_path: Path,
+    audit_path: Path,
+    commitment: str,
+    expected_audit_sha256: str,
+    symbolic_target: str,
+    expected_pane_id: str,
+    expected_pane_pid: int,
+    expected_pane_start_ticks: int,
+) -> str:
+    """Promote durable close intent after exact absence, tolerating link/unlink crashes."""
+
+    expected_proof_path = audit_path.with_name(f".{audit_path.name}.owner-stopped")
+    started_path = done_live_close_started_path(audit_path)
+    if not proof_path.is_absolute() or not audit_path.is_absolute() or proof_path != expected_proof_path:
+        raise RuntimeError("done-live close proof path is not bound to its audit")
+    validate_done_live_close_audit_file(
+        audit_path,
+        commitment,
+        symbolic_target,
+        expected_pane_id,
+        expected_pane_pid,
+        expected_pane_start_ticks,
+        expected_audit_sha256,
     )
+    final_secret = bound_close_secret(proof_path, commitment, expected_audit_sha256)
+    started_secret = bound_close_secret(started_path, commitment, expected_audit_sha256)
+    if path_entry_exists(proof_path) and not final_secret:
+        raise RuntimeError("done-live final close proof is malformed")
+    if path_entry_exists(started_path) and not started_secret:
+        raise RuntimeError("done-live close-started marker is malformed")
+    if not final_secret and not started_secret:
+        raise RuntimeError("done-live close lacks durable pre-kill evidence")
+    if final_secret and started_secret:
+        final_info = proof_path.lstat()
+        started_info = started_path.lstat()
+        if (final_info.st_dev, final_info.st_ino) != (started_info.st_dev, started_info.st_ino) or final_secret != started_secret:
+            raise RuntimeError("done-live close proof and started marker are not one atomic promotion")
+    if not done_live_close_identity_is_absent(symbolic_target, expected_pane_id, expected_pane_pid):
+        raise RuntimeError("done-live close proof cannot advance while pane identity remains live")
+    validate_done_live_close_audit_file(
+        audit_path,
+        commitment,
+        symbolic_target,
+        expected_pane_id,
+        expected_pane_pid,
+        expected_pane_start_ticks,
+        expected_audit_sha256,
+    )
+    if not final_secret:
+        try:
+            os.link(started_path, proof_path, follow_symlinks=False)
+        except FileExistsError:
+            final_info = proof_path.lstat()
+            started_info = started_path.lstat()
+            if (final_info.st_dev, final_info.st_ino) != (started_info.st_dev, started_info.st_ino):
+                raise RuntimeError("done-live close proof raced with different evidence") from None
+        directory_fd = os.open(audit_path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        final_secret = bound_close_secret(proof_path, commitment, expected_audit_sha256)
+        if final_secret != started_secret:
+            raise RuntimeError("done-live close proof promotion lost its exact evidence")
+    if not done_live_close_identity_is_absent(symbolic_target, expected_pane_id, expected_pane_pid):
+        raise RuntimeError("done-live pane identity appeared during close-proof promotion")
+    if path_entry_exists(started_path):
+        final_info = proof_path.lstat()
+        started_info = started_path.lstat()
+        if (final_info.st_dev, final_info.st_ino) != (started_info.st_dev, started_info.st_ino):
+            raise RuntimeError("done-live close-started marker changed before cleanup")
+        started_path.unlink()
+        directory_fd = os.open(audit_path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    if bound_close_secret(proof_path, commitment, expected_audit_sha256) != final_secret:
+        raise RuntimeError("done-live close proof changed after durable promotion")
+    return final_secret
 
 
 def close_authorized_human_pane(target: str, identity_is_current: Callable[[], bool]) -> None:
@@ -1770,7 +2071,10 @@ def stop(args: Args) -> str:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) in {9, 10} and argv[0] == "--kill-bound-and-write-close-proof":
+    if argv and argv[0] == "--kill-bound-and-write-close-proof":
+        if len(argv) not in {9, 11}:
+            print("omo_codex_stop.py: bound close child arguments are incomplete", file=sys.stderr)
+            return 1
         try:
             kill_bound_and_write_close_proof(
                 argv[1],
@@ -1781,7 +2085,8 @@ def main(argv: list[str]) -> int:
                 Path(argv[6]),
                 argv[7],
                 argv[8],
-                argv[9] if len(argv) == 10 else "",
+                argv[9] if len(argv) == 11 else "",
+                argv[10] if len(argv) == 11 else "",
             )
         except (OSError, RuntimeError, ValueError) as exc:
             print(f"omo_codex_stop.py: {exc}", file=sys.stderr)

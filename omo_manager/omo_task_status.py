@@ -39,14 +39,17 @@ from omo_manager.omo_blocking import split_task_text
 from omo_manager.omo_blocking import V2_VERSION
 from omo_manager.omo_blocking import v2_enabled
 from omo_manager.omo_codex_stop import Args as StopArgs
+from omo_manager.omo_codex_stop import bound_close_secret
 from omo_manager.omo_codex_stop import capture
 from omo_manager.omo_codex_stop import close_bound_tmux_target
 from omo_manager.omo_codex_stop import close_note
 from omo_manager.omo_codex_stop import close_exited_codex_shell
+from omo_manager.omo_codex_stop import done_live_close_started_path
 from omo_manager.omo_codex_stop import has_close_note
 from omo_manager.omo_codex_stop import has_bound_close_proof
 from omo_manager.omo_codex_stop import moved_todo_text
 from omo_manager.omo_codex_stop import pane_id
+from omo_manager.omo_codex_stop import promote_done_live_close_started
 from omo_manager.omo_codex_stop import record_close
 from omo_manager.omo_codex_stop import stop
 from omo_manager.omo_codex_stop import terminalize_bound_codex_to_shell
@@ -4175,6 +4178,13 @@ def render_done_live_close_audit(args: Args, path: Path, audit: DoneLiveCloseAud
     return json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
 
 
+def terminalized_done_live_audit_sha256(args: Args, path: Path, audit: DoneLiveCloseAudit) -> str:
+    """Reconstruct the immutable terminalized audit bytes bound by close proof."""
+
+    terminalized = replace(audit, state="terminalized", close_note="", completed_task_sha256="")
+    return hashlib.sha256(render_done_live_close_audit(args, path, terminalized).encode()).hexdigest()
+
+
 def parse_done_live_close_audit(args: Args, path: Path, text: str) -> DoneLiveCloseAudit:
     """Authenticate one canonical done-live close recovery record."""
 
@@ -4330,6 +4340,7 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
     if path == todo or audit_path in {path, todo} or not todo.is_file():
         raise TaskFrontmatterError("done-live close requires distinct task, TODO, and private audit files.")
     proof_path = audit_path.with_name(f".{audit_path.name}.owner-stopped")
+    started_path = done_live_close_started_path(audit_path)
     with root_membership_lock(args.root), task_target_lock(args.root, args.active_target):
         with ExitStack() as locks:
             for locked_path in sorted({path, todo}, key=str):
@@ -4348,8 +4359,8 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
             validate_done_live_todo(args.root, path, todo_text, args.active_target)
             validate_done_live_ownership(args.root, path, args.active_target)
             if audit is None:
-                if path_artifact_exists(proof_path):
-                    raise TaskFrontmatterError("done-live close refuses a close-proof artifact without its audit.")
+                if path_artifact_exists(proof_path) or path_artifact_exists(started_path):
+                    raise TaskFrontmatterError("done-live close refuses close artifacts without their audit.")
                 if done_live_pane_state(args) != "live":
                     raise TaskFrontmatterError("done-live close requires the exact live pane before reserving recovery evidence.")
                 audit = DoneLiveCloseAudit("reserved")
@@ -4399,8 +4410,8 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
 
             proof_secret = ""
             if close_audit.state in {"reserved", "prepared"}:
-                if path_artifact_exists(proof_path):
-                    raise TaskFrontmatterError("done-live close has a premature close-proof artifact.")
+                if path_artifact_exists(proof_path) or path_artifact_exists(started_path):
+                    raise TaskFrontmatterError("done-live close has premature close artifacts.")
                 if done_live_pane_state(args) != "live":
                     raise TaskFrontmatterError("done-live close prepared recovery lost its exact live pane.")
                 capture_sha256 = ""
@@ -4435,16 +4446,44 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                 advance_audit(replace(close_audit, state="terminalized", terminal_capture_sha256=capture_sha256, close_proof_commitment=commitment))
 
             if close_audit.state == "terminalized":
-                close_proven = has_bound_close_proof(proof_path, close_audit.close_proof_commitment)
+                terminalized_sha256 = terminalized_done_live_audit_sha256(args, path, close_audit)
+                if hashlib.sha256(audit_text.encode()).hexdigest() != terminalized_sha256:
+                    raise TaskFrontmatterError("done-live terminalized audit bytes do not match their canonical digest.")
+                final_secret = bound_close_secret(proof_path, close_audit.close_proof_commitment, terminalized_sha256)
+                started_secret = bound_close_secret(started_path, close_audit.close_proof_commitment, terminalized_sha256)
+                if path_artifact_exists(proof_path) and not final_secret:
+                    raise TaskFrontmatterError("done-live close proof does not match its exact audit commitment and digest.")
+                if path_artifact_exists(started_path) and not started_secret:
+                    raise TaskFrontmatterError("done-live close-started marker does not match its exact audit commitment and digest.")
                 pane_state = done_live_pane_state(args)
-                if close_proven:
+                if final_secret:
                     if pane_state != "absent":
                         raise TaskFrontmatterError("done-live close proof contradicts a live pane identity.")
+                    if started_secret:
+                        promote_done_live_close_started(
+                            proof_path,
+                            audit_path,
+                            close_audit.close_proof_commitment,
+                            terminalized_sha256,
+                            args.active_target,
+                            args.expected_pane_id,
+                            args.expected_pane_pid,
+                            args.expected_pane_start_ticks,
+                        )
+                elif started_secret and pane_state == "absent":
+                    promote_done_live_close_started(
+                        proof_path,
+                        audit_path,
+                        close_audit.close_proof_commitment,
+                        terminalized_sha256,
+                        args.active_target,
+                        args.expected_pane_id,
+                        args.expected_pane_pid,
+                        args.expected_pane_start_ticks,
+                    )
                 else:
-                    if path_artifact_exists(proof_path):
-                        raise TaskFrontmatterError("done-live close proof does not match its audit commitment.")
                     if pane_state != "live":
-                        raise TaskFrontmatterError("done-live close lost the pane without durable guarded-close proof.")
+                        raise TaskFrontmatterError("done-live close lost the pane without durable pre-kill or final proof.")
                     observed_capture = validate_exited_codex_shell(
                         args.active_target,
                         args.expected_pane_id,
@@ -4453,10 +4492,13 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                     )
                     if observed_capture != close_audit.terminal_capture_sha256:
                         raise TaskFrontmatterError("done-live close terminal shell capture drifted before close.")
-                    if not proof_secret:
+                    if started_secret:
+                        proof_secret = started_secret
+                    elif not proof_secret:
                         proof_secret = secrets.token_hex(32)
                         commitment = hashlib.sha256(proof_secret.encode()).hexdigest()
                         advance_audit(replace(close_audit, close_proof_commitment=commitment))
+                        terminalized_sha256 = terminalized_done_live_audit_sha256(args, path, close_audit)
 
                     def pane_identity_is_current() -> bool:
                         try:
@@ -4477,16 +4519,24 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                         args.expected_pane_start_ticks,
                         lambda: unchanged_evidence(close_audit.terminal_capture_sha256),
                         DONE_LIVE_CLOSE_OPERATION,
+                        terminalized_sha256,
                     )
-                    if not has_bound_close_proof(proof_path, close_audit.close_proof_commitment):
+                    if not has_bound_close_proof(proof_path, close_audit.close_proof_commitment, terminalized_sha256) or path_artifact_exists(started_path):
                         raise TaskFrontmatterError("done-live close returned without durable guarded-close proof.")
                     if done_live_pane_state(args) != "absent":
                         raise TaskFrontmatterError("done-live close pane or process remained live after guarded close.")
+                if not has_bound_close_proof(proof_path, close_audit.close_proof_commitment, terminalized_sha256) or path_artifact_exists(started_path):
+                    raise TaskFrontmatterError("done-live close did not finish one durable close-proof promotion.")
                 unchanged_evidence()
                 advance_audit(replace(close_audit, state="owner-stopped"))
 
             if close_audit.state == "owner-stopped":
-                if not has_bound_close_proof(proof_path, close_audit.close_proof_commitment) or done_live_pane_state(args) != "absent":
+                terminalized_sha256 = terminalized_done_live_audit_sha256(args, path, close_audit)
+                if (
+                    not has_bound_close_proof(proof_path, close_audit.close_proof_commitment, terminalized_sha256)
+                    or path_artifact_exists(started_path)
+                    or done_live_pane_state(args) != "absent"
+                ):
                     raise TaskFrontmatterError("done-live close stopped state lacks exact durable absence evidence.")
                 unchanged_evidence()
                 note = close_note(args.active_target, args.expected_session_id)
@@ -4494,7 +4544,12 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                 advance_audit(replace(close_audit, state="note-prepared", close_note=note, completed_task_sha256=completed_sha256))
 
             if close_audit.state == "note-prepared":
-                if not has_bound_close_proof(proof_path, close_audit.close_proof_commitment) or done_live_pane_state(args) != "absent":
+                terminalized_sha256 = terminalized_done_live_audit_sha256(args, path, close_audit)
+                if (
+                    not has_bound_close_proof(proof_path, close_audit.close_proof_commitment, terminalized_sha256)
+                    or path_artifact_exists(started_path)
+                    or done_live_pane_state(args) != "absent"
+                ):
                     raise TaskFrontmatterError("done-live close note state lacks exact durable absence evidence.")
                 validate_done_live_task(args, current_text, close_audit)
                 current_sha256 = hashlib.sha256(current_text.encode()).hexdigest()
@@ -4509,7 +4564,12 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
 
             if close_audit.state != "complete":
                 raise TaskFrontmatterError("done-live close audit did not reach its complete state.")
-            if not has_bound_close_proof(proof_path, close_audit.close_proof_commitment) or done_live_pane_state(args) != "absent":
+            terminalized_sha256 = terminalized_done_live_audit_sha256(args, path, close_audit)
+            if (
+                not has_bound_close_proof(proof_path, close_audit.close_proof_commitment, terminalized_sha256)
+                or path_artifact_exists(started_path)
+                or done_live_pane_state(args) != "absent"
+            ):
                 raise TaskFrontmatterError("done-live close completion lost its durable close proof or absence.")
             unchanged_evidence()
             validate_done_live_task(args, current_text, close_audit)
