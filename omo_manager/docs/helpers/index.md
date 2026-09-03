@@ -12,6 +12,7 @@ This directory is non-authoritative helper documentation. Manager operating inst
 - `omo_task_edit.py` manager-only task-file edits: `summary`, `pending-list`, `pending-add`, `pending-replace`, `pending-remove`, initial-routing `pending-move`, closure-only `pending-closure-transfer`, `pending-marker-clear`, `comment-add`, and `delegate-message`
 - `omo_task_status.py` updates task frontmatter `status`; reissuing unchanged `running`, human-blocked, or done state safely reconciles one stale TODO row
 - `transcription-shared-closure.md` exact no-resend Sent adoption, incident recovery evidence, shared-`wl:32` closure, and approved post-cancellation closure
+- `source1290-lifecycle-prerequisite.md` accepted-report-gated terminalization and current-row custody receipt for the canonical Source-1290 carrier
 - `tmux-send.md` safe tmux paste and async delivery through `omo_tmux_send.py`
 - `../routing/supported-delivery.md` shared Codex and live Cursor Agent delivery
 - `cursor-agent-pilot.md` Cursor Agent one-shot helper and default managed-worker launch

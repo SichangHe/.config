@@ -92,6 +92,12 @@ class Args:
     bound_pre_input_check: Callable[[], None] | None = None
 
 
+@dataclass(frozen=True)
+class ExitedCodexShell:
+    session_id: str
+    capture_sha256: str
+
+
 class ParsedArgs(argparse.Namespace):
     target: str = ""
     wait_s: float = 10.0
@@ -1096,6 +1102,106 @@ def close_authorized_human_pane(target: str, identity_is_current: Callable[[], b
     _ = tmux(["kill-pane", "-t", target], check=True)
 
 
+def terminalize_bound_codex_to_shell(
+    target: str,
+    expected_pane_id: str,
+    expected_pane_pid: int,
+    expected_pane_start_ticks: int,
+    expected_session_id: str,
+    terminal_evidence: str,
+    evidence_is_current: Callable[[], None],
+    *,
+    wait_s: float = 10.0,
+    n_lines: int = 2000,
+) -> ExitedCodexShell:
+    """Exit one exact non-human Codex process while preserving its shell pane."""
+
+    if not re.fullmatch(r"%[0-9]+", expected_pane_id):
+        raise RuntimeError("expected pane id must be an exact numeric tmux pane id")
+    if expected_pane_pid <= 1 or expected_pane_start_ticks <= 0:
+        raise RuntimeError("expected pane process identity must be exact")
+    if not re.fullmatch(UUID_RE, expected_session_id):
+        raise RuntimeError("session id must be an exact Codex UUID")
+    evidence = terminal_evidence.strip()
+    if len(evidence) < 12:
+        raise RuntimeError("terminal evidence must be a specific nonempty report token")
+    if wait_s < 0 or n_lines <= 0:
+        raise RuntimeError("terminalization bounds are invalid")
+    if is_human_owned_target(target) or is_human_owned_target(target_session_name(expected_pane_id)):
+        raise RuntimeError(f"refusing to terminalize human-owned target: {target}")
+    if pane_id(target) != expected_pane_id or pane_id(expected_pane_id) != expected_pane_id:
+        raise RuntimeError(f"target no longer resolves to expected pane {expected_pane_id}")
+    if expected_pane_id == current_pane_id():
+        raise RuntimeError(f"refusing to terminalize the current pane: {expected_pane_id}")
+    if process_start_ticks(expected_pane_pid) != expected_pane_start_ticks:
+        raise RuntimeError("bound target process identity changed")
+    tmux_guard = (target, expected_pane_id)
+    numeric_target = bound_guarded_read(
+        *tmux_guard,
+        ["display-message", "-p", "-t", expected_pane_id, "#{session_name}:#{window_index}.#{pane_index}"],
+        expected_pane_pid,
+    ).strip()
+
+    def identity_is_current() -> bool:
+        if process_start_ticks(expected_pane_pid) != expected_pane_start_ticks:
+            return False
+        try:
+            identity = bound_guarded_read(
+                *tmux_guard,
+                ["display-message", "-p", "-t", expected_pane_id, "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}"],
+                expected_pane_pid,
+            ).strip()
+        except RuntimeError:
+            return False
+        return identity == f"{expected_pane_id}\t{numeric_target}"
+
+    initial_capture = guarded_capture(expected_pane_id, n_lines, tmux_guard, expected_pane_pid)
+    lines = [line.rstrip() for line in initial_capture.splitlines()]
+    while lines and not lines[-1]:
+        lines.pop()
+    report = report_from_lines(lines)
+    if report.status not in STOPPABLE_CODEX_STATUSES:
+        raise RuntimeError(f"target is not a supported live Codex pane: {target} status={report.status}")
+    marker_count = initial_capture.count("Conversation interrupted")
+    if marker_count > 1:
+        raise RuntimeError("bound Codex pane has ambiguous interruption markers")
+    marker_at = initial_capture.rfind("Conversation interrupted")
+    if marker_count == 1 and EXIT_RESUME_RE.search(initial_capture[marker_at:]):
+        raise RuntimeError("bound Codex pane contains a completed prior exit marker")
+    evidence_region = initial_capture if marker_count == 0 else initial_capture[:marker_at]
+    compact_capture = re.sub(r"\s+", "", evidence_region)
+    accepted_at = compact_capture.rfind('"accepted":true')
+    if accepted_at < 0 or evidence not in compact_capture[accepted_at:]:
+        raise RuntimeError("accepted terminal report evidence is absent before terminalization")
+    evidence_is_current()
+    session_id, before_close = query_status_session_id(
+        expected_pane_id,
+        n_lines,
+        wait_s,
+        identity_is_current,
+        tmux_guard,
+        strict_status_response=True,
+        expected_pane_pid=expected_pane_pid,
+        pre_input_check=evidence_is_current,
+    )
+    if session_id.lower() != expected_session_id.lower():
+        raise RuntimeError(f"bound Codex session id mismatch before interrupt: expected {expected_session_id.lower()}, found {session_id or '<missing>'}")
+    if not identity_is_current():
+        raise RuntimeError("tmux pane identity changed before interrupt")
+    send_exit_keys(expected_pane_id, identity_is_current, tmux_guard, expected_pane_pid, evidence_is_current)
+    if not wait_shell(expected_pane_id, time.monotonic() + wait_s, tmux_guard, expected_pane_pid):
+        raise RuntimeError("bound Codex pane did not exit to a shell")
+    if not identity_is_current():
+        raise RuntimeError("tmux pane identity changed after terminalization")
+    capture_sha256 = validate_exited_codex_shell(target, expected_pane_id, session_id, evidence, n_lines)
+    if not identity_is_current():
+        raise RuntimeError("tmux pane identity changed during shell authentication")
+    evidence_is_current()
+    if not before_close:
+        raise RuntimeError("bound Codex status response was empty")
+    return ExitedCodexShell(session_id.lower(), capture_sha256)
+
+
 def validate_exited_codex_shell(target: str, expected_pane_id: str, session_id: str, terminal_evidence: str, n_lines: int = 2000) -> str:
     """Authenticate one unchanged shell pane and return its exact capture digest."""
 
@@ -1119,8 +1225,9 @@ def validate_exited_codex_shell(target: str, expected_pane_id: str, session_id: 
         raise RuntimeError(f"expected an exited non-Codex shell: {expected_pane_id} status={actual}")
     before = capture(expected_pane_id, n_lines)
     interrupted_at = before.rfind("Conversation interrupted")
-    accepted_at = before.rfind('"accepted":true', 0, interrupted_at)
-    if before.count("Conversation interrupted") != 1 or accepted_at < 0 or evidence not in before[accepted_at:interrupted_at]:
+    compact_report = re.sub(r"\s+", "", before[:interrupted_at])
+    accepted_at = compact_report.rfind('"accepted":true')
+    if before.count("Conversation interrupted") != 1 or accepted_at < 0 or evidence not in compact_report[accepted_at:]:
         raise RuntimeError("terminal report evidence is absent before the final Codex exit marker")
     exit_text = before[interrupted_at:]
     resume_matches = list(EXIT_RESUME_RE.finditer(exit_text))
