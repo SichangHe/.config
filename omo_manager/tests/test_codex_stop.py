@@ -37,6 +37,7 @@ from omo_manager.omo_codex_stop import (
     resume_cmd,
     send_exit_keys,
     stop,
+    validate_exited_codex_shell,
 )
 
 TEST_COMPLETION_COMMAND = "/opt/omo_completion_email.py --task /tmp/task.md --outcome 'task done'"
@@ -159,6 +160,115 @@ class CodexStopTests(unittest.TestCase):
             close_exited_codex_shell("cfg:1", "%42", session_id, "specific-token")
 
         self.assertEqual("%42", close.call_args.args[0])
+
+    def test_validate_exited_codex_shell_authenticates_without_closing(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f'{{"accepted":true,"receipt":"specific-token"}}\nConversation interrupted\nTo continue this session, run codex resume {session_id}\n$ '
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.pane_target", return_value="cfg:1.0") as numeric_target,
+            patch("omo_manager.omo_codex_stop.current_command", return_value="zsh") as current_command,
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["$ "])),
+            patch("omo_manager.omo_codex_stop.capture", return_value=transcript) as capture,
+            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+        ):
+            capture_sha256 = validate_exited_codex_shell("cfg:1", "%42", session_id, "specific-token", 73)
+
+        self.assertEqual(hashlib.sha256(transcript.encode()).hexdigest(), capture_sha256)
+        numeric_target.assert_called_with("%42")
+        current_command.assert_called_with("%42")
+        capture.assert_called_with("%42", 73)
+        close.assert_not_called()
+
+    def test_close_exited_codex_shell_preserves_positional_api_and_failure_order(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        events: list[tuple[object, ...]] = []
+
+        def validate(*args: object) -> str:
+            events.append(("validate", *args))
+            return "a" * 64
+
+        def close(target: str) -> None:
+            events.append(("close", target))
+
+        def remaining(target: str) -> str:
+            events.append(("pane_id", target))
+            return ""
+
+        with (
+            patch("omo_manager.omo_codex_stop.validate_exited_codex_shell", side_effect=validate),
+            patch("omo_manager.omo_codex_stop.close_tmux_target", side_effect=close),
+            patch("omo_manager.omo_codex_stop.pane_id", side_effect=remaining),
+        ):
+            close_exited_codex_shell("cfg:1", "%42", session_id, "specific-token", 73)
+
+        self.assertEqual(
+            [
+                ("validate", "cfg:1", "%42", session_id, "specific-token", 73),
+                ("close", "%42"),
+                ("pane_id", "%42"),
+            ],
+            events,
+        )
+
+    def test_validate_exited_codex_shell_rejects_exact_pane_mismatch_before_shell_access(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%41"),
+            patch("omo_manager.omo_codex_stop.current_pane_id") as current_pane,
+            patch("omo_manager.omo_codex_stop.pane_target") as numeric_target,
+            patch("omo_manager.omo_codex_stop.current_command") as current_command,
+            patch("omo_manager.omo_codex_stop.inspect") as inspect_pane,
+            patch("omo_manager.omo_codex_stop.capture") as capture,
+            self.assertRaisesRegex(RuntimeError, "no longer resolves to expected pane"),
+        ):
+            validate_exited_codex_shell(
+                "cfg:1",
+                "%42",
+                "11111111-2222-3333-4444-555555555555",
+                "specific-token",
+            )
+
+        current_pane.assert_not_called()
+        numeric_target.assert_not_called()
+        current_command.assert_not_called()
+        inspect_pane.assert_not_called()
+        capture.assert_not_called()
+
+    def test_validate_exited_codex_shell_rejects_non_shell_before_capture(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="codex") as current_command,
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["$ "])),
+            patch("omo_manager.omo_codex_stop.capture") as capture,
+            self.assertRaisesRegex(RuntimeError, "expected an exited non-Codex shell"),
+        ):
+            validate_exited_codex_shell(
+                "cfg:1",
+                "%42",
+                "11111111-2222-3333-4444-555555555555",
+                "specific-token",
+            )
+
+        current_command.assert_called_once_with("%42")
+        capture.assert_not_called()
+
+    def test_validate_exited_codex_shell_rejects_capture_drift_without_closing(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f'{{"accepted":true,"receipt":"specific-token"}}\nConversation interrupted\nTo continue this session, run codex resume {session_id}\n$ '
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="zsh"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["$ "])),
+            patch("omo_manager.omo_codex_stop.capture", side_effect=(transcript, transcript + "changed")),
+            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+            self.assertRaisesRegex(RuntimeError, "changed during recovery"),
+        ):
+            validate_exited_codex_shell("cfg:1", "%42", session_id, "specific-token")
+
+        close.assert_not_called()
 
     def test_close_exited_codex_shell_cross_binds_immutable_task_receipt(self) -> None:
         session_id = "11111111-2222-3333-4444-555555555555"

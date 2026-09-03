@@ -1096,8 +1096,8 @@ def close_authorized_human_pane(target: str, identity_is_current: Callable[[], b
     _ = tmux(["kill-pane", "-t", target], check=True)
 
 
-def close_exited_codex_shell(target: str, expected_pane_id: str, session_id: str, terminal_evidence: str, n_lines: int = 2000) -> None:
-    """Close one unchanged shell pane that retains exact terminal Codex evidence."""
+def validate_exited_codex_shell(target: str, expected_pane_id: str, session_id: str, terminal_evidence: str, n_lines: int = 2000) -> str:
+    """Authenticate one unchanged shell pane and return its exact capture digest."""
 
     if not re.fullmatch(r"%[0-9]+", expected_pane_id):
         raise RuntimeError("expected pane id must be an exact numeric tmux pane id")
@@ -1138,6 +1138,13 @@ def close_exited_codex_shell(target: str, expected_pane_id: str, session_id: str
         or capture(expected_pane_id, n_lines) != before
     ):
         raise RuntimeError("pane identity or shell evidence changed during recovery; retry")
+    return hashlib.sha256(before.encode()).hexdigest()
+
+
+def close_exited_codex_shell(target: str, expected_pane_id: str, session_id: str, terminal_evidence: str, n_lines: int = 2000) -> None:
+    """Close one unchanged shell pane that retains exact terminal Codex evidence."""
+
+    validate_exited_codex_shell(target, expected_pane_id, session_id, terminal_evidence, n_lines)
     close_tmux_target(expected_pane_id)
     if pane_id(expected_pane_id):
         raise RuntimeError(f"exact stale shell pane remained live after close: {expected_pane_id}")
