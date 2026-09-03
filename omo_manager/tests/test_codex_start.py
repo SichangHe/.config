@@ -3543,6 +3543,18 @@ class CodexStartTests(unittest.TestCase):
             with self.assertRaisesRegex(StartError, "work-log root"):
                 require_human_restart_authority(args, pane)
 
+    def test_only_hcfg_authorized_restart_accepts_human_pending_index(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, runat="hcfg:1", status="long_running", task_file=HCFG_RESTART_TASK_FILE)
+            (root / "TODO.md").write_text(f"current:\n\nhuman pending:\n{HCFG_RESTART_TASK_FILE} hcfg:1\n", encoding="utf-8")
+            pane = Pane("hcfg:1.0", "%46", "@1", "bun", root, 4242)
+            args = self.args(root, task_file=HCFG_RESTART_TASK_FILE, target="hcfg:1")
+            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane):
+                with self.assertRaisesRegex(StartError, "TODO `current`"):
+                    validate_task(args, pane)
+                self.assertEqual("hcfg:1", validate_task(args, pane, allow_human_pending=True).runat)
+
     def test_human_restart_authority_rejects_other_h_target_and_paraphrase(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)

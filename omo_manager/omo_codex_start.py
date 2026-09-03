@@ -613,7 +613,19 @@ def current_todo_entries(text: str) -> set[str]:
     return entries
 
 
-def validate_task(args: Args, pane: Pane, *, verify_target: bool = True) -> TaskBinding:
+def human_pending_todo_entries(text: str) -> set[str]:
+    section = ""
+    entries: set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.rstrip(":").casefold() in {"current", "previous", "human pending", "low priority"}:
+            section = stripped.rstrip(":").casefold()
+        elif section == "human pending" and stripped:
+            entries.add(stripped)
+    return entries
+
+
+def validate_task(args: Args, pane: Pane, *, verify_target: bool = True, allow_human_pending: bool = False) -> TaskBinding:
     path = task_path(args.root, args.task_file)
     if not path.is_file():
         raise StartError(f"task file does not exist: {path}")
@@ -648,8 +660,13 @@ def validate_task(args: Args, pane: Pane, *, verify_target: bool = True) -> Task
         raise StartError(f"task `runat` {metadata.runat} does not identify target {pane.target}.")
     todo = args.root / "TODO.md"
     expected = f"{task_ref(args.root, path)} {metadata.runat}"
-    if not todo.is_file() or expected not in current_todo_entries(todo.read_text(encoding="utf-8")):
-        raise StartError(f"TODO `current` does not contain exact task entry: {expected}")
+    todo_text = todo.read_text(encoding="utf-8") if todo.is_file() else ""
+    accepted_entries = current_todo_entries(todo_text)
+    if allow_human_pending:
+        accepted_entries |= human_pending_todo_entries(todo_text)
+    if expected not in accepted_entries:
+        section = "`current` or `human pending`" if allow_human_pending else "`current`"
+        raise StartError(f"TODO {section} does not contain exact task entry: {expected}")
     return TaskBinding(
         metadata.is_manager,
         metadata.tool,
@@ -2761,7 +2778,12 @@ def start(args: Args) -> str:
             verify_same_pane(pane)
         if not any(modes):
             require_same_shell(pane)
-        task_binding = validate_task(args, pane, verify_target=not args.rotate_worker)
+        task_binding = validate_task(
+            args,
+            pane,
+            verify_target=not args.rotate_worker,
+            allow_human_pending=human_restart_authority is not None and human_restart_authority.target == HCFG_RESTART_TARGET,
+        )
         if args.restart_running:
             require_restartable_codex(pane)
         if args.recover_non_codex:
