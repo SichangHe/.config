@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import stat
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -75,6 +78,8 @@ class Source1376ShutdownTests(unittest.TestCase):
         self.authority.write_text("authority\n", encoding="utf-8")
         self.packet = self.root.parent / f"{self.root.name}-packet.json"
         self.addCleanup(self.packet.unlink, missing_ok=True)
+        self.prepared = self.root.parent / f"{self.root.name}-prepared.json"
+        self.addCleanup(self.prepared.unlink, missing_ok=True)
         self.args = shutdown.Args(self.root, self.plan, self.binding, self.authority, self.receipts, self.packet)
         self.escrow_guard = patch.object(shutdown, "validate_escrow_custody_locked")
         self.escrow_guard.start()
@@ -99,6 +104,43 @@ class Source1376ShutdownTests(unittest.TestCase):
         (self.root / shutdown.DESTINATION_REF).write_text(text, encoding="utf-8")
         return text
 
+    def prepared_args(self, digest_value: str = "", *, prepare: bool) -> shutdown.Args:
+        return shutdown.Args(
+            self.root,
+            self.plan,
+            self.binding,
+            self.authority,
+            self.receipts,
+            self.packet,
+            self.prepared,
+            digest_value,
+            prepare,
+        )
+
+    def publish_small_prepared_binding(
+        self,
+        source_text: str,
+        current_source_text: str,
+        destination_text: str,
+        current_destination_text: str,
+    ) -> tuple[dict[str, shutdown.PlanRow], str]:
+        source = self.root / "source.md"
+        source.write_text(current_source_text, encoding="utf-8")
+        (self.root / shutdown.DESTINATION_REF).write_text(current_destination_text, encoding="utf-8")
+        self.write_todo((("source.md", "agent_managers:1"), (shutdown.DESTINATION_REF, "cedit:15")))
+        rows = {"01": row("01", "source.md", source_text)}
+        with (
+            patch.object(shutdown, "DESTINATION_INITIAL_SHA256", digest(destination_text)),
+            patch.object(shutdown, "load_execution_rows", return_value=rows),
+            patch.object(shutdown, "load_plan", return_value=rows),
+            patch.object(shutdown, "validate_authority", return_value=f"{shutdown.AUTHORITY_REF}:3-3"),
+            patch.object(shutdown, "source1352_anchor", return_value={"sha256": "1" * 64, "resent": False}),
+            patch.object(shutdown, "transfer_schedule", return_value=(("01",),)),
+        ):
+            path, prepared_digest = shutdown.publish_prepared_binding(self.prepared_args(prepare=True))
+        self.assertEqual(self.prepared, path)
+        return rows, prepared_digest
+
     def test_loads_exact_immutable_plan(self) -> None:
         rows = shutdown.load_plan(Path("/ssd1/sichangheagent/amh1376-transfer-plan-20260902.md"))
         self.assertEqual(84, len(rows))
@@ -113,6 +155,136 @@ class Source1376ShutdownTests(unittest.TestCase):
             "ebd60e85d87ae6c7fca6280ee8988c990becbb8027c7b22b5ac5f64a5f02619b",
             shutdown.DESTINATION_INITIAL_SHA256,
         )
+
+    def test_new_or_existing_setgid_receipt_directory_is_never_normalized(self) -> None:
+        new_path = self.root / "new-receipts"
+        real_mkdir = os.mkdir
+
+        def inherited_setgid(path: str, mode: int = 0o777, *, dir_fd: int | None = None) -> None:
+            real_mkdir(path, mode, dir_fd=dir_fd)
+            os.chmod(path, 0o2700, dir_fd=dir_fd)
+
+        with (
+            patch.object(os, "mkdir", side_effect=inherited_setgid),
+            self.assertRaisesRegex(shutdown.TaskFrontmatterError, "inherited setgid is not normalized"),
+        ):
+            shutdown.ensure_private_dir(new_path)
+        self.assertEqual(0o2700, stat.S_IMODE(new_path.stat().st_mode))
+
+        existing = self.root / "existing-receipts"
+        existing.mkdir(mode=0o700)
+        os.chmod(existing, 0o2700)
+        with self.assertRaisesRegex(shutdown.TaskFrontmatterError, "0700"):
+            shutdown.ensure_private_dir(existing)
+        self.assertEqual(0o2700, stat.S_IMODE(existing.stat().st_mode))
+
+    def test_new_receipt_directory_replacement_before_normalization_is_rejected(self) -> None:
+        path = self.root / "racy-receipts"
+        displaced = self.root / "displaced-receipts"
+        real_stat = os.stat
+        replaced = False
+
+        def replace_before_named_stat(name: object, *args: object, **kwargs: object) -> os.stat_result:
+            nonlocal replaced
+            dir_fd = kwargs.get("dir_fd")
+            if name == path.name and isinstance(dir_fd, int) and not replaced:
+                os.rename(path.name, displaced.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                os.mkdir(path.name, mode=0o700, dir_fd=dir_fd)
+                replaced = True
+            return real_stat(name, *args, **kwargs)  # type: ignore[arg-type]
+
+        with (
+            patch.object(os, "stat", side_effect=replace_before_named_stat),
+            self.assertRaisesRegex(shutdown.TaskFrontmatterError, "exact custody"),
+        ):
+            shutdown.ensure_private_dir(path)
+
+        self.assertTrue(replaced)
+        self.assertTrue(path.is_dir())
+        self.assertTrue(displaced.is_dir())
+
+    def test_new_setgid_replacement_before_open_is_rejected_without_chmod(self) -> None:
+        path = self.root / "preopen-racy-receipts"
+        displaced = self.root / "preopen-displaced-receipts"
+        real_open = os.open
+        replaced = False
+
+        def replace_before_child_open(name: object, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+            nonlocal replaced
+            if name == path.name and isinstance(dir_fd, int) and not replaced:
+                os.rename(path.name, displaced.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                os.mkdir(path.name, mode=0o700, dir_fd=dir_fd)
+                os.chmod(path.name, 0o2700, dir_fd=dir_fd)
+                replaced = True
+            return real_open(name, flags, mode, dir_fd=dir_fd)  # type: ignore[arg-type]
+
+        with (
+            patch.object(os, "open", side_effect=replace_before_child_open),
+            self.assertRaisesRegex(shutdown.TaskFrontmatterError, "inherited setgid is not normalized"),
+        ):
+            shutdown.ensure_private_dir(path)
+
+        self.assertTrue(replaced)
+        self.assertEqual(0o2700, stat.S_IMODE(path.stat().st_mode))
+        self.assertEqual(0o700, stat.S_IMODE(displaced.stat().st_mode))
+
+    def test_prepared_binding_records_locked_row_and_destination_drift_without_mutation(self) -> None:
+        source_text = task_text("agent_managers:1", ("move me",))
+        source_current = source_text + "evidence appended after prior binding\n"
+        destination_text = task_text(
+            "cedit:15",
+            (shutdown.AUTHORITY_TEXT,),
+            status="long_running",
+            is_manager=True,
+            managerat="wl:4",
+            blocked_on="",
+        )
+        destination_current = destination_text + "coordinator report evidence\n"
+        _rows, prepared_digest = self.publish_small_prepared_binding(
+            source_text,
+            source_current,
+            destination_text,
+            destination_current,
+        )
+
+        self.assertEqual(prepared_digest, digest(self.prepared.read_text(encoding="utf-8")))
+        self.assertEqual(0o444, stat.S_IMODE(self.prepared.stat().st_mode))
+        document = json.loads(self.prepared.read_text(encoding="utf-8"))
+        self.assertEqual(shutdown.PREPARED_BINDING_SCHEMA, document["schema"])
+        self.assertEqual(digest(source_text), document["rows"][0]["planned_sha256"])
+        self.assertEqual(digest(source_text), document["rows"][0]["prior_bound_sha256"])
+        self.assertEqual(digest(source_current), document["rows"][0]["current_sha256"])
+        self.assertEqual(["move me"], document["rows"][0]["pending_items"])
+        self.assertEqual("parked", document["rows"][0]["blocked_on"])
+        self.assertEqual(digest(destination_text), document["destination"]["prior_bound_sha256"])
+        self.assertEqual(digest(destination_current), document["destination"]["current_sha256"])
+        self.assertEqual(["row", "destination"], [entry["kind"] for entry in document["drifts"]])
+        self.assertEqual([shutdown.TRANSFER_JOURNAL, shutdown.LEGACY_TRANSFER_JOURNAL], document["recovery_records_absent"])
+        self.assertEqual(source_current, (self.root / "source.md").read_text(encoding="utf-8"))
+        self.assertEqual(destination_current, (self.root / shutdown.DESTINATION_REF).read_text(encoding="utf-8"))
+        self.assertEqual([], list(self.receipts.iterdir()))
+
+    def test_prepared_binding_rejects_dangling_legacy_transfer_recovery_entry(self) -> None:
+        source_text = task_text("agent_managers:1", ("move me",))
+        (self.root / "source.md").write_text(source_text, encoding="utf-8")
+        destination_text = self.destination()
+        self.write_todo((("source.md", "agent_managers:1"), (shutdown.DESTINATION_REF, "cedit:15")))
+        (self.root / shutdown.LEGACY_TRANSFER_JOURNAL).symlink_to(self.root / "missing-legacy-target")
+        rows = {"01": row("01", "source.md", source_text)}
+
+        with (
+            patch.object(shutdown, "DESTINATION_INITIAL_SHA256", digest(destination_text)),
+            patch.object(shutdown, "load_execution_rows", return_value=rows),
+            patch.object(shutdown, "load_plan", return_value=rows),
+            patch.object(shutdown, "validate_authority", return_value=f"{shutdown.AUTHORITY_REF}:3-3"),
+            patch.object(shutdown, "source1352_anchor", return_value={"sha256": "1" * 64, "resent": False}),
+            patch.object(shutdown, "transfer_schedule", return_value=(("01",),)),
+            self.assertRaisesRegex(shutdown.TaskFrontmatterError, "legacy closure-transfer"),
+        ):
+            shutdown.publish_prepared_binding(self.prepared_args(prepare=True))
+
+        self.assertFalse(self.prepared.exists())
+        self.assertEqual([], list(self.receipts.iterdir()))
 
     def test_transfers_historical_nonblocked_queue_and_recovers_partial_write(self) -> None:
         source_text = task_text(
@@ -162,6 +334,178 @@ class Source1376ShutdownTests(unittest.TestCase):
         self.assertEqual((), source_metadata.pending_task_items)
         self.assertEqual((shutdown.AUTHORITY_TEXT, "first", "second"), destination_metadata.pending_task_items)
         self.assertEqual(["01"], receipt["rows"])
+
+    def test_first_transfer_revalidates_and_commits_under_complete_prepared_lock_set(self) -> None:
+        source_text = task_text("agent_managers:1", ("move me",))
+        source_current = source_text + "reviewed evidence\n"
+        destination_text = task_text(
+            "cedit:15",
+            (shutdown.AUTHORITY_TEXT,),
+            status="long_running",
+            is_manager=True,
+            managerat="wl:4",
+            blocked_on="",
+        )
+        destination_current = destination_text + "reviewed coordinator evidence\n"
+        rows, prepared_digest = self.publish_small_prepared_binding(
+            source_text,
+            source_current,
+            destination_text,
+            destination_current,
+        )
+        args = self.prepared_args(prepared_digest, prepare=False)
+        active_files: set[Path] = set()
+        membership = False
+        real_validate = shutdown.validate_prepared_snapshot_locked
+        real_finish = shutdown.finish_transfer_journal_locked
+
+        @contextmanager
+        def membership_lock(_root: Path):
+            nonlocal membership
+            membership = True
+            try:
+                yield
+            finally:
+                membership = False
+
+        @contextmanager
+        def file_lock(path: Path):
+            resolved = path.resolve()
+            active_files.add(resolved)
+            try:
+                yield
+            finally:
+                active_files.remove(resolved)
+
+        def assert_snapshot_locked(
+            locked_args: shutdown.Args,
+            locked_rows: dict[str, shutdown.PlanRow],
+            initial_paths: tuple[Path, ...],
+        ) -> None:
+            self.assertTrue(membership)
+            self.assertTrue(set(shutdown.prepared_binding_lock_paths(locked_args, locked_rows, initial_paths)).issubset(active_files))
+            real_validate(locked_args, locked_rows, initial_paths)
+
+        def assert_receipt_committed(*call_args: object, **call_kwargs: object) -> dict[str, object]:
+            receipt = real_finish(*call_args, **call_kwargs)  # type: ignore[arg-type]
+            self.assertTrue(membership)
+            self.assertTrue((self.receipts / "transfer-01.json").is_file())
+            self.assertFalse((self.root / shutdown.TRANSFER_JOURNAL).exists())
+            return receipt
+
+        with (
+            patch.object(shutdown, "DESTINATION_INITIAL_SHA256", digest(destination_text)),
+            patch.object(shutdown, "load_execution_rows", return_value=rows),
+            patch.object(shutdown, "load_plan", return_value=rows),
+            patch.object(shutdown, "validate_authority", return_value=f"{shutdown.AUTHORITY_REF}:3-3"),
+            patch.object(shutdown, "source1352_anchor", return_value={"sha256": "1" * 64, "resent": False}),
+            patch.object(shutdown, "transfer_schedule", return_value=(("01",),)),
+            patch.object(shutdown, "root_membership_lock", side_effect=membership_lock),
+            patch.object(shutdown, "task_file_lock", side_effect=file_lock),
+            patch.object(shutdown, "validate_prepared_snapshot_locked", side_effect=assert_snapshot_locked),
+            patch.object(shutdown, "finish_transfer_journal_locked", side_effect=assert_receipt_committed),
+        ):
+            receipt = shutdown.transfer_rows(
+                args,
+                shutdown.effective_execution_rows(args),
+                ("01",),
+                digest(destination_current),
+                require_prepared_snapshot=True,
+            )
+
+        self.assertEqual(prepared_digest, receipt["prepared_binding_sha256"])
+        self.assertIs(True, receipt["legacy_recovery_absent"])
+        self.assertFalse(membership)
+        self.assertEqual(set(), active_files)
+        source_metadata = parse_task_metadata((self.root / "source.md").read_text(encoding="utf-8"), self.root)
+        destination_metadata = parse_task_metadata((self.root / shutdown.DESTINATION_REF).read_text(encoding="utf-8"), self.root)
+        assert source_metadata is not None
+        assert destination_metadata is not None
+        self.assertEqual((), source_metadata.pending_task_items)
+        self.assertEqual((shutdown.AUTHORITY_TEXT, "move me"), destination_metadata.pending_task_items)
+
+    def test_post_review_snapshot_drift_aborts_before_journal_or_receipt(self) -> None:
+        source_text = task_text("agent_managers:1", ("move me",))
+        destination_text = task_text(
+            "cedit:15",
+            (shutdown.AUTHORITY_TEXT,),
+            status="long_running",
+            is_manager=True,
+            managerat="wl:4",
+            blocked_on="",
+        )
+        rows, prepared_digest = self.publish_small_prepared_binding(
+            source_text,
+            source_text,
+            destination_text,
+            destination_text,
+        )
+        source = self.root / "source.md"
+        source.write_text(source_text + "unreviewed drift\n", encoding="utf-8")
+        destination_before = (self.root / shutdown.DESTINATION_REF).read_bytes()
+        args = self.prepared_args(prepared_digest, prepare=False)
+
+        with (
+            patch.object(shutdown, "DESTINATION_INITIAL_SHA256", digest(destination_text)),
+            patch.object(shutdown, "load_execution_rows", return_value=rows),
+            patch.object(shutdown, "load_plan", return_value=rows),
+            patch.object(shutdown, "validate_authority", return_value=f"{shutdown.AUTHORITY_REF}:3-3"),
+            patch.object(shutdown, "source1352_anchor", return_value={"sha256": "1" * 64, "resent": False}),
+            patch.object(shutdown, "transfer_schedule", return_value=(("01",),)),
+            self.assertRaisesRegex(shutdown.TaskFrontmatterError, "snapshot drifted"),
+        ):
+            shutdown.transfer_rows(
+                args,
+                shutdown.effective_execution_rows(args),
+                ("01",),
+                digest(destination_text),
+                require_prepared_snapshot=True,
+            )
+
+        self.assertFalse((self.root / shutdown.TRANSFER_JOURNAL).exists())
+        self.assertFalse((self.receipts / "transfer-01.json").exists())
+        self.assertEqual(destination_before, (self.root / shutdown.DESTINATION_REF).read_bytes())
+
+    def test_legacy_transfer_recovery_state_after_review_blocks_first_transfer(self) -> None:
+        source_text = task_text("agent_managers:1", ("move me",))
+        destination_text = task_text(
+            "cedit:15",
+            (shutdown.AUTHORITY_TEXT,),
+            status="long_running",
+            is_manager=True,
+            managerat="wl:4",
+            blocked_on="",
+        )
+        rows, prepared_digest = self.publish_small_prepared_binding(
+            source_text,
+            source_text,
+            destination_text,
+            destination_text,
+        )
+        legacy = self.root / shutdown.LEGACY_TRANSFER_JOURNAL
+        legacy.write_text("{}\n", encoding="utf-8")
+        args = self.prepared_args(prepared_digest, prepare=False)
+
+        with (
+            patch.object(shutdown, "DESTINATION_INITIAL_SHA256", digest(destination_text)),
+            patch.object(shutdown, "load_execution_rows", return_value=rows),
+            patch.object(shutdown, "load_plan", return_value=rows),
+            patch.object(shutdown, "validate_authority", return_value=f"{shutdown.AUTHORITY_REF}:3-3"),
+            patch.object(shutdown, "source1352_anchor", return_value={"sha256": "1" * 64, "resent": False}),
+            patch.object(shutdown, "transfer_schedule", return_value=(("01",),)),
+            self.assertRaisesRegex(shutdown.TaskFrontmatterError, "legacy closure-transfer"),
+        ):
+            shutdown.transfer_rows(
+                args,
+                shutdown.effective_execution_rows(args),
+                ("01",),
+                digest(destination_text),
+                require_prepared_snapshot=True,
+            )
+
+        self.assertFalse((self.root / shutdown.TRANSFER_JOURNAL).exists())
+        self.assertFalse((self.receipts / "transfer-01.json").exists())
+        self.assertEqual(destination_text, (self.root / shutdown.DESTINATION_REF).read_text(encoding="utf-8"))
 
     def test_group_transfer_preserves_duplicate_multiplicity(self) -> None:
         first_text = task_text("agent_managers:64", ("same item",), status="long_running", blocked_on="")

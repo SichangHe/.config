@@ -81,6 +81,17 @@ COMPLETED_SHELL_COMPLETION_COMMAND = (
     "/home/sichangheagent/.config/omo_manager/omo_completion_email.py --root /ssd1/sichangheagent/work_logs --task /ssd1/sichangheagent/work_logs/amh1232_term_eval.md --outcome 'task done'"
 )
 TRANSFER_JOURNAL = ".omo-source1376-transfer.json"
+LEGACY_TRANSFER_JOURNAL = ".omo-pending-closure-transfer.json"
+PREPARED_BINDING_SCHEMA = "omo-source1376-prepared-binding/v1"
+PREPARED_BINDING_PURPOSE = (
+    "Root-wide locked Source-1376 snapshot prepared for independent review and exact revalidation immediately before "
+    "the first committed queue transfer; the immutable base plan and prior execution binding remain unchanged inputs."
+)
+RECEIPT_DIRECTORY_MODE_CONTRACT = (
+    "An inherited setgid bit may be cleared only with an atomic creation-to-open guarantee proving exact custody of a "
+    "just-created owner-owned empty directory. Because mkdirat plus openat has a replacement window, this helper fails "
+    "closed on 02700 and never normalizes an existing directory."
+)
 PROTECTED_ROWS = frozenset({"29", "59", "69", "84"})
 EXTERNAL_SHARED_ROWS = {"28": "29", "58": "59"}
 INTERNAL_SHARED_PAIR = ("71", "72")
@@ -190,10 +201,23 @@ class Args:
     authority: Path
     receipt_dir: Path
     packet_output: Path
+    prepared_binding: Path | None = None
+    prepared_binding_sha256: str = ""
+    prepare_binding: bool = False
 
 
 def sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def path_entry_exists(path: Path) -> bool:
+    """Return whether a directory entry exists, including a dangling symlink."""
+
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def canonical_json(value: object) -> bytes:
@@ -374,6 +398,632 @@ def load_execution_rows(plan: Path, binding: Path) -> dict[str, PlanRow]:
     return rows
 
 
+def prepared_binding_digest(args: Args) -> str:
+    return args.prepared_binding_sha256
+
+
+def prepared_binding_value(args: Args) -> dict[str, object] | None:
+    path = args.prepared_binding
+    if path is None:
+        if args.prepared_binding_sha256 or args.prepare_binding:
+            raise TaskFrontmatterError("Source-1376 prepared-binding arguments are incomplete.")
+        return None
+    if args.prepare_binding:
+        raise TaskFrontmatterError("a Source-1376 binding being prepared cannot be used for execution.")
+    if SHA256_RE.fullmatch(args.prepared_binding_sha256) is None:
+        raise TaskFrontmatterError("Source-1376 prepared-binding digest is invalid.")
+    value, payload = read_immutable_json(path)
+    if sha256(payload) != args.prepared_binding_sha256:
+        raise TaskFrontmatterError("Source-1376 prepared binding does not match its independently reviewed digest.")
+    validate_prepared_binding_document(args, value)
+    return value
+
+
+def prepared_binding_rows(value: dict[str, object], prior_rows: dict[str, PlanRow]) -> dict[str, PlanRow]:
+    row_values = value.get("rows")
+    if not isinstance(row_values, list) or len(row_values) != len(prior_rows):
+        raise TaskFrontmatterError("Source-1376 prepared binding has an invalid row manifest.")
+    effective: dict[str, PlanRow] = {}
+    for expected_id, row_value in zip(sorted(prior_rows), row_values, strict=True):
+        if not isinstance(row_value, dict):
+            raise TaskFrontmatterError("Source-1376 prepared binding row is malformed.")
+        prior = prior_rows[expected_id]
+        pending_items = row_value.get("pending_items")
+        current_sha256 = row_value.get("current_sha256")
+        if (
+            set(row_value)
+            != {
+                "row",
+                "task",
+                "planned_sha256",
+                "prior_bound_sha256",
+                "current_sha256",
+                "drifted_after_prior_binding",
+                "status",
+                "blocked_on",
+                "target",
+                "manager_target",
+                "is_manager",
+                "pending_items",
+                "pending_items_count",
+                "queue_sha256",
+                "mode",
+                "size",
+                "protected",
+                "disposition",
+            }
+            or row_value.get("row") != expected_id
+            or row_value.get("task") != prior.task_ref
+            or row_value.get("prior_bound_sha256") != prior.task_sha256
+            or not isinstance(current_sha256, str)
+            or SHA256_RE.fullmatch(current_sha256) is None
+            or row_value.get("drifted_after_prior_binding") is not (current_sha256 != prior.task_sha256)
+            or row_value.get("status") != prior.status
+            or not isinstance(row_value.get("blocked_on"), str)
+            or row_value.get("target") != prior.runat
+            or row_value.get("manager_target") != prior.managerat
+            or row_value.get("is_manager") is not prior.is_manager
+            or not isinstance(pending_items, list)
+            or any(not isinstance(item, str) for item in pending_items)
+            or row_value.get("pending_items_count") != prior.n_items
+            or row_value.get("queue_sha256") != prior.queue_sha256
+            or len(pending_items) != prior.n_items
+            or queue_sha256(tuple(pending_items)) != prior.queue_sha256
+            or not isinstance(row_value.get("mode"), str)
+            or not isinstance(row_value.get("size"), int)
+            or row_value.get("protected") is not (expected_id in PROTECTED_ROWS)
+            or not isinstance(row_value.get("disposition"), str)
+        ):
+            raise TaskFrontmatterError(f"Source-1376 prepared binding row {expected_id} breaks prior plan semantics.")
+        effective[expected_id] = replace(prior, task_sha256=current_sha256)
+    return effective
+
+
+def prepared_binding_inventory(value: dict[str, object], root: Path) -> dict[Path, dict[str, object]]:
+    manifest = value.get("markdown_inventory")
+    if not isinstance(manifest, list) or not manifest:
+        raise TaskFrontmatterError("Source-1376 prepared binding has no Markdown inventory.")
+    result: dict[Path, dict[str, object]] = {}
+    for entry in manifest:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"task", "sha256", "mode", "size"}
+            or not isinstance(entry.get("task"), str)
+            or not isinstance(entry.get("sha256"), str)
+            or SHA256_RE.fullmatch(str(entry["sha256"])) is None
+            or not isinstance(entry.get("mode"), str)
+            or not isinstance(entry.get("size"), int)
+        ):
+            raise TaskFrontmatterError("Source-1376 prepared binding Markdown inventory is malformed.")
+        path = (root / str(entry["task"])).resolve()
+        if path == root or root not in path.parents or path in result:
+            raise TaskFrontmatterError("Source-1376 prepared binding Markdown path is invalid or duplicated.")
+        result[path] = entry
+    if tuple(result) != tuple(sorted(result)):
+        raise TaskFrontmatterError("Source-1376 prepared binding Markdown inventory is not canonical.")
+    return result
+
+
+def validate_prepared_binding_document(args: Args, value: dict[str, object]) -> None:
+    prior_rows = load_execution_rows(args.plan, args.binding)
+    effective_rows = prepared_binding_rows(value, prior_rows)
+    plan_value = value.get("base_plan")
+    prior_value = value.get("prior_execution_binding")
+    authority_value = value.get("authority")
+    receipt_value = value.get("receipt_directory")
+    destination = value.get("destination")
+    todo = value.get("todo")
+    implementation = value.get("implementation")
+    protected = value.get("protected")
+    boundaries = value.get("boundaries")
+    source1352 = value.get("source1352")
+    inventory = prepared_binding_inventory(value, args.root)
+    prepared_schedule = transfer_schedule(effective_rows, include_deferred=False)
+    if not prepared_schedule:
+        raise TaskFrontmatterError("Source-1376 prepared binding has no eligible first transfer.")
+    expected_first = list(prepared_schedule[0])
+    if (
+        set(value)
+        != {
+            "schema",
+            "created_at",
+            "purpose",
+            "root",
+            "base_plan",
+            "prior_execution_binding",
+            "authority",
+            "implementation",
+            "receipt_directory",
+            "packet_output",
+            "todo",
+            "markdown_inventory",
+            "rows",
+            "drifts",
+            "destination",
+            "first_transfer_rows",
+            "protected",
+            "source1352",
+            "boundaries",
+            "recovery_records_absent",
+            "execution_rule",
+        }
+        or value.get("schema") != PREPARED_BINDING_SCHEMA
+        or not isinstance(value.get("created_at"), str)
+        or value.get("purpose") != PREPARED_BINDING_PURPOSE
+        or value.get("root") != str(args.root)
+        or plan_value != {"path": str(args.plan), "mode": "0444", "sha256": PLAN_SHA256}
+        or prior_value != {"path": str(args.binding), "mode": "0444", "sha256": EXECUTION_BINDING_SHA256}
+        or authority_value
+        != {
+            "path": str(args.authority),
+            "source": f"{AUTHORITY_REF}:3-3",
+            "sha256": AUTHORITY_SHA256,
+            "text": AUTHORITY_TEXT,
+        }
+        or not isinstance(implementation, dict)
+        or set(implementation) != {"path", "sha256", "mode", "size"}
+        or implementation.get("path") != str(Path(__file__).resolve())
+        or SHA256_RE.fullmatch(str(implementation.get("sha256", ""))) is None
+        or not isinstance(implementation.get("mode"), str)
+        or not isinstance(implementation.get("size"), int)
+        or not isinstance(receipt_value, dict)
+        or set(receipt_value) != {"path", "mode", "uid", "device", "inode", "initial_entries", "normalization_contract"}
+        or receipt_value.get("path") != str(args.receipt_dir)
+        or receipt_value.get("mode") != "0700"
+        or receipt_value.get("uid") != os.getuid()
+        or not isinstance(receipt_value.get("device"), int)
+        or not isinstance(receipt_value.get("inode"), int)
+        or receipt_value.get("initial_entries") != []
+        or receipt_value.get("normalization_contract") != RECEIPT_DIRECTORY_MODE_CONTRACT
+        or value.get("packet_output") != str(args.packet_output)
+        or not isinstance(todo, dict)
+        or set(todo) != {"path", "sha256", "mode", "size"}
+        or todo.get("path") != str((args.root / "TODO.md").resolve())
+        or SHA256_RE.fullmatch(str(todo.get("sha256", ""))) is None
+        or not isinstance(todo.get("mode"), str)
+        or not isinstance(todo.get("size"), int)
+        or value.get("first_transfer_rows") != expected_first
+        or not isinstance(destination, dict)
+        or set(destination)
+        != {
+            "task",
+            "path",
+            "prior_bound_sha256",
+            "current_sha256",
+            "drifted_after_prior_binding",
+            "status",
+            "blocked_on",
+            "target",
+            "manager_target",
+            "is_manager",
+            "pending_items",
+            "pending_items_count",
+            "queue_sha256",
+            "mode",
+            "size",
+            "unique_active_target_owner",
+            "disposition",
+        }
+        or destination.get("task") != DESTINATION_REF
+        or destination.get("path") != str((args.root / DESTINATION_REF).resolve())
+        or destination.get("prior_bound_sha256") != DESTINATION_INITIAL_SHA256
+        or destination.get("target") != "cedit:15"
+        or destination.get("manager_target") != "wl:4"
+        or destination.get("status") != "long_running"
+        or destination.get("is_manager") is not True
+        or destination.get("pending_items") != [AUTHORITY_TEXT]
+        or destination.get("pending_items_count") != 1
+        or destination.get("queue_sha256") != queue_sha256((AUTHORITY_TEXT,))
+        or SHA256_RE.fullmatch(str(destination.get("prior_bound_sha256", ""))) is None
+        or SHA256_RE.fullmatch(str(destination.get("current_sha256", ""))) is None
+        or destination.get("drifted_after_prior_binding") is not (destination.get("current_sha256") != destination.get("prior_bound_sha256"))
+        or destination.get("unique_active_target_owner") is not True
+        or not isinstance(destination.get("blocked_on"), str)
+        or not isinstance(destination.get("mode"), str)
+        or not isinstance(destination.get("size"), int)
+        or not isinstance(destination.get("disposition"), str)
+        or protected
+        != {
+            "rows": sorted(PROTECTED_ROWS),
+            "human_target": "hamh:1",
+            "human_rule": "Preserve row 84 and do not mutate any human-owned session without exact authoritative Human text naming that action and session.",
+            "root_target": "amh:1",
+            "root_rule": "Preserve row 69 and leave the root open while the protected hamh:1 dependency lacks exact authoritative Human resolution.",
+        }
+        or source1352 != source1352_anchor()
+        or boundaries
+        != {
+            "human_contact": "forbidden",
+            "human_owned_sessions": "no mutation",
+            "mailbox": "no access or mutation",
+            "pcodx": "unused",
+            "production": "no access or mutation",
+            "source1352": "preserve accepted receipt and do not resend",
+        }
+        or value.get("recovery_records_absent") != [TRANSFER_JOURNAL, LEGACY_TRANSFER_JOURNAL]
+        or value.get("execution_rule")
+        != "After independent review, reacquire the root-membership lock and the complete prepared task-file lock set, revalidate this exact snapshot, and commit the first eligible transfer receipt before releasing. Abort on any mismatch; never alter row 15 or substitute a stale digest."
+    ):
+        raise TaskFrontmatterError("Source-1376 prepared binding breaks its reviewed frozen-snapshot contract.")
+    implementation_path = Path(str(implementation["path"])).resolve()
+    implementation_payload, implementation_state = stable_owned_read(
+        implementation_path,
+        modes=frozenset({int(str(implementation["mode"]), 8)}),
+        label="Source-1376 prepared implementation",
+    )
+    if len(implementation_payload) != implementation["size"] or sha256(implementation_payload) != implementation["sha256"]:
+        raise TaskFrontmatterError("Source-1376 prepared implementation bytes changed.")
+    if implementation_state.st_uid != os.getuid():
+        raise TaskFrontmatterError("Source-1376 prepared implementation custody changed.")
+    planned_rows = load_plan(args.plan)
+    row_manifest = value["rows"]
+    assert isinstance(row_manifest, list)
+    drift_values = [
+        {
+            "kind": "row",
+            "row": str(entry["row"]),
+            "task": str(entry["task"]),
+            "planned_sha256": planned_rows[str(entry["row"])].task_sha256,
+            "prior_bound_sha256": str(entry["prior_bound_sha256"]),
+            "current_sha256": str(entry["current_sha256"]),
+            "disposition": str(entry["disposition"]),
+        }
+        for entry in row_manifest
+        if isinstance(entry, dict) and entry.get("drifted_after_prior_binding") is True
+    ]
+    if destination["drifted_after_prior_binding"] is True:
+        drift_values.append(
+            {
+                "kind": "destination",
+                "task": DESTINATION_REF,
+                "prior_bound_sha256": str(destination["prior_bound_sha256"]),
+                "current_sha256": str(destination["current_sha256"]),
+                "disposition": str(destination.get("disposition", "")),
+            }
+        )
+    if value.get("drifts") != drift_values:
+        raise TaskFrontmatterError("Source-1376 prepared binding drift manifest does not rederive.")
+    planned_sha_by_row = {row_id: row.task_sha256 for row_id, row in planned_rows.items()}
+    required_inventory = {
+        *(plan_path(args.root, row) for row in prior_rows.values()),
+        (args.root / DESTINATION_REF).resolve(),
+        (args.root / "TODO.md").resolve(),
+    }
+    if not required_inventory.issubset(inventory):
+        raise TaskFrontmatterError("Source-1376 prepared inventory omits required task custody.")
+    for entry in row_manifest:
+        assert isinstance(entry, dict)
+        if entry.get("planned_sha256") != planned_sha_by_row[str(entry["row"])]:
+            raise TaskFrontmatterError("Source-1376 prepared binding rewrites a stale base-plan digest.")
+        inventory_entry = inventory[plan_path(args.root, prior_rows[str(entry["row"])])]
+        if entry.get("current_sha256") != inventory_entry["sha256"] or entry.get("mode") != inventory_entry["mode"] or entry.get("size") != inventory_entry["size"]:
+            raise TaskFrontmatterError("Source-1376 prepared row does not match the frozen root inventory.")
+    destination_inventory = inventory[(args.root / DESTINATION_REF).resolve()]
+    todo_inventory = inventory[(args.root / "TODO.md").resolve()]
+    if (
+        destination["current_sha256"] != destination_inventory["sha256"]
+        or destination["mode"] != destination_inventory["mode"]
+        or destination["size"] != destination_inventory["size"]
+        or todo["sha256"] != todo_inventory["sha256"]
+        or todo["mode"] != todo_inventory["mode"]
+        or todo["size"] != todo_inventory["size"]
+    ):
+        raise TaskFrontmatterError("Source-1376 prepared destination or TODO does not match the frozen inventory.")
+    if set(inventory) != set(markdown_paths(args.root)):
+        raise TaskFrontmatterError("Source-1376 prepared binding inventory no longer names the current root inventory.")
+
+
+def effective_execution_rows(args: Args) -> dict[str, PlanRow]:
+    prior = load_execution_rows(args.plan, args.binding)
+    value = prepared_binding_value(args)
+    return prior if value is None else prepared_binding_rows(value, prior)
+
+
+def initial_destination_sha256(args: Args) -> str:
+    value = prepared_binding_value(args)
+    if value is None:
+        return DESTINATION_INITIAL_SHA256
+    destination = value.get("destination")
+    if not isinstance(destination, dict) or SHA256_RE.fullmatch(str(destination.get("current_sha256", ""))) is None:
+        raise TaskFrontmatterError("Source-1376 prepared destination digest is invalid.")
+    return str(destination["current_sha256"])
+
+
+def snapshot_manifest_entry(root: Path, path: Path, state: os.stat_result, payload: bytes) -> dict[str, object]:
+    if not stat.S_ISREG(state.st_mode) or state.st_uid != os.getuid():
+        raise TaskFrontmatterError(f"Source-1376 snapshot path has unsafe custody: {path}")
+    return {
+        "task": relative_task_ref(root, path),
+        "sha256": sha256(payload),
+        "mode": f"{stat.S_IMODE(state.st_mode):04o}",
+        "size": len(payload),
+    }
+
+
+def prepared_binding_lock_paths(args: Args, rows: dict[str, PlanRow], markdown: tuple[Path, ...]) -> tuple[Path, ...]:
+    if args.prepared_binding is None:
+        raise TaskFrontmatterError("Source-1376 prepared-binding path is missing.")
+    return tuple(
+        sorted(
+            {
+                *markdown,
+                args.root / "TODO.md",
+                args.root / TRANSFER_JOURNAL,
+                args.root / LEGACY_TRANSFER_JOURNAL,
+                args.plan,
+                args.binding,
+                args.authority,
+                args.receipt_dir,
+                args.packet_output,
+                args.prepared_binding,
+                Path(__file__).resolve(),
+                *(plan_path(args.root, row) for row in rows.values()),
+            }
+        )
+    )
+
+
+def receipt_directory_binding(path: Path) -> dict[str, object]:
+    before = path.lstat()
+    entries = sorted(candidate.name for candidate in path.iterdir())
+    after = path.lstat()
+    if not same_file_state(before, after) or not stat.S_ISDIR(before.st_mode) or before.st_uid != os.getuid() or stat.S_IMODE(before.st_mode) != 0o700:
+        raise TaskFrontmatterError("Source-1376 receipt directory has unsafe custody.")
+    return {
+        "path": str(path),
+        "mode": "0700",
+        "uid": before.st_uid,
+        "device": before.st_dev,
+        "inode": before.st_ino,
+        "initial_entries": entries,
+        "normalization_contract": RECEIPT_DIRECTORY_MODE_CONTRACT,
+    }
+
+
+def validate_empty_receipt_directory(args: Args, expected: dict[str, object]) -> None:
+    actual = receipt_directory_binding(args.receipt_dir)
+    if actual != expected or actual["initial_entries"] != []:
+        raise TaskFrontmatterError("Source-1376 receipt directory changed after the reviewed snapshot.")
+
+
+def publish_prepared_binding(args: Args) -> tuple[Path, str]:
+    if args.prepared_binding is None or not args.prepare_binding or args.prepared_binding_sha256:
+        raise TaskFrontmatterError("Source-1376 prepare mode requires one unbound prepared-binding output.")
+    output = args.prepared_binding.resolve()
+    if output.parent == args.root or args.root in output.parents or not output.parent.is_dir():
+        raise TaskFrontmatterError("Source-1376 prepared binding must be outside the task root in an existing directory.")
+    prior_rows = load_execution_rows(args.plan, args.binding)
+    with root_membership_lock(args.root):
+        initial_paths = markdown_paths(args.root)
+        with ExitStack() as locks:
+            for locked_path in prepared_binding_lock_paths(args, prior_rows, initial_paths):
+                locks.enter_context(task_file_lock(locked_path))
+            if markdown_paths(args.root) != initial_paths:
+                raise TaskFrontmatterError("Source-1376 task inventory changed while the prepared binding was locked.")
+            if path_entry_exists(output):
+                raise TaskFrontmatterError("Source-1376 prepared-binding output already exists.")
+            if path_entry_exists(args.packet_output):
+                raise TaskFrontmatterError("Source-1376 execution packet exists before the prepared handoff.")
+            if path_entry_exists(args.root / TRANSFER_JOURNAL):
+                raise TaskFrontmatterError("Source-1376 transfer journal exists before the prepared handoff.")
+            if path_entry_exists(args.root / LEGACY_TRANSFER_JOURNAL):
+                raise TaskFrontmatterError("legacy closure-transfer recovery state exists before the prepared handoff.")
+            receipt_binding = receipt_directory_binding(args.receipt_dir)
+            if receipt_binding["initial_entries"] != []:
+                raise TaskFrontmatterError("Source-1376 prepared handoff requires a new empty receipt directory.")
+            if validate_authority(args.root, args.authority) != f"{AUTHORITY_REF}:3-3":
+                raise TaskFrontmatterError("Source-1376 authority locator drifted during snapshot preparation.")
+            if load_execution_rows(args.plan, args.binding) != prior_rows:
+                raise TaskFrontmatterError("Source-1376 base plan or prior execution binding changed during snapshot preparation.")
+            snapshots = {path: task_snapshot(path) for path in initial_paths}
+            payloads = {path: snapshot[1] for path, snapshot in snapshots.items()}
+            planned_rows = load_plan(args.plan)
+            planned_paths = {plan_path(args.root, row) for row in prior_rows.values()}
+            destination_path = (args.root / DESTINATION_REF).resolve()
+            todo_path = (args.root / "TODO.md").resolve()
+            if not planned_paths.issubset(payloads) or destination_path not in payloads or todo_path not in payloads:
+                raise TaskFrontmatterError("Source-1376 prepared snapshot is missing planned task custody.")
+            row_manifest: list[dict[str, object]] = []
+            for row_id in sorted(prior_rows):
+                prior = prior_rows[row_id]
+                task = plan_path(args.root, prior)
+                state, payload = snapshots[task]
+                text = payload.decode("utf-8")
+                metadata = require_v1_metadata(text)
+                validate_plan_metadata(prior, metadata, require_original_status=True)
+                if len(metadata.pending_task_items) != prior.n_items or queue_sha256(metadata.pending_task_items) != prior.queue_sha256:
+                    raise TaskFrontmatterError(f"plan row {row_id} queue semantics drifted and cannot be rebound.")
+                current_digest = sha256(payload)
+                drifted = current_digest != prior.task_sha256
+                if row_id in PROTECTED_ROWS:
+                    disposition = "Preserve the exact current bytes and lifecycle state; this protected row is outside every transfer and closure mutation."
+                elif drifted:
+                    disposition = (
+                        "Bind the exact current complete bytes while retaining the immutable base-plan mapping, order, queue, ownership, and current blocker; "
+                        "preserve all appended evidence through transfer and closure."
+                    )
+                else:
+                    disposition = "The prior execution-binding byte preimage remains exact."
+                row_manifest.append(
+                    {
+                        "row": row_id,
+                        "task": prior.task_ref,
+                        "planned_sha256": planned_rows[row_id].task_sha256,
+                        "prior_bound_sha256": prior.task_sha256,
+                        "current_sha256": current_digest,
+                        "drifted_after_prior_binding": drifted,
+                        "status": metadata.status,
+                        "blocked_on": metadata.blocked_on,
+                        "target": metadata.runat,
+                        "manager_target": metadata.managerat,
+                        "is_manager": metadata.is_manager,
+                        "pending_items": list(metadata.pending_task_items),
+                        "pending_items_count": len(metadata.pending_task_items),
+                        "queue_sha256": queue_sha256(metadata.pending_task_items),
+                        "mode": f"{stat.S_IMODE(state.st_mode):04o}",
+                        "size": len(payload),
+                        "protected": row_id in PROTECTED_ROWS,
+                        "disposition": disposition,
+                    }
+                )
+            destination_state, destination_payload = snapshots[destination_path]
+            destination_metadata = require_v1_metadata(destination_payload.decode("utf-8"))
+            parsed, malformed = active_metadata(args.root, initial_paths)
+            destination_owners = tuple(path for path, metadata in parsed.items() if metadata.runat == "cedit:15")
+            if (
+                destination_metadata.status != "long_running"
+                or not destination_metadata.is_manager
+                or destination_metadata.runat != "cedit:15"
+                or destination_metadata.managerat != "wl:4"
+                or destination_metadata.pending_task_items != (AUTHORITY_TEXT,)
+                or destination_owners != (destination_path,)
+                or any(raw_target_claims(text, "cedit:15") for text in malformed.values())
+                or task_row_sections(args.root, destination_path) != ("current",)
+            ):
+                raise TaskFrontmatterError("Source-1376 prepared destination does not retain singular escrow custody.")
+            destination_digest = sha256(destination_payload)
+            destination: dict[str, object] = {
+                "task": DESTINATION_REF,
+                "path": str(destination_path),
+                "prior_bound_sha256": DESTINATION_INITIAL_SHA256,
+                "current_sha256": destination_digest,
+                "drifted_after_prior_binding": destination_digest != DESTINATION_INITIAL_SHA256,
+                "status": destination_metadata.status,
+                "blocked_on": destination_metadata.blocked_on,
+                "target": destination_metadata.runat,
+                "manager_target": destination_metadata.managerat,
+                "is_manager": destination_metadata.is_manager,
+                "pending_items": list(destination_metadata.pending_task_items),
+                "pending_items_count": len(destination_metadata.pending_task_items),
+                "queue_sha256": queue_sha256(destination_metadata.pending_task_items),
+                "mode": f"{stat.S_IMODE(destination_state.st_mode):04o}",
+                "size": len(destination_payload),
+                "unique_active_target_owner": True,
+                "disposition": "Bind and preserve the exact current evidence-bearing escrow bytes as the first transfer destination preimage.",
+            }
+            drifts: list[dict[str, object]] = [
+                {
+                    "kind": "row",
+                    "row": str(entry["row"]),
+                    "task": str(entry["task"]),
+                    "planned_sha256": str(entry["planned_sha256"]),
+                    "prior_bound_sha256": str(entry["prior_bound_sha256"]),
+                    "current_sha256": str(entry["current_sha256"]),
+                    "disposition": str(entry["disposition"]),
+                }
+                for entry in row_manifest
+                if entry["drifted_after_prior_binding"] is True
+            ]
+            if destination["drifted_after_prior_binding"] is True:
+                drifts.append(
+                    {
+                        "kind": "destination",
+                        "task": DESTINATION_REF,
+                        "prior_bound_sha256": DESTINATION_INITIAL_SHA256,
+                        "current_sha256": destination_digest,
+                        "disposition": str(destination["disposition"]),
+                    }
+                )
+            implementation_path = Path(__file__).resolve()
+            implementation_payload, implementation_state = stable_owned_read(
+                implementation_path,
+                modes=frozenset({stat.S_IMODE(implementation_path.lstat().st_mode)}),
+                label="Source-1376 prepared implementation",
+            )
+            effective_rows = {row_id: replace(prior_rows[row_id], task_sha256=str(row_manifest[int(row_id) - 1]["current_sha256"])) for row_id in prior_rows}
+            first_schedule = transfer_schedule(effective_rows, include_deferred=False)
+            if not first_schedule:
+                raise TaskFrontmatterError("Source-1376 prepared snapshot has no eligible first transfer.")
+            todo_state, todo_payload = snapshots[todo_path]
+            manifest = [snapshot_manifest_entry(args.root, path, *snapshots[path]) for path in initial_paths]
+            document: dict[str, object] = {
+                "schema": PREPARED_BINDING_SCHEMA,
+                "created_at": datetime.now().astimezone().isoformat(),
+                "purpose": PREPARED_BINDING_PURPOSE,
+                "root": str(args.root),
+                "base_plan": {"path": str(args.plan), "mode": "0444", "sha256": PLAN_SHA256},
+                "prior_execution_binding": {"path": str(args.binding), "mode": "0444", "sha256": EXECUTION_BINDING_SHA256},
+                "authority": {
+                    "path": str(args.authority),
+                    "source": f"{AUTHORITY_REF}:3-3",
+                    "sha256": AUTHORITY_SHA256,
+                    "text": AUTHORITY_TEXT,
+                },
+                "implementation": {
+                    "path": str(implementation_path),
+                    "sha256": sha256(implementation_payload),
+                    "mode": f"{stat.S_IMODE(implementation_state.st_mode):04o}",
+                    "size": len(implementation_payload),
+                },
+                "receipt_directory": receipt_binding,
+                "packet_output": str(args.packet_output),
+                "todo": {
+                    "path": str(todo_path),
+                    "sha256": sha256(todo_payload),
+                    "mode": f"{stat.S_IMODE(todo_state.st_mode):04o}",
+                    "size": len(todo_payload),
+                },
+                "markdown_inventory": manifest,
+                "rows": row_manifest,
+                "drifts": drifts,
+                "destination": destination,
+                "first_transfer_rows": list(first_schedule[0]),
+                "protected": {
+                    "rows": sorted(PROTECTED_ROWS),
+                    "human_target": "hamh:1",
+                    "human_rule": "Preserve row 84 and do not mutate any human-owned session without exact authoritative Human text naming that action and session.",
+                    "root_target": "amh:1",
+                    "root_rule": "Preserve row 69 and leave the root open while the protected hamh:1 dependency lacks exact authoritative Human resolution.",
+                },
+                "source1352": source1352_anchor(),
+                "boundaries": {
+                    "human_contact": "forbidden",
+                    "human_owned_sessions": "no mutation",
+                    "mailbox": "no access or mutation",
+                    "pcodx": "unused",
+                    "production": "no access or mutation",
+                    "source1352": "preserve accepted receipt and do not resend",
+                },
+                "recovery_records_absent": [TRANSFER_JOURNAL, LEGACY_TRANSFER_JOURNAL],
+                "execution_rule": "After independent review, reacquire the root-membership lock and the complete prepared task-file lock set, revalidate this exact snapshot, and commit the first eligible transfer receipt before releasing. Abort on any mismatch; never alter row 15 or substitute a stale digest.",
+            }
+            payload = write_private_json(output, document, final=True)
+            os.chmod(output, 0o444)
+            output_fd = os.open(output, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                os.fsync(output_fd)
+            finally:
+                os.close(output_fd)
+            return output, sha256(payload)
+
+
+def validate_prepared_snapshot_locked(
+    args: Args,
+    rows: dict[str, PlanRow],
+    initial_paths: tuple[Path, ...],
+) -> None:
+    value = prepared_binding_value(args)
+    if value is None or prepared_binding_rows(value, load_execution_rows(args.plan, args.binding)) != rows:
+        raise TaskFrontmatterError("Source-1376 first transfer is not bound to the reviewed prepared rows.")
+    inventory = prepared_binding_inventory(value, args.root)
+    if set(initial_paths) != set(inventory) or markdown_paths(args.root) != initial_paths:
+        raise TaskFrontmatterError("Source-1376 root inventory drifted after prepared-binding review.")
+    for path in initial_paths:
+        state, payload = task_snapshot(path)
+        expected = inventory[path]
+        if sha256(payload) != expected["sha256"] or len(payload) != expected["size"] or f"{stat.S_IMODE(state.st_mode):04o}" != expected["mode"] or state.st_uid != os.getuid():
+            raise TaskFrontmatterError(f"Source-1376 prepared snapshot drifted before first transfer: {relative_task_ref(args.root, path)}")
+    receipt = value.get("receipt_directory")
+    if not isinstance(receipt, dict):
+        raise TaskFrontmatterError("Source-1376 prepared receipt-directory binding is malformed.")
+    validate_empty_receipt_directory(args, receipt)
+    if path_entry_exists(args.packet_output) or path_entry_exists(args.root / TRANSFER_JOURNAL) or path_entry_exists(args.root / LEGACY_TRANSFER_JOURNAL):
+        raise TaskFrontmatterError("Source-1376 transaction state appeared after prepared-binding review.")
+    destination = value.get("destination")
+    if not isinstance(destination, dict) or sha256(task_bytes(args.root / DESTINATION_REF)) != destination.get("current_sha256"):
+        raise TaskFrontmatterError("Source-1376 prepared destination drifted before first transfer.")
+
+
 def validate_authority(root: Path, authority: Path) -> str:
     if authority.resolve() != (root / AUTHORITY_REF).resolve():
         raise TaskFrontmatterError("Source-1376 authority path changed.")
@@ -397,6 +1047,8 @@ def operation_binding_paths(args: Args, rows: dict[str, PlanRow]) -> tuple[Path,
                 args.plan.resolve(),
                 args.binding.resolve(),
                 args.authority.resolve(),
+                Path(__file__).resolve(),
+                *(() if args.prepared_binding is None else (args.prepared_binding.resolve(),)),
                 *(plan_path(args.root, rows[row_id]) for row_id in PROTECTED_ROWS if row_id in rows),
             }
         )
@@ -404,7 +1056,7 @@ def operation_binding_paths(args: Args, rows: dict[str, PlanRow]) -> tuple[Path,
 
 
 def validate_operation_bindings_locked(args: Args, rows: dict[str, PlanRow]) -> None:
-    if load_execution_rows(args.plan, args.binding) != rows or validate_authority(args.root, args.authority) != f"{AUTHORITY_REF}:3-3":
+    if effective_execution_rows(args) != rows or validate_authority(args.root, args.authority) != f"{AUTHORITY_REF}:3-3":
         raise TaskFrontmatterError("Source-1376 immutable plan or authority binding changed.")
     for row_id in PROTECTED_ROWS:
         if row_id in rows:
@@ -442,10 +1094,31 @@ def validate_original_row(root: Path, row: PlanRow, payload: bytes) -> tuple[str
 
 def ensure_private_dir(path: Path) -> Path:
     path = path.resolve()
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    parent_fd = os.open(path.parent, directory_flags)
+    created_fd = -1
     try:
-        path.mkdir(mode=0o700)
-    except FileExistsError:
-        pass
+        try:
+            os.mkdir(path.name, mode=0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        else:
+            created_fd = os.open(path.name, directory_flags, dir_fd=parent_fd)
+            created = os.fstat(created_fd)
+            named = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            if not stat.S_ISDIR(created.st_mode) or created.st_uid != os.getuid() or stat.S_IMODE(created.st_mode) != 0o700:
+                raise TaskFrontmatterError("new receipt directory is not exact owner-private 0700; inherited setgid is not normalized.")
+            if not same_file_state(created, named) or os.listdir(created_fd):
+                raise TaskFrontmatterError("new receipt directory changed before exact custody was verified.")
+            verified = os.fstat(created_fd)
+            named_after = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            if not same_file_state(created, verified) or not same_file_state(verified, named_after) or stat.S_IMODE(verified.st_mode) != 0o700 or os.listdir(created_fd):
+                raise TaskFrontmatterError("new receipt directory changed before exact custody was verified.")
+            return path
+    finally:
+        if created_fd >= 0:
+            os.close(created_fd)
+        os.close(parent_fd)
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
         raise TaskFrontmatterError("receipt directory must be an owner-private 0700 directory.")
@@ -565,12 +1238,13 @@ def close_receipt_path(receipt_dir: Path, row_ids: tuple[str, ...]) -> Path:
     return receipt_dir / f"close-{'-'.join(row_ids)}.json"
 
 
-def source1376_record(operation: str, row: PlanRow, **values: object) -> str:
+def source1376_record(args: Args, operation: str, row: PlanRow, **values: object) -> str:
     record: dict[str, object] = {
         "operation": operation,
         "row": row.row_id,
         "plan_sha256": PLAN_SHA256,
         "execution_binding_sha256": EXECUTION_BINDING_SHA256,
+        "prepared_binding_sha256": prepared_binding_digest(args),
         "authority": f"{AUTHORITY_REF}:3-3",
         "authority_sha256": AUTHORITY_SHA256,
         **values,
@@ -653,7 +1327,10 @@ def finish_transfer_journal_locked(
         or not isinstance(receipt, dict)
         or receipt.get("schema") != "omo-source1376-transfer/v1"
         or receipt.get("rows") != list(row_ids)
+        or receipt.get("prepared_binding_sha256") != prepared_binding_digest(args)
+        or receipt.get("legacy_recovery_absent") is not True
         or receipt.get("destination_before_sha256") != expected_destination_sha256
+        or path_entry_exists(args.root / LEGACY_TRANSFER_JOURNAL)
     ):
         raise TaskFrontmatterError("Source-1376 transfer recovery record does not match this operation.")
     destination_before = journal_value.get("destination_before")
@@ -741,6 +1418,8 @@ def transfer_rows(
     rows: dict[str, PlanRow],
     row_ids: tuple[str, ...],
     expected_destination_sha256: str,
+    *,
+    require_prepared_snapshot: bool = False,
 ) -> dict[str, object]:
     if not row_ids or any(row_id in PROTECTED_ROWS for row_id in row_ids):
         raise TaskFrontmatterError("transfer requires eligible non-protected Source-1376 rows.")
@@ -751,15 +1430,18 @@ def transfer_rows(
         raise TaskFrontmatterError("transfer source queue is empty.")
     receipt_path = transfer_receipt_path(args.receipt_dir, row_ids)
     journal_path = args.root / TRANSFER_JOURNAL
+    legacy_journal_path = args.root / LEGACY_TRANSFER_JOURNAL
     prior_receipt = read_private_json(receipt_path)
-    if prior_receipt is not None and not journal_path.exists():
+    if prior_receipt is not None and not path_entry_exists(journal_path):
+        if require_prepared_snapshot:
+            raise TaskFrontmatterError("Source-1376 first-transfer handoff cannot reuse a preexisting receipt.")
         validate_initial_state(args, rows)
         latest = read_private_json(receipt_path, required=True)
         assert latest is not None
         if latest[1] != prior_receipt[1]:
             raise TaskFrontmatterError("existing Source-1376 transfer receipt changed during validation.")
         value = prior_receipt[0]
-        validated_rows, _moving = validate_transfer_receipt_against_plan(value, rows)
+        validated_rows, _moving = validate_transfer_receipt_against_plan(value, rows, args)
         if validated_rows != row_ids or value.get("destination_before_sha256") != expected_destination_sha256:
             raise TaskFrontmatterError("existing transfer receipt does not match the requested rows.")
         return value
@@ -774,7 +1456,10 @@ def transfer_rows(
                     (args.root / "TODO.md").resolve(),
                     *operation_binding_paths(args, rows),
                     journal_path,
+                    legacy_journal_path,
                     receipt_path,
+                    args.receipt_dir,
+                    *(prepared_binding_lock_paths(args, rows, initial_paths) if require_prepared_snapshot else ()),
                 }
             )
         )
@@ -782,6 +1467,8 @@ def transfer_rows(
             for locked_path in locked_paths:
                 locks.enter_context(task_file_lock(locked_path))
             validate_operation_bindings_locked(args, rows)
+            if path_entry_exists(legacy_journal_path):
+                raise TaskFrontmatterError("legacy closure-transfer recovery state is present.")
             todo_before = task_bytes(args.root / "TODO.md")
             snapshots = {path: task_snapshot(path) for path in initial_paths}
             payloads = {path: snapshot[1] for path, snapshot in snapshots.items()}
@@ -799,6 +1486,11 @@ def transfer_rows(
                     existing_journal[0],
                     existing_journal[1],
                 )
+            if require_prepared_snapshot:
+                value = prepared_binding_value(args)
+                if value is None or value.get("first_transfer_rows") != list(row_ids):
+                    raise TaskFrontmatterError("Source-1376 first transfer differs from the reviewed prepared handoff.")
+                validate_prepared_snapshot_locked(args, rows, initial_paths)
             if sha256(payloads[destination]) != expected_destination_sha256:
                 raise TaskFrontmatterError("destination digest does not match the rolling transfer chain.")
             destination_text = payloads[destination].decode("utf-8")
@@ -834,6 +1526,7 @@ def transfer_rows(
                 if source_metadata.status != "blocked":
                     prepared = update_frontmatter_status(prepared, "blocked", SHUTDOWN_BLOCKER, args.root)
                 sent_record = source1376_record(
+                    args,
                     "pending-closure-transfer-sent",
                     row,
                     destination=DESTINATION_REF,
@@ -844,6 +1537,7 @@ def transfer_rows(
                     count=row.n_items,
                 )
                 received_record = source1376_record(
+                    args,
                     "pending-closure-transfer-received",
                     row,
                     source=row.task_ref,
@@ -878,6 +1572,7 @@ def transfer_rows(
                 "rows": list(row_ids),
                 "plan_sha256": PLAN_SHA256,
                 "execution_binding_sha256": EXECUTION_BINDING_SHA256,
+                "prepared_binding_sha256": prepared_binding_digest(args),
                 "authority": f"{AUTHORITY_REF}:3-3",
                 "authority_sha256": AUTHORITY_SHA256,
                 "todo_sha256": sha256(todo_before),
@@ -887,6 +1582,7 @@ def transfer_rows(
                 "sources": source_receipts,
                 "received_records": received_records,
                 "recovery_record": TRANSFER_JOURNAL,
+                "legacy_recovery_absent": True,
             }
             journal: dict[str, object] = {
                 "schema": "omo-source1376-transfer-journal/v1",
@@ -914,7 +1610,7 @@ def transfer_rows(
             )
 
 
-def transfer_receipts(receipt_dir: Path) -> list[dict[str, object]]:
+def transfer_receipts(receipt_dir: Path, initial_destination: str = DESTINATION_INITIAL_SHA256) -> list[dict[str, object]]:
     by_before: dict[str, dict[str, object]] = {}
     for path in sorted(receipt_dir.glob("transfer-*.json")):
         loaded = read_private_json(path, required=True)
@@ -933,7 +1629,7 @@ def transfer_receipts(receipt_dir: Path) -> list[dict[str, object]]:
             raise TaskFrontmatterError(f"unexpected transfer receipt schema: {path.name}")
         by_before[before] = receipt
     ordered: list[dict[str, object]] = []
-    current = DESTINATION_INITIAL_SHA256
+    current = initial_destination
     while current in by_before:
         receipt = by_before.pop(current)
         ordered.append(receipt)
@@ -946,7 +1642,9 @@ def transfer_receipts(receipt_dir: Path) -> list[dict[str, object]]:
 def validate_transfer_receipt_against_plan(
     receipt: dict[str, object],
     rows: dict[str, PlanRow],
+    args: Args | None = None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    expected_prepared_binding = "" if args is None else prepared_binding_digest(args)
     row_values = receipt.get("rows")
     if (
         set(receipt)
@@ -955,6 +1653,7 @@ def validate_transfer_receipt_against_plan(
             "rows",
             "plan_sha256",
             "execution_binding_sha256",
+            "prepared_binding_sha256",
             "authority",
             "authority_sha256",
             "todo_sha256",
@@ -964,14 +1663,18 @@ def validate_transfer_receipt_against_plan(
             "sources",
             "received_records",
             "recovery_record",
+            "legacy_recovery_absent",
         }
         or receipt.get("schema") != "omo-source1376-transfer/v1"
         or receipt.get("plan_sha256") != PLAN_SHA256
         or receipt.get("execution_binding_sha256") != EXECUTION_BINDING_SHA256
+        or receipt.get("prepared_binding_sha256") != expected_prepared_binding
         or receipt.get("authority") != f"{AUTHORITY_REF}:3-3"
         or receipt.get("authority_sha256") != AUTHORITY_SHA256
         or receipt.get("destination") != DESTINATION_REF
         or receipt.get("recovery_record") != TRANSFER_JOURNAL
+        or receipt.get("legacy_recovery_absent") is not True
+        or (args is not None and path_entry_exists(args.root / LEGACY_TRANSFER_JOURNAL))
         or not isinstance(row_values, list)
         or not row_values
         or any(not isinstance(row_id, str) or row_id not in rows or row_id in PROTECTED_ROWS for row_id in row_values)
@@ -1017,7 +1720,10 @@ def validate_transfer_receipt_against_plan(
         ):
             raise TaskFrontmatterError(f"row {row_id} transfer receipt source evidence is malformed.")
         items = tuple(items_value)
+        if args is None:
+            raise TaskFrontmatterError("Source-1376 transfer receipt lacks prepared-binding validation context.")
         sent_record = source1376_record(
+            args,
             "pending-closure-transfer-sent",
             row,
             destination=DESTINATION_REF,
@@ -1028,6 +1734,7 @@ def validate_transfer_receipt_against_plan(
             count=row.n_items,
         )
         received_record = source1376_record(
+            args,
             "pending-closure-transfer-received",
             row,
             source=row.task_ref,
@@ -1058,25 +1765,25 @@ def validate_transfer_receipt_against_plan(
     return row_ids, tuple(moving)
 
 
-def validated_transfer_receipts(receipt_dir: Path, rows: dict[str, PlanRow]) -> list[dict[str, object]]:
-    receipts = transfer_receipts(receipt_dir)
+def validated_transfer_receipts(args: Args, rows: dict[str, PlanRow]) -> list[dict[str, object]]:
+    receipts = transfer_receipts(args.receipt_dir, initial_destination_sha256(args))
     seen: Counter[str] = Counter()
     expected_names: set[str] = set()
     for receipt in receipts:
-        row_ids, _moving = validate_transfer_receipt_against_plan(receipt, rows)
+        row_ids, _moving = validate_transfer_receipt_against_plan(receipt, rows, args)
         seen.update(row_ids)
-        expected_names.add(transfer_receipt_path(receipt_dir, row_ids).name)
-    actual_names = {path.name for path in receipt_dir.glob("transfer-*.json")}
+        expected_names.add(transfer_receipt_path(args.receipt_dir, row_ids).name)
+    actual_names = {path.name for path in args.receipt_dir.glob("transfer-*.json")}
     if seen and any(count != 1 for count in seen.values()) or actual_names != expected_names:
         raise TaskFrontmatterError("Source-1376 transfer receipts have duplicate rows or unexpected filenames.")
     return receipts
 
 
-def expected_current_task_sha256(receipt_dir: Path, rows: dict[str, PlanRow], row: PlanRow) -> str:
+def expected_current_task_sha256(args: Args, rows: dict[str, PlanRow], row: PlanRow) -> str:
     if row.n_items == 0:
         return row.task_sha256
     matches: list[str] = []
-    for receipt in validated_transfer_receipts(receipt_dir, rows):
+    for receipt in validated_transfer_receipts(args, rows):
         sources = receipt.get("sources")
         if not isinstance(sources, list):
             raise TaskFrontmatterError("transfer receipt lacks source records.")
@@ -1088,8 +1795,9 @@ def expected_current_task_sha256(receipt_dir: Path, rows: dict[str, PlanRow], ro
     return matches[0]
 
 
-def close_record(row: PlanRow, mode: str, receipt_path: Path, **values: object) -> str:
+def close_record(args: Args, row: PlanRow, mode: str, receipt_path: Path, **values: object) -> str:
     return source1376_record(
+        args,
         "lifecycle-close",
         row,
         mode=mode,
@@ -1201,6 +1909,7 @@ def validate_close_receipt(
         or receipt.get("rows") != list(row_ids)
         or receipt.get("plan_sha256") != PLAN_SHA256
         or receipt.get("execution_binding_sha256") != EXECUTION_BINDING_SHA256
+        or receipt.get("prepared_binding_sha256") != prepared_binding_digest(args)
         or receipt.get("authority_sha256") != AUTHORITY_SHA256
         or receipt.get("mail") != "suppressed"
         or any(row_id in PROTECTED_ROWS for row_id in row_ids)
@@ -1222,7 +1931,7 @@ def validate_close_receipt(
         or any(not isinstance(value, str) or SHA256_RE.fullmatch(value) is None for value in digests)
     ):
         raise TaskFrontmatterError("existing Source-1376 close receipt has invalid task digests.")
-    expected_before = [expected_current_task_sha256(args.receipt_dir, rows, row) for row in selected]
+    expected_before = [expected_current_task_sha256(args, rows, row) for row in selected]
     if before_digests != expected_before:
         raise TaskFrontmatterError("existing Source-1376 close receipt does not continue reviewed task custody.")
     mode = receipt.get("mode")
@@ -1231,7 +1940,7 @@ def validate_close_receipt(
     if len(selected) > 1:
         if mode not in {"coordinated-shared-target", "coordinated-shared-missing-target"} or receipt.get("tasks") != [row.task_ref for row in selected]:
             raise TaskFrontmatterError("existing Source-1376 shared close receipt has invalid disposition.")
-        expected_notes = [close_record(row, str(mode), receipt_path, target=row.runat, paired_rows=list(row_ids)) for row in selected]
+        expected_notes = [close_record(args, row, str(mode), receipt_path, target=row.runat, paired_rows=list(row_ids)) for row in selected]
         notes = receipt.get("notes")
         if notes != expected_notes:
             raise TaskFrontmatterError("existing Source-1376 shared close receipt provenance changed.")
@@ -1249,6 +1958,7 @@ def validate_close_receipt(
             raise TaskFrontmatterError("existing Source-1376 close receipt has an invalid disposition.")
         if mode in {"missing-target", "preserved-shared-target", "protected-shared-missing-target"}:
             expected_note = close_record(
+                args,
                 row,
                 str(mode),
                 receipt_path,
@@ -1259,6 +1969,7 @@ def validate_close_receipt(
                 raise TaskFrontmatterError("existing Source-1376 metadata-close provenance changed.")
         else:
             expected_note = close_record(
+                args,
                 row,
                 str(mode),
                 receipt_path,
@@ -1318,6 +2029,7 @@ def validate_close_bookkeeping_derivation(
         or receipt.get("rows") != list(row_ids)
         or receipt.get("plan_sha256") != PLAN_SHA256
         or receipt.get("execution_binding_sha256") != EXECUTION_BINDING_SHA256
+        or receipt.get("prepared_binding_sha256") != prepared_binding_digest(args)
         or receipt.get("authority_sha256") != AUTHORITY_SHA256
         or receipt.get("target") != target
         or receipt.get("mail") != "suppressed"
@@ -1328,7 +2040,7 @@ def validate_close_bookkeeping_derivation(
     after_value = receipt.get("task_after_sha256")
     after_digests = [after_value] if isinstance(after_value, str) else after_value
     if (
-        before_digests != [expected_current_task_sha256(args.receipt_dir, rows, row) for row in selected]
+        before_digests != [expected_current_task_sha256(args, rows, row) for row in selected]
         or not isinstance(after_digests, list)
         or len(after_digests) != len(selected)
         or any(not isinstance(expected, str) or sha256(tasks_after[row.task_ref].encode()) != expected for row, expected in zip(selected, after_digests, strict=True))
@@ -1343,6 +2055,7 @@ def validate_close_bookkeeping_derivation(
         else:
             allowed = {"missing-target"}
         note = close_record(
+            args,
             row,
             str(mode),
             receipt_path,
@@ -1366,7 +2079,7 @@ def validate_close_bookkeeping_derivation(
             raise TaskFrontmatterError("Source-1376 metadata-close bookkeeping no longer rederives.")
         return
     if mode == "coordinated-shared-missing-target" and row_ids == INTERNAL_SHARED_PAIR:
-        notes = [close_record(row, str(mode), receipt_path, target=target, paired_rows=list(row_ids)) for row in selected]
+        notes = [close_record(args, row, str(mode), receipt_path, target=target, paired_rows=list(row_ids)) for row in selected]
         expected_after = {row.task_ref: update_frontmatter_status(append_comment(tasks_before[row.task_ref], note), "done", "", args.root) for row, note in zip(selected, notes, strict=True)}
         if (
             receipt.get("tasks") != [row.task_ref for row in selected]
@@ -1456,7 +2169,7 @@ def finish_close_bookkeeping_locked(
         raise TaskFrontmatterError("Source-1376 close recovery receipt does not bind its terminal task bytes.")
     before_digest_value = receipt.get("task_before_sha256")
     before_digest_values = [before_digest_value] if isinstance(before_digest_value, str) else before_digest_value
-    if before_digest_values != [expected_current_task_sha256(args.receipt_dir, rows, row) for row in selected]:
+    if before_digest_values != [expected_current_task_sha256(args, rows, row) for row in selected]:
         raise TaskFrontmatterError("Source-1376 close recovery does not continue reviewed task custody.")
     validate_close_bookkeeping_derivation(args, rows, selected, journal_value, receipt, tasks_before, tasks_after)
     if "tasks_original" in journal_value:
@@ -1548,7 +2261,7 @@ def prepare_metadata_close(
     row_ids = (row.row_id,)
     receipt_path = close_receipt_path(args.receipt_dir, row_ids)
     journal_path = close_journal_path(args.receipt_dir, row_ids)
-    note = close_record(row, mode, receipt_path, target=row.runat, protected_row=protected_row.row_id if protected_row else "")
+    note = close_record(args, row, mode, receipt_path, target=row.runat, protected_row=protected_row.row_id if protected_row else "")
     updated_task = update_frontmatter_status(append_comment(current_text, note), "done", "", args.root)
     todo = args.root / "TODO.md"
     protected_sha256: dict[str, str] = {}
@@ -1571,7 +2284,7 @@ def prepare_metadata_close(
             validate_escrow_custody_locked(args, rows)
             if task.read_text(encoding="utf-8") != current_text or not same_file_state(current_before, task.stat()):
                 raise TaskFrontmatterError(f"row {row.row_id} changed during metadata closure preparation.")
-            if sha256(current_text.encode()) != expected_current_task_sha256(args.receipt_dir, rows, row):
+            if sha256(current_text.encode()) != expected_current_task_sha256(args, rows, row):
                 raise TaskFrontmatterError(f"row {row.row_id} no longer matches reviewed custody before metadata closure.")
             if protected_path is not None and protected_row is not None:
                 protected_payload = task_bytes(protected_path)
@@ -1599,6 +2312,7 @@ def prepare_metadata_close(
                 "rows": [row.row_id],
                 "plan_sha256": PLAN_SHA256,
                 "execution_binding_sha256": EXECUTION_BINDING_SHA256,
+                "prepared_binding_sha256": prepared_binding_digest(args),
                 "authority_sha256": AUTHORITY_SHA256,
                 "mode": mode,
                 "task": row.task_ref,
@@ -1641,7 +2355,7 @@ def prepare_missing_shared_close(
     target = selected[0].runat
     receipt_path = close_receipt_path(args.receipt_dir, row_ids)
     journal_path = close_journal_path(args.receipt_dir, row_ids)
-    notes = [close_record(row, "coordinated-shared-missing-target", receipt_path, target=target, paired_rows=list(row_ids)) for row in selected]
+    notes = [close_record(args, row, "coordinated-shared-missing-target", receipt_path, target=target, paired_rows=list(row_ids)) for row in selected]
     originals = {row.task_ref: text for row, (_path, _before, text) in zip(selected, values, strict=True)}
     tasks_after = {row.task_ref: update_frontmatter_status(append_comment(originals[row.task_ref], note), "done", "", args.root) for row, note in zip(selected, notes, strict=True)}
     todo = args.root / "TODO.md"
@@ -1667,7 +2381,7 @@ def prepare_missing_shared_close(
             for row, (path, before, text) in zip(selected, values, strict=True):
                 if path.read_text(encoding="utf-8") != text or not same_file_state(before, path.stat()):
                     raise TaskFrontmatterError(f"row {row.row_id} changed before shared missing-target closure.")
-                if sha256(text.encode()) != expected_current_task_sha256(args.receipt_dir, rows, row):
+                if sha256(text.encode()) != expected_current_task_sha256(args, rows, row):
                     raise TaskFrontmatterError(f"row {row.row_id} no longer matches reviewed custody before shared closure.")
             todo_text = todo.read_text(encoding="utf-8")
             updated_todo = todo_text
@@ -1687,6 +2401,7 @@ def prepare_missing_shared_close(
                 "rows": list(row_ids),
                 "plan_sha256": PLAN_SHA256,
                 "execution_binding_sha256": EXECUTION_BINDING_SHA256,
+                "prepared_binding_sha256": prepared_binding_digest(args),
                 "authority_sha256": AUTHORITY_SHA256,
                 "mode": "coordinated-shared-missing-target",
                 "tasks": [row.task_ref for row in selected],
@@ -1754,6 +2469,7 @@ def validate_pane_journal_derivation(
         raise TaskFrontmatterError("Source-1232 exited shell is not the reviewed exact pane.")
     expected_notes = [
         close_record(
+            args,
             row,
             "coordinated-shared-target" if len(selected) > 1 else "exited-shell" if row.row_id == COMPLETED_SHELL_ROW else "live",
             receipt_path,
@@ -1771,7 +2487,7 @@ def validate_pane_journal_derivation(
         if (
             original is None
             or prepared is None
-            or sha256(original.encode()) != expected_current_task_sha256(args.receipt_dir, rows, row)
+            or sha256(original.encode()) != expected_current_task_sha256(args, rows, row)
             or prepared
             != update_frontmatter_status(
                 append_comment(original, note),
@@ -1793,6 +2509,7 @@ def closure_custody_paths(args: Args, rows: dict[str, PlanRow]) -> tuple[Path, .
                 *operation_binding_paths(args, rows),
                 *args.receipt_dir.glob("transfer-*.json"),
                 args.root / TRANSFER_JOURNAL,
+                args.root / LEGACY_TRANSFER_JOURNAL,
             }
         )
     )
@@ -1801,13 +2518,15 @@ def closure_custody_paths(args: Args, rows: dict[str, PlanRow]) -> tuple[Path, .
 def validate_escrow_custody_locked(args: Args, rows: dict[str, PlanRow]) -> None:
     """Re-derive the complete escrow queue and its only active target owner."""
 
-    if (args.root / TRANSFER_JOURNAL).exists():
+    if path_entry_exists(args.root / TRANSFER_JOURNAL):
         raise TaskFrontmatterError("Source-1376 cannot close a row while a transfer journal is active.")
+    if path_entry_exists(args.root / LEGACY_TRANSFER_JOURNAL):
+        raise TaskFrontmatterError("Source-1376 cannot close a row while legacy transfer recovery state exists.")
     paths = markdown_paths(args.root)
     destination = (args.root / DESTINATION_REF).resolve()
     if destination not in paths:
         raise TaskFrontmatterError("Source-1376 escrow owner is absent from the locked task inventory.")
-    _custody, moved, rolling_destination = transfer_custody_by_row(validated_transfer_receipts(args.receipt_dir, rows), rows)
+    _custody, moved, rolling_destination = transfer_custody_by_row(args, validated_transfer_receipts(args, rows), rows)
     destination_payload = task_bytes(destination)
     destination_metadata = require_v1_metadata(destination_payload.decode("utf-8"))
     if (
@@ -1917,6 +2636,7 @@ def finish_pane_phase(
                 "rows": list(row_ids),
                 "plan_sha256": PLAN_SHA256,
                 "execution_binding_sha256": EXECUTION_BINDING_SHA256,
+                "prepared_binding_sha256": prepared_binding_digest(args),
                 "authority_sha256": AUTHORITY_SHA256,
                 "mode": mode,
                 "tasks": [row.task_ref for row in selected],
@@ -2036,6 +2756,7 @@ def prepare_pane_close(
     journal_path = close_journal_path(args.receipt_dir, row_ids)
     notes = [
         close_record(
+            args,
             row,
             "coordinated-shared-target" if len(selected) > 1 else "exited-shell" if row.row_id == COMPLETED_SHELL_ROW else "live",
             receipt_path,
@@ -2083,7 +2804,7 @@ def prepare_pane_close(
             for row, (path, before, text) in zip(selected, values, strict=True):
                 if path.read_text(encoding="utf-8") != text or not same_file_state(before, path.stat()):
                     raise TaskFrontmatterError(f"row {row.row_id} changed before durable close intent.")
-                if sha256(text.encode()) != expected_current_task_sha256(args.receipt_dir, rows, row):
+                if sha256(text.encode()) != expected_current_task_sha256(args, rows, row):
                     raise TaskFrontmatterError(f"row {row.row_id} no longer matches reviewed custody before close intent.")
             validate_pane_journal_derivation(args, rows, selected, journal, originals, in_progress)
             journal_payload = write_private_json(journal_path, journal, final=False)
@@ -2114,7 +2835,7 @@ def close_row(args: Args, rows: dict[str, PlanRow], row_id: str) -> dict[str, ob
         return prior[0]
     task = plan_path(args.root, row)
     before, payload = task_snapshot(task)
-    expected_sha256 = expected_current_task_sha256(args.receipt_dir, rows, row)
+    expected_sha256 = expected_current_task_sha256(args, rows, row)
     if sha256(payload) != expected_sha256:
         raise TaskFrontmatterError(f"row {row_id} bytes do not match reviewed custody before closure.")
     text = payload.decode("utf-8")
@@ -2162,7 +2883,7 @@ def close_internal_shared_pair(args: Args, rows: dict[str, PlanRow]) -> dict[str
     values: list[tuple[Path, os.stat_result, str]] = []
     for row, path in zip(pair, paths, strict=True):
         before, payload = task_snapshot(path)
-        if sha256(payload) != expected_current_task_sha256(args.receipt_dir, rows, row):
+        if sha256(payload) != expected_current_task_sha256(args, rows, row):
             raise TaskFrontmatterError(f"paired row {row.row_id} bytes do not match reviewed custody.")
         text = payload.decode("utf-8")
         metadata = require_v1_metadata(text)
@@ -2205,14 +2926,15 @@ def transfer_schedule(rows: dict[str, PlanRow], *, include_deferred: bool) -> tu
 
 
 def transfer_custody_by_row(
+    args: Args,
     receipts: list[dict[str, object]],
     rows: dict[str, PlanRow],
 ) -> tuple[dict[str, tuple[str, str]], tuple[str, ...], str]:
     custody: dict[str, tuple[str, str]] = {}
     moved: list[str] = []
-    rolling = DESTINATION_INITIAL_SHA256
+    rolling = initial_destination_sha256(args)
     for receipt in receipts:
-        row_ids, items = validate_transfer_receipt_against_plan(receipt, rows)
+        row_ids, items = validate_transfer_receipt_against_plan(receipt, rows, args)
         if receipt.get("destination_before_sha256") != rolling:
             raise TaskFrontmatterError("Source-1376 transfer receipt chain has a discontinuous destination preimage.")
         sources = receipt.get("sources")
@@ -2269,7 +2991,7 @@ def validate_close_journal_state_locked(
     after_value = receipt.get("task_after_sha256")
     after_digests = [after_value] if isinstance(after_value, str) else after_value
     if (
-        before_digests != [expected_current_task_sha256(args.receipt_dir, rows, row) for row in selected]
+        before_digests != [expected_current_task_sha256(args, rows, row) for row in selected]
         or not isinstance(after_digests, list)
         or len(after_digests) != len(selected)
         or any(not isinstance(expected, str) or sha256(tasks_after[row.task_ref].encode()) != expected for row, expected in zip(selected, after_digests, strict=True))
@@ -2302,7 +3024,7 @@ def validate_transfer_journal_state_locked(
     receipt = value.get("receipt")
     if value.get("schema") != "omo-source1376-transfer-journal/v1" or not isinstance(receipt, dict):
         raise TaskFrontmatterError("Source-1376 transfer journal is malformed.")
-    row_ids, moving = validate_transfer_receipt_against_plan(receipt, rows)
+    row_ids, moving = validate_transfer_receipt_against_plan(receipt, rows, args)
     selected = tuple(rows[row_id] for row_id in row_ids)
     destination = (args.root / DESTINATION_REF).resolve()
     sources_before = string_mapping(value.get("sources_before"), "transfer journal source-before map")
@@ -2355,6 +3077,7 @@ def validate_initial_state(args: Args, rows: dict[str, PlanRow]) -> None:
         paths = markdown_paths(args.root)
         receipt_paths = tuple(args.receipt_dir.glob("transfer-*.json")) + tuple(args.receipt_dir.glob("close-*.json")) + tuple(args.receipt_dir.glob(".close-*.journal.json"))
         transfer_journal_path = args.root / TRANSFER_JOURNAL
+        legacy_transfer_journal_path = args.root / LEGACY_TRANSFER_JOURNAL
         with ExitStack() as locks:
             for locked_path in sorted(
                 {
@@ -2363,10 +3086,13 @@ def validate_initial_state(args: Args, rows: dict[str, PlanRow]) -> None:
                     *operation_binding_paths(args, rows),
                     args.root / "TODO.md",
                     transfer_journal_path,
+                    legacy_transfer_journal_path,
                 }
             ):
                 locks.enter_context(task_file_lock(locked_path))
             validate_operation_bindings_locked(args, rows)
+            if path_entry_exists(legacy_transfer_journal_path):
+                raise TaskFrontmatterError("legacy closure-transfer recovery state is present.")
             planned_paths = {plan_path(args.root, row) for row in rows.values()}
             if not planned_paths.issubset(paths) or destination not in paths:
                 raise TaskFrontmatterError("Source-1376 initial task-record inventory drifted.")
@@ -2375,8 +3101,8 @@ def validate_initial_state(args: Args, rows: dict[str, PlanRow]) -> None:
                 task = plan_path(args.root, row)
                 if len(todo_sections_in_text(args.root, task, todo_text)) > 1:
                     raise TaskFrontmatterError(f"plan row {row.row_id} has ambiguous TODO custody.")
-            transfers = validated_transfer_receipts(args.receipt_dir, rows)
-            transfer_custody, moved, rolling_destination = transfer_custody_by_row(transfers, rows)
+            transfers = validated_transfer_receipts(args, rows)
+            transfer_custody, moved, rolling_destination = transfer_custody_by_row(args, transfers, rows)
             closed_rows: set[str] = set()
             for receipt_path in args.receipt_dir.glob("close-*.json"):
                 loaded = read_private_json(receipt_path, required=True)
@@ -2453,7 +3179,7 @@ def validate_initial_state(args: Args, rows: dict[str, PlanRow]) -> None:
 
 
 def apply(args: Args) -> None:
-    rows = load_execution_rows(args.plan, args.binding)
+    rows = effective_execution_rows(args)
     authority_locator = validate_authority(args.root, args.authority)
     if authority_locator != f"{AUTHORITY_REF}:3-3":
         raise TaskFrontmatterError("Source-1376 authority locator drifted.")
@@ -2479,36 +3205,56 @@ def apply(args: Args) -> None:
         if recovered != receipt:
             raise TaskFrontmatterError("Source-1376 recovered transfer receipt changed.")
     destination = args.root / DESTINATION_REF
-    receipts = validated_transfer_receipts(args.receipt_dir, rows)
-    rolling_destination = DESTINATION_INITIAL_SHA256
+    receipts = validated_transfer_receipts(args, rows)
+    rolling_destination = initial_destination_sha256(args)
     for receipt in receipts:
         if receipt.get("destination_before_sha256") != rolling_destination:
             raise TaskFrontmatterError("existing transfer receipt chain is not contiguous.")
         rolling_destination = str(receipt.get("destination_after_sha256", ""))
     if sha256(task_bytes(destination)) != rolling_destination:
         raise TaskFrontmatterError("current destination does not match the completed transfer receipt chain.")
+    nondeferred_schedule = transfer_schedule(rows, include_deferred=False)
+    if not nondeferred_schedule:
+        raise TaskFrontmatterError("Source-1376 execution has no eligible first transfer.")
+    deferred_schedule = transfer_schedule(rows, include_deferred=True)
+    if deferred_schedule != ((DEFERRED_TRANSFER_ROW,),):
+        raise TaskFrontmatterError("deferred Source-1376 transfer schedule is invalid.")
+    complete_transfer_schedule = (*nondeferred_schedule, *deferred_schedule)
+    completed_groups_values: list[tuple[str, ...]] = []
+    for receipt in receipts:
+        receipt_rows = receipt.get("rows")
+        if not isinstance(receipt_rows, list) or any(not isinstance(row_id, str) for row_id in receipt_rows):
+            raise TaskFrontmatterError("completed Source-1376 transfer has malformed rows.")
+        completed_groups_values.append(tuple(receipt_rows))
+    completed_groups = tuple(completed_groups_values)
+    if completed_groups != complete_transfer_schedule[: len(completed_groups)]:
+        raise TaskFrontmatterError("completed transfers are not a prefix of the reviewed Source-1376 schedule.")
+    first_group = nondeferred_schedule[0]
+    if not receipts:
+        receipt = transfer_rows(
+            args,
+            rows,
+            first_group,
+            rolling_destination,
+            require_prepared_snapshot=args.prepared_binding is not None,
+        )
+        rolling_destination = str(receipt["destination_after_sha256"])
+        receipts = [receipt]
+        print(f"transferred first handoff row(s) {','.join(first_group)}", flush=True)
+    elif receipts[0].get("rows") != list(first_group):
+        raise TaskFrontmatterError("the first completed transfer does not match the reviewed prepared handoff.")
     for row_id in EARLY_CLOSE_ROWS:
         receipt = close_row(args, rows, row_id)
         print(f"closed row {row_id} mode={receipt['mode']}", flush=True)
-    for group in transfer_schedule(rows, include_deferred=False):
-        receipt_path = transfer_receipt_path(args.receipt_dir, group)
-        if read_private_json(receipt_path) is None:
-            receipt = transfer_rows(args, rows, group, rolling_destination)
-            rolling_destination = str(receipt["destination_after_sha256"])
-            print(f"transferred row(s) {','.join(group)}", flush=True)
-        else:
-            loaded = read_private_json(receipt_path, required=True)
-            assert loaded is not None
-            receipt = loaded[0]
-            if receipt.get("destination_before_sha256") != rolling_destination:
-                raise TaskFrontmatterError("transfer receipt order does not match the Source-1376 execution schedule.")
-            rolling_destination = str(receipt["destination_after_sha256"])
+    completed_nondeferred = min(len(receipts), len(nondeferred_schedule))
+    for group in nondeferred_schedule[completed_nondeferred:]:
+        receipt = transfer_rows(args, rows, group, rolling_destination)
+        rolling_destination = str(receipt["destination_after_sha256"])
+        print(f"transferred row(s) {','.join(group)}", flush=True)
     for row_id in PRE_DEFERRED_CLOSE_ROWS:
         receipt = close_row(args, rows, row_id)
         print(f"closed row {row_id} mode={receipt['mode']}", flush=True)
-    deferred = transfer_schedule(rows, include_deferred=True)
-    if deferred != ((DEFERRED_TRANSFER_ROW,),):
-        raise TaskFrontmatterError("deferred Source-1376 transfer schedule is invalid.")
+    deferred = deferred_schedule
     deferred_path = transfer_receipt_path(args.receipt_dir, deferred[0])
     if read_private_json(deferred_path) is None:
         receipt = transfer_rows(args, rows, deferred[0], rolling_destination)
@@ -2518,9 +3264,8 @@ def apply(args: Args) -> None:
         loaded = read_private_json(deferred_path, required=True)
         assert loaded is not None
         receipt = loaded[0]
-        if receipt.get("destination_before_sha256") != rolling_destination:
-            raise TaskFrontmatterError("deferred transfer receipt is not contiguous.")
-        rolling_destination = str(receipt["destination_after_sha256"])
+        if receipt.get("destination_after_sha256") != rolling_destination:
+            raise TaskFrontmatterError("deferred transfer receipt does not match rolling custody.")
     for entry in CLOSE_ORDER:
         if isinstance(entry, tuple):
             receipt = close_internal_shared_pair(args, rows)
@@ -2705,7 +3450,7 @@ def live_source1352_senders() -> list[int]:
 
 
 def build_packet_locked(args: Args, rows: dict[str, PlanRow], destination_sha256: str) -> None:
-    transfer_values = validated_transfer_receipts(args.receipt_dir, rows)
+    transfer_values = validated_transfer_receipts(args, rows)
     close_values: list[dict[str, object]] = []
     for path in sorted(args.receipt_dir.glob("close-*.json")):
         loaded = read_private_json(path, required=True)
@@ -2798,7 +3543,7 @@ def build_packet_locked(args: Args, rows: dict[str, PlanRow], destination_sha256
     if senders:
         raise TaskFrontmatterError(f"Source-1352 sender processes remain live: {senders}")
     close_journals = sorted(path.name for path in args.receipt_dir.glob(".close-*.journal.json"))
-    if (args.root / TRANSFER_JOURNAL).exists() or (args.root / ".omo-pending-closure-transfer.json").exists() or close_journals:
+    if path_entry_exists(args.root / TRANSFER_JOURNAL) or path_entry_exists(args.root / LEGACY_TRANSFER_JOURNAL) or close_journals:
         raise TaskFrontmatterError("a closure transfer recovery record remains present.")
     receipt_manifest: list[dict[str, object]] = []
     for path in sorted((*args.receipt_dir.glob("transfer-*.json"), *args.receipt_dir.glob("close-*.json"))):
@@ -2822,6 +3567,11 @@ def build_packet_locked(args: Args, rows: dict[str, PlanRow], destination_sha256
             "path": str(args.binding),
             "mode": "0444",
             "sha256": EXECUTION_BINDING_SHA256,
+        },
+        "prepared_binding": {
+            "path": str(args.prepared_binding),
+            "mode": "0444",
+            "sha256": prepared_binding_digest(args),
         },
         "authority": {"source": f"{AUTHORITY_REF}:3-3", "sha256": AUTHORITY_SHA256, "text": AUTHORITY_TEXT},
         "destination": {
@@ -2847,15 +3597,18 @@ def build_packet_locked(args: Args, rows: dict[str, PlanRow], destination_sha256
         "mail_policy": "No mailbox access and no Human mail; the accepted Source-1352 notice was not resent.",
         "production": "untouched",
         "pcodx": "unused",
-        "recovery_records_absent": [TRANSFER_JOURNAL, ".omo-pending-closure-transfer.json", ".close-*.journal.json"],
-        "process_feedback": "The static plan required a plan-bound batch helper because the reviewed single-source transfer rejected historical, non-blocked, shared-target, duplicate, missing-target, and exited-shell cases.",
+        "recovery_records_absent": [TRANSFER_JOURNAL, LEGACY_TRANSFER_JOURNAL, ".close-*.journal.json"],
+        "process_feedback": (
+            "The static plan required a plan-bound batch helper for historical and shared lifecycle dispositions, then a root-wide locked "
+            "prepared-binding handoff because evidence writers could otherwise invalidate a reviewed snapshot before its first transfer. " + RECEIPT_DIRECTORY_MODE_CONTRACT
+        ),
     }
     output = args.packet_output.resolve()
     if output.parent == args.root or args.root in output.parents:
         raise TaskFrontmatterError("execution packet must remain outside the work-log repository.")
     if not output.parent.is_dir():
         raise TaskFrontmatterError("execution packet parent directory does not exist.")
-    if output.exists():
+    if path_entry_exists(output):
         existing, _payload = read_immutable_json(output)
         existing_body = dict(existing)
         created_at = existing_body.pop("created_at", None)
@@ -2891,6 +3644,7 @@ def build_packet(args: Args, rows: dict[str, PlanRow], destination_sha256: str) 
                         *closure_custody_paths(args, rows),
                         *args.receipt_dir.glob("close-*.json"),
                         *args.receipt_dir.glob(".close-*.journal.json"),
+                        args.receipt_dir,
                         args.packet_output,
                     }
                 ):
@@ -2920,6 +3674,22 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--authority", type=Path, required=True, help=f"Exact private Source-1376 Human authority file {AUTHORITY_REF}.")
     _ = parser.add_argument("--receipt-dir", type=Path, required=True, help="New or existing owner-private 0700 execution-receipt directory.")
     _ = parser.add_argument("--packet-output", type=Path, required=True, help="New immutable execution/custody JSON packet outside the work-log root.")
+    _ = parser.add_argument(
+        "--prepared-binding",
+        type=Path,
+        required=True,
+        help="Immutable root-wide prepared-binding path outside the work-log root.",
+    )
+    _ = parser.add_argument(
+        "--prepared-binding-sha256",
+        default="",
+        help="Independent-review-approved SHA-256 of --prepared-binding; required for execution and forbidden while preparing.",
+    )
+    _ = parser.add_argument(
+        "--prepare-binding",
+        action="store_true",
+        help="Publish --prepared-binding under the complete root/task lock set without mutating lifecycle state, then exit.",
+    )
     parsed = parser.parse_args(argv)
     root = parsed.root.resolve()
     if (
@@ -2929,12 +3699,21 @@ def parse_args(argv: list[str]) -> Args:
         or not parsed.authority.is_absolute()
         or not parsed.receipt_dir.is_absolute()
         or not parsed.packet_output.is_absolute()
+        or not parsed.prepared_binding.is_absolute()
     ):
-        parser.error("root, plan, binding, authority, receipt directory, and packet output must be absolute existing-parent paths.")
+        parser.error("root, plan, binding, authority, receipt directory, packet output, and prepared binding must be absolute paths.")
     if root != WORK_LOG_ROOT or parsed.plan.resolve() != PLAN_PATH or parsed.binding.resolve() != EXECUTION_BINDING_PATH:
         parser.error(f"this one-shot helper is bound to root {WORK_LOG_ROOT}, plan {PLAN_PATH}, and binding {EXECUTION_BINDING_PATH}.")
     if parsed.packet_output.suffix != ".json":
         parser.error("--packet-output must end with .json.")
+    prepared_binding = parsed.prepared_binding.resolve()
+    if prepared_binding.suffix != ".json" or prepared_binding.parent == root or root in prepared_binding.parents:
+        parser.error("--prepared-binding must be an external .json path.")
+    if parsed.prepare_binding:
+        if parsed.prepared_binding_sha256:
+            parser.error("--prepared-binding-sha256 is forbidden with --prepare-binding.")
+    elif SHA256_RE.fullmatch(parsed.prepared_binding_sha256) is None:
+        parser.error("execution requires --prepared-binding-sha256 as 64 lowercase hex characters.")
     return Args(
         root,
         parsed.plan.resolve(),
@@ -2942,12 +3721,20 @@ def parse_args(argv: list[str]) -> Args:
         parsed.authority.resolve(),
         ensure_private_dir(parsed.receipt_dir),
         parsed.packet_output.resolve(),
+        prepared_binding,
+        parsed.prepared_binding_sha256,
+        parsed.prepare_binding,
     )
 
 
 def run(args: Args) -> int:
     try:
-        apply(args)
+        if args.prepare_binding:
+            path, digest = publish_prepared_binding(args)
+            print(f"prepared binding: {path}", flush=True)
+            print(f"prepared binding sha256: {digest}", flush=True)
+        else:
+            apply(args)
     except (OSError, TaskFrontmatterError, RuntimeError, ValueError) as exc:
         print(f"omo_source1376_shutdown.py: {exc}", file=sys.stderr)
         return 2
