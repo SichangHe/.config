@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import pwd
 import re
 import stat
 import subprocess
@@ -63,13 +64,20 @@ ARCHIVED_TRANSCRIPTION = Path("202608/transcription_sw.md")
 ARCHIVED_INTERRUPTED_EVAL = Path("202608/mem1290_eval.md")
 ARCHIVED_INTERRUPTED_FIX = Path("202608/mem1290_fix.md")
 TARGET = "vlcontext_recovery:2"
-DONE_CLOSE_IN_PROGRESS = "done_close_in_progress: manager is closing the agent before marking done"
+CANONICAL_CARRIER_BLOCKER = "waiting_for_promoted_done_close_recovery_invocation"
+CANONICAL_CARRIER_OPEN_ITEMS = (
+    "Establish evidence-bound carrier terminalization with an accepted private report and stabilize/authenticate canonical TODO current-row custody through supported tooling; fail closed if prerequisites remain unavailable; do not execute carrier recovery.",
+    "Stabilize and authenticate this canonical carrier task/queue and sole canonical TODO current row; emit exactly one accepted private blocked/terminalization-ready report; generate the bounded ownership manifest bound to stable current state and installed HEAD; stop after preflight evidence or report one supported blocker.",
+)
+CANONICAL_CARRIER_OPEN_ITEMS_SHA256 = "57e13091c5b8ec0a942fdb81da6611c164057e405d81f8224678f7555f7ee5fa"
+CANONICAL_REPORT_STATUS = "blocked"
 DUPLICATE_CARRIER_BLOCKER = "duplicate authority carrier created during concurrent routing; canonical carrier is mem1290_auth.md; no production ownership"
 SOURCE1290_AUDIT_SHA256 = "eafa5c27d35ea2dacb4c94a0c53619f06acfb66bef703bf63dc569ac7af5fedf"
 SOURCE1290_AUTHORITY = "202608/manager_mail/85c5dff58359-1290.txt:3-4"
 SOURCE1290_EXCERPT = "Close the “memory” thing. It is so old.\nWhich email report was for the transcription thing\n"
+CANONICAL_SOURCE_HEAD = "2e168e0744c976fad65308633e157cbe3942c107"
 POST_ARCHIVE_SHA256 = {
-    CANONICAL_CARRIER: "86e0cbe819e7b1d0f2899d35b903744209222d9eaa46ca8e6929bb63af1ec30a",
+    CANONICAL_CARRIER: "f3d0e041d72ac26cf421b914e9d154a93d8db6304503338f25995119e8d3fc4a",
     DUPLICATE_CARRIER: "3a0291e6ea4c6aa8ef59055d65e97c53a8468d1a29d6e41c9aad7e760f59c811",
     ARCHIVED_MEMORY: "d2ae03a9e19f981ec43c6b8527fca1475a31a7c0593611c8ac6f36dbb392e705",
     ARCHIVED_TRANSCRIPTION: "a01fec08cfdcab16755a5d44c5ae78fde5110b05967ed7b0c324bba55cc6bea1",
@@ -88,7 +96,7 @@ POST_ARCHIVE_FILES = (
     ARCHIVED_INTERRUPTED_FIX,
     ARCHIVE_TODO,
 )
-STATE_SCHEMA = "omo-source1290-lifecycle-prerequisite/v2"
+STATE_SCHEMA = "omo-source1290-lifecycle-prerequisite/v3"
 OWNERSHIP_MANIFEST_SCHEMA = "omo-source1290-ownership-manifest/v1"
 TODO_SECTIONS = ("current", "human pending", "low priority", "previous")
 MAX_INDEXED_TASKS = 512
@@ -110,6 +118,13 @@ SOURCE_FILES = (
     Path("omo_manager/omo_task_lock.py"),
     Path("omo_manager/omo_task_metadata.py"),
 )
+
+
+def canonical_source_root() -> Path:
+    return (Path(pwd.getpwnam("sichangheagent").pw_dir) / ".config").resolve()
+
+
+CANONICAL_SOURCE_ROOT = canonical_source_root()
 
 
 class PrerequisiteError(RuntimeError):
@@ -475,7 +490,12 @@ def has_pending_marker(text: str) -> bool:
     return False
 
 
-def validate_task_and_todo(args: Args, task: Snapshot, todo: Snapshot) -> None:
+def open_items_record(items: tuple[str, ...]) -> dict[str, object]:
+    values = list(items)
+    return {"items": values, "sha256": hashlib.sha256(canonical_json(values).rstrip(b"\n")).hexdigest()}
+
+
+def validate_task_and_todo(args: Args, task: Snapshot, todo: Snapshot) -> dict[str, object]:
     if task.sha256 != args.task_sha256 or task.sha256 != POST_ARCHIVE_SHA256[CANONICAL_CARRIER] or todo.sha256 != args.todo_sha256:
         raise PrerequisiteError("carrier or TODO bytes do not match the supplied digests")
     try:
@@ -489,17 +509,18 @@ def validate_task_and_todo(args: Args, task: Snapshot, todo: Snapshot) -> None:
         metadata is None
         or metadata.version != "v1.0.0"
         or metadata.status != "blocked"
-        or metadata.blocked_on != DONE_CLOSE_IN_PROGRESS
+        or metadata.blocked_on != CANONICAL_CARRIER_BLOCKER
         or metadata.runat != TARGET
         or metadata.tool != "codex"
         or metadata.is_manager
-        or metadata.pending_task_items
+        or metadata.pending_task_items != CANONICAL_CARRIER_OPEN_ITEMS
+        or open_items_record(metadata.pending_task_items)["sha256"] != CANONICAL_CARRIER_OPEN_ITEMS_SHA256
         or has_pending_marker(task_text)
         or authority != ((SOURCE1290_AUTHORITY, SOURCE1290_EXCERPT),)
     ):
-        raise PrerequisiteError("canonical carrier is not the exact empty-queue Source-1290 close prerequisite")
+        raise PrerequisiteError("canonical carrier is not the exact blocked/open-item Source-1290 prerequisite")
     if (
-        todo_rows(todo_text, CANONICAL_CARRIER.as_posix()) != (("current", f"{CANONICAL_CARRIER} {TARGET}"),)
+        todo_rows(todo_text, CANONICAL_CARRIER.as_posix()) != (("human pending", f"{CANONICAL_CARRIER} {TARGET}"),)
         or todo_rows(todo_text, DUPLICATE_CARRIER.as_posix()) != (("human pending", "memory_auth_1290.md agent_managers:78"),)
         or todo_rows(todo_text, ARCHIVED_INTERRUPTED_EVAL.as_posix()) != (("previous", "202608/mem1290_eval.md vldr:2"),)
         or todo_rows(todo_text, ARCHIVED_INTERRUPTED_FIX.as_posix()) != (("previous", "202608/mem1290_fix.md vldr:1"),)
@@ -508,7 +529,14 @@ def validate_task_and_todo(args: Args, task: Snapshot, todo: Snapshot) -> None:
         or todo_rows(todo_text, "transcription_sw.md")
         or todo_rows(todo_text, ARCHIVED_TRANSCRIPTION.as_posix())
     ):
-        raise PrerequisiteError("Source-1290 TODO placement is not canonical current-row custody")
+        raise PrerequisiteError("Source-1290 TODO placement is not canonical human-pending custody")
+    return {
+        "blocked_on": metadata.blocked_on,
+        "pending_task_items": open_items_record(metadata.pending_task_items),
+        "status": metadata.status,
+        "todo_section": "human pending",
+        "transition": "none",
+    }
 
 
 def validate_post_archive_state(
@@ -597,14 +625,16 @@ def git_head(root: Path) -> str:
 
 
 def source_binding(args: Args) -> dict[str, object]:
-    expected_helper = (args.source_root / SOURCE_FILES[0]).resolve(strict=False)
+    if args.source_root != CANONICAL_SOURCE_ROOT or args.source_head != CANONICAL_SOURCE_HEAD:
+        raise PrerequisiteError("source repository claim is not the canonical Source-1290 observation")
+    expected_helper = (CANONICAL_SOURCE_ROOT / SOURCE_FILES[0]).resolve(strict=False)
     if Path(__file__).resolve() != expected_helper:
         raise PrerequisiteError("executed prerequisite helper is outside the bound source repository")
-    head = git_head(args.source_root)
-    if head != args.source_head:
+    head = git_head(CANONICAL_SOURCE_ROOT)
+    if head != CANONICAL_SOURCE_HEAD:
         raise PrerequisiteError("source repository HEAD drifted")
-    files = [stable_owned_read((args.source_root / relative).resolve(), label=f"source file {relative}").record() for relative in SOURCE_FILES]
-    return {"files": files, "head": head, "root": str(args.source_root)}
+    files = [stable_owned_read((CANONICAL_SOURCE_ROOT / relative).resolve(), label=f"source file {relative}").record() for relative in SOURCE_FILES]
+    return {"files": files, "head": head, "root": str(CANONICAL_SOURCE_ROOT)}
 
 
 def route_state(path: Path) -> dict[str, object]:
@@ -906,6 +936,8 @@ def validate_canonical_receipt(
 
 
 def validate_report(args: Args, paths: ReportPaths, task: Snapshot, todo: Snapshot) -> dict[str, object]:
+    if args.report_status != CANONICAL_REPORT_STATUS:
+        raise PrerequisiteError("Source-1290 terminalization report status is not blocked")
     report = stable_owned_read(args.report_file, label="private report", exact_mode=0o600, private_parent=True)
     if report.sha256 != args.report_sha256:
         raise PrerequisiteError("private report bytes drifted")
@@ -1114,7 +1146,7 @@ def membership_record(indexed: tuple[IndexedTask, ...]) -> dict[str, object]:
 def build_binding(args: Args, paths: ReportPaths) -> dict[str, object]:
     task = stable_owned_read(args.root / CANONICAL_CARRIER, label="canonical Source-1290 carrier")
     todo = stable_owned_read(args.root / "TODO.md", label="work-log TODO")
-    validate_task_and_todo(args, task, todo)
+    carrier_lifecycle = validate_task_and_todo(args, task, todo)
     post_archive = validate_post_archive_state(args)
     ownership_manifest, indexed = validate_ownership_manifest(args, todo)
     owners = active_target_owners(indexed)
@@ -1129,6 +1161,7 @@ def build_binding(args: Args, paths: ReportPaths) -> dict[str, object]:
     return {
         "audit": audit.record(),
         "carrier": task.record(),
+        "carrier_lifecycle": carrier_lifecycle,
         "membership": membership_record(indexed),
         "ownership_manifest": ownership_manifest,
         "ownership": {"owners": list(owners), "target": TARGET},
@@ -1147,7 +1180,7 @@ def build_binding(args: Args, paths: ReportPaths) -> dict[str, object]:
         "todo_custody": {
             "duplicate_section": "human pending",
             "interrupted_owners": interrupted_owners,
-            "section": "current",
+            "section": "human pending",
         },
     }
 
@@ -1160,11 +1193,11 @@ def prepared_payload(binding: dict[str, object]) -> bytes:
     return state_payload({"binding": binding, "phase": "prepared", "schema": STATE_SCHEMA}, "intent_id")
 
 
-def completed_payload(binding: dict[str, object], intent_id: str, shell: ExitedCodexShell) -> bytes:
+def terminalized_payload(binding: dict[str, object], intent_id: str, shell: ExitedCodexShell) -> bytes:
     value: dict[str, object] = {
         "binding": binding,
         "intent_id": intent_id,
-        "phase": "completed",
+        "phase": "terminalized",
         "schema": STATE_SCHEMA,
         "terminal": {
             "capture_sha256": shell.capture_sha256,
@@ -1186,7 +1219,7 @@ def optional_state(path: Path) -> tuple[dict[str, object], Snapshot] | None:
 def require_no_terminal_temporary(path: Path) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     if os.path.lexists(temporary):
-        raise PrerequisiteError("completed terminal receipt has unexpected transaction residue")
+        raise PrerequisiteError("terminalized receipt has unexpected transaction residue")
 
 
 def write_new_private(path: Path, payload: bytes) -> None:
@@ -1251,10 +1284,10 @@ def validate_state(value: dict[str, object], binding: dict[str, object]) -> str:
             raise PrerequisiteError("prepared terminal intent does not match current custody")
         validate_bound_id(value, "intent_id", "prepared terminal intent")
         return str(value["intent_id"])
-    if phase == "completed":
+    if phase == "terminalized":
         if set(value) != {"binding", "intent_id", "phase", "receipt_id", "schema", "terminal"} or value.get("schema") != STATE_SCHEMA or value.get("binding") != binding:
-            raise PrerequisiteError("completed terminal receipt does not match current custody")
-        validate_bound_id(value, "receipt_id", "completed terminal receipt")
+            raise PrerequisiteError("terminalized receipt does not match current custody")
+        validate_bound_id(value, "receipt_id", "terminalized receipt")
         terminal = value.get("terminal")
         if (
             value.get("intent_id") != expected_intent
@@ -1264,7 +1297,7 @@ def validate_state(value: dict[str, object], binding: dict[str, object]) -> str:
             or UUID_RE.fullmatch(str(terminal.get("session_id", ""))) is None
             or terminal.get("status") != "authenticated-exited-shell"
         ):
-            raise PrerequisiteError("completed terminal receipt is malformed")
+            raise PrerequisiteError("terminalized receipt is malformed")
         return str(value["intent_id"])
     raise PrerequisiteError("terminal prerequisite state has an unknown phase")
 
@@ -1276,7 +1309,7 @@ def require_pane_identity(args: Args) -> None:
 
 # 🧑 Human Source `202608/manager_mail/85c5dff58359-1290.txt:3-4`: "Close the “memory” thing. It is so old."
 def reconcile(args: Args) -> bytes:
-    """Terminalize only the carrier after durable report and custody authentication."""
+    """Terminalize only the carrier pane while its blocked lifecycle stays unchanged."""
 
     task = args.root / CANONICAL_CARRIER
     todo = args.root / "TODO.md"
@@ -1322,7 +1355,7 @@ def reconcile(args: Args) -> bytes:
             if not isinstance(report_binding, dict) or not isinstance(report_binding.get("receipt_id"), str):
                 raise PrerequisiteError("terminal binding lost its report receipt identity")
             terminal_evidence = str(report_binding["receipt_id"])
-            if current[0].get("phase") == "completed":
+            if current[0].get("phase") == "terminalized":
                 require_no_terminal_temporary(args.terminal_receipt)
                 terminal = current[0]["terminal"]
                 assert isinstance(terminal, dict)
@@ -1331,7 +1364,7 @@ def reconcile(args: Args) -> bytes:
                 observed = validate_exited_codex_shell(TARGET, args.pane_id, shell.session_id, terminal_evidence, args.lines)
                 require_pane_identity(args)
                 if observed != shell.capture_sha256 or shell.session_id != args.session_id.lower() or build_binding(args, paths) != binding:
-                    raise PrerequisiteError("completed terminal receipt or current-row custody drifted")
+                    raise PrerequisiteError("terminalized receipt or human-pending custody drifted")
                 return current[1].payload
             prepared = current[1].payload
 
@@ -1368,9 +1401,9 @@ def reconcile(args: Args) -> bytes:
                 raise PrerequisiteError("authenticated exited shell changed before receipt publication")
             require_pane_identity(args)
             require_current()
-            completed = completed_payload(binding, intent_id, shell)
-            replace_state(args.terminal_receipt, prepared, completed)
-            return completed
+            terminalized = terminalized_payload(binding, intent_id, shell)
+            replace_state(args.terminal_receipt, prepared, terminalized)
+            return terminalized
 
 
 def parse_args(argv: list[str] | None = None) -> Args:

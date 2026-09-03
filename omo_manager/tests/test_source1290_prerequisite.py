@@ -39,7 +39,14 @@ def digest(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def task_text(*, target: str, manager: bool = False, blocker: str = prerequisite.DONE_CLOSE_IN_PROGRESS) -> str:
+def task_text(
+    *,
+    target: str,
+    manager: bool = False,
+    blocker: str = prerequisite.CANONICAL_CARRIER_BLOCKER,
+    pending_items: tuple[str, ...] = (),
+) -> str:
+    pending_lines = ("pending_task_items: []",) if not pending_items else ("pending_task_items:", *(f"  - {item}" for item in pending_items))
     return "\n".join(
         (
             "---",
@@ -50,7 +57,7 @@ def task_text(*, target: str, manager: bool = False, blocker: str = prerequisite
             "tool: codex",
             "managerat: vldr:0",
             f"is_manager: {str(manager).lower()}",
-            "pending_task_items: []",
+            *pending_lines,
             "---",
             '<human_instruction authoritative="true" source="202608/manager_mail/85c5dff58359-1290.txt:3-4">',
             "Close the “memory” thing. It is so old.",
@@ -132,7 +139,10 @@ class Fixture:
         self.acceptance = self.private / "acceptance.json"
         self.ownership_manifest = self.private / "ownership-manifest.json"
         self.terminal_receipt = self.private / "terminal.json"
-        self.task.write_text(task_text(target=prerequisite.TARGET), encoding="utf-8")
+        self.task.write_text(
+            task_text(target=prerequisite.TARGET, pending_items=prerequisite.CANONICAL_CARRIER_OPEN_ITEMS),
+            encoding="utf-8",
+        )
         self.duplicate.write_text(
             task_text(target="agent_managers:78", blocker=prerequisite.DUPLICATE_CARRIER_BLOCKER),
             encoding="utf-8",
@@ -157,10 +167,10 @@ class Fixture:
             "\n".join(
                 (
                     "current:",
-                    f"{prerequisite.CANONICAL_CARRIER} {prerequisite.TARGET}",
                     "manager.md vldr:0",
                     "",
                     "human pending:",
+                    f"{prerequisite.CANONICAL_CARRIER} {prerequisite.TARGET}",
                     f"{prerequisite.DUPLICATE_CARRIER} agent_managers:78",
                     "",
                     "previous:",
@@ -176,15 +186,10 @@ class Fixture:
         for path in (self.audit, self.report):
             path.chmod(0o600)
         self.refresh_ownership_manifest()
-        self.report_status = "in-progress"
+        self.report_status = prerequisite.CANONICAL_REPORT_STATUS
         self.replay_id = digest(b"source1290-report-replay")
         self.refresh_report_artifacts()
-        head = subprocess.run(
-            ["git", "-C", str(SOURCE_ROOT), "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        head = prerequisite.git_head(SOURCE_ROOT)
         self.args = prerequisite.Args(
             self.root.resolve(),
             digest(self.task.read_bytes()),
@@ -396,6 +401,8 @@ class Fixture:
     def patches(self, command: dict[str, str], *, bypass_canonical_receipt: bool = True) -> ExitStack:
         stack = ExitStack()
         stack.enter_context(patch.object(prerequisite, "SOURCE1290_AUDIT_SHA256", digest(self.audit.read_bytes())))
+        stack.enter_context(patch.object(prerequisite, "CANONICAL_SOURCE_ROOT", SOURCE_ROOT))
+        stack.enter_context(patch.object(prerequisite, "CANONICAL_SOURCE_HEAD", self.args.source_head))
         stack.enter_context(
             patch.object(
                 prerequisite,
@@ -423,7 +430,7 @@ class Source1290PrerequisiteTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         return temporary, Fixture(Path(temporary.name))
 
-    def test_live_codex_becomes_authenticated_exited_shell_without_custody_edits(self) -> None:
+    def test_blocked_human_pending_carrier_is_terminalized_without_lifecycle_edits(self) -> None:
         temporary, case = self.fixture()
         self.addCleanup(temporary.cleanup)
         task_before = case.task.read_bytes()
@@ -446,8 +453,22 @@ class Source1290PrerequisiteTests(unittest.TestCase):
             output = prerequisite.reconcile(case.args)
 
         result = json.loads(output)
-        self.assertEqual("completed", result["phase"])
+        self.assertEqual("terminalized", result["phase"])
         self.assertEqual("authenticated-exited-shell", result["terminal"]["status"])
+        self.assertEqual("blocked", result["binding"]["report"]["status"])
+        self.assertEqual(
+            {
+                "blocked_on": prerequisite.CANONICAL_CARRIER_BLOCKER,
+                "pending_task_items": {
+                    "items": list(prerequisite.CANONICAL_CARRIER_OPEN_ITEMS),
+                    "sha256": prerequisite.CANONICAL_CARRIER_OPEN_ITEMS_SHA256,
+                },
+                "status": "blocked",
+                "todo_section": "human pending",
+                "transition": "none",
+            },
+            result["binding"]["carrier_lifecycle"],
+        )
         self.assertEqual(output, case.terminal_receipt.read_bytes())
         self.assertEqual(task_before, case.task.read_bytes())
         self.assertEqual(todo_before, case.todo.read_bytes())
@@ -479,10 +500,10 @@ class Source1290PrerequisiteTests(unittest.TestCase):
         ):
             output = prerequisite.reconcile(case.args)
 
-        completed = json.loads(output)
-        indexed = completed["binding"]["ownership_manifest"]["index"]["tasks"]
+        terminalized = json.loads(output)
+        indexed = terminalized["binding"]["ownership_manifest"]["index"]["tasks"]
         self.assertEqual(5, len(indexed))
-        self.assertEqual("completed", completed["phase"])
+        self.assertEqual("terminalized", terminalized["phase"])
         self.assertTrue(case.terminal_receipt.exists())
 
     def test_ownership_preflight_cli_emits_the_canonical_bounded_index(self) -> None:
@@ -780,24 +801,69 @@ class Source1290PrerequisiteTests(unittest.TestCase):
         with self.assertRaisesRegex(prerequisite.PrerequisiteError, "manager transition is inconsistent"):
             prerequisite.validate_canonical_receipt(args, paths, report_snapshot, tampered, tampered_snapshot)
 
-    def test_carrier_must_have_one_current_row_while_duplicate_stays_human_pending(self) -> None:
+    def test_carrier_requires_one_human_pending_row(self) -> None:
         temporary, case = self.fixture()
         self.addCleanup(temporary.cleanup)
-        case.todo.write_text(case.todo.read_text(encoding="utf-8").replace("current:\nmem1290_auth.md", "current:\n\nhuman pending:\nmem1290_auth.md"), encoding="utf-8")
-        args = replace(case.args, todo_sha256=digest(case.todo.read_bytes()))
-        command = {"value": "bunx"}
-        with case.patches(command), patch.object(prerequisite, "terminalize_bound_codex_to_shell") as terminalize, self.assertRaisesRegex(prerequisite.PrerequisiteError, "TODO placement"):
-            prerequisite.reconcile(args)
-        terminalize.assert_not_called()
-        self.assertFalse(case.terminal_receipt.exists())
+        original = case.todo.read_text(encoding="utf-8")
+        for change in ("wrong section", "duplicate row", "missing row"):
+            with self.subTest(change=change):
+                if change == "wrong section":
+                    changed = original.replace("current:\n", f"current:\n{prerequisite.CANONICAL_CARRIER} {prerequisite.TARGET}\n", 1)
+                    changed = changed.replace(f"human pending:\n{prerequisite.CANONICAL_CARRIER} {prerequisite.TARGET}\n", "human pending:\n", 1)
+                elif change == "duplicate row":
+                    changed = original.replace(
+                        "current:\n",
+                        f"current:\n{prerequisite.CANONICAL_CARRIER} {prerequisite.TARGET}\n",
+                        1,
+                    )
+                else:
+                    changed = original.replace(f"{prerequisite.CANONICAL_CARRIER} {prerequisite.TARGET}\n", "", 1)
+                case.todo.write_text(changed, encoding="utf-8")
+                args = replace(case.args, todo_sha256=digest(case.todo.read_bytes()))
+                command = {"value": "bunx"}
+                with (
+                    case.patches(command),
+                    patch.object(prerequisite, "terminalize_bound_codex_to_shell") as terminalize,
+                    self.assertRaisesRegex(prerequisite.PrerequisiteError, "TODO placement"),
+                ):
+                    prerequisite.reconcile(args)
+                terminalize.assert_not_called()
+                self.assertFalse(case.terminal_receipt.exists())
+                case.todo.write_text(original, encoding="utf-8")
 
-    def test_concurrent_task_change_after_intent_is_detected_before_input(self) -> None:
+    def test_carrier_open_items_must_match_exact_order_and_membership(self) -> None:
+        original = prerequisite.CANONICAL_CARRIER_OPEN_ITEMS
+        variants = {
+            "reordered": tuple(reversed(original)),
+            "added": (*original, "Unexpected third item."),
+            "removed": original[:1],
+        }
+        for change, pending_items in variants.items():
+            with self.subTest(change=change):
+                temporary, case = self.fixture()
+                self.addCleanup(temporary.cleanup)
+                case.task.write_text(task_text(target=prerequisite.TARGET, pending_items=pending_items), encoding="utf-8")
+                args = replace(case.args, task_sha256=digest(case.task.read_bytes()))
+                command = {"value": "bunx"}
+                with (
+                    case.patches(command),
+                    patch.object(prerequisite, "terminalize_bound_codex_to_shell") as terminalize,
+                    self.assertRaisesRegex(prerequisite.PrerequisiteError, "exact blocked/open-item"),
+                ):
+                    prerequisite.reconcile(args)
+                terminalize.assert_not_called()
+                self.assertFalse(case.terminal_receipt.exists())
+
+    def test_concurrent_open_item_reorder_after_intent_is_detected_before_input(self) -> None:
         temporary, case = self.fixture()
         self.addCleanup(temporary.cleanup)
         command = {"value": "bunx"}
 
         def terminalize(*args: object, **_kwargs: object) -> codex_stop.ExitedCodexShell:
-            case.task.write_bytes(case.task.read_bytes() + b"concurrent change\n")
+            case.task.write_text(
+                task_text(target=prerequisite.TARGET, pending_items=tuple(reversed(prerequisite.CANONICAL_CARRIER_OPEN_ITEMS))),
+                encoding="utf-8",
+            )
             callback = args[6]
             assert callable(callback)
             callback()
@@ -827,6 +893,42 @@ class Source1290PrerequisiteTests(unittest.TestCase):
         ):
             prerequisite.reconcile(case.args)
         self.assertEqual("prepared", json.loads(case.terminal_receipt.read_bytes())["phase"])
+
+    def test_canonical_source_head_observation_accepts_fresh_and_rejects_stale(self) -> None:
+        temporary, case = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        self.assertEqual("2e168e0744c976fad65308633e157cbe3942c107", prerequisite.CANONICAL_SOURCE_HEAD)
+        with patch.dict(os.environ, {"HOME": str(Path(temporary.name) / "untrusted-home")}):
+            self.assertEqual(prerequisite.CANONICAL_SOURCE_ROOT, prerequisite.canonical_source_root())
+        observation = subprocess.CompletedProcess([], 0, f"{prerequisite.CANONICAL_SOURCE_HEAD}\n", "")
+        with patch.object(subprocess, "run", return_value=observation) as run:
+            self.assertEqual(prerequisite.CANONICAL_SOURCE_HEAD, prerequisite.git_head(prerequisite.CANONICAL_SOURCE_ROOT))
+        run.assert_called_once_with(
+            ["git", "-C", str(prerequisite.CANONICAL_SOURCE_ROOT), "rev-parse", "--verify", "HEAD"],
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+
+        command = {"value": "bunx"}
+        with case.patches(command), patch.object(prerequisite, "git_head", return_value=case.args.source_head) as observe:
+            binding = prerequisite.source_binding(case.args)
+            self.assertEqual(case.args.source_head, binding["head"])
+            stale = replace(case.args, source_head="543475ccf538d3b27114cf4f2f3e257b4790ace3")
+            with self.assertRaisesRegex(prerequisite.PrerequisiteError, "not the canonical Source-1290 observation"):
+                prerequisite.source_binding(stale)
+        observe.assert_called_once_with(SOURCE_ROOT)
+
+        with (
+            case.patches(command),
+            patch.object(prerequisite, "git_head", return_value="543475ccf538d3b27114cf4f2f3e257b4790ace3"),
+            patch.object(prerequisite, "terminalize_bound_codex_to_shell") as terminalize,
+            self.assertRaisesRegex(prerequisite.PrerequisiteError, "source repository HEAD drifted"),
+        ):
+            prerequisite.reconcile(case.args)
+        terminalize.assert_not_called()
+        self.assertFalse(case.terminal_receipt.exists())
 
     def test_source_head_change_after_intent_is_detected_before_input(self) -> None:
         temporary, case = self.fixture()
@@ -941,11 +1043,11 @@ class Source1290PrerequisiteTests(unittest.TestCase):
             patch.object(prerequisite, "terminalize_bound_codex_to_shell") as terminalize,
             patch.object(prerequisite, "validate_exited_codex_shell", return_value=CAPTURE_SHA256),
         ):
-            completed = prerequisite.reconcile(case.args)
+            terminalized = prerequisite.reconcile(case.args)
             replay = prerequisite.reconcile(case.args)
         terminalize.assert_not_called()
-        self.assertEqual(completed, replay)
-        self.assertEqual("completed", json.loads(completed)["phase"])
+        self.assertEqual(terminalized, replay)
+        self.assertEqual("terminalized", json.loads(terminalized)["phase"])
 
     def test_interruption_after_first_exit_input_while_codex_is_live_resumes_prepared_intent(self) -> None:
         temporary, case = self.fixture()
@@ -975,13 +1077,13 @@ class Source1290PrerequisiteTests(unittest.TestCase):
             patch.object(prerequisite, "terminalize_bound_codex_to_shell", side_effect=resumed) as terminalize,
             patch.object(prerequisite, "validate_exited_codex_shell", return_value=CAPTURE_SHA256),
         ):
-            completed = prerequisite.reconcile(case.args)
+            terminalized = prerequisite.reconcile(case.args)
             replay = prerequisite.reconcile(case.args)
         terminalize.assert_called_once()
-        self.assertEqual(completed, replay)
-        self.assertEqual("completed", json.loads(completed)["phase"])
+        self.assertEqual(terminalized, replay)
+        self.assertEqual("terminalized", json.loads(terminalized)["phase"])
 
-    def test_completed_replay_rejects_sibling_transaction_temporary(self) -> None:
+    def test_terminalized_replay_rejects_sibling_transaction_temporary(self) -> None:
         temporary, case = self.fixture()
         self.addCleanup(temporary.cleanup)
         command = {"value": "bunx"}
