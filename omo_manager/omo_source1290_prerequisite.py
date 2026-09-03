@@ -606,7 +606,7 @@ def active_target_owners(
 def git_head() -> str:
     environment = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
     result = subprocess.run(
-        ["git", "-C", str(CANONICAL_SOURCE_ROOT), "rev-parse", "HEAD"],
+        ["git", "-C", str(CANONICAL_SOURCE_ROOT), "rev-parse", "--verify", "HEAD"],
         text=True,
         capture_output=True,
         timeout=10,
@@ -1427,7 +1427,7 @@ def parse_args(argv: list[str] | None = None) -> Args:
     _ = parser.add_argument(
         "--source-head",
         required=True,
-        help="full lowercase SHA from: git -C /home/sichangheagent/.config rev-parse HEAD",
+        help="full lowercase SHA from: git -C /home/sichangheagent/.config rev-parse --verify HEAD",
     )
     _ = parser.add_argument("--terminal-receipt", type=Path, required=True)
     _ = parser.add_argument("--wait-s", type=float, default=10.0)

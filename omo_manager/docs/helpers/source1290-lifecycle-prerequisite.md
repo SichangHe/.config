@@ -27,9 +27,9 @@ carrier state
 
 source observation
 
-- observe with exactly `git -C /home/sichangheagent/.config rev-parse HEAD`
+- observe with exactly `git -C /home/sichangheagent/.config rev-parse --verify HEAD`
 - pass that full 40-character lowercase output as the required `--source-head`; the helper contains no fixed accepted HEAD
-- the revision evidence was `c99d7d8a1b436f9f3e0d3bba20a75c8c84e8935f`; the former `2e168e0744c976fad65308633e157cbe3942c107` observation is stale, and either value must be rejected whenever it is not the live canonical HEAD
+- treat every observed live HEAD as diagnostic evidence only until the invocation supplies it; no observed SHA is durable authorization
 - remove all caller `GIT_*` environment overrides before observation and reject malformed, abbreviated, uppercase, stale, or different claims
 - observe HEAD before and after individually authenticating every source file, then repeat the same source binding at every prepared, terminalized, and pre-input/pre-receipt custody revalidation gate
 

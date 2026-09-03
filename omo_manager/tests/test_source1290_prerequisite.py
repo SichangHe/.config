@@ -34,8 +34,8 @@ PANE_ID = "%3389"
 PANE_PID = 3176274
 PANE_START_TICKS = 91827364
 CAPTURE_SHA256 = "c" * 64
-OBSERVED_SOURCE_HEAD = "c99d7d8a1b436f9f3e0d3bba20a75c8c84e8935f"
-STALE_SOURCE_HEAD = "2e168e0744c976fad65308633e157cbe3942c107"
+EXPECTED_SOURCE_HEAD = "a" * 40
+OTHER_SOURCE_HEAD = "b" * 40
 
 
 def digest(payload: bytes) -> str:
@@ -44,7 +44,7 @@ def digest(payload: bytes) -> str:
 
 def repository_head(root: Path) -> str:
     result = subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
         text=True,
         capture_output=True,
         timeout=10,
@@ -971,7 +971,7 @@ class Source1290PrerequisiteTests(unittest.TestCase):
         temporary, _case = self.fixture()
         self.addCleanup(temporary.cleanup)
         self.assertEqual(Path("/home/sichangheagent/.config"), prerequisite.CANONICAL_SOURCE_ROOT)
-        observation = subprocess.CompletedProcess([], 0, f"{OBSERVED_SOURCE_HEAD}\n", "")
+        observation = subprocess.CompletedProcess([], 0, f"{EXPECTED_SOURCE_HEAD}\n", "")
         overrides = {
             "GIT_COMMON_DIR": str(SOURCE_ROOT / ".git"),
             "GIT_DIR": str(SOURCE_ROOT / ".git"),
@@ -979,11 +979,11 @@ class Source1290PrerequisiteTests(unittest.TestCase):
             "HOME": str(Path(temporary.name) / "untrusted-home"),
         }
         with patch.dict(os.environ, overrides), patch.object(subprocess, "run", return_value=observation) as run:
-            self.assertEqual(OBSERVED_SOURCE_HEAD, prerequisite.git_head())
+            self.assertEqual(EXPECTED_SOURCE_HEAD, prerequisite.git_head())
         run.assert_called_once()
         positional, keywords = run.call_args
         self.assertEqual(
-            (["git", "-C", "/home/sichangheagent/.config", "rev-parse", "HEAD"],),
+            (["git", "-C", "/home/sichangheagent/.config", "rev-parse", "--verify", "HEAD"],),
             positional,
         )
         self.assertEqual("untrusted-home", Path(keywords["env"]["HOME"]).name)
@@ -993,15 +993,31 @@ class Source1290PrerequisiteTests(unittest.TestCase):
             {name: value for name, value in keywords.items() if name != "env"},
         )
 
+    def test_git_head_rejects_command_failure_and_noncanonical_output(self) -> None:
+        observations = {
+            "abbreviated": subprocess.CompletedProcess([], 0, f"{EXPECTED_SOURCE_HEAD[:12]}\n", ""),
+            "command failure": subprocess.CompletedProcess([], 128, "", "fatal"),
+            "malformed": subprocess.CompletedProcess([], 0, "not-a-sha\n", ""),
+            "multiple values": subprocess.CompletedProcess([], 0, f"{EXPECTED_SOURCE_HEAD}\n{OTHER_SOURCE_HEAD}\n", ""),
+            "uppercase": subprocess.CompletedProcess([], 0, f"{EXPECTED_SOURCE_HEAD.upper()}\n", ""),
+        }
+        for name, observation in observations.items():
+            with (
+                self.subTest(name=name),
+                patch.object(subprocess, "run", return_value=observation),
+                self.assertRaisesRegex(prerequisite.PrerequisiteError, "cannot authenticate the source repository HEAD"),
+            ):
+                prerequisite.git_head()
+
     def test_source_head_claim_accepts_current_and_rejects_stale_different_or_non_full_sha(self) -> None:
-        with patch.object(prerequisite, "git_head", return_value=OBSERVED_SOURCE_HEAD) as observe:
-            prerequisite.require_source_head(OBSERVED_SOURCE_HEAD)
-            for source_head in (STALE_SOURCE_HEAD, "f" * 40):
+        with patch.object(prerequisite, "git_head", return_value=EXPECTED_SOURCE_HEAD) as observe:
+            prerequisite.require_source_head(EXPECTED_SOURCE_HEAD)
+            for source_head in (OTHER_SOURCE_HEAD, "f" * 40):
                 with self.subTest(source_head=source_head), self.assertRaisesRegex(prerequisite.PrerequisiteError, "differs from --source-head"):
                     prerequisite.require_source_head(source_head)
         self.assertEqual(3, observe.call_count)
 
-        for source_head in (OBSERVED_SOURCE_HEAD[:12], OBSERVED_SOURCE_HEAD.upper(), "not-a-sha"):
+        for source_head in (EXPECTED_SOURCE_HEAD[:12], EXPECTED_SOURCE_HEAD.upper(), "not-a-sha"):
             with (
                 self.subTest(source_head=source_head),
                 patch.object(prerequisite, "git_head") as observe,
@@ -1015,16 +1031,16 @@ class Source1290PrerequisiteTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         with (
             patch.object(prerequisite, "SOURCE1290_AUDIT_SHA256", case.args.completed_audit_sha256),
-            patch.object(prerequisite, "git_head", return_value=OBSERVED_SOURCE_HEAD),
+            patch.object(prerequisite, "git_head", return_value=EXPECTED_SOURCE_HEAD),
         ):
-            parsed = prerequisite.parse_args(case.cli_arguments(OBSERVED_SOURCE_HEAD))
-            self.assertEqual(OBSERVED_SOURCE_HEAD, parsed.source_head)
-            for source_head in (STALE_SOURCE_HEAD, "f" * 40, OBSERVED_SOURCE_HEAD[:12], OBSERVED_SOURCE_HEAD.upper(), "not-a-sha"):
+            parsed = prerequisite.parse_args(case.cli_arguments(EXPECTED_SOURCE_HEAD))
+            self.assertEqual(EXPECTED_SOURCE_HEAD, parsed.source_head)
+            for source_head in (OTHER_SOURCE_HEAD, "f" * 40, EXPECTED_SOURCE_HEAD[:12], EXPECTED_SOURCE_HEAD.upper(), "not-a-sha"):
                 with self.subTest(source_head=source_head), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                     prerequisite.parse_args(case.cli_arguments(source_head))
             for option in ("--source-root", "--source-ref", "--work-tree"):
                 with self.subTest(option=option), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-                    prerequisite.parse_args([*case.cli_arguments(OBSERVED_SOURCE_HEAD), option, str(SOURCE_ROOT)])
+                    prerequisite.parse_args([*case.cli_arguments(EXPECTED_SOURCE_HEAD), option, str(SOURCE_ROOT)])
 
     def test_source_binding_authenticates_every_installed_source_file(self) -> None:
         temporary, case = self.fixture()
