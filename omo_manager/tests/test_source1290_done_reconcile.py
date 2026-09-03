@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import os
 import tempfile
@@ -10,7 +11,7 @@ from unittest.mock import patch
 
 import yaml
 
-from omo_manager.omo_source1290_done_reconcile import Args, SOURCE1290_EXCERPT, parse_args, reconcile, source1290_authority
+from omo_manager.omo_source1290_done_reconcile import Args, SOURCE1290_EXCERPT, parse_args, reconcile, source1290_authority, validate_completed_audit
 from omo_manager.omo_task_metadata import TaskFrontmatterError, parse_task_metadata
 from omo_manager.omo_task_status import Args as StatusArgs
 from omo_manager.omo_task_status import recover_exited_shell_done
@@ -19,6 +20,20 @@ PANE_ID = "%42"
 SESSION_ID = "11111111-2222-3333-4444-555555555555"
 REPORT_TOKEN = "accepted-report-token"
 CAPTURE_SHA256 = "e" * 64
+# 🧑 Human Source `manager_mail/85c5dff58359-1290.txt:3-4`: “Close the ‘memory’ thing. It is so old.”
+REAL_FIXTURE = Path(__file__).parent / "fixtures" / "source1290"
+REAL_FIXTURE_SHA256 = {
+    "completed-audit.yaml": "eafa5c27d35ea2dacb4c94a0c53619f06acfb66bef703bf63dc569ac7af5fedf",
+    "post-archive/TODO.md": "921da9ae60251af0e082c9d140d7b1f804f2f519dfdbe651c86a05d6e02f8503",
+    "post-archive/mem1290_auth.md": "86e0cbe819e7b1d0f2899d35b903744209222d9eaa46ca8e6929bb63af1ec30a",
+    "post-archive/memory_auth_1290.md": "3a0291e6ea4c6aa8ef59055d65e97c53a8468d1a29d6e41c9aad7e760f59c811",
+    "post-archive/202608/old_todos.md": "5203a0a09617a417543abd121eac39efc44fb6ddef101366ae7de6042df29c83",
+    "post-archive/202608/memory_research_mgr.md": "d2ae03a9e19f981ec43c6b8527fca1475a31a7c0593611c8ac6f36dbb392e705",
+    "post-archive/202608/transcription_sw.md": "a01fec08cfdcab16755a5d44c5ae78fde5110b05967ed7b0c324bba55cc6bea1",
+    "post-archive/202608/mem1290_eval.md": "79ff9856392ca2e0875d825359098f48855a47a9d25a74eb944b02c9ee214bab",
+    "post-archive/202608/mem1290_fix.md": "6a025f0867eede1f32284cb6badbe6075adc6e09e041e3b93de31739b3cd95d9",
+    "post-archive/202608/manager_mail/85c5dff58359-1290.txt.b64": "0b33b7c6fd2e90680eec166668fdf2abcdc7cc45b94bd660974d0bdb1995e169",
+}
 
 
 def sha256(payload: bytes) -> str:
@@ -90,6 +105,22 @@ def completed_audit(carrier: str, authority_sha256: str, carrier_sha256: str) ->
 
 
 class Source1290DoneReconcileTests(unittest.TestCase):
+    def test_real_audit_and_post_archive_fixture_matches_source_evidence(self) -> None:
+        for relative, expected_sha256 in REAL_FIXTURE_SHA256.items():
+            payload = (REAL_FIXTURE / relative).read_bytes()
+            if relative.endswith(".b64"):
+                payload = base64.b64decode(payload)
+            self.assertEqual(expected_sha256, sha256(payload), relative)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = validate_completed_audit(
+                (REAL_FIXTURE / "completed-audit.yaml").read_bytes(),
+                "mem1290_auth.md",
+                Path(tmp).resolve(),
+            )
+        self.assertEqual("ccb6a488394d01ac3687738b8117e46c6daaa5f9675bd776c9f7f48c3a3a1429", audit.memory_sha256)
+        self.assertEqual("cebfc885684e2281c15026a543472c1ac40b533f4343132dde805ad58c26af95", audit.transcription_sha256)
+
     def fixture(self, base: Path) -> tuple[Args, Path, Path, Path, Path]:
         root = base.resolve()
         carrier = root / "source1290_carrier.md"

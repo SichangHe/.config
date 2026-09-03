@@ -1,0 +1,1920 @@
+version: v1.0.0
+operation: cancel-shared-target
+state: prepared
+task: memory_research_mgr.md
+task_sha256: 2c6b91f92427bc1bfd5a692d92763ff6201e25f6d034154626dd98d94a438674
+source_task_text: "---\nversion: v1.0.0\nstatus: blocked\nblocked_on: paused by direct\
+  \ human shutdown instruction routed to 202607/periph_misc_mgr.md; non-human pane\
+  \ wl:32 closed and pending queue preserved for explicit resume; prior dependency\
+  \ preserved: 202607/mem_synth.md and 202607/dw1_chain_mgr.md\nrunat: wl:32\ntool:\
+  \ codex\nmanagerat: wl:30\nis_manager: true\npending_task_items:\n  - This is a\
+  \ research idea that we can explore around and see whether we can do a research\
+  \ project on we should aim towards prestigious top conferences in computer science.\
+  \ And it is related to previous explorations around browser engine agent research.\
+  \ Basically we need to find research directions that are worth pursuing and can\
+  \ be published. I am thinking that since the memory prices have gone up a lot and\
+  \ it turns out memory has been the bottleneck for a lot of compute. Especially Web\
+  \ and JavaScript. Maybe there are ways to automatically reduce memory usage by statically\
+  \ analyzing the JavaScript programs or by letting agents convert existing programs\
+  \ into ones that use constructs that save memory. So the basic idea is JavaScript\
+  \ programs take a lot of memory because everything is separately keep allocated.\
+  \ We could reduce memory usage if we move some of that to stack allocation, either\
+  \ with JavaScript built-in functionalities or with WebAssembly. I'm not sure exactly\
+  \ how to do it though, and whether it has been done. Another direction as closely\
+  \ related is browser optimization. We need to understand why Chrome and Firefox\
+  \ use much more memory than Safari does. But that is probably a JavaScript engine\
+  \ and just in time compiler difference and beyond our scope. For both of these ideas\
+  \ and directions, search online using personal browser setup browsers broadly with\
+  \ different search keywords and search engines. Discuss with ChatGPT. Explore relevant\
+  \ papers using Google Scholar. And come back with a high-level report while preserving\
+  \ relevant papers and notes. Let a smartest agent do this and discuss with some\
+  \ smartest and adversarial subagents.\n  - What does the rewrite do?\n  - What does\
+  \ the current code do?\n  - What is the architecture on a high level?\n  - How do\
+  \ we test it by moving some tasks onto this new control plane?\n  - Or do we have\
+  \ to do a big bang migration and move everything on to it\n  - I have found some\
+  \ other related projects should we try to pull the implementation details and overall\
+  \ designs from them before we start using this one.\n  - You said something about\
+  \ not knowing whether delivery happened. Shouldn\u2019t that be guaranteed by omni\
+  \ agent?\n  - Own one disposition for both retired DW1 Common Crawl records from\
+  \ BLOCKED_RECORD_DISPOSITIONS.md: choose a bounded rerun or explicit cancellation/terminal-failure\
+  \ for the failed smoke, then resume or cancel dataset enlargement accordingly. Preserve\
+  \ existing logs/artifacts, create no duplicate workers, and do not claim the failed\
+  \ smoke succeeded.\n  - Add to an auxiliary manager document how to query the amount\
+  \ of tokens left and let managers plan accordingly. Not sure exactly how, but start\
+  \ with something.\n  - Reviewers did not like our approach on relying only on Binoculars.\
+  \ That is why I am proposing to have three detectors. Try EVIL-Detect as well, if\
+  \ it matches our overall requirements.\n  - We should still have DW going amidst\
+  \ our token shortage. Tomorrow on August sixteenth, my research assistantship officially\
+  \ resumes and I should be working on DW. Do not spend too much token too fast; have\
+  \ one or two work happening in parallel at most.\n---\nCoordinate a publication-oriented\
+  \ research-direction investigation.\n\n- Preserve the human's exact research goals\
+  \ from the attached source email.\n- Delegate independent literature, browser/JavaScript\
+  \ systems, and feasibility investigations to multiple strongest available workers.\n\
+  - Require at least one adversarial worker to challenge novelty, scope, and top-conference\
+  \ viability.\n- Require broad personal-browser web searches using varied terms and\
+  \ search engines, Google Scholar paper exploration, and ChatGPT discussion as requested.\n\
+  - Preserve relevant papers and compact notes outside the work-log repository.\n\
+  - Synthesize a high-level report proposing concrete directions, prior art, novelty\
+  \ gaps, feasibility, evaluation plans, risks, and plausible prestigious venues.\n\
+  - Have a fresh one-shot eval worker judge the final result against the human's goal\
+  \ before closure; if it fails, launch a new implementation worker and a new eval\
+  \ worker.\n- Email the human directly with substantive updates and the final report;\
+  \ include `memory_research_mgr.md` in the subject.\n\nYou are the research submanager\
+  \ and must only route, track, and communicate; delegate all research and synthesis\
+  \ work. Keep high-level state in the task records and ensure all worker-owned artifacts\
+  \ have exactly one owner. Report to the upper manager only through a concise private\
+  \ `omo_report.sh` report using its allocated message file workflow.\n(Adversarial\
+  \ interim: whole-browser memory comparisons do not support engine-level attribution;\
+  \ the defensible browser direction is a controlled same-macOS pressure, lifecycle,\
+  \ and process-topology study. Generic stack allocation, JS-to-Wasm conversion, and\
+  \ generic agentic memory optimization already show major novelty collisions. Allocation\
+  \ and transformation challenges remain in progress.)\n(Adversarial workstream completed\
+  \ after an internal fix-and-rereview loop; the substantive memo was emailed to the\
+  \ human and preserved under /ssd1/sichangheagent/memadv/artifacts/. Search friction\
+  \ came from Google/Scholar authentication and CAPTCHA; primary repositories, Crossref,\
+  \ OpenAlex, and arXiv provided documented fallbacks. The browser-ChatGPT helper\
+  \ also needs more resilient model selection and a documented short-prompt fallback.)\n\
+  (Browser/runtime workstream completed after independent review and a macOS-accounting\
+  \ correction; the substantive memo was emailed to the human and preserved under\
+  \ /ssd1/sichangheagent/membrowser/artifacts/. Primary-source snapshots improved\
+  \ claim discipline. Reproducibility was hindered by search authentication/CAPTCHA,\
+  \ a failing generic search connector, publisher access failures, and ChatGPT model-picker/connection\
+  \ failures; a browser-research exporter for query, URL, excerpt, timestamp, denominator,\
+  \ and completed model response would help.)\n(Feasibility workstream completed after\
+  \ semantic-consistency fixes and independent review; the substantive memo and bounded\
+  \ experiments were emailed to the human and preserved under /ssd1/sichangheagent/memfeas/.\
+  \ The strongest surviving direction is verifier-checked, cross-engine packing of\
+  \ large long-lived homogeneous value-record collections, gated by a real-application\
+  \ candidate census and three-application manual-oracle study; TypedArrays are the\
+  \ primary backend and Wasm is an ablation. Search authentication/CAPTCHA, backend\
+  \ and Unicode failures, and ChatGPT timeout/shared-tab ambiguity suggest adding\
+  \ stable per-agent browser targets, resumable polling, and Unicode-safe extraction.)\n\
+  (Literature/novelty workstream completed with a clean reviewer rerun; the substantive\
+  \ memo was emailed to the human and preserved under /ssd1/sichangheagent/memlit/.\
+  \ Vocabulary-driven searches initially missed the closest collision; an exact-mechanism\
+  \ ChatGPT pass plus exact-title and forward-citation checks corrected the memo.\
+  \ Future searches should include mechanism phrases such as runtime columnar array\
+  \ transformation in JavaScript early, and the ChatGPT helper should capture completion\
+  \ state reliably.)\n(Synthesis worker 202607/mem_synth.md is running over all four\
+  \ read-only artifact sets. The fresh one-shot evaluator prompt was written before\
+  \ synthesis at /tmp/memory-research-synthesis.xAYQBD/eval.txt; its reserved workspace\
+  \ is /ssd1/sichangheagent/memeval and planned task is mem_eval.md. On pass it emails\
+  \ the complete report; on fail launch a new implementation worker and a new evaluator.)\n\
+  \n(record and delegate 202607/manager_mail/85c5dff58359-207.txt)\n(verified removed\
+  \ pending item: Forwarded the recurring browser-research failures and requested\
+  \ repairs to the upper manager through the private routed report workflow.)\n(Human\
+  \ follow-up launched 202607/mem_wasm_api.md in memwasmapi:0 for an independent WebAssembly-native\
+  \ Web API investigation. Its one-shot evaluation prompt was written before launch\
+  \ at /tmp/memory-wasm-api.K26ZM8/eval.txt; reserve /ssd1/sichangheagent/memwasmeval\
+  \ and 202607/mem_wasm_eval.md for the fresh evaluator after the worker reports completion.)\n\
+  \n(from agent memwasmapi:0 /tmp/omo-agent-messages-30033/agent_done_7118b1712cd53b8eab6ab58a9994aeb7f935916e1c26bc56ecaabf838bc22eb6.md)\n\
+  \n(from agent memwasmapi:0 /tmp/omo-agent-messages-30033/agent_done_ad8bc62df105ecad776fd5c41061a5e079d55e0ad58bde9b47eba96509410151.md)\n\
+  \n(from agent memwasmapi:0 /tmp/omo-agent-messages-30033/agent_done_f3f2f1ea577e3ef28f81fce48c9b90ef78cc793d7e64305fd9291996136458f0.md)\n\
+  \n(from agent memwasmapi:0 /tmp/omo-agent-messages-30033/agent_done_90ff66b4063ce6770ff620fb7889d3cc11d6835aacad6b646ab97f0870a9770f.md)\n\
+  \n(record and delegate manager_mail/85c5dff58359-211.txt)\n(pending marker cleared\
+  \ line=49: existing-owner-item: The requested high-level ELI5 explanation is already\
+  \ tracked by the active parent queue and queued to the synthesis worker.)\n(human\
+  \ ack sent for pending marker clear line=49: existing-owner-item: The requested\
+  \ high-level ELI5 explanation is already tracked by the active parent queue and\
+  \ queued to the synthesis worker.)\n(pending marker cleared line=48: report-only:\
+  \ Consumed final WebAssembly-native Web API report; promised artifacts, reviewer\
+  \ clearance, and human delivery require manager verification before lifecycle closure.)\n\
+  (pending marker cleared line=45: report-only: Consumed publication-novelty audit\
+  \ report; it is supporting evidence for the active WebAssembly-native Web API task,\
+  \ not a new pending request.)\n(pending marker cleared line=42: report-only: Consumed\
+  \ Chromium cost investigation report; it is supporting evidence for the active WebAssembly-native\
+  \ Web API task, not a new pending request.)\n(pending marker cleared line=39: report-only:\
+  \ Consumed standards and proposal prior-art audit report; it is supporting evidence\
+  \ for the active WebAssembly-native Web API task, not a new pending request.)\n\
+  (Verified the completed WebAssembly-native Web API memo, source map, ELI5 summary,\
+  \ and search log are nonempty; its fresh one-shot evaluator is running in memwasmeval:0\
+  \ under mem_wasm_eval.md. The research task is blocked on that evaluator before\
+  \ human-pending next-step handling.)\n(verified removed pending item: Forwarded\
+  \ the exact immediate-blockage-reporting requirement and related browser/helper\
+  \ defects to the upper manager through the private routed report workflow for infrastructure\
+  \ ownership.)\n(verified removed pending item: Verified the standalone ELI5 artifact\
+  \ is nonempty, the synthesis worker queue is empty after independent review, and\
+  \ the worker reported successful direct email delivery with the required task filename\
+  \ in the subject.)\n(The first WebAssembly one-shot evaluator failed on broken or\
+  \ misattributed authoritative links, a broken S20 anchor, and an unsupported universal\
+  \ prototype claim. A new revision owner is running under 202607/mem_wasm_rev.md\
+  \ in memwasmrev:0; a fresh one-shot evaluator prompt was written before launch at\
+  \ /tmp/memory-wasm-revision.n8QHbL/eval.txt, reserving 202607/mem_wasm_eval2.md\
+  \ and /ssd1/sichangheagent/memwasmeval2.)\n(Verified all five corrected WebAssembly\
+  \ revision artifacts are nonempty and the revision queue is clear. The fresh second\
+  \ one-shot evaluator is running under 202607/mem_wasm_eval2.md in memwasmeval2:0;\
+  \ all dependent synthesis and WebAssembly tasks now block on that evaluator.)\n\
+  (The second WebAssembly one-shot evaluator failed on statistical decision rules,\
+  \ an unrealizable batching baseline, Mozilla status, inconsistent Chromium/V8 pins,\
+  \ and non-operational causal ablations. A new revision owner is running under 202607/mem_wasm_rev2.md\
+  \ in memwasmrev2:0; the fresh third evaluator prompt was written before launch at\
+  \ /tmp/memory-wasm-revision2.jW4nfS/eval.txt, reserving 202607/mem_wasm_eval3.md\
+  \ and /ssd1/sichangheagent/memwasmeval3.)\n(Verified the second WebAssembly revision's\
+  \ corrected memo, source map, ELI5 summary, search log, revision log, source-capture\
+  \ manifest, and prewritten evaluator prompt are nonempty and its queue is clear.\
+  \ The fresh third evaluator is running under 202607/mem_wasm_eval3.md in memwasmeval3:0;\
+  \ all dependent tasks block on it.)\n(The third WebAssembly one-shot evaluator failed\
+  \ on familywise statistical control and power, reverse-effect equivalence, batching\
+  \ CPU design, reproducible application scheduling and randomness, three source anchors,\
+  \ and ELI5 accessibility. A new revision owner is running under 202607/mem_wasm_rev3.md\
+  \ in memwasmrev3:0; the fresh fourth evaluator prompt was written before launch\
+  \ at /tmp/memory-wasm-revision3.dZTkG6/eval.txt, reserving 202607/mem_wasm_eval4.md\
+  \ and /ssd1/sichangheagent/memwasmeval4.)\n(verified removed pending item: Launched\
+  \ 202607/mem_wasm_chain_mgr.md at memwasmchain:0 and verified 202607/mem_wasm_api.md,\
+  \ 202607/mem_wasm_rev.md, and 202607/mem_wasm_rev2.md now have managerat memwasmchain:0;\
+  \ wl:32 directly retains only 202607/mem_synth.md, 202607/mem_wasm_eval4.md, 202607/mem_wasm_rev3.md,\
+  \ and the new submanager.)\n\n(from agent memwasmrev4:0 /tmp/omo-agent-messages-30033/agent_done_794355fbdd38a76d728d0096dc4c1c08a6d93c82534effb4c5c6983178071eb7.md)\n\
+  (pending marker cleared line=62: report-only: Cleared a report-only duplicate synchronization\
+  \ audit; 202607/mem_wasm_rev4.md already owns the integration work.)\n(verified\
+  \ removed pending item: Verified 202607/mem_wasm_api.md and 202607/mem_wasm_eval6.md\
+  \ are both done with empty queues after evaluator-six PASS; the accepted research-track\
+  \ result was emailed and all revision predecessors were closed.)\n(verified removed\
+  \ pending item: Verified the requested WebAssembly-native Web API work was recorded\
+  \ in 202607/mem_wasm_api.md, carried through six evaluator rounds to PASS, emailed\
+  \ to the human, and closed with an empty queue.)\n\n(record and delegate 202607/manager_mail/85c5dff58359-379.txt)\n\
+  (verified removed pending item: Verified 202607/dw1_detector_survey.md is already\
+  \ listed under TODO human pending, recorded the human reaffirmation in that task,\
+  \ and acknowledged the same email thread.)\n\n(record and delegate manager_mail/85c5dff58359-394.txt)\n\
+  (verified removed pending item: Recorded the authoritative scope clarification,\
+  \ delivered it to cliquota:0, verified the worker accepted it and resumed the preserved\
+  \ OpenAI/ChatGPT-only implementation, and restored task status to running.)\n\n\
+  (record and delegate manager_mail/85c5dff58359-431.txt)\n(verified removed pending\
+  \ item: Recorded and assigned together with the requested context-free status mapping\
+  \ to 202607/omni_status.md; verified dedicated worker launch in omstat:0 and direct\
+  \ human-email ownership.)\n(verified removed pending item: Recorded and assigned\
+  \ to 202607/omni_status.md; verified dedicated worker launch in omstat:0 to answer\
+  \ the original-goal mapping and canary clarification directly to the human.)\n\n\
+  (record and delegate 202607/manager_mail/85c5dff58359-433.txt)\n(pending marker\
+  \ cleared line=83: superseded: Superseded by verified dedicated worker launch 202607/omni_explain.md\
+  \ at omarch:0 after wl:32 accepted and recorded all seven exact questions; no duplicate\
+  \ paste required.)\n(human ack sent for pending marker clear line=83: superseded:\
+  \ Superseded by verified dedicated worker launch 202607/omni_explain.md at omarch:0\
+  \ after wl:32 accepted and recorded all seven exact questions; no duplicate paste\
+  \ required.)\n\n(record and delegate manager_mail/85c5dff58359-454.txt)\n(verified\
+  \ removed pending item: Recorded and delegated to 202607/omni_alt_review.md; verified\
+  \ omalt:0 launch with ownership of source verification, comparison, proposed architecture\
+  \ revision, independent review, and direct human approval email.)\n(verified removed\
+  \ pending item: Preserved as an authoritative constraint in 202607/omni_alt_review.md;\
+  \ verified worker launch explicitly prohibits replacing the custom Omnigent-based\
+  \ direction.)\n\n(record and delegate 202607/manager_mail/85c5dff58359-462.txt)\n\
+  (verified removed pending item: Recorded in 202607/amh_arch_revision.md and verified\
+  \ amhrev:0 running with ownership of the exact Human email, Omnigent API verification,\
+  \ complete non-governing AMH revision, independent reviewer loop, and direct Human\
+  \ approval email; no policy or runtime change authorized.)\n(verified removed pending\
+  \ item: Recorded in 202607/amh_arch_revision.md and verified amhrev:0 running with\
+  \ ownership of the exact Human email, Omnigent API verification, complete non-governing\
+  \ AMH revision, independent reviewer loop, and direct Human approval email; no policy\
+  \ or runtime change authorized.)\n(verified removed pending item: Recorded in 202607/amh_arch_revision.md\
+  \ and verified amhrev:0 running with ownership of the exact Human email, Omnigent\
+  \ API verification, complete non-governing AMH revision, independent reviewer loop,\
+  \ and direct Human approval email; no policy or runtime change authorized.)\n(verified\
+  \ removed pending item: Recorded in 202607/amh_arch_revision.md and verified amhrev:0\
+  \ running with ownership of the exact Human email, Omnigent API verification, complete\
+  \ non-governing AMH revision, independent reviewer loop, and direct Human approval\
+  \ email; no policy or runtime change authorized.)\n(verified removed pending item:\
+  \ Recorded in 202607/amh_arch_revision.md and verified amhrev:0 running with ownership\
+  \ of the exact Human email, Omnigent API verification, complete non-governing AMH\
+  \ revision, independent reviewer loop, and direct Human approval email; no policy\
+  \ or runtime change authorized.)\n(verified removed pending item: Recorded in 202607/amh_arch_revision.md\
+  \ and verified amhrev:0 running with ownership of the exact Human email, Omnigent\
+  \ API verification, complete non-governing AMH revision, independent reviewer loop,\
+  \ and direct Human approval email; no policy or runtime change authorized.)\n(verified\
+  \ removed pending item: Recorded in 202607/amh_arch_revision.md and verified amhrev:0\
+  \ running with ownership of the exact Human email, Omnigent API verification, complete\
+  \ non-governing AMH revision, independent reviewer loop, and direct Human approval\
+  \ email; no policy or runtime change authorized.)\n(verified removed pending item:\
+  \ Recorded in 202607/amh_arch_revision.md and verified amhrev:0 running with ownership\
+  \ of the exact Human email, Omnigent API verification, complete non-governing AMH\
+  \ revision, independent reviewer loop, and direct Human approval email; no policy\
+  \ or runtime change authorized.)\n(verified removed pending item: Recorded in 202607/amh_arch_revision.md\
+  \ and verified amhrev:0 running with ownership of the exact Human email, Omnigent\
+  \ API verification, complete non-governing AMH revision, independent reviewer loop,\
+  \ and direct Human approval email; no policy or runtime change authorized.)\n\n\
+  (record and delegate 202607/manager_mail/85c5dff58359-464.txt)\n(verified removed\
+  \ pending item: Recorded and delegated under 202607/amh_arch_mgr.md: 202607/amh_current_audit.md\
+  \ owns current-system reconstruction, 202607/amh_markdown_views.md owns the authorized\
+  \ nonproduction SQLite/WAL generated-Markdown implementation, and 202607/amh_arch_revision.md\
+  \ owns the complete reviewed non-governing proposal and Human answers; all launches\
+  \ and managerat migration to amhmgr:0 were verified, and no production/runtime switch\
+  \ is authorized.)\n(verified removed pending item: Recorded and delegated under\
+  \ 202607/amh_arch_mgr.md: 202607/amh_current_audit.md owns current-system reconstruction,\
+  \ 202607/amh_markdown_views.md owns the authorized nonproduction SQLite/WAL generated-Markdown\
+  \ implementation, and 202607/amh_arch_revision.md owns the complete reviewed non-governing\
+  \ proposal and Human answers; all launches and managerat migration to amhmgr:0 were\
+  \ verified, and no production/runtime switch is authorized.)\n(verified removed\
+  \ pending item: Recorded and delegated under 202607/amh_arch_mgr.md: 202607/amh_current_audit.md\
+  \ owns current-system reconstruction, 202607/amh_markdown_views.md owns the authorized\
+  \ nonproduction SQLite/WAL generated-Markdown implementation, and 202607/amh_arch_revision.md\
+  \ owns the complete reviewed non-governing proposal and Human answers; all launches\
+  \ and managerat migration to amhmgr:0 were verified, and no production/runtime switch\
+  \ is authorized.)\n(verified removed pending item: Recorded and delegated under\
+  \ 202607/amh_arch_mgr.md: 202607/amh_current_audit.md owns current-system reconstruction,\
+  \ 202607/amh_markdown_views.md owns the authorized nonproduction SQLite/WAL generated-Markdown\
+  \ implementation, and 202607/amh_arch_revision.md owns the complete reviewed non-governing\
+  \ proposal and Human answers; all launches and managerat migration to amhmgr:0 were\
+  \ verified, and no production/runtime switch is authorized.)\n(verified removed\
+  \ pending item: Recorded and delegated under 202607/amh_arch_mgr.md: 202607/amh_current_audit.md\
+  \ owns current-system reconstruction, 202607/amh_markdown_views.md owns the authorized\
+  \ nonproduction SQLite/WAL generated-Markdown implementation, and 202607/amh_arch_revision.md\
+  \ owns the complete reviewed non-governing proposal and Human answers; all launches\
+  \ and managerat migration to amhmgr:0 were verified, and no production/runtime switch\
+  \ is authorized.)\n(verified removed pending item: Recorded and delegated under\
+  \ 202607/amh_arch_mgr.md: 202607/amh_current_audit.md owns current-system reconstruction,\
+  \ 202607/amh_markdown_views.md owns the authorized nonproduction SQLite/WAL generated-Markdown\
+  \ implementation, and 202607/amh_arch_revision.md owns the complete reviewed non-governing\
+  \ proposal and Human answers; all launches and managerat migration to amhmgr:0 were\
+  \ verified, and no production/runtime switch is authorized.)\n(verified removed\
+  \ pending item: Recorded and delegated under 202607/amh_arch_mgr.md: 202607/amh_current_audit.md\
+  \ owns current-system reconstruction, 202607/amh_markdown_views.md owns the authorized\
+  \ nonproduction SQLite/WAL generated-Markdown implementation, and 202607/amh_arch_revision.md\
+  \ owns the complete reviewed non-governing proposal and Human answers; all launches\
+  \ and managerat migration to amhmgr:0 were verified, and no production/runtime switch\
+  \ is authorized.)\n(verified removed pending item: Recorded and delegated under\
+  \ 202607/amh_arch_mgr.md: 202607/amh_current_audit.md owns current-system reconstruction,\
+  \ 202607/amh_markdown_views.md owns the authorized nonproduction SQLite/WAL generated-Markdown\
+  \ implementation, and 202607/amh_arch_revision.md owns the complete reviewed non-governing\
+  \ proposal and Human answers; all launches and managerat migration to amhmgr:0 were\
+  \ verified, and no production/runtime switch is authorized.)\n(verified removed\
+  \ pending item: Recorded and delegated under 202607/amh_arch_mgr.md: 202607/amh_current_audit.md\
+  \ owns current-system reconstruction, 202607/amh_markdown_views.md owns the authorized\
+  \ nonproduction SQLite/WAL generated-Markdown implementation, and 202607/amh_arch_revision.md\
+  \ owns the complete reviewed non-governing proposal and Human answers; all launches\
+  \ and managerat migration to amhmgr:0 were verified, and no production/runtime switch\
+  \ is authorized.)\n(verified removed pending item: Recorded and delegated under\
+  \ 202607/amh_arch_mgr.md: 202607/amh_current_audit.md owns current-system reconstruction,\
+  \ 202607/amh_markdown_views.md owns the authorized nonproduction SQLite/WAL generated-Markdown\
+  \ implementation, and 202607/amh_arch_revision.md owns the complete reviewed non-governing\
+  \ proposal and Human answers; all launches and managerat migration to amhmgr:0 were\
+  \ verified, and no production/runtime switch is authorized.)\n(verified removed\
+  \ pending item: Recorded and delegated under 202607/amh_arch_mgr.md: 202607/amh_current_audit.md\
+  \ owns current-system reconstruction, 202607/amh_markdown_views.md owns the authorized\
+  \ nonproduction SQLite/WAL generated-Markdown implementation, and 202607/amh_arch_revision.md\
+  \ owns the complete reviewed non-governing proposal and Human answers; all launches\
+  \ and managerat migration to amhmgr:0 were verified, and no production/runtime switch\
+  \ is authorized.)\n(verified removed pending item: Recorded and delegated under\
+  \ 202607/amh_arch_mgr.md: 202607/amh_current_audit.md owns current-system reconstruction,\
+  \ 202607/amh_markdown_views.md owns the authorized nonproduction SQLite/WAL generated-Markdown\
+  \ implementation, and 202607/amh_arch_revision.md owns the complete reviewed non-governing\
+  \ proposal and Human answers; all launches and managerat migration to amhmgr:0 were\
+  \ verified, and no production/runtime switch is authorized.)\n(verified removed\
+  \ pending item: Recorded and delegated under 202607/amh_arch_mgr.md: 202607/amh_current_audit.md\
+  \ owns current-system reconstruction, 202607/amh_markdown_views.md owns the authorized\
+  \ nonproduction SQLite/WAL generated-Markdown implementation, and 202607/amh_arch_revision.md\
+  \ owns the complete reviewed non-governing proposal and Human answers; all launches\
+  \ and managerat migration to amhmgr:0 were verified, and no production/runtime switch\
+  \ is authorized.)\n(verified removed pending item: Recorded and delegated under\
+  \ 202607/amh_arch_mgr.md: 202607/amh_current_audit.md owns current-system reconstruction,\
+  \ 202607/amh_markdown_views.md owns the authorized nonproduction SQLite/WAL generated-Markdown\
+  \ implementation, and 202607/amh_arch_revision.md owns the complete reviewed non-governing\
+  \ proposal and Human answers; all launches and managerat migration to amhmgr:0 were\
+  \ verified, and no production/runtime switch is authorized.)\n(verified removed\
+  \ pending item: Recorded and delegated under 202607/amh_arch_mgr.md: 202607/amh_current_audit.md\
+  \ owns current-system reconstruction, 202607/amh_markdown_views.md owns the authorized\
+  \ nonproduction SQLite/WAL generated-Markdown implementation, and 202607/amh_arch_revision.md\
+  \ owns the complete reviewed non-governing proposal and Human answers; all launches\
+  \ and managerat migration to amhmgr:0 were verified, and no production/runtime switch\
+  \ is authorized.)\n(verified removed pending item: Recorded and delegated under\
+  \ 202607/amh_arch_mgr.md: 202607/amh_current_audit.md owns current-system reconstruction,\
+  \ 202607/amh_markdown_views.md owns the authorized nonproduction SQLite/WAL generated-Markdown\
+  \ implementation, and 202607/amh_arch_revision.md owns the complete reviewed non-governing\
+  \ proposal and Human answers; all launches and managerat migration to amhmgr:0 were\
+  \ verified, and no production/runtime switch is authorized.)\n(verified removed\
+  \ pending item: Recorded and delegated under 202607/amh_arch_mgr.md: 202607/amh_current_audit.md\
+  \ owns current-system reconstruction, 202607/amh_markdown_views.md owns the authorized\
+  \ nonproduction SQLite/WAL generated-Markdown implementation, and 202607/amh_arch_revision.md\
+  \ owns the complete reviewed non-governing proposal and Human answers; all launches\
+  \ and managerat migration to amhmgr:0 were verified, and no production/runtime switch\
+  \ is authorized.)\n(verified removed pending item: Recorded and delegated under\
+  \ 202607/amh_arch_mgr.md: 202607/amh_current_audit.md owns current-system reconstruction,\
+  \ 202607/amh_markdown_views.md owns the authorized nonproduction SQLite/WAL generated-Markdown\
+  \ implementation, and 202607/amh_arch_revision.md owns the complete reviewed non-governing\
+  \ proposal and Human answers; all launches and managerat migration to amhmgr:0 were\
+  \ verified, and no production/runtime switch is authorized.)\n(verified removed\
+  \ pending item: Recorded and delegated under 202607/amh_arch_mgr.md: 202607/amh_current_audit.md\
+  \ owns current-system reconstruction, 202607/amh_markdown_views.md owns the authorized\
+  \ nonproduction SQLite/WAL generated-Markdown implementation, and 202607/amh_arch_revision.md\
+  \ owns the complete reviewed non-governing proposal and Human answers; all launches\
+  \ and managerat migration to amhmgr:0 were verified, and no production/runtime switch\
+  \ is authorized.)\n(verified removed pending item: Recorded and delegated under\
+  \ 202607/amh_arch_mgr.md: 202607/amh_current_audit.md owns current-system reconstruction,\
+  \ 202607/amh_markdown_views.md owns the authorized nonproduction SQLite/WAL generated-Markdown\
+  \ implementation, and 202607/amh_arch_revision.md owns the complete reviewed non-governing\
+  \ proposal and Human answers; all launches and managerat migration to amhmgr:0 were\
+  \ verified, and no production/runtime switch is authorized.)\n(verified removed\
+  \ pending item: Recorded and delegated under 202607/amh_arch_mgr.md: 202607/amh_current_audit.md\
+  \ owns current-system reconstruction, 202607/amh_markdown_views.md owns the authorized\
+  \ nonproduction SQLite/WAL generated-Markdown implementation, and 202607/amh_arch_revision.md\
+  \ owns the complete reviewed non-governing proposal and Human answers; all launches\
+  \ and managerat migration to amhmgr:0 were verified, and no production/runtime switch\
+  \ is authorized.)\n(verified removed pending item: Recorded and delegated under\
+  \ 202607/amh_arch_mgr.md: 202607/amh_current_audit.md owns current-system reconstruction,\
+  \ 202607/amh_markdown_views.md owns the authorized nonproduction SQLite/WAL generated-Markdown\
+  \ implementation, and 202607/amh_arch_revision.md owns the complete reviewed non-governing\
+  \ proposal and Human answers; all launches and managerat migration to amhmgr:0 were\
+  \ verified, and no production/runtime switch is authorized.)\n(verified removed\
+  \ pending item: Recorded and delegated under 202607/amh_arch_mgr.md: 202607/amh_current_audit.md\
+  \ owns current-system reconstruction, 202607/amh_markdown_views.md owns the authorized\
+  \ nonproduction SQLite/WAL generated-Markdown implementation, and 202607/amh_arch_revision.md\
+  \ owns the complete reviewed non-governing proposal and Human answers; all launches\
+  \ and managerat migration to amhmgr:0 were verified, and no production/runtime switch\
+  \ is authorized.)\n\n(record and delegate manager_mail/85c5dff58359-531.txt)\n(verified\
+  \ removed pending item: Verified 202607/cligate_quota.md is done with an empty queue;\
+  \ durable completion evidence records commit d7b6140, 48 focused tests, independent\
+  \ reviewer PASS, rollback-capable localhost canary deployment, test isolation, and\
+  \ prior completion email. Sent the requested concise status in subject 'Re: cligate_quota.md\
+  \ needs settings restore' and email_me.py returned Email sent.)\n\n(record and delegate\
+  \ manager_mail/85c5dff58359-535.txt)\n(verified removed pending item: Verified cligate-canary.service\
+  \ is active on 127.0.0.1:18181 at reviewed commit 6588bea; the worker sent exact\
+  \ web/API/CLI access instructions in the existing Human thread.)\n(verified removed\
+  \ pending item: Verified reviewed per-account ChatGPT receipt accounting is deployed\
+  \ at commit 6588bea, fails closed on incomplete coverage and reset boundaries, and\
+  \ the Human received the current measured/count/estimate interpretation.)\n\n(from\
+  \ agent cligate-quota:0 /tmp/omo-agent-messages-30033/agent_done_450517296e0317cd90a9eb023defe0b70bf7662c5f7aefe770a024b0ae068a20.md)\n\
+  (verified removed pending item: Verified personal fork SichangHe/codeking-ai--cligate\
+  \ branch feature/quota-velocity matches reviewed commit 2262533; live canary ExecStart\
+  \ also uses release 2262533 with zero restarts.)\n(verified removed pending item:\
+  \ Verified 202607/dw1_detector_survey.md status done with empty queue; durable task\
+  \ evidence records completed reviewed research, pushed artifacts, later Qwen IRM/agreement\
+  \ and EchoPrompt/Steer-to-Detect follow-ups, and verified Gmail delivery UID 3182.)\n\
+  (verified removed pending item: Verified durable DW1 records identify and delivered\
+  \ the detector report in Gmail thread with exact subject Re: [dw1:1] 202607/dw1_detector_survey.md:\
+  \ recent detector update; survey task is done with empty queue.)\n\n(record and\
+  \ delegate manager_mail/85c5dff58359-658.txt)\n\n(record and delegate manager_mail/85c5dff58359-658.txt)\n\
+  \n(record and delegate manager_mail/85c5dff58359-658.txt)\n(verified removed pending\
+  \ item: Verified status/compression/Human-planning requests are recorded and delegated;\
+  \ read-only audit found the delay was one serial AMH lane plus delivery buffers.\
+  \ Core integration and the test-only inbox/priority prototype are now separated,\
+  \ with independent review retained and no live access enabled.)\n\n(record and delegate\
+  \ manager_mail/85c5dff58359-658.txt)\n(record and delegate manager_mail/85c5dff58359-658.txt)\n\
+  \n(pending marker cleared line=137: report-only: report-only: stale cligate-quota\
+  \ agent done marker already followed by verified completion evidence; no new pending\
+  \ item added.)\n(manager_mail/85c5dff58359-727.txt routed by root to new successor\
+  \ deployment task 202607/cligate_forecast_deploy_727.md at cligate-forecast-727:0;\
+  \ existing 202607/cligate_quota.md and 202607/cligate_forecast_followup_706.md remain\
+  \ closed.)\n\n(deduped 2 bare source pointer(s) for manager_mail/85c5dff58359-727.txt:\
+  \ manager_mail/85c5dff58359-727.txt is already routed to active successor deployment\
+  \ task 202607/cligate_forecast_deploy_727.md at cligate-forecast-727:0; duplicate\
+  \ bare source pointers are intake noise.)\n\n\n(deduped 2 bare source pointer(s)\
+  \ for manager_mail/85c5dff58359-727.txt: manager_mail/85c5dff58359-727.txt is already\
+  \ routed to active successor deployment task 202607/cligate_forecast_deploy_727.md\
+  \ at cligate-forecast-727:0; repeated bare source pointers are intake noise.)\n\n\
+  \n(pending marker cleared line=162: existing-owner-item: existing-owner-item: manager_mail/85c5dff58359-727.txt\
+  \ is already routed to successor deployment task 202607/cligate_forecast_deploy_727.md\
+  \ at cligate-forecast-727:0; no duplicate item added.)\n(deduped 2 bare source pointer(s)\
+  \ for manager_mail/85c5dff58359-727.txt: manager_mail/85c5dff58359-727.txt completed\
+  \ by successor task 202607/cligate_forecast_deploy_727.md; task is done with verified\
+  \ deployment evidence and no pending queue.)\n\n(manager closed Codex agent 08-17\
+  \ 18:39 PDT; tmux target `wl:32`; session_id: `019fbfc3-5673-7973-9821-7daf49214ba4`.)\n\
+  (Paused by direct human shutdown instruction routed through 202607/periph_misc_mgr.md:\
+  \ the non-human wl:32 agent is closed/missing, the pending queue and prior dependency\
+  \ context 202607/mem_synth.md plus 202607/dw1_chain_mgr.md are preserved, and the\
+  \ next action is explicit human resume if this work should continue.)\n"
+cancelled_pending_items:
+- This is a research idea that we can explore around and see whether we can do a research
+  project on we should aim towards prestigious top conferences in computer science.
+  And it is related to previous explorations around browser engine agent research.
+  Basically we need to find research directions that are worth pursuing and can be
+  published. I am thinking that since the memory prices have gone up a lot and it
+  turns out memory has been the bottleneck for a lot of compute. Especially Web and
+  JavaScript. Maybe there are ways to automatically reduce memory usage by statically
+  analyzing the JavaScript programs or by letting agents convert existing programs
+  into ones that use constructs that save memory. So the basic idea is JavaScript
+  programs take a lot of memory because everything is separately keep allocated. We
+  could reduce memory usage if we move some of that to stack allocation, either with
+  JavaScript built-in functionalities or with WebAssembly. I'm not sure exactly how
+  to do it though, and whether it has been done. Another direction as closely related
+  is browser optimization. We need to understand why Chrome and Firefox use much more
+  memory than Safari does. But that is probably a JavaScript engine and just in time
+  compiler difference and beyond our scope. For both of these ideas and directions,
+  search online using personal browser setup browsers broadly with different search
+  keywords and search engines. Discuss with ChatGPT. Explore relevant papers using
+  Google Scholar. And come back with a high-level report while preserving relevant
+  papers and notes. Let a smartest agent do this and discuss with some smartest and
+  adversarial subagents.
+- What does the rewrite do?
+- What does the current code do?
+- What is the architecture on a high level?
+- How do we test it by moving some tasks onto this new control plane?
+- Or do we have to do a big bang migration and move everything on to it
+- I have found some other related projects should we try to pull the implementation
+  details and overall designs from them before we start using this one.
+- "You said something about not knowing whether delivery happened. Shouldn\u2019t\
+  \ that be guaranteed by omni agent?"
+- 'Own one disposition for both retired DW1 Common Crawl records from BLOCKED_RECORD_DISPOSITIONS.md:
+  choose a bounded rerun or explicit cancellation/terminal-failure for the failed
+  smoke, then resume or cancel dataset enlargement accordingly. Preserve existing
+  logs/artifacts, create no duplicate workers, and do not claim the failed smoke succeeded.'
+- Add to an auxiliary manager document how to query the amount of tokens left and
+  let managers plan accordingly. Not sure exactly how, but start with something.
+- Reviewers did not like our approach on relying only on Binoculars. That is why I
+  am proposing to have three detectors. Try EVIL-Detect as well, if it matches our
+  overall requirements.
+- We should still have DW going amidst our token shortage. Tomorrow on August sixteenth,
+  my research assistantship officially resumes and I should be working on DW. Do not
+  spend too much token too fast; have one or two work happening in parallel at most.
+cancelled_pending_items_sha256: dce381e263692b0acd35081a564d5925a4377edb08b329300c6c12bc21347c45
+prior_blocker: 'paused by direct human shutdown instruction routed to 202607/periph_misc_mgr.md;
+  non-human pane wl:32 closed and pending queue preserved for explicit resume; prior
+  dependency preserved: 202607/mem_synth.md and 202607/dw1_chain_mgr.md'
+shared_target: wl:32
+protected_task: transcription_sw.md
+protected_task_sha256: cebfc885684e2281c15026a543472c1ac40b533f4343132dde805ad58c26af95
+todo_sha256: 90ec3c1f1a6354a7a8bac4e79861f5c24ce033f48929ea3c378bfa1809424e37
+source_todo_text: 'rules: filename + tmux session name here;
+
+  do not format anything;
+
+  "current" works like a ring buffer, put tasks with pending results on top;
+
+  move finished tasks to "previous";
+
+  empty lines around each heading, nowhere else
+
+
+  current:
+
+  ns_prepare_1261.md cedit:23
+
+  mem1290_mgr.md vldr:0
+
+  memory_auth_1290.md agent_managers:78
+
+  mem1290_auth.md vlcontext_recovery:2
+
+  active_task_tree.md agent_managers:5
+
+  vl_b3_prep.md vlea:0
+
+  dw1291_generation.md dw5:0
+
+  todo_archive_0830.md cedit:21
+
+  ns_code_review.md cedit:28
+
+  tt_trash_strict.md cedit:12
+
+  trans_lifecycle_fix.md cedit:40
+
+  transcription_sw.md wl:32
+
+  guest1269_goal_eval.md cedit:38
+
+  amh_capacity_mgr.md amh:14
+
+  ns_cust_b.md cedit:36
+
+  ns_cust_c.md cedit:37
+
+  ns_cust_a.md cedit:35
+
+  ns_custody_mgr.md cedit:34
+
+  ns_support_mgr.md cedit:33
+
+  ns_core_mgr.md cedit:32
+
+  ns_capacity_review.md wl:31
+
+  restore_custody.md cedit:30
+
+  amh_pbc_mgr.md amh:13
+
+  ns_pane_reconcile.md cedit:29
+
+  ns_coord_1261.md cedit:27
+
+  namespace_close_1261.md cedit:19
+
+  amh1232_arb_mgr.md agent_managers:57
+
+  amh1232_term_eval.md agent_managers:39
+
+  amh_slice_c_impl.md amh:9
+
+  dw_2014_polishing.md dw:3
+
+  202607/pbw_interpreter_live.md pb:9
+
+  tt_doc_fix.md cedit:8
+
+  dw_builder_mix.md dw4:0
+
+  amh_integ_submgr.md amh:12
+
+  guest1269_mgr.md guest_hees:7
+
+  tt_impl_mgr.md cedit:7
+
+  teamtype_setup.md cedit:4
+
+  collab_edit_mgr.md wl:4
+
+  amh_pbinteg_mgr.md amh:3
+
+  amh_corefx_mgr.md amh:2
+
+  vl_private_portfolio.md vlcontext_recovery:0
+
+  vl_private_research.md vl-engr596-report-private:0
+
+  vl_repo_split_mgr.md vl-company-legal-education-private:0
+
+  hvlpw_read.md hvlpw:1
+
+  amh_human_agent.md hamh:1
+
+  dw_fpr_mgr.md dw:5
+
+  amh_manager.md amh:1
+
+  vl_rebuild_mgr.md wl:30
+
+  dw_planning_mgr.md dwplan:0
+
+  ops_manager.md wl:3
+
+  dw_cc_sampling.md dw2:0
+
+  human_task_planner.md hwl:3
+
+  dw_manager.md dw:2
+
+  pb_review_mgr.md pb:8
+
+  pb_ops_submgr.md wl:2
+
+  mail_archive_ops_submgr_0802.md opsmail0802:1
+
+  memory_research_mgr.md wl:32
+
+  pb_submgr_b_0729.md wl:7
+
+  pb_submgr_a_0729.md wl:6
+
+  peripheral_projects_submanager_8653.md wl:18
+
+
+  human pending:
+
+  vl_tree_authority.md vlcontext_recovery:1
+
+  namespace_eval_1261.md cedit:20
+
+  ns_review_1261.md cedit:24
+
+  mail_compress_1261.md cedit:25
+
+  lifecycle_primitives.md cedit:41
+
+  capacity_grant_review.md cedit:31
+
+  todo_archive_eval.md cedit:22
+
+  amh1200_cycle74_mgr.md agent_managers:65
+
+  mail_compress_1246.md opsmail0802:33
+
+  amh1200_worker75.md agent_managers:67
+
+  amh1193_impl_eval.md amh:11
+
+  amh1200_install_fix.md agent_managers:62
+
+  amh1200_install_eval2.md agent_managers:61
+
+  amh1232_impl_fix.md agent_managers:47
+
+  amh1232_bound_eval.md agent_managers:50
+
+  mail_response_eval2.md opsmail0802:32
+
+  amh1200_recover.md agent_managers:14
+
+  amh1200_worker.md agent_managers:14
+
+  amh1193_impl_fix.md agent_managers:15
+
+  amh_slice_d_impl.md amh:11
+
+  amh1200_eval.md agent_managers:13
+
+  amh_parity_eval.md agent_managers:6
+
+  amh1097_impl_eval.md agent_managers:9
+
+  amh_slice_d_eval.md amh:10
+
+  amh_pbbridge_eval.md amh:6
+
+  amh_slice_c_eval2.md amh:8
+
+  amh_pbbridge_fix.md amh:7
+
+  vl_cli_improve_mgr.md
+
+  vl_slotmap_restart_0825.md
+
+  vl_cli_packet1.md
+
+  pb_remote_access_enable_followup_6475.md pb:3
+
+  anvil_liveness.md
+
+  mail_old_unread_replace_0821.md
+
+  vl_custody_submanager_0813.md retired
+
+  hwl_cleanup.md hwl:4
+
+  artifact_deletion_coordination.md wl:21
+
+  helper_audit_human_facing.md hcfg:1
+
+  vl_runbook_review_successor.md
+
+  vl_doc_review_9758.md
+
+  vl_relrun_10710.md
+
+  sync_mdbook_fork.md
+
+  pb_instr_guide_10459.md
+
+  engr596_outline_review_11943.md
+
+  vl_releaseprep_11760.md
+
+  ml_hvl_docs2_10734.md
+
+  ml_hvl_restart_10848.md
+
+  vl_human_review_9748.md
+
+  vl_mini_trials_9748.md
+
+  gpu_formal_verification_note_review_6291.md
+
+  research_broad_directions_notes_4830.md
+
+  handbook_paper.md wl:4
+
+  vl_late_walk_8951.md
+
+
+  low priority:
+
+  vlpw_rank12_prep.md
+
+  vl_http_work1.md
+
+  vl_doc_review_mgr.md
+
+  vl_doc_mgr.md
+
+  hvl_cli_push_11754.md
+
+  vl_contrib_eval_human_resume_11889.md hvl:3
+
+  vlexp_portfolio_hyg.md vlexp:3
+
+
+  previous:
+
+  vl_split_b2work.md vltargeteval4:0
+
+  watch_blocked_cascade.md cedit:42
+
+  vl_b2_xform_repair.md vlea:0
+
+  mail_gap_audit_1250.md opsmail0802:27
+
+  mail_compress_1247.md opsmail0802:26
+
+  amh_boundary_submgr.md agent_managers:78
+
+  amh1193_comp_fix.md agent_managers:76
+
+  amh_sliced_mgr3.md agent_managers:77
+
+  amh1193_comp_eval.md agent_managers:75
+
+  amh1193_comp_mgr.md agent_managers:74
+
+  amh1200_hist_mgr.md agent_managers:73
+
+  amh1200_install_submgr.md agent_managers:72
+
+  amh1200_ins75.md agent_managers:71
+
+  amh1200_eval75.md agent_managers:66
+
+  amh1200_worker76.md agent_managers:68
+
+  amh1200_recon74.md agent_managers:64
+
+  amh1200_ie75.md agent_managers:69
+
+  amh1200_preserve2_mgr.md agent_managers:63
+
+  amh1200_preserve_mgr.md agent_managers:60
+
+  amh1232_arb_eval.md agent_managers:58
+
+  amh1200_live_eval.md agent_managers:56
+
+  amh1200_live_recon.md agent_managers:55
+
+  pm_cycle_mgr.md agent_managers:54
+
+  amh_boundary_mgr.md agent_managers:51
+
+  pending_mail_eval2.md agent_managers:52
+
+  amh_slice_c_mgr.md agent_managers:49
+
+  amh1232_impl_mgr.md agent_managers:45
+
+  amh1232_impl_eval.md agent_managers:46
+
+  amh_hold_mgr2.md agent_managers:44
+
+  pending_mail_fix.md agent_managers:43
+
+  pending_mail_eval.md agent_managers:42
+
+  amh1200_semantic2_eval.md agent_managers:41
+
+  amh_hold_mgr.md agent_managers:40
+
+  amh1200_integ_mgr.md agent_managers:36
+
+  amh1200_semantic_eval.md agent_managers:34
+
+  amh_lane_mgr.md agent_managers:18
+
+  amh1200_inst_eval.md agent_managers:30
+
+  amh1200_inst_fix.md agent_managers:31
+
+  amh1193_lifecycle.md agent_managers:16
+
+  amh_parity_mgr.md agent_managers:4
+
+  mail_report_policy.md agent_managers:5
+
+  amh1097_impl_mgr.md agent_managers:10
+
+  mail_context_race.md agent_managers:3
+
+  worktree_cleanup_1022.md agent_managers:1
+
+  restore_agents_1021.md agent_managers:0
+
+  vl_split_batch2.md vlea:0
+
+  202608/dw_svm_literature_1264.md dw1264lit:0
+
+  202608/dw_svm_multidetector_1264.md dw1264svm:0
+
+  amh_sliced_mgr2.md agent_managers:38
+
+  amh1200_install_eval.md agent_managers:59
+
+  amh1232_arb_fix.md agent_managers:59
+
+  amh1200_live_fix.md agent_managers:57
+
+  amh1200_semantic2_fix.md agent_managers:48
+
+  pending_mail_fix2.md agent_managers:53
+
+  vl_setup_eval2.md vl-engr596-report-private:4
+
+  vl_tla_setup_eval.md vl-engr596-report-private:4
+
+  vl_portfolio_policy_mgr.md vlportfolio:0
+
+  tt_doc.md cedit:8
+
+  202608/todo_archive_0828b.md wl:5
+
+  dw_plan_gate_fix.md dw7:1
+
+  202608/todo_archive_0828.md wl:5
+
+  vl_build_mgr.md
+
+  dw1093_bodyswap.md dw5:0
+
+  cpt_strategy.md cptw:0
+
+  vl_workspace_audit.md vl-company-legal-education-private:1
+
+  vl_owner_audit.md vl-company-legal-education-private:1
+
+  vlexp_path_migration_exec.md vlexp:13
+
+  vl_consthex_custody_refresh_20260824.md vlconsthexcustody20260824:0
+
+  amh_parity_follow.md amhcurr:0
+
+  omniagent_control_plane_mgr.md omniagentcp:0
+
+  202608/amh_miss_superv.md amhrev:0
+
+  vl_paper_intake19.md vlprograms:1
+
+  202607/amh_adversarial_parity_supervisor.md amhrev:4
+
+  dw_browser_scripts_rewrite_711.md dw1:1 retired
+
+  202607/amh_parity_walk.md amhrev:0
+
+  vl_hyg_stale_fix.md vlportfolio:4
+
+  vl_context_mgr.md vlcontext:0
+
+  vl_pane_reconcile_mgr.md retired
+
+  vl_release_tools_mgr.md retired
+
+  202607/cligate_forecast_deploy_727.md cligate-forecast-727:0
+
+  202607/cligate_forecast_followup_706.md cligate-forecast-706:0
+
+  vl_wave3_gate_mgr.md vlcontext:3
+
+  202608/pb_state_alert_mgr.md pb:15
+
+  202608/pb_stockwatch_eval2.md pb:14
+
+  202608/pb_stockwatch_pub2.md pb:20
+
+  vl_custody_eval.md vlportfolio:5
+
+  202608/pb_stockwatch_eval.md pb:14
+
+  202608/pb_stockwatch_fix.md pb:17
+
+  202608/pb_captcha_notes.md pb:19
+
+  202608/pb_state_alert_eval.md pb:14
+
+  202608/pb_state_impl.md pb:16
+
+  '
+authority: manager_mail/85c5dff58359-1290.txt:3-4
+authority_sha256: 0b33b7c6fd2e90680eec166668fdf2abcdc7cc45b94bd660974d0bdb1995e169
+authority_envelope: mem1290_auth.md
+authority_envelope_sha256: 067dc445bef60174e0490198aa3859557fd29fcb0a055ae18c940dc0a945daea
+committed_task_sha256: ccb6a488394d01ac3687738b8117e46c6daaa5f9675bd776c9f7f48c3a3a1429
+committed_task_text: '---
+
+  version: v1.0.0
+
+  status: done
+
+  runat: wl:32
+
+  tool: codex
+
+  managerat: wl:30
+
+  is_manager: true
+
+  pending_task_items: []
+
+  ---
+
+  Coordinate a publication-oriented research-direction investigation.
+
+
+  - Preserve the human''s exact research goals from the attached source email.
+
+  - Delegate independent literature, browser/JavaScript systems, and feasibility investigations
+  to multiple strongest available workers.
+
+  - Require at least one adversarial worker to challenge novelty, scope, and top-conference
+  viability.
+
+  - Require broad personal-browser web searches using varied terms and search engines,
+  Google Scholar paper exploration, and ChatGPT discussion as requested.
+
+  - Preserve relevant papers and compact notes outside the work-log repository.
+
+  - Synthesize a high-level report proposing concrete directions, prior art, novelty
+  gaps, feasibility, evaluation plans, risks, and plausible prestigious venues.
+
+  - Have a fresh one-shot eval worker judge the final result against the human''s
+  goal before closure; if it fails, launch a new implementation worker and a new eval
+  worker.
+
+  - Email the human directly with substantive updates and the final report; include
+  `memory_research_mgr.md` in the subject.
+
+
+  You are the research submanager and must only route, track, and communicate; delegate
+  all research and synthesis work. Keep high-level state in the task records and ensure
+  all worker-owned artifacts have exactly one owner. Report to the upper manager only
+  through a concise private `omo_report.sh` report using its allocated message file
+  workflow.
+
+  (Adversarial interim: whole-browser memory comparisons do not support engine-level
+  attribution; the defensible browser direction is a controlled same-macOS pressure,
+  lifecycle, and process-topology study. Generic stack allocation, JS-to-Wasm conversion,
+  and generic agentic memory optimization already show major novelty collisions. Allocation
+  and transformation challenges remain in progress.)
+
+  (Adversarial workstream completed after an internal fix-and-rereview loop; the substantive
+  memo was emailed to the human and preserved under /ssd1/sichangheagent/memadv/artifacts/.
+  Search friction came from Google/Scholar authentication and CAPTCHA; primary repositories,
+  Crossref, OpenAlex, and arXiv provided documented fallbacks. The browser-ChatGPT
+  helper also needs more resilient model selection and a documented short-prompt fallback.)
+
+  (Browser/runtime workstream completed after independent review and a macOS-accounting
+  correction; the substantive memo was emailed to the human and preserved under /ssd1/sichangheagent/membrowser/artifacts/.
+  Primary-source snapshots improved claim discipline. Reproducibility was hindered
+  by search authentication/CAPTCHA, a failing generic search connector, publisher
+  access failures, and ChatGPT model-picker/connection failures; a browser-research
+  exporter for query, URL, excerpt, timestamp, denominator, and completed model response
+  would help.)
+
+  (Feasibility workstream completed after semantic-consistency fixes and independent
+  review; the substantive memo and bounded experiments were emailed to the human and
+  preserved under /ssd1/sichangheagent/memfeas/. The strongest surviving direction
+  is verifier-checked, cross-engine packing of large long-lived homogeneous value-record
+  collections, gated by a real-application candidate census and three-application
+  manual-oracle study; TypedArrays are the primary backend and Wasm is an ablation.
+  Search authentication/CAPTCHA, backend and Unicode failures, and ChatGPT timeout/shared-tab
+  ambiguity suggest adding stable per-agent browser targets, resumable polling, and
+  Unicode-safe extraction.)
+
+  (Literature/novelty workstream completed with a clean reviewer rerun; the substantive
+  memo was emailed to the human and preserved under /ssd1/sichangheagent/memlit/.
+  Vocabulary-driven searches initially missed the closest collision; an exact-mechanism
+  ChatGPT pass plus exact-title and forward-citation checks corrected the memo. Future
+  searches should include mechanism phrases such as runtime columnar array transformation
+  in JavaScript early, and the ChatGPT helper should capture completion state reliably.)
+
+  (Synthesis worker 202607/mem_synth.md is running over all four read-only artifact
+  sets. The fresh one-shot evaluator prompt was written before synthesis at /tmp/memory-research-synthesis.xAYQBD/eval.txt;
+  its reserved workspace is /ssd1/sichangheagent/memeval and planned task is mem_eval.md.
+  On pass it emails the complete report; on fail launch a new implementation worker
+  and a new evaluator.)
+
+
+  (record and delegate 202607/manager_mail/85c5dff58359-207.txt)
+
+  (verified removed pending item: Forwarded the recurring browser-research failures
+  and requested repairs to the upper manager through the private routed report workflow.)
+
+  (Human follow-up launched 202607/mem_wasm_api.md in memwasmapi:0 for an independent
+  WebAssembly-native Web API investigation. Its one-shot evaluation prompt was written
+  before launch at /tmp/memory-wasm-api.K26ZM8/eval.txt; reserve /ssd1/sichangheagent/memwasmeval
+  and 202607/mem_wasm_eval.md for the fresh evaluator after the worker reports completion.)
+
+
+  (from agent memwasmapi:0 /tmp/omo-agent-messages-30033/agent_done_7118b1712cd53b8eab6ab58a9994aeb7f935916e1c26bc56ecaabf838bc22eb6.md)
+
+
+  (from agent memwasmapi:0 /tmp/omo-agent-messages-30033/agent_done_ad8bc62df105ecad776fd5c41061a5e079d55e0ad58bde9b47eba96509410151.md)
+
+
+  (from agent memwasmapi:0 /tmp/omo-agent-messages-30033/agent_done_f3f2f1ea577e3ef28f81fce48c9b90ef78cc793d7e64305fd9291996136458f0.md)
+
+
+  (from agent memwasmapi:0 /tmp/omo-agent-messages-30033/agent_done_90ff66b4063ce6770ff620fb7889d3cc11d6835aacad6b646ab97f0870a9770f.md)
+
+
+  (record and delegate manager_mail/85c5dff58359-211.txt)
+
+  (pending marker cleared line=49: existing-owner-item: The requested high-level ELI5
+  explanation is already tracked by the active parent queue and queued to the synthesis
+  worker.)
+
+  (human ack sent for pending marker clear line=49: existing-owner-item: The requested
+  high-level ELI5 explanation is already tracked by the active parent queue and queued
+  to the synthesis worker.)
+
+  (pending marker cleared line=48: report-only: Consumed final WebAssembly-native
+  Web API report; promised artifacts, reviewer clearance, and human delivery require
+  manager verification before lifecycle closure.)
+
+  (pending marker cleared line=45: report-only: Consumed publication-novelty audit
+  report; it is supporting evidence for the active WebAssembly-native Web API task,
+  not a new pending request.)
+
+  (pending marker cleared line=42: report-only: Consumed Chromium cost investigation
+  report; it is supporting evidence for the active WebAssembly-native Web API task,
+  not a new pending request.)
+
+  (pending marker cleared line=39: report-only: Consumed standards and proposal prior-art
+  audit report; it is supporting evidence for the active WebAssembly-native Web API
+  task, not a new pending request.)
+
+  (Verified the completed WebAssembly-native Web API memo, source map, ELI5 summary,
+  and search log are nonempty; its fresh one-shot evaluator is running in memwasmeval:0
+  under mem_wasm_eval.md. The research task is blocked on that evaluator before human-pending
+  next-step handling.)
+
+  (verified removed pending item: Forwarded the exact immediate-blockage-reporting
+  requirement and related browser/helper defects to the upper manager through the
+  private routed report workflow for infrastructure ownership.)
+
+  (verified removed pending item: Verified the standalone ELI5 artifact is nonempty,
+  the synthesis worker queue is empty after independent review, and the worker reported
+  successful direct email delivery with the required task filename in the subject.)
+
+  (The first WebAssembly one-shot evaluator failed on broken or misattributed authoritative
+  links, a broken S20 anchor, and an unsupported universal prototype claim. A new
+  revision owner is running under 202607/mem_wasm_rev.md in memwasmrev:0; a fresh
+  one-shot evaluator prompt was written before launch at /tmp/memory-wasm-revision.n8QHbL/eval.txt,
+  reserving 202607/mem_wasm_eval2.md and /ssd1/sichangheagent/memwasmeval2.)
+
+  (Verified all five corrected WebAssembly revision artifacts are nonempty and the
+  revision queue is clear. The fresh second one-shot evaluator is running under 202607/mem_wasm_eval2.md
+  in memwasmeval2:0; all dependent synthesis and WebAssembly tasks now block on that
+  evaluator.)
+
+  (The second WebAssembly one-shot evaluator failed on statistical decision rules,
+  an unrealizable batching baseline, Mozilla status, inconsistent Chromium/V8 pins,
+  and non-operational causal ablations. A new revision owner is running under 202607/mem_wasm_rev2.md
+  in memwasmrev2:0; the fresh third evaluator prompt was written before launch at
+  /tmp/memory-wasm-revision2.jW4nfS/eval.txt, reserving 202607/mem_wasm_eval3.md and
+  /ssd1/sichangheagent/memwasmeval3.)
+
+  (Verified the second WebAssembly revision''s corrected memo, source map, ELI5 summary,
+  search log, revision log, source-capture manifest, and prewritten evaluator prompt
+  are nonempty and its queue is clear. The fresh third evaluator is running under
+  202607/mem_wasm_eval3.md in memwasmeval3:0; all dependent tasks block on it.)
+
+  (The third WebAssembly one-shot evaluator failed on familywise statistical control
+  and power, reverse-effect equivalence, batching CPU design, reproducible application
+  scheduling and randomness, three source anchors, and ELI5 accessibility. A new revision
+  owner is running under 202607/mem_wasm_rev3.md in memwasmrev3:0; the fresh fourth
+  evaluator prompt was written before launch at /tmp/memory-wasm-revision3.dZTkG6/eval.txt,
+  reserving 202607/mem_wasm_eval4.md and /ssd1/sichangheagent/memwasmeval4.)
+
+  (verified removed pending item: Launched 202607/mem_wasm_chain_mgr.md at memwasmchain:0
+  and verified 202607/mem_wasm_api.md, 202607/mem_wasm_rev.md, and 202607/mem_wasm_rev2.md
+  now have managerat memwasmchain:0; wl:32 directly retains only 202607/mem_synth.md,
+  202607/mem_wasm_eval4.md, 202607/mem_wasm_rev3.md, and the new submanager.)
+
+
+  (from agent memwasmrev4:0 /tmp/omo-agent-messages-30033/agent_done_794355fbdd38a76d728d0096dc4c1c08a6d93c82534effb4c5c6983178071eb7.md)
+
+  (pending marker cleared line=62: report-only: Cleared a report-only duplicate synchronization
+  audit; 202607/mem_wasm_rev4.md already owns the integration work.)
+
+  (verified removed pending item: Verified 202607/mem_wasm_api.md and 202607/mem_wasm_eval6.md
+  are both done with empty queues after evaluator-six PASS; the accepted research-track
+  result was emailed and all revision predecessors were closed.)
+
+  (verified removed pending item: Verified the requested WebAssembly-native Web API
+  work was recorded in 202607/mem_wasm_api.md, carried through six evaluator rounds
+  to PASS, emailed to the human, and closed with an empty queue.)
+
+
+  (record and delegate 202607/manager_mail/85c5dff58359-379.txt)
+
+  (verified removed pending item: Verified 202607/dw1_detector_survey.md is already
+  listed under TODO human pending, recorded the human reaffirmation in that task,
+  and acknowledged the same email thread.)
+
+
+  (record and delegate manager_mail/85c5dff58359-394.txt)
+
+  (verified removed pending item: Recorded the authoritative scope clarification,
+  delivered it to cliquota:0, verified the worker accepted it and resumed the preserved
+  OpenAI/ChatGPT-only implementation, and restored task status to running.)
+
+
+  (record and delegate manager_mail/85c5dff58359-431.txt)
+
+  (verified removed pending item: Recorded and assigned together with the requested
+  context-free status mapping to 202607/omni_status.md; verified dedicated worker
+  launch in omstat:0 and direct human-email ownership.)
+
+  (verified removed pending item: Recorded and assigned to 202607/omni_status.md;
+  verified dedicated worker launch in omstat:0 to answer the original-goal mapping
+  and canary clarification directly to the human.)
+
+
+  (record and delegate 202607/manager_mail/85c5dff58359-433.txt)
+
+  (pending marker cleared line=83: superseded: Superseded by verified dedicated worker
+  launch 202607/omni_explain.md at omarch:0 after wl:32 accepted and recorded all
+  seven exact questions; no duplicate paste required.)
+
+  (human ack sent for pending marker clear line=83: superseded: Superseded by verified
+  dedicated worker launch 202607/omni_explain.md at omarch:0 after wl:32 accepted
+  and recorded all seven exact questions; no duplicate paste required.)
+
+
+  (record and delegate manager_mail/85c5dff58359-454.txt)
+
+  (verified removed pending item: Recorded and delegated to 202607/omni_alt_review.md;
+  verified omalt:0 launch with ownership of source verification, comparison, proposed
+  architecture revision, independent review, and direct human approval email.)
+
+  (verified removed pending item: Preserved as an authoritative constraint in 202607/omni_alt_review.md;
+  verified worker launch explicitly prohibits replacing the custom Omnigent-based
+  direction.)
+
+
+  (record and delegate 202607/manager_mail/85c5dff58359-462.txt)
+
+  (verified removed pending item: Recorded in 202607/amh_arch_revision.md and verified
+  amhrev:0 running with ownership of the exact Human email, Omnigent API verification,
+  complete non-governing AMH revision, independent reviewer loop, and direct Human
+  approval email; no policy or runtime change authorized.)
+
+  (verified removed pending item: Recorded in 202607/amh_arch_revision.md and verified
+  amhrev:0 running with ownership of the exact Human email, Omnigent API verification,
+  complete non-governing AMH revision, independent reviewer loop, and direct Human
+  approval email; no policy or runtime change authorized.)
+
+  (verified removed pending item: Recorded in 202607/amh_arch_revision.md and verified
+  amhrev:0 running with ownership of the exact Human email, Omnigent API verification,
+  complete non-governing AMH revision, independent reviewer loop, and direct Human
+  approval email; no policy or runtime change authorized.)
+
+  (verified removed pending item: Recorded in 202607/amh_arch_revision.md and verified
+  amhrev:0 running with ownership of the exact Human email, Omnigent API verification,
+  complete non-governing AMH revision, independent reviewer loop, and direct Human
+  approval email; no policy or runtime change authorized.)
+
+  (verified removed pending item: Recorded in 202607/amh_arch_revision.md and verified
+  amhrev:0 running with ownership of the exact Human email, Omnigent API verification,
+  complete non-governing AMH revision, independent reviewer loop, and direct Human
+  approval email; no policy or runtime change authorized.)
+
+  (verified removed pending item: Recorded in 202607/amh_arch_revision.md and verified
+  amhrev:0 running with ownership of the exact Human email, Omnigent API verification,
+  complete non-governing AMH revision, independent reviewer loop, and direct Human
+  approval email; no policy or runtime change authorized.)
+
+  (verified removed pending item: Recorded in 202607/amh_arch_revision.md and verified
+  amhrev:0 running with ownership of the exact Human email, Omnigent API verification,
+  complete non-governing AMH revision, independent reviewer loop, and direct Human
+  approval email; no policy or runtime change authorized.)
+
+  (verified removed pending item: Recorded in 202607/amh_arch_revision.md and verified
+  amhrev:0 running with ownership of the exact Human email, Omnigent API verification,
+  complete non-governing AMH revision, independent reviewer loop, and direct Human
+  approval email; no policy or runtime change authorized.)
+
+  (verified removed pending item: Recorded in 202607/amh_arch_revision.md and verified
+  amhrev:0 running with ownership of the exact Human email, Omnigent API verification,
+  complete non-governing AMH revision, independent reviewer loop, and direct Human
+  approval email; no policy or runtime change authorized.)
+
+
+  (record and delegate 202607/manager_mail/85c5dff58359-464.txt)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+  (verified removed pending item: Recorded and delegated under 202607/amh_arch_mgr.md:
+  202607/amh_current_audit.md owns current-system reconstruction, 202607/amh_markdown_views.md
+  owns the authorized nonproduction SQLite/WAL generated-Markdown implementation,
+  and 202607/amh_arch_revision.md owns the complete reviewed non-governing proposal
+  and Human answers; all launches and managerat migration to amhmgr:0 were verified,
+  and no production/runtime switch is authorized.)
+
+
+  (record and delegate manager_mail/85c5dff58359-531.txt)
+
+  (verified removed pending item: Verified 202607/cligate_quota.md is done with an
+  empty queue; durable completion evidence records commit d7b6140, 48 focused tests,
+  independent reviewer PASS, rollback-capable localhost canary deployment, test isolation,
+  and prior completion email. Sent the requested concise status in subject ''Re: cligate_quota.md
+  needs settings restore'' and email_me.py returned Email sent.)
+
+
+  (record and delegate manager_mail/85c5dff58359-535.txt)
+
+  (verified removed pending item: Verified cligate-canary.service is active on 127.0.0.1:18181
+  at reviewed commit 6588bea; the worker sent exact web/API/CLI access instructions
+  in the existing Human thread.)
+
+  (verified removed pending item: Verified reviewed per-account ChatGPT receipt accounting
+  is deployed at commit 6588bea, fails closed on incomplete coverage and reset boundaries,
+  and the Human received the current measured/count/estimate interpretation.)
+
+
+  (from agent cligate-quota:0 /tmp/omo-agent-messages-30033/agent_done_450517296e0317cd90a9eb023defe0b70bf7662c5f7aefe770a024b0ae068a20.md)
+
+  (verified removed pending item: Verified personal fork SichangHe/codeking-ai--cligate
+  branch feature/quota-velocity matches reviewed commit 2262533; live canary ExecStart
+  also uses release 2262533 with zero restarts.)
+
+  (verified removed pending item: Verified 202607/dw1_detector_survey.md status done
+  with empty queue; durable task evidence records completed reviewed research, pushed
+  artifacts, later Qwen IRM/agreement and EchoPrompt/Steer-to-Detect follow-ups, and
+  verified Gmail delivery UID 3182.)
+
+  (verified removed pending item: Verified durable DW1 records identify and delivered
+  the detector report in Gmail thread with exact subject Re: [dw1:1] 202607/dw1_detector_survey.md:
+  recent detector update; survey task is done with empty queue.)
+
+
+  (record and delegate manager_mail/85c5dff58359-658.txt)
+
+
+  (record and delegate manager_mail/85c5dff58359-658.txt)
+
+
+  (record and delegate manager_mail/85c5dff58359-658.txt)
+
+  (verified removed pending item: Verified status/compression/Human-planning requests
+  are recorded and delegated; read-only audit found the delay was one serial AMH lane
+  plus delivery buffers. Core integration and the test-only inbox/priority prototype
+  are now separated, with independent review retained and no live access enabled.)
+
+
+  (record and delegate manager_mail/85c5dff58359-658.txt)
+
+  (record and delegate manager_mail/85c5dff58359-658.txt)
+
+
+  (pending marker cleared line=137: report-only: report-only: stale cligate-quota
+  agent done marker already followed by verified completion evidence; no new pending
+  item added.)
+
+  (manager_mail/85c5dff58359-727.txt routed by root to new successor deployment task
+  202607/cligate_forecast_deploy_727.md at cligate-forecast-727:0; existing 202607/cligate_quota.md
+  and 202607/cligate_forecast_followup_706.md remain closed.)
+
+
+  (deduped 2 bare source pointer(s) for manager_mail/85c5dff58359-727.txt: manager_mail/85c5dff58359-727.txt
+  is already routed to active successor deployment task 202607/cligate_forecast_deploy_727.md
+  at cligate-forecast-727:0; duplicate bare source pointers are intake noise.)
+
+
+
+  (deduped 2 bare source pointer(s) for manager_mail/85c5dff58359-727.txt: manager_mail/85c5dff58359-727.txt
+  is already routed to active successor deployment task 202607/cligate_forecast_deploy_727.md
+  at cligate-forecast-727:0; repeated bare source pointers are intake noise.)
+
+
+
+  (pending marker cleared line=162: existing-owner-item: existing-owner-item: manager_mail/85c5dff58359-727.txt
+  is already routed to successor deployment task 202607/cligate_forecast_deploy_727.md
+  at cligate-forecast-727:0; no duplicate item added.)
+
+  (deduped 2 bare source pointer(s) for manager_mail/85c5dff58359-727.txt: manager_mail/85c5dff58359-727.txt
+  completed by successor task 202607/cligate_forecast_deploy_727.md; task is done
+  with verified deployment evidence and no pending queue.)
+
+
+  (manager closed Codex agent 08-17 18:39 PDT; tmux target `wl:32`; session_id: `019fbfc3-5673-7973-9821-7daf49214ba4`.)
+
+  (Paused by direct human shutdown instruction routed through 202607/periph_misc_mgr.md:
+  the non-human wl:32 agent is closed/missing, the pending queue and prior dependency
+  context 202607/mem_synth.md plus 202607/dw1_chain_mgr.md are preserved, and the
+  next action is explicit human resume if this work should continue.)
+
+
+  (verified cancelled pending items under Human authority manager_mail/85c5dff58359-1290.txt:3-4;
+  prior queue preserved in owner-private audit /home/sichangheagent/.local/state/omo-manager/source1290-memory-cancel-v1.yaml;
+  prior queue SHA-256: dce381e263692b0acd35081a564d5925a4377edb08b329300c6c12bc21347c45;
+  protected shared task unchanged: transcription_sw.md cebfc885684e2281c15026a543472c1ac40b533f4343132dde805ad58c26af95)
+
+  '
+committed_todo_sha256: bb450330bd6fd869092b40e81823f58c5a5fa6cc45da1ebcdc471393cda55ef2
+committed_todo_text: 'rules: filename + tmux session name here;
+
+  do not format anything;
+
+  "current" works like a ring buffer, put tasks with pending results on top;
+
+  move finished tasks to "previous";
+
+  empty lines around each heading, nowhere else
+
+
+  current:
+
+  ns_prepare_1261.md cedit:23
+
+  mem1290_mgr.md vldr:0
+
+  memory_auth_1290.md agent_managers:78
+
+  mem1290_auth.md vlcontext_recovery:2
+
+  active_task_tree.md agent_managers:5
+
+  vl_b3_prep.md vlea:0
+
+  dw1291_generation.md dw5:0
+
+  todo_archive_0830.md cedit:21
+
+  ns_code_review.md cedit:28
+
+  tt_trash_strict.md cedit:12
+
+  trans_lifecycle_fix.md cedit:40
+
+  transcription_sw.md wl:32
+
+  guest1269_goal_eval.md cedit:38
+
+  amh_capacity_mgr.md amh:14
+
+  ns_cust_b.md cedit:36
+
+  ns_cust_c.md cedit:37
+
+  ns_cust_a.md cedit:35
+
+  ns_custody_mgr.md cedit:34
+
+  ns_support_mgr.md cedit:33
+
+  ns_core_mgr.md cedit:32
+
+  ns_capacity_review.md wl:31
+
+  restore_custody.md cedit:30
+
+  amh_pbc_mgr.md amh:13
+
+  ns_pane_reconcile.md cedit:29
+
+  ns_coord_1261.md cedit:27
+
+  namespace_close_1261.md cedit:19
+
+  amh1232_arb_mgr.md agent_managers:57
+
+  amh1232_term_eval.md agent_managers:39
+
+  amh_slice_c_impl.md amh:9
+
+  dw_2014_polishing.md dw:3
+
+  202607/pbw_interpreter_live.md pb:9
+
+  tt_doc_fix.md cedit:8
+
+  dw_builder_mix.md dw4:0
+
+  amh_integ_submgr.md amh:12
+
+  guest1269_mgr.md guest_hees:7
+
+  tt_impl_mgr.md cedit:7
+
+  teamtype_setup.md cedit:4
+
+  collab_edit_mgr.md wl:4
+
+  amh_pbinteg_mgr.md amh:3
+
+  amh_corefx_mgr.md amh:2
+
+  vl_private_portfolio.md vlcontext_recovery:0
+
+  vl_private_research.md vl-engr596-report-private:0
+
+  vl_repo_split_mgr.md vl-company-legal-education-private:0
+
+  hvlpw_read.md hvlpw:1
+
+  amh_human_agent.md hamh:1
+
+  dw_fpr_mgr.md dw:5
+
+  amh_manager.md amh:1
+
+  vl_rebuild_mgr.md wl:30
+
+  dw_planning_mgr.md dwplan:0
+
+  ops_manager.md wl:3
+
+  dw_cc_sampling.md dw2:0
+
+  human_task_planner.md hwl:3
+
+  dw_manager.md dw:2
+
+  pb_review_mgr.md pb:8
+
+  pb_ops_submgr.md wl:2
+
+  mail_archive_ops_submgr_0802.md opsmail0802:1
+
+  pb_submgr_b_0729.md wl:7
+
+  pb_submgr_a_0729.md wl:6
+
+  peripheral_projects_submanager_8653.md wl:18
+
+
+  human pending:
+
+  vl_tree_authority.md vlcontext_recovery:1
+
+  namespace_eval_1261.md cedit:20
+
+  ns_review_1261.md cedit:24
+
+  mail_compress_1261.md cedit:25
+
+  lifecycle_primitives.md cedit:41
+
+  capacity_grant_review.md cedit:31
+
+  todo_archive_eval.md cedit:22
+
+  amh1200_cycle74_mgr.md agent_managers:65
+
+  mail_compress_1246.md opsmail0802:33
+
+  amh1200_worker75.md agent_managers:67
+
+  amh1193_impl_eval.md amh:11
+
+  amh1200_install_fix.md agent_managers:62
+
+  amh1200_install_eval2.md agent_managers:61
+
+  amh1232_impl_fix.md agent_managers:47
+
+  amh1232_bound_eval.md agent_managers:50
+
+  mail_response_eval2.md opsmail0802:32
+
+  amh1200_recover.md agent_managers:14
+
+  amh1200_worker.md agent_managers:14
+
+  amh1193_impl_fix.md agent_managers:15
+
+  amh_slice_d_impl.md amh:11
+
+  amh1200_eval.md agent_managers:13
+
+  amh_parity_eval.md agent_managers:6
+
+  amh1097_impl_eval.md agent_managers:9
+
+  amh_slice_d_eval.md amh:10
+
+  amh_pbbridge_eval.md amh:6
+
+  amh_slice_c_eval2.md amh:8
+
+  amh_pbbridge_fix.md amh:7
+
+  vl_cli_improve_mgr.md
+
+  vl_slotmap_restart_0825.md
+
+  vl_cli_packet1.md
+
+  pb_remote_access_enable_followup_6475.md pb:3
+
+  anvil_liveness.md
+
+  mail_old_unread_replace_0821.md
+
+  vl_custody_submanager_0813.md retired
+
+  hwl_cleanup.md hwl:4
+
+  artifact_deletion_coordination.md wl:21
+
+  helper_audit_human_facing.md hcfg:1
+
+  vl_runbook_review_successor.md
+
+  vl_doc_review_9758.md
+
+  vl_relrun_10710.md
+
+  sync_mdbook_fork.md
+
+  pb_instr_guide_10459.md
+
+  engr596_outline_review_11943.md
+
+  vl_releaseprep_11760.md
+
+  ml_hvl_docs2_10734.md
+
+  ml_hvl_restart_10848.md
+
+  vl_human_review_9748.md
+
+  vl_mini_trials_9748.md
+
+  gpu_formal_verification_note_review_6291.md
+
+  research_broad_directions_notes_4830.md
+
+  handbook_paper.md wl:4
+
+  vl_late_walk_8951.md
+
+
+  low priority:
+
+  vlpw_rank12_prep.md
+
+  vl_http_work1.md
+
+  vl_doc_review_mgr.md
+
+  vl_doc_mgr.md
+
+  hvl_cli_push_11754.md
+
+  vl_contrib_eval_human_resume_11889.md hvl:3
+
+  vlexp_portfolio_hyg.md vlexp:3
+
+
+  previous:
+
+  memory_research_mgr.md wl:32
+
+  vl_split_b2work.md vltargeteval4:0
+
+  watch_blocked_cascade.md cedit:42
+
+  vl_b2_xform_repair.md vlea:0
+
+  mail_gap_audit_1250.md opsmail0802:27
+
+  mail_compress_1247.md opsmail0802:26
+
+  amh_boundary_submgr.md agent_managers:78
+
+  amh1193_comp_fix.md agent_managers:76
+
+  amh_sliced_mgr3.md agent_managers:77
+
+  amh1193_comp_eval.md agent_managers:75
+
+  amh1193_comp_mgr.md agent_managers:74
+
+  amh1200_hist_mgr.md agent_managers:73
+
+  amh1200_install_submgr.md agent_managers:72
+
+  amh1200_ins75.md agent_managers:71
+
+  amh1200_eval75.md agent_managers:66
+
+  amh1200_worker76.md agent_managers:68
+
+  amh1200_recon74.md agent_managers:64
+
+  amh1200_ie75.md agent_managers:69
+
+  amh1200_preserve2_mgr.md agent_managers:63
+
+  amh1200_preserve_mgr.md agent_managers:60
+
+  amh1232_arb_eval.md agent_managers:58
+
+  amh1200_live_eval.md agent_managers:56
+
+  amh1200_live_recon.md agent_managers:55
+
+  pm_cycle_mgr.md agent_managers:54
+
+  amh_boundary_mgr.md agent_managers:51
+
+  pending_mail_eval2.md agent_managers:52
+
+  amh_slice_c_mgr.md agent_managers:49
+
+  amh1232_impl_mgr.md agent_managers:45
+
+  amh1232_impl_eval.md agent_managers:46
+
+  amh_hold_mgr2.md agent_managers:44
+
+  pending_mail_fix.md agent_managers:43
+
+  pending_mail_eval.md agent_managers:42
+
+  amh1200_semantic2_eval.md agent_managers:41
+
+  amh_hold_mgr.md agent_managers:40
+
+  amh1200_integ_mgr.md agent_managers:36
+
+  amh1200_semantic_eval.md agent_managers:34
+
+  amh_lane_mgr.md agent_managers:18
+
+  amh1200_inst_eval.md agent_managers:30
+
+  amh1200_inst_fix.md agent_managers:31
+
+  amh1193_lifecycle.md agent_managers:16
+
+  amh_parity_mgr.md agent_managers:4
+
+  mail_report_policy.md agent_managers:5
+
+  amh1097_impl_mgr.md agent_managers:10
+
+  mail_context_race.md agent_managers:3
+
+  worktree_cleanup_1022.md agent_managers:1
+
+  restore_agents_1021.md agent_managers:0
+
+  vl_split_batch2.md vlea:0
+
+  202608/dw_svm_literature_1264.md dw1264lit:0
+
+  202608/dw_svm_multidetector_1264.md dw1264svm:0
+
+  amh_sliced_mgr2.md agent_managers:38
+
+  amh1200_install_eval.md agent_managers:59
+
+  amh1232_arb_fix.md agent_managers:59
+
+  amh1200_live_fix.md agent_managers:57
+
+  amh1200_semantic2_fix.md agent_managers:48
+
+  pending_mail_fix2.md agent_managers:53
+
+  vl_setup_eval2.md vl-engr596-report-private:4
+
+  vl_tla_setup_eval.md vl-engr596-report-private:4
+
+  vl_portfolio_policy_mgr.md vlportfolio:0
+
+  tt_doc.md cedit:8
+
+  202608/todo_archive_0828b.md wl:5
+
+  dw_plan_gate_fix.md dw7:1
+
+  202608/todo_archive_0828.md wl:5
+
+  vl_build_mgr.md
+
+  dw1093_bodyswap.md dw5:0
+
+  cpt_strategy.md cptw:0
+
+  vl_workspace_audit.md vl-company-legal-education-private:1
+
+  vl_owner_audit.md vl-company-legal-education-private:1
+
+  vlexp_path_migration_exec.md vlexp:13
+
+  vl_consthex_custody_refresh_20260824.md vlconsthexcustody20260824:0
+
+  amh_parity_follow.md amhcurr:0
+
+  omniagent_control_plane_mgr.md omniagentcp:0
+
+  202608/amh_miss_superv.md amhrev:0
+
+  vl_paper_intake19.md vlprograms:1
+
+  202607/amh_adversarial_parity_supervisor.md amhrev:4
+
+  dw_browser_scripts_rewrite_711.md dw1:1 retired
+
+  202607/amh_parity_walk.md amhrev:0
+
+  vl_hyg_stale_fix.md vlportfolio:4
+
+  vl_context_mgr.md vlcontext:0
+
+  vl_pane_reconcile_mgr.md retired
+
+  vl_release_tools_mgr.md retired
+
+  202607/cligate_forecast_deploy_727.md cligate-forecast-727:0
+
+  202607/cligate_forecast_followup_706.md cligate-forecast-706:0
+
+  vl_wave3_gate_mgr.md vlcontext:3
+
+  202608/pb_state_alert_mgr.md pb:15
+
+  202608/pb_stockwatch_eval2.md pb:14
+
+  202608/pb_stockwatch_pub2.md pb:20
+
+  vl_custody_eval.md vlportfolio:5
+
+  202608/pb_stockwatch_eval.md pb:14
+
+  202608/pb_stockwatch_fix.md pb:17
+
+  202608/pb_captcha_notes.md pb:19
+
+  202608/pb_state_alert_eval.md pb:14
+
+  202608/pb_state_impl.md pb:16
+
+  '
+final-result: success
