@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import omo_manager.omo_codex_stop as codex_stop
 from omo_manager.omo_codex_status import Report
@@ -36,6 +36,7 @@ from omo_manager.omo_codex_stop import (
     resume_cmd,
     send_exit_keys,
     stop,
+    validate_exited_codex_shell,
 )
 
 
@@ -97,11 +98,71 @@ class CodexStopTests(unittest.TestCase):
             patch("omo_manager.omo_codex_stop.current_command", return_value="zsh"),
             patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["$ "])),
             patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
-            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+            patch("omo_manager.omo_codex_stop.guarded_tmux_shell_close") as close,
         ):
             close_exited_codex_shell("cfg:1", "%42", session_id, "specific-token")
 
-        self.assertEqual("%42", close.call_args.args[0])
+        close.assert_called_once_with("cfg:1", "%42")
+
+    def test_validate_exited_codex_shell_authenticates_without_closing(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f'{{"accepted":true,"receipt":"specific-token"}}\nConversation interrupted\nTo continue this session, run codex resume {session_id}\n$ '
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="zsh"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["$ "])),
+            patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
+            patch("omo_manager.omo_codex_stop.guarded_tmux_shell_close") as close,
+        ):
+            capture_sha256 = validate_exited_codex_shell("cfg:1", "%42", session_id, "specific-token")
+        self.assertEqual(hashlib.sha256(transcript.encode()).hexdigest(), capture_sha256)
+        close.assert_not_called()
+
+    def test_close_exited_codex_shell_preserves_live_positional_call(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        with (
+            patch("omo_manager.omo_codex_stop.validate_exited_codex_shell", return_value="a" * 64) as validate,
+            patch("omo_manager.omo_codex_stop.guarded_tmux_shell_close") as close,
+            patch("omo_manager.omo_codex_stop.pane_id", return_value=""),
+        ):
+            close_exited_codex_shell("cfg:1", "%42", session_id, "specific-token", 73)
+        validate.assert_called_once_with("cfg:1", "%42", session_id, "specific-token", 73)
+        close.assert_called_once_with("cfg:1", "%42")
+
+    def test_close_exited_codex_shell_rejects_capture_drift_from_durable_intent(self) -> None:
+        evidence_is_current = Mock(return_value=True)
+        with (
+            patch("omo_manager.omo_codex_stop.validate_exited_codex_shell", return_value="a" * 64),
+            patch("omo_manager.omo_codex_stop.guarded_tmux_shell_close") as close,
+            self.assertRaisesRegex(RuntimeError, "capture changed"),
+        ):
+            close_exited_codex_shell(
+                "cfg:1",
+                "%42",
+                "11111111-2222-3333-4444-555555555555",
+                "specific-token",
+                expected_capture_sha256="b" * 64,
+                evidence_is_current=evidence_is_current,
+            )
+        evidence_is_current.assert_not_called()
+        close.assert_not_called()
+
+    def test_close_exited_codex_shell_rejects_lifecycle_drift_before_close(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.validate_exited_codex_shell", return_value="a" * 64),
+            patch("omo_manager.omo_codex_stop.guarded_tmux_shell_close") as close,
+            self.assertRaisesRegex(RuntimeError, "lifecycle evidence changed"),
+        ):
+            close_exited_codex_shell(
+                "cfg:1",
+                "%42",
+                "11111111-2222-3333-4444-555555555555",
+                "specific-token",
+                expected_capture_sha256="a" * 64,
+                evidence_is_current=lambda: False,
+            )
+        close.assert_not_called()
 
     def test_close_authorized_human_pane_kills_only_the_exact_pane(self) -> None:
         with (
@@ -212,7 +273,7 @@ class CodexStopTests(unittest.TestCase):
                     patch("omo_manager.omo_codex_stop.current_command", return_value=command),
                     patch("omo_manager.omo_codex_stop.inspect", return_value=report),
                     patch("omo_manager.omo_codex_stop.capture", side_effect=captures),
-                    patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+                    patch("omo_manager.omo_codex_stop.guarded_tmux_shell_close") as close,
                     self.assertRaisesRegex(RuntimeError, error),
                 ):
                     close_exited_codex_shell("cfg:1", "%42", supplied_session, evidence)
@@ -1292,6 +1353,29 @@ class CodexStopTests(unittest.TestCase):
             self.assertRaisesRegex(RuntimeError, "no longer owns"),
         ):
             codex_stop.guarded_tmux_command("vl:2", "%42", ["kill-pane", "-t", "%42"])
+
+    def test_close_exited_shell_rechecks_ordinary_shell_in_same_tmux_queue_as_kill(self) -> None:
+        def command_changed_tmux(argv: list[str], check: bool = False) -> subprocess.CompletedProcess[str]:
+            self.assertFalse(check)
+            self.assertEqual(["if-shell", "-F", "-t", "vl:2"], argv[:4])
+            self.assertIn("#{==:#{pane_id},%42}", argv[4])
+            for shell in codex_stop.SHELL_COMMANDS:
+                self.assertIn(f"#{{==:#{{pane_current_command}},{shell}}}", argv[4])
+            self.assertIn("kill-pane -t %42", argv[5])
+            rejected = argv[6].rsplit("display-message -p ", 1)[1]
+            return subprocess.CompletedProcess(argv, 0, rejected + "\n", "")
+
+        with (
+            patch("omo_manager.omo_codex_stop.validate_exited_codex_shell", return_value="a" * 64),
+            patch("omo_manager.omo_codex_stop.tmux", side_effect=command_changed_tmux),
+            self.assertRaisesRegex(RuntimeError, "no longer owns"),
+        ):
+            close_exited_codex_shell(
+                "vl:2",
+                "%42",
+                "11111111-2222-3333-4444-555555555555",
+                "specific-token",
+            )
 
     def test_bound_nonhuman_rebind_at_paste_stops_before_any_later_input(self) -> None:
         with (
