@@ -103,7 +103,7 @@ HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 PANE_RE = re.compile(r"%[0-9]+\Z")
 UUID_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
-TODO_ROW_RE = re.compile(r"([A-Za-z0-9_./-]+\.md)(?:[ \t]+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?|retired))?\Z")
+TODO_ROW_RE = re.compile(r"([A-Za-z0-9_./-]+\.md)(?:[ \t]+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?|retired)(?:[ \t]+(retired))?)?\Z")
 AUTHORITY_RE = re.compile(
     r'<human_instruction[ \t]+authoritative="true"[ \t]+source="([^"\r\n]+)">\r?\n(.*?)</human_instruction>',
     re.DOTALL,
@@ -356,7 +356,9 @@ def todo_tasks(root: Path, todo: Snapshot) -> tuple[TodoTask, ...]:
         match = TODO_ROW_RE.fullmatch(stripped)
         if match is None:
             raise PrerequisiteError(f"work-log TODO contains a malformed {section} task row")
-        raw_path, target = match.groups()
+        raw_path, target, retired_marker = match.groups()
+        if retired_marker is not None and (section != "previous" or target == "retired"):
+            raise PrerequisiteError(f"work-log TODO contains a malformed {section} task row")
         relative = Path(raw_path)
         if relative.is_absolute() or relative.as_posix() != raw_path or any(part in {"", ".", ".."} for part in relative.parts) or relative == Path("TODO.md"):
             raise PrerequisiteError("work-log TODO contains an unsafe task path")
@@ -604,14 +606,13 @@ def active_target_owners(
 
 
 def git_head() -> str:
-    environment = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
     result = subprocess.run(
         ["git", "-C", str(CANONICAL_SOURCE_ROOT), "rev-parse", "--verify", "HEAD"],
-        text=True,
+        encoding="ascii",
         capture_output=True,
         timeout=10,
         check=False,
-        env=environment,
+        env={"PATH": "/usr/bin:/bin"},
     )
     value = result.stdout.strip()
     if result.returncode != 0 or COMMIT_RE.fullmatch(value) is None:

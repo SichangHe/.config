@@ -45,10 +45,11 @@ def digest(payload: bytes) -> str:
 def repository_head(root: Path) -> str:
     result = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
-        text=True,
+        encoding="ascii",
         capture_output=True,
         timeout=10,
         check=True,
+        env={"PATH": "/usr/bin:/bin"},
     )
     return result.stdout.strip()
 
@@ -162,6 +163,7 @@ class Fixture:
         self.archived_transcription = self.root / prerequisite.ARCHIVED_TRANSCRIPTION
         self.archived_eval = self.root / prerequisite.ARCHIVED_INTERRUPTED_EVAL
         self.archived_fix = self.root / prerequisite.ARCHIVED_INTERRUPTED_FIX
+        self.retired_target = self.root / "dw_browser_scripts_rewrite_711.md"
         self.audit = self.private / "completed-audit.yaml"
         self.report = self.private / "report.md"
         self.acceptance = self.private / "acceptance.json"
@@ -180,6 +182,7 @@ class Fixture:
         self.archived_transcription.write_text(finished_task_text("wl:32"), encoding="utf-8")
         self.archived_eval.write_text(finished_task_text("vldr:2"), encoding="utf-8")
         self.archived_fix.write_text(finished_task_text("vldr:1"), encoding="utf-8")
+        self.retired_target.write_text(finished_task_text("dw1:1"), encoding="utf-8")
         self.archive_todo.write_text(
             "\n".join(
                 (
@@ -201,9 +204,12 @@ class Fixture:
                     f"{prerequisite.CANONICAL_CARRIER} {prerequisite.TARGET}",
                     f"{prerequisite.DUPLICATE_CARRIER} agent_managers:78",
                     "",
+                    "low priority:",
+                    "",
                     "previous:",
                     "202608/mem1290_eval.md vldr:2",
                     "202608/mem1290_fix.md vldr:1",
+                    "dw_browser_scripts_rewrite_711.md dw1:1 retired",
                     "",
                 )
             ),
@@ -575,7 +581,7 @@ class Source1290PrerequisiteTests(unittest.TestCase):
 
         terminalized = json.loads(output)
         indexed = terminalized["binding"]["ownership_manifest"]["index"]["tasks"]
-        self.assertEqual(5, len(indexed))
+        self.assertEqual(6, len(indexed))
         self.assertEqual("terminalized", terminalized["phase"])
         self.assertTrue(case.terminal_receipt.exists())
 
@@ -602,9 +608,39 @@ class Source1290PrerequisiteTests(unittest.TestCase):
         manifest = json.loads(result.stdout)
         self.assertEqual(result.stdout, canonical_json(manifest))
         self.assertEqual(
-            ["202608/mem1290_eval.md", "202608/mem1290_fix.md", "manager.md", "mem1290_auth.md", "memory_auth_1290.md"],
+            ["202608/mem1290_eval.md", "202608/mem1290_fix.md", "dw_browser_scripts_rewrite_711.md", "manager.md", "mem1290_auth.md", "memory_auth_1290.md"],
             [item["path"] for item in manifest["tasks"]],
         )
+
+    def test_ownership_preflight_preserves_previous_target_plus_retired_row(self) -> None:
+        temporary, case = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        manifest = json.loads(prerequisite.ownership_preflight(case.root, digest(case.todo.read_bytes())))
+        record = next(item for item in manifest["tasks"] if item["path"] == case.retired_target.name)
+        self.assertEqual("previous", record["section"])
+        self.assertEqual("done", record["status"])
+        self.assertEqual("dw1:1", record["target"])
+        self.assertEqual("dw1:1", record["todo_target"])
+
+    def test_target_plus_retired_row_rejects_wrong_section_or_ambiguous_suffix(self) -> None:
+        row = "dw_browser_scripts_rewrite_711.md dw1:1 retired"
+        variants = {
+            "current": ("current", row),
+            "human pending": ("human pending", row),
+            "low priority": ("low priority", row),
+            "competing target": ("previous", "dw_browser_scripts_rewrite_711.md dw1:1 other:2 retired"),
+            "double retired": ("previous", "dw_browser_scripts_rewrite_711.md retired retired"),
+            "extra suffix": ("previous", f"{row} extra"),
+        }
+        for name, (section, replacement) in variants.items():
+            with self.subTest(name=name):
+                temporary, case = self.fixture()
+                self.addCleanup(temporary.cleanup)
+                todo_text = case.todo.read_text(encoding="utf-8").replace(f"{row}\n", "")
+                todo_text = todo_text.replace(f"{section}:\n", f"{section}:\n{replacement}\n", 1)
+                case.todo.write_text(todo_text, encoding="utf-8")
+                with self.assertRaisesRegex(prerequisite.PrerequisiteError, "malformed .* task row"):
+                    prerequisite.ownership_preflight(case.root, digest(case.todo.read_bytes()))
 
     def test_manifest_cannot_exclude_an_indexed_active_owner(self) -> None:
         temporary, case = self.fixture()
@@ -967,16 +1003,31 @@ class Source1290PrerequisiteTests(unittest.TestCase):
             prerequisite.reconcile(case.args)
         self.assertEqual("prepared", json.loads(case.terminal_receipt.read_bytes())["phase"])
 
-    def test_canonical_source_head_command_ignores_repository_environment_overrides(self) -> None:
-        temporary, _case = self.fixture()
+    def test_canonical_source_head_command_uses_only_fixed_path_environment(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
+        injected_bin = Path(temporary.name) / "bin"
+        injected_bin.mkdir()
+        git_shim = injected_bin / "git"
+        git_shim.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        git_shim.chmod(0o700)
         self.assertEqual(Path("/home/sichangheagent/.config"), prerequisite.CANONICAL_SOURCE_ROOT)
         observation = subprocess.CompletedProcess([], 0, f"{EXPECTED_SOURCE_HEAD}\n", "")
         overrides = {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_GLOBAL": str(Path(temporary.name) / "global.gitconfig"),
+            "GIT_CONFIG_KEY_0": "include.path",
+            "GIT_CONFIG_SYSTEM": str(Path(temporary.name) / "system.gitconfig"),
+            "GIT_CONFIG_VALUE_0": str(Path(temporary.name) / "injected.gitconfig"),
             "GIT_COMMON_DIR": str(SOURCE_ROOT / ".git"),
             "GIT_DIR": str(SOURCE_ROOT / ".git"),
+            "GIT_EXEC_PATH": str(injected_bin),
             "GIT_WORK_TREE": str(SOURCE_ROOT),
             "HOME": str(Path(temporary.name) / "untrusted-home"),
+            "LANG": "malicious_LOCALE",
+            "LC_ALL": "malicious_LOCALE",
+            "PATH": str(injected_bin),
+            "XDG_CONFIG_HOME": str(Path(temporary.name) / "xdg"),
         }
         with patch.dict(os.environ, overrides), patch.object(subprocess, "run", return_value=observation) as run:
             self.assertEqual(EXPECTED_SOURCE_HEAD, prerequisite.git_head())
@@ -986,10 +1037,9 @@ class Source1290PrerequisiteTests(unittest.TestCase):
             (["git", "-C", "/home/sichangheagent/.config", "rev-parse", "--verify", "HEAD"],),
             positional,
         )
-        self.assertEqual("untrusted-home", Path(keywords["env"]["HOME"]).name)
-        self.assertFalse(any(name.startswith("GIT_") for name in keywords["env"]))
+        self.assertEqual({"PATH": "/usr/bin:/bin"}, keywords["env"])
         self.assertEqual(
-            {"capture_output": True, "check": False, "text": True, "timeout": 10},
+            {"capture_output": True, "check": False, "encoding": "ascii", "timeout": 10},
             {name: value for name, value in keywords.items() if name != "env"},
         )
 

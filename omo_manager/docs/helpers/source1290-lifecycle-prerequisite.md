@@ -27,10 +27,11 @@ carrier state
 
 source observation
 
-- observe with exactly `git -C /home/sichangheagent/.config rev-parse --verify HEAD`
+- observe with the hermetic equivalent of exactly `env -i PATH=/usr/bin:/bin git -C /home/sichangheagent/.config rev-parse --verify HEAD`
 - pass that full 40-character lowercase output as the required `--source-head`; the helper contains no fixed accepted HEAD
 - treat every observed live HEAD as diagnostic evidence only until the invocation supplies it; no observed SHA is durable authorization
-- remove all caller `GIT_*` environment overrides before observation and reject malformed, abbreviated, uppercase, stale, or different claims
+- give the Git child exactly `PATH=/usr/bin:/bin`; inherit no caller `HOME`, `PATH`, locale, config, hook, `GIT_*`, or unrelated environment input
+- reject failed Git execution and malformed, abbreviated, uppercase, stale, or different observations and claims
 - observe HEAD before and after individually authenticating every source file, then repeat the same source binding at every prepared, terminalized, and pre-input/pre-receipt custody revalidation gate
 
 terminalization CLI manifest
@@ -42,6 +43,8 @@ terminalization CLI manifest
 ownership preflight
 
 - after report acceptance, run `omo_source1290_prerequisite.py ownership-preflight --root ROOT --todo-sha256 DIGEST`
+- accept only canonical task rows containing a path, an optional target or targetless `retired`, and, under `previous:` only, an optional trailing `retired` after an exact owner target
+- preserve the owner target in `TASK.md TARGET retired` rows and require it to match task metadata; reject the trailing marker in another section, after targetless `retired`, or with any additional or competing suffix
 - save its canonical JSON output in an owner-private mode `0600` file and pass that file with `--ownership-manifest` and `--ownership-manifest-sha256`
 - the manifest contains every unique task row in the exact authenticated `TODO.md`, capped at 512 entries, with its section, declared target, parsed lifecycle target/status, inode identity, mode, owner, bytes, and owner-owned parent directory identity/mode
 - only those authoritative indexed tasks are authenticated for ownership; unrelated unindexed historical Markdown, including preserved shared-mode records, is neither read nor changed
