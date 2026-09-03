@@ -38,6 +38,26 @@ AUTHORITY_RE = re.compile(
 # 🧑 Human Source `manager_mail/85c5dff58359-1290.txt:3-4`: “Close the ‘memory’ thing. It is so old.”
 SOURCE1290_AUTHORITY = "manager_mail/85c5dff58359-1290.txt:3-4"
 SOURCE1290_EXCERPT = "Close the “memory” thing. It is so old.\nWhich email report was for the transcription thing\n"
+SOURCE1290_AUDIT_SHA256 = "eafa5c27d35ea2dacb4c94a0c53619f06acfb66bef703bf63dc569ac7af5fedf"
+SOURCE1290_ENVELOPE_SHA256 = "067dc445bef60174e0490198aa3859557fd29fcb0a055ae18c940dc0a945daea"
+ARCHIVED_SOURCE1290_AUTHORITY = f"202608/{SOURCE1290_AUTHORITY}"
+CANONICAL_CARRIER = Path("mem1290_auth.md")
+DUPLICATE_CARRIER = Path("memory_auth_1290.md")
+ARCHIVE_TODO = Path("202608/old_todos.md")
+ARCHIVED_MEMORY = Path("202608/memory_research_mgr.md")
+ARCHIVED_TRANSCRIPTION = Path("202608/transcription_sw.md")
+ARCHIVED_INTERRUPTED_EVAL = Path("202608/mem1290_eval.md")
+ARCHIVED_INTERRUPTED_FIX = Path("202608/mem1290_fix.md")
+POST_ARCHIVE_SHA256 = {
+    CANONICAL_CARRIER: "86e0cbe819e7b1d0f2899d35b903744209222d9eaa46ca8e6929bb63af1ec30a",
+    DUPLICATE_CARRIER: "3a0291e6ea4c6aa8ef59055d65e97c53a8468d1a29d6e41c9aad7e760f59c811",
+    ARCHIVED_MEMORY: "d2ae03a9e19f981ec43c6b8527fca1475a31a7c0593611c8ac6f36dbb392e705",
+    ARCHIVED_TRANSCRIPTION: "a01fec08cfdcab16755a5d44c5ae78fde5110b05967ed7b0c324bba55cc6bea1",
+    ARCHIVED_INTERRUPTED_EVAL: "62d641ddcaede3417b5bb024c676d0c3322f8d3bdbac31aa03b9e269259a19cf",
+    ARCHIVED_INTERRUPTED_FIX: "ee0429ecf458721f24d4965e285dd59ade51742359b717fd1d697067826d35d5",
+}
+DUPLICATE_CARRIER_BLOCKER = "duplicate authority carrier created during concurrent routing; canonical carrier is mem1290_auth.md; no production ownership"
+INTERRUPTED_TARGETS = {ARCHIVED_INTERRUPTED_EVAL: "vldr:2", ARCHIVED_INTERRUPTED_FIX: "vldr:1"}
 AUDIT_FIELDS = {
     "version",
     "operation",
@@ -78,12 +98,16 @@ RECOVERY_AUDIT_FIELDS = {
     "in_progress_task_sha256",
     "failed_task_sha256",
     "todo_sha256",
+    "archive_todo_sha256",
     "completed_audit",
     "completed_audit_sha256",
     "authority_sha256",
     "authority_envelope_sha256",
     "memory_sha256",
     "transcription_sha256",
+    "duplicate_carrier_sha256",
+    "interrupted_eval_sha256",
+    "interrupted_fix_sha256",
 }
 
 
@@ -93,6 +117,7 @@ class Args:
     task_file: Path
     task_sha256: str
     todo_sha256: str
+    archive_todo_sha256: str
     pane_id: str
     session_id: str
     terminal_evidence: str
@@ -115,6 +140,16 @@ class CompletedAudit:
 class RecoveryAudit:
     text: str
     terminal_capture_sha256: str
+
+
+@dataclass(frozen=True)
+class PostArchiveState:
+    archive_todo: str
+    memory: str
+    transcription: str
+    duplicate_carrier: str
+    interrupted_eval: str
+    interrupted_fix: str
 
 
 def sha256(payload: bytes) -> str:
@@ -210,6 +245,8 @@ def todo_rows(text: str, name: str) -> tuple[tuple[str, str], ...]:
 def validate_completed_audit(payload: bytes, carrier: str, root: Path) -> CompletedAudit:
     """Authenticate the immutable successful Source-1290 cancellation receipt."""
 
+    if sha256(payload) != SOURCE1290_AUDIT_SHA256:
+        raise OSError("completed Source-1290 audit is not the exact immutable cancellation receipt")
     try:
         record = yaml.load(payload, Loader=UniqueKeyLoader)
     except (UnicodeDecodeError, yaml.YAMLError) as exc:
@@ -277,7 +314,7 @@ def validate_completed_audit(payload: bytes, carrier: str, root: Path) -> Comple
         or committed_metadata.runat != "wl:32"
         or committed_metadata.pending_task_items
         or todo_rows(source_todo, "transcription_sw.md") != (("current", "transcription_sw.md wl:32"),)
-        or todo_rows(source_todo, "memory_research_mgr.md") != (("human pending", "memory_research_mgr.md wl:32"),)
+        or todo_rows(source_todo, "memory_research_mgr.md") != (("current", "memory_research_mgr.md wl:32"),)
         or todo_rows(committed_todo, "transcription_sw.md") != (("current", "transcription_sw.md wl:32"),)
         or todo_rows(committed_todo, "memory_research_mgr.md") != (("previous", "memory_research_mgr.md wl:32"),)
     ):
@@ -294,21 +331,31 @@ def validate_completed_audit(payload: bytes, carrier: str, root: Path) -> Comple
 
 
 def source1290_authority(root: Path, expected_sha256: str) -> tuple[bytes, os.stat_result]:
-    """Authenticate the exact owner-private Source-1290 mailbox source."""
+    """Authenticate the exact archived Source-1290 mailbox source."""
 
-    relative = Path(SOURCE1290_AUTHORITY.partition(":")[0])
+    original = root / SOURCE1290_AUTHORITY.partition(":")[0]
+    try:
+        _ = original.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise OSError("pre-archive Source-1290 mailbox source unexpectedly exists")
+    relative = Path(ARCHIVED_SOURCE1290_AUTHORITY.partition(":")[0])
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     root_descriptor = os.open(root, directory_flags)
-    parent_descriptor = -1
+    directory_descriptors = [root_descriptor]
     descriptor = -1
     try:
-        root_before = os.fstat(root_descriptor)
-        parent_descriptor = os.open(relative.parts[0], directory_flags, dir_fd=root_descriptor)
-        parent_before = os.fstat(parent_descriptor)
-        if not stat.S_ISDIR(parent_before.st_mode) or parent_before.st_uid != os.getuid() or stat.S_IMODE(parent_before.st_mode) & 0o077:
-            raise OSError("Source-1290 manager_mail directory is not owner-private")
-        descriptor = os.open(relative.parts[1], file_flags, dir_fd=parent_descriptor)
+        directory_before = [os.fstat(root_descriptor)]
+        for part in relative.parts[:-1]:
+            directory_descriptor = os.open(part, directory_flags, dir_fd=directory_descriptors[-1])
+            directory_descriptors.append(directory_descriptor)
+            directory_state = os.fstat(directory_descriptor)
+            directory_before.append(directory_state)
+            if not stat.S_ISDIR(directory_state.st_mode) or directory_state.st_uid != os.getuid() or stat.S_IMODE(directory_state.st_mode) & 0o022:
+                raise OSError("Source-1290 archived mailbox directory is not owner-controlled")
+        descriptor = os.open(relative.parts[-1], file_flags, dir_fd=directory_descriptors[-1])
         before = os.fstat(descriptor)
         chunks: list[bytes] = []
         remaining = MAX_AUDIT_BYTES + 1
@@ -320,17 +367,18 @@ def source1290_authority(root: Path, expected_sha256: str) -> tuple[bytes, os.st
             remaining -= len(chunk)
         payload = b"".join(chunks)
         after = os.fstat(descriptor)
-        bound = os.stat(relative.parts[1], dir_fd=parent_descriptor, follow_symlinks=False)
-        parent_after = os.fstat(parent_descriptor)
-        parent_bound = os.stat(relative.parts[0], dir_fd=root_descriptor, follow_symlinks=False)
-        root_after = os.fstat(root_descriptor)
-        root_bound = root.lstat()
+        bound = os.stat(relative.parts[-1], dir_fd=directory_descriptors[-1], follow_symlinks=False)
+        directory_after = [os.fstat(directory_descriptor) for directory_descriptor in directory_descriptors]
+        directory_bound = [root.lstat()]
+        directory_bound.extend(
+            os.stat(part, dir_fd=directory_descriptors[index], follow_symlinks=False)
+            for index, part in enumerate(relative.parts[:-1])
+        )
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-        if parent_descriptor >= 0:
-            os.close(parent_descriptor)
-        os.close(root_descriptor)
+        for directory_descriptor in reversed(directory_descriptors):
+            os.close(directory_descriptor)
     if (
         len(payload) > MAX_AUDIT_BYTES
         or not stat.S_ISREG(before.st_mode)
@@ -339,18 +387,14 @@ def source1290_authority(root: Path, expected_sha256: str) -> tuple[bytes, os.st
         or not same_file_state(before, after)
         or (after.st_dev, after.st_ino) != (bound.st_dev, bound.st_ino)
         or bound.st_uid != before.st_uid
-        or stat.S_IMODE(bound.st_mode) & 0o077
-        or not same_file_state(parent_before, parent_after)
-        or (parent_after.st_dev, parent_after.st_ino) != (parent_bound.st_dev, parent_bound.st_ino)
-        or parent_after.st_uid != os.getuid()
-        or stat.S_IMODE(parent_after.st_mode) & 0o077
-        or not same_file_state(root_before, root_after)
-        or (root_after.st_dev, root_after.st_ino) != (root_bound.st_dev, root_bound.st_ino)
+        or stat.S_IMODE(bound.st_mode) != 0o600
+        or any(not same_file_state(old, new) for old, new in zip(directory_before, directory_after, strict=True))
+        or any((new.st_dev, new.st_ino) != (bound_directory.st_dev, bound_directory.st_ino) for new, bound_directory in zip(directory_after, directory_bound, strict=True))
         or sha256(payload) != expected_sha256
     ):
         raise OSError("Source-1290 mailbox identity, mode, size, or digest drifted")
     try:
-        lines = payload.decode().splitlines(keepends=True)
+        lines = payload.decode("utf-8").splitlines(keepends=True)
     except UnicodeDecodeError as exc:
         raise OSError("Source-1290 mailbox source is not UTF-8") from exc
     if len(lines) < 4 or "".join(lines[2:4]).replace("\r\n", "\n") != SOURCE1290_EXCERPT:
@@ -373,13 +417,112 @@ def task_paths(root: Path) -> tuple[Path, ...]:
     return tuple(sorted(paths))
 
 
+def read_post_archive_state(root: Path, args: Args) -> PostArchiveState:
+    """Authenticate the exact Source-1290 records after the August archive."""
+
+    texts = {
+        relative: (root / relative).read_text(encoding="utf-8")
+        for relative in (DUPLICATE_CARRIER, ARCHIVED_MEMORY, ARCHIVED_TRANSCRIPTION, *INTERRUPTED_TARGETS)
+    }
+    archive_todo = (root / ARCHIVE_TODO).read_text(encoding="utf-8")
+    if sha256(archive_todo.encode()) != args.archive_todo_sha256:
+        raise OSError("archived TODO bytes do not match --archive-todo-sha256")
+    if any(sha256(text.encode()) != POST_ARCHIVE_SHA256[relative] for relative, text in texts.items()):
+        raise OSError("Source-1290 post-archive record bytes drifted")
+    for original in (Path("memory_research_mgr.md"), Path("transcription_sw.md"), Path(SOURCE1290_AUTHORITY.partition(":")[0])):
+        try:
+            _ = (root / original).lstat()
+        except FileNotFoundError:
+            continue
+        raise OSError("Source-1290 pre-archive record unexpectedly exists")
+    memory_metadata = parse_task_metadata(texts[ARCHIVED_MEMORY], root)
+    transcription_metadata = parse_task_metadata(texts[ARCHIVED_TRANSCRIPTION], root)
+    duplicate_metadata = parse_task_metadata(texts[DUPLICATE_CARRIER], root)
+    if (
+        memory_metadata is None
+        or memory_metadata.status != "done"
+        or not memory_metadata.is_manager
+        or memory_metadata.runat != "wl:32"
+        or memory_metadata.pending_task_items
+        or has_pending_marker(texts[ARCHIVED_MEMORY])
+        or transcription_metadata is None
+        or transcription_metadata.status != "done"
+        or transcription_metadata.is_manager
+        or transcription_metadata.runat != "wl:32"
+        or transcription_metadata.pending_task_items
+        or has_pending_marker(texts[ARCHIVED_TRANSCRIPTION])
+        or duplicate_metadata is None
+        or duplicate_metadata.status != "blocked"
+        or duplicate_metadata.blocked_on != DUPLICATE_CARRIER_BLOCKER
+        or duplicate_metadata.is_manager
+        or duplicate_metadata.runat != "agent_managers:78"
+        or duplicate_metadata.pending_task_items
+        or has_pending_marker(texts[DUPLICATE_CARRIER])
+        or authority_blocks(texts[DUPLICATE_CARRIER]) != ((ARCHIVED_SOURCE1290_AUTHORITY, SOURCE1290_EXCERPT),)
+    ):
+        raise OSError("Source-1290 post-archive memory, transcription, or duplicate-carrier custody drifted")
+    for relative, target in INTERRUPTED_TARGETS.items():
+        metadata = parse_task_metadata(texts[relative], root)
+        if (
+            metadata is None
+            or metadata.status != "done"
+            or metadata.blocked_on
+            or metadata.is_manager
+            or metadata.runat != target
+            or metadata.pending_task_items
+            or has_pending_marker(texts[relative])
+        ):
+            raise OSError("Source-1290 archived interrupted-close evidence drifted")
+    archive_section = "archived from todo.md previous on 2026-09-01"
+    if (
+        todo_rows(archive_todo, "memory_research_mgr.md") != ((archive_section, "memory_research_mgr.md wl:32"),)
+        or todo_rows(archive_todo, "transcription_sw.md") != ((archive_section, "transcription_sw.md wl:32"),)
+    ):
+        raise OSError("Source-1290 archived TODO custody drifted")
+    return PostArchiveState(
+        archive_todo,
+        texts[ARCHIVED_MEMORY],
+        texts[ARCHIVED_TRANSCRIPTION],
+        texts[DUPLICATE_CARRIER],
+        texts[ARCHIVED_INTERRUPTED_EVAL],
+        texts[ARCHIVED_INTERRUPTED_FIX],
+    )
+
+
+def validate_post_archive_todo(text: str, carrier: str, target: str) -> None:
+    """Require the exact live and archived Source-1290 custody rows."""
+
+    if (
+        todo_rows(text, carrier) != (("current", f"{carrier} {target}"),)
+        or todo_rows(text, DUPLICATE_CARRIER.as_posix()) != (("human pending", "memory_auth_1290.md agent_managers:78"),)
+        or todo_rows(text, ARCHIVED_INTERRUPTED_EVAL.as_posix()) != (("previous", "202608/mem1290_eval.md vldr:2"),)
+        or todo_rows(text, ARCHIVED_INTERRUPTED_FIX.as_posix()) != (("previous", "202608/mem1290_fix.md vldr:1"),)
+        or todo_rows(text, "memory_research_mgr.md")
+        or todo_rows(text, ARCHIVED_MEMORY.as_posix())
+        or todo_rows(text, "transcription_sw.md")
+        or todo_rows(text, ARCHIVED_TRANSCRIPTION.as_posix())
+    ):
+        raise OSError("current TODO does not preserve the exact Source-1290 post-archive custody")
+
+
+def archived_helper_targets_are_unowned(root: Path) -> bool:
+    return all(not authoritative_active_target_task_paths(root, target) for target in INTERRUPTED_TARGETS.values())
+
+
+def post_archive_state_is_current(root: Path, args: Args, expected: PostArchiveState) -> bool:
+    try:
+        return read_post_archive_state(root, args) == expected
+    except (OSError, TaskFrontmatterError, UnicodeDecodeError):
+        return False
+
+
 def validate_carrier(root: Path, path: Path, text: str, expected_sha256: str, pane_id: str) -> tuple[str, bool]:
     """Validate the exact interrupted empty-queue authority carrier."""
 
     if sha256(text.encode()) != expected_sha256:
         raise OSError("authority-carrier task bytes do not match --task-sha256")
     metadata = parse_task_metadata(text, root)
-    expected_authority = (SOURCE1290_AUTHORITY, SOURCE1290_EXCERPT)
+    expected_authority = (ARCHIVED_SOURCE1290_AUTHORITY, SOURCE1290_EXCERPT)
     failed_reason = f"{CLOSE_FAILED_PREFIX}: target is not a supported live Codex pane: {pane_id} status=not_codex"
     if (
         metadata is None
@@ -391,22 +534,21 @@ def validate_carrier(root: Path, path: Path, text: str, expected_sha256: str, pa
         or has_pending_marker(text)
         or authority_blocks(text) != (expected_authority,)
         or metadata.runat.partition(":")[0].startswith("h")
-        or relative_task_ref(root, path) in {"TODO.md", "memory_research_mgr.md", "transcription_sw.md"}
+        or relative_task_ref(root, path) != CANONICAL_CARRIER.as_posix()
     ):
         raise OSError("task is not the exact interrupted non-human Source-1290 authority carrier with an empty queue")
+    in_progress = update_frontmatter_status(text, "blocked", DONE_CLOSE_IN_PROGRESS, root)
+    if sha256(in_progress.encode()) != POST_ARCHIVE_SHA256[CANONICAL_CARRIER]:
+        raise OSError("authority-carrier bytes do not derive from the exact post-archive state")
     return metadata.runat, metadata.blocked_on == failed_reason
 
 
 def validate_audit_bound_carrier(root: Path, text: str, audit: CompletedAudit) -> None:
-    """Bind the carrier to the audit through only canonical done-close status edits."""
+    """Bind the immutable audit envelope to its exact post-archive carrier state."""
 
     in_progress = update_frontmatter_status(text, "blocked", DONE_CLOSE_IN_PROGRESS, root)
-    permitted_images = {
-        update_frontmatter_status(in_progress, "running", "", root),
-        update_frontmatter_status(in_progress, "long_running", "", root),
-    }
-    if audit.authority_envelope_sha256 not in {sha256(image.encode()) for image in permitted_images}:
-        raise OSError("completed Source-1290 audit does not bind this carrier through a permitted done-close transition")
+    if audit.authority_envelope_sha256 != SOURCE1290_ENVELOPE_SHA256 or sha256(in_progress.encode()) != POST_ARCHIVE_SHA256[CANONICAL_CARRIER]:
+        raise OSError("completed Source-1290 audit does not bind the exact post-archive carrier")
 
 
 def recovery_path(completed_audit: Path) -> Path:
@@ -420,6 +562,7 @@ def recovery_audit_text(
     in_progress_text: str,
     failed_text: str,
     audit: CompletedAudit,
+    state: PostArchiveState,
     terminal_capture_sha256: str,
 ) -> str:
     record = {
@@ -434,13 +577,17 @@ def recovery_audit_text(
         "terminal_capture_sha256": terminal_capture_sha256,
         "in_progress_task_sha256": sha256(in_progress_text.encode()),
         "failed_task_sha256": sha256(failed_text.encode()),
-        "todo_sha256": audit.todo_sha256,
+        "todo_sha256": args.todo_sha256,
+        "archive_todo_sha256": args.archive_todo_sha256,
         "completed_audit": str(args.completed_audit),
         "completed_audit_sha256": args.completed_audit_sha256,
         "authority_sha256": audit.authority_sha256,
         "authority_envelope_sha256": audit.authority_envelope_sha256,
-        "memory_sha256": audit.memory_sha256,
-        "transcription_sha256": audit.transcription_sha256,
+        "memory_sha256": sha256(state.memory.encode()),
+        "transcription_sha256": sha256(state.transcription.encode()),
+        "duplicate_carrier_sha256": sha256(state.duplicate_carrier.encode()),
+        "interrupted_eval_sha256": sha256(state.interrupted_eval.encode()),
+        "interrupted_fix_sha256": sha256(state.interrupted_fix.encode()),
     }
     return yaml.safe_dump(record, sort_keys=False)
 
@@ -453,6 +600,7 @@ def validate_recovery_audit(
     in_progress_text: str,
     failed_text: str,
     audit: CompletedAudit,
+    state: PostArchiveState,
 ) -> RecoveryAudit:
     try:
         record = yaml.load(text, Loader=UniqueKeyLoader)
@@ -469,6 +617,7 @@ def validate_recovery_audit(
             in_progress_text,
             failed_text,
             audit,
+            state,
             str(terminal_capture_sha256),
         )
     )
@@ -501,19 +650,16 @@ def reconcile(args: Args) -> None:
     audit_payload, audit_before = private_audit(args.completed_audit, args.completed_audit_sha256)
     audit = validate_completed_audit(audit_payload, carrier, root)
     validate_audit_bound_carrier(root, initial_text, audit)
-    if audit.todo_sha256 != args.todo_sha256 or audit.todo_text != todo_text:
-        raise OSError("TODO does not match the completed Source-1290 cancellation state")
-    authority_path = root / SOURCE1290_AUTHORITY.partition(":")[0]
+    authority_path = root / ARCHIVED_SOURCE1290_AUTHORITY.partition(":")[0]
     authority_payload, authority_before = source1290_authority(root, audit.authority_sha256)
-    memory = root / "memory_research_mgr.md"
-    transcription = root / "transcription_sw.md"
-    expected_authority = (SOURCE1290_AUTHORITY, SOURCE1290_EXCERPT)
+    expected_authority = (ARCHIVED_SOURCE1290_AUTHORITY, SOURCE1290_EXCERPT)
     failed_reason = f"{CLOSE_FAILED_PREFIX}: target is not a supported live Codex pane: {args.pane_id} status=not_codex"
     close_intent_path = recovery_path(args.completed_audit)
     with root_membership_lock(root), task_target_lock(root, target):
         paths = task_paths(root)
-        if not {path, todo, memory, transcription}.issubset(paths):
-            raise OSError("carrier, memory, transcription, or TODO disappeared from work-log membership")
+        required_paths = {path, todo, *(root / relative for relative in (ARCHIVE_TODO, DUPLICATE_CARRIER, ARCHIVED_MEMORY, ARCHIVED_TRANSCRIPTION, *INTERRUPTED_TARGETS))}
+        if not required_paths.issubset(paths):
+            raise OSError("Source-1290 carrier or post-archive custody record disappeared from work-log membership")
         with ExitStack() as locks:
             for locked_path in sorted({*paths, args.completed_audit, authority_path, close_intent_path}, key=str):
                 locks.enter_context(task_file_lock(locked_path))
@@ -542,21 +688,10 @@ def reconcile(args: Args) -> None:
             if validate_completed_audit(current_audit, carrier, root) != audit:
                 raise OSError("completed Source-1290 audit binding changed")
             validate_audit_bound_carrier(root, current_text, audit)
-            memory_text = memory.read_text(encoding="utf-8")
-            transcription_text = transcription.read_text(encoding="utf-8")
-            transcription_metadata = parse_task_metadata(transcription_text, root)
-            if (
-                memory_text != audit.memory_text
-                or sha256(memory_text.encode()) != audit.memory_sha256
-                or sha256(transcription_text.encode()) != audit.transcription_sha256
-                or transcription_metadata is None
-                or transcription_metadata.status == "done"
-                or transcription_metadata.runat != "wl:32"
-                or todo_rows(current_todo, "memory_research_mgr.md") != (("previous", "memory_research_mgr.md wl:32"),)
-                or todo_rows(current_todo, "transcription_sw.md") != (("current", "transcription_sw.md wl:32"),)
-                or todo_rows(current_todo, carrier) != (("current", f"{carrier} {target}"),)
-            ):
-                raise OSError("completed memory cancellation or protected transcription state drifted")
+            state = read_post_archive_state(root, args)
+            validate_post_archive_todo(current_todo, carrier, target)
+            if not archived_helper_targets_are_unowned(root):
+                raise OSError("Source-1290 archived helper target ownership drifted")
             owners = authoritative_active_target_task_paths(root, target)
             if owners != (path,):
                 names = ", ".join(relative_task_ref(root, owner) for owner in owners) or "none"
@@ -577,6 +712,7 @@ def reconcile(args: Args) -> None:
                     in_progress_text,
                     failed_text,
                     audit,
+                    state,
                 )
                 if current_text != failed_text:
                     raise OSError("durable Source-1290 close intent requires the exact done_close_failed carrier state")
@@ -602,10 +738,10 @@ def reconcile(args: Args) -> None:
                 or todo.read_text(encoding="utf-8") != current_todo
                 or private_audit(args.completed_audit, args.completed_audit_sha256)[0] != current_audit
                 or source1290_authority(root, audit.authority_sha256)[0] != current_authority
-                or memory.read_text(encoding="utf-8") != memory_text
-                or transcription.read_text(encoding="utf-8") != transcription_text
+                or not post_archive_state_is_current(root, args, state)
                 or task_paths(root) != paths
                 or authoritative_active_target_task_paths(root, target) != (path,)
+                or not archived_helper_targets_are_unowned(root)
                 or exact_pane_id(target) != resolved_pane
                 or read_private_audit(close_intent_path) != recovery_text
             ):
@@ -627,6 +763,7 @@ def reconcile(args: Args) -> None:
                     in_progress_text,
                     failed_text,
                     audit,
+                    state,
                     capture_sha256,
                 )
                 reserve_private_audit(close_intent_path, prepared_recovery)
@@ -639,6 +776,7 @@ def reconcile(args: Args) -> None:
                     in_progress_text,
                     failed_text,
                     audit,
+                    state,
                 )
 
             def evidence_is_current(expected_pane_id: str) -> bool:
@@ -650,10 +788,10 @@ def reconcile(args: Args) -> None:
                         and read_private_audit(close_intent_path) == recovery_text
                         and private_audit(args.completed_audit, args.completed_audit_sha256)[0] == current_audit
                         and source1290_authority(root, audit.authority_sha256)[0] == current_authority
-                        and memory.read_text(encoding="utf-8") == memory_text
-                        and transcription.read_text(encoding="utf-8") == transcription_text
+                        and post_archive_state_is_current(root, args, state)
                         and task_paths(root) == paths
                         and authoritative_active_target_task_paths(root, target) == (path,)
+                        and archived_helper_targets_are_unowned(root)
                     )
                 except (OSError, TaskFrontmatterError):
                     return False
@@ -703,10 +841,10 @@ def reconcile(args: Args) -> None:
                 authority_blocks(path.read_text(encoding="utf-8")) != (expected_authority,)
                 or private_audit(args.completed_audit, args.completed_audit_sha256)[0] != current_audit
                 or source1290_authority(root, audit.authority_sha256)[0] != current_authority
-                or memory.read_text(encoding="utf-8") != memory_text
-                or transcription.read_text(encoding="utf-8") != transcription_text
+                or not post_archive_state_is_current(root, args, state)
                 or todo.read_text(encoding="utf-8") != updated_todo
                 or task_paths(root) != paths
+                or not archived_helper_targets_are_unowned(root)
                 or recovery is None
                 or read_private_audit(close_intent_path) != recovery.text
             ):
@@ -719,15 +857,23 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--task-file", type=Path, required=True)
     _ = parser.add_argument("--task-sha256", required=True)
     _ = parser.add_argument("--todo-sha256", required=True)
+    _ = parser.add_argument("--archive-todo-sha256", required=True)
     _ = parser.add_argument("--pane-id", required=True)
     _ = parser.add_argument("--session-id", required=True)
     _ = parser.add_argument("--terminal-evidence", required=True)
     _ = parser.add_argument("--completed-audit", type=Path, required=True)
     _ = parser.add_argument("--completed-audit-sha256", required=True)
     parsed = parser.parse_args(argv)
-    hashes = (parsed.task_sha256, parsed.todo_sha256, parsed.completed_audit_sha256)
+    hashes = (
+        parsed.task_sha256,
+        parsed.todo_sha256,
+        parsed.archive_todo_sha256,
+        parsed.completed_audit_sha256,
+    )
     if any(SHA256_RE.fullmatch(value) is None for value in hashes):
-        parser.error("task, TODO, and completed-audit digests must be lowercase SHA-256 values")
+        parser.error("all task, custody, TODO, and audit digests must be lowercase SHA-256 values")
+    if parsed.completed_audit_sha256 != SOURCE1290_AUDIT_SHA256:
+        parser.error("completed-audit digest must identify the exact immutable Source-1290 receipt")
     if PANE_ID_RE.fullmatch(parsed.pane_id) is None or SESSION_ID_RE.fullmatch(parsed.session_id) is None:
         parser.error("pane id and Codex session id must be exact")
     if len(parsed.terminal_evidence.strip()) < 12:
@@ -740,6 +886,7 @@ def parse_args(argv: list[str]) -> Args:
         parsed.task_file,
         parsed.task_sha256,
         parsed.todo_sha256,
+        parsed.archive_todo_sha256,
         parsed.pane_id,
         parsed.session_id,
         parsed.terminal_evidence.strip(),

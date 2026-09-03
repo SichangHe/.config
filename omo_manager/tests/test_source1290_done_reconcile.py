@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import shutil
 import tempfile
 import unittest
 from dataclasses import replace
@@ -11,27 +12,44 @@ from unittest.mock import patch
 
 import yaml
 
-from omo_manager.omo_source1290_done_reconcile import Args, SOURCE1290_EXCERPT, parse_args, reconcile, source1290_authority, validate_completed_audit
+from omo_manager.omo_source1290_done_reconcile import (
+    ARCHIVE_TODO,
+    ARCHIVED_MEMORY,
+    ARCHIVED_INTERRUPTED_EVAL,
+    ARCHIVED_INTERRUPTED_FIX,
+    ARCHIVED_SOURCE1290_AUTHORITY,
+    ARCHIVED_TRANSCRIPTION,
+    CANONICAL_CARRIER,
+    DUPLICATE_CARRIER,
+    Args,
+    SOURCE1290_AUDIT_SHA256,
+    SOURCE1290_EXCERPT,
+    parse_args,
+    reconcile,
+    source1290_authority,
+    validate_completed_audit,
+)
 from omo_manager.omo_task_metadata import TaskFrontmatterError, parse_task_metadata
 from omo_manager.omo_task_status import Args as StatusArgs
-from omo_manager.omo_task_status import recover_exited_shell_done
+from omo_manager.omo_task_status import reconcile_todo_text, recover_exited_shell_done
 
 PANE_ID = "%42"
 SESSION_ID = "11111111-2222-3333-4444-555555555555"
 REPORT_TOKEN = "accepted-report-token"
 CAPTURE_SHA256 = "e" * 64
+CARRIER_TARGET = "vlcontext_recovery:2"
 # 🧑 Human Source `manager_mail/85c5dff58359-1290.txt:3-4`: “Close the ‘memory’ thing. It is so old.”
 REAL_FIXTURE = Path(__file__).parent / "fixtures" / "source1290"
 REAL_FIXTURE_SHA256 = {
     "completed-audit.yaml": "eafa5c27d35ea2dacb4c94a0c53619f06acfb66bef703bf63dc569ac7af5fedf",
-    "post-archive/TODO.md": "921da9ae60251af0e082c9d140d7b1f804f2f519dfdbe651c86a05d6e02f8503",
+    "post-archive/TODO.md": "f042a22a2feab3649dcc1798204f2c7193cd083ffbc404c2aec984c4a2f0191f",
     "post-archive/mem1290_auth.md": "86e0cbe819e7b1d0f2899d35b903744209222d9eaa46ca8e6929bb63af1ec30a",
     "post-archive/memory_auth_1290.md": "3a0291e6ea4c6aa8ef59055d65e97c53a8468d1a29d6e41c9aad7e760f59c811",
     "post-archive/202608/old_todos.md": "5203a0a09617a417543abd121eac39efc44fb6ddef101366ae7de6042df29c83",
     "post-archive/202608/memory_research_mgr.md": "d2ae03a9e19f981ec43c6b8527fca1475a31a7c0593611c8ac6f36dbb392e705",
     "post-archive/202608/transcription_sw.md": "a01fec08cfdcab16755a5d44c5ae78fde5110b05967ed7b0c324bba55cc6bea1",
-    "post-archive/202608/mem1290_eval.md": "79ff9856392ca2e0875d825359098f48855a47a9d25a74eb944b02c9ee214bab",
-    "post-archive/202608/mem1290_fix.md": "6a025f0867eede1f32284cb6badbe6075adc6e09e041e3b93de31739b3cd95d9",
+    "post-archive/202608/mem1290_eval.md": "62d641ddcaede3417b5bb024c676d0c3322f8d3bdbac31aa03b9e269259a19cf",
+    "post-archive/202608/mem1290_fix.md": "ee0429ecf458721f24d4965e285dd59ade51742359b717fd1d697067826d35d5",
     "post-archive/202608/manager_mail/85c5dff58359-1290.txt.b64": "0b33b7c6fd2e90680eec166668fdf2abcdc7cc45b94bd660974d0bdb1995e169",
 }
 
@@ -54,56 +72,6 @@ def task_text(
     return f"---\nversion: v1.0.0\nstatus: {status}\n{blocked}runat: {target}\ntool: codex\nmanagerat: cfg:0\nis_manager: {str(manager).lower()}\n{pending}---\n{body}"
 
 
-def completed_audit(carrier: str, authority_sha256: str, carrier_sha256: str) -> bytes:
-    queue = ["Research memory and report findings."]
-    source_task = task_text(
-        status="blocked",
-        blocker="paused",
-        target="wl:32",
-        manager=True,
-        items=tuple(queue),
-        body="memory evidence\n",
-    )
-    committed_task = task_text(status="done", target="wl:32", manager=True, body="memory evidence\n")
-    transcription = task_text(
-        status="blocked",
-        blocker="human",
-        target="wl:32",
-        manager=False,
-        items=("preserve transcription work",),
-        body="transcription evidence\n",
-    )
-    source_todo = "current:\ntranscription_sw.md wl:32\nsource1290_carrier.md cfg:1\nduplicate_carrier.md cfg:9\n\nhuman pending:\nmemory_research_mgr.md wl:32\n\nprevious:\n"
-    committed_todo = "current:\ntranscription_sw.md wl:32\nsource1290_carrier.md cfg:1\nduplicate_carrier.md cfg:9\n\nhuman pending:\n\nprevious:\nmemory_research_mgr.md wl:32\n"
-    queue_sha256 = sha256(yaml.safe_dump(queue, sort_keys=False).encode())
-    record = {
-        "version": "v1.0.0",
-        "operation": "cancel-shared-target",
-        "state": "prepared",
-        "task": "memory_research_mgr.md",
-        "task_sha256": sha256(source_task.encode()),
-        "source_task_text": source_task,
-        "cancelled_pending_items": queue,
-        "cancelled_pending_items_sha256": queue_sha256,
-        "prior_blocker": "paused",
-        "shared_target": "wl:32",
-        "protected_task": "transcription_sw.md",
-        "protected_task_sha256": sha256(transcription.encode()),
-        "todo_sha256": sha256(source_todo.encode()),
-        "source_todo_text": source_todo,
-        "authority": "manager_mail/85c5dff58359-1290.txt:3-4",
-        "authority_sha256": authority_sha256,
-        "authority_envelope": carrier,
-        "authority_envelope_sha256": carrier_sha256,
-        "committed_task_sha256": sha256(committed_task.encode()),
-        "committed_task_text": committed_task,
-        "committed_todo_sha256": sha256(committed_todo.encode()),
-        "committed_todo_text": committed_todo,
-        "final-result": "success",
-    }
-    return yaml.safe_dump(record, sort_keys=False).encode()
-
-
 class Source1290DoneReconcileTests(unittest.TestCase):
     def test_real_audit_and_post_archive_fixture_matches_source_evidence(self) -> None:
         for relative, expected_sha256 in REAL_FIXTURE_SHA256.items():
@@ -123,67 +91,25 @@ class Source1290DoneReconcileTests(unittest.TestCase):
 
     def fixture(self, base: Path) -> tuple[Args, Path, Path, Path, Path]:
         root = base.resolve()
-        carrier = root / "source1290_carrier.md"
-        carrier_body = (
-            "carrier evidence\n"
-            '<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1290.txt:3-4">\n'
-            f"{SOURCE1290_EXCERPT}"
-            "</human_instruction>\n"
-            "(verified removed pending item: Source-1290 cancellation completed and its answer was delivered)\n"
-        )
-        carrier_text = task_text(
-            status="blocked",
-            blocker="done_close_in_progress: manager is closing the agent before marking done",
-            target="cfg:1",
-            manager=False,
-            body=carrier_body,
-        )
-        carrier.write_text(carrier_text, encoding="utf-8")
-        duplicate = root / "duplicate_carrier.md"
-        duplicate.write_text(
-            task_text(
-                status="running",
-                target="cfg:9",
-                manager=False,
-                body=(f'duplicate authority custody\n<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1290.txt:3-4">\n{SOURCE1290_EXCERPT}</human_instruction>\n'),
-            ),
-            encoding="utf-8",
-        )
-        memory = root / "memory_research_mgr.md"
-        memory.write_text(task_text(status="done", target="wl:32", manager=True, body="memory evidence\n"), encoding="utf-8")
-        transcription = root / "transcription_sw.md"
-        transcription.write_text(
-            task_text(
-                status="blocked",
-                blocker="human",
-                target="wl:32",
-                manager=False,
-                items=("preserve transcription work",),
-                body="transcription evidence\n",
-            ),
-            encoding="utf-8",
-        )
-        todo = root / "TODO.md"
-        todo.write_text(
-            "current:\ntranscription_sw.md wl:32\nsource1290_carrier.md cfg:1\nduplicate_carrier.md cfg:9\n\nhuman pending:\n\nprevious:\nmemory_research_mgr.md wl:32\n",
-            encoding="utf-8",
-        )
-        mail = root / "manager_mail"
-        mail.mkdir(mode=0o700)
-        authority = mail / "85c5dff58359-1290.txt"
-        authority.write_text(f"Subject: memory cancellation\n\n{SOURCE1290_EXCERPT}", encoding="utf-8")
+        _ = shutil.copytree(REAL_FIXTURE / "post-archive", root, dirs_exist_ok=True)
+        encoded_authority = root / f"{ARCHIVED_SOURCE1290_AUTHORITY.partition(':')[0]}.b64"
+        authority = encoded_authority.with_suffix("")
+        authority.write_bytes(base64.b64decode(encoded_authority.read_bytes()))
+        encoded_authority.unlink()
         authority.chmod(0o600)
+        carrier = root / CANONICAL_CARRIER
+        todo = root / "TODO.md"
         audit_directory = root / "private"
         audit_directory.mkdir(mode=0o700)
         audit = audit_directory / "cancel.yaml"
-        authority_envelope = task_text(status="running", target="cfg:1", manager=False, body=carrier_body)
-        audit.write_bytes(completed_audit(carrier.name, sha256(authority.read_bytes()), sha256(authority_envelope.encode())))
+        audit.write_bytes((REAL_FIXTURE / "completed-audit.yaml").read_bytes())
         audit.chmod(0o600)
         args = Args(
             root,
-            Path(carrier.name),
+            CANONICAL_CARRIER,
             sha256(carrier.read_bytes()),
             sha256(todo.read_bytes()),
+            sha256((root / ARCHIVE_TODO).read_bytes()),
             PANE_ID,
             SESSION_ID,
             REPORT_TOKEN,
@@ -202,6 +128,7 @@ class Source1290DoneReconcileTests(unittest.TestCase):
             payload = authority.read_bytes()
             expected_sha256 = sha256(payload)
             root_before = os.stat(root)
+            month_before = os.stat(root / "202608")
             original_stat = os.stat
             rebound = False
 
@@ -209,13 +136,14 @@ class Source1290DoneReconcileTests(unittest.TestCase):
                 nonlocal rebound
                 if path == "manager_mail" and stat_kwargs.get("dir_fd") is not None and not rebound:
                     rebound = True
-                    os.rename(root / "manager_mail", base / "displaced-manager-mail")
-                    os.mkdir(root / "manager_mail", 0o700)
-                    descriptor = os.open(root / "manager_mail" / authority.name, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                    os.rename(root / "202608" / "manager_mail", base / "displaced-manager-mail")
+                    os.mkdir(root / "202608" / "manager_mail", 0o755)
+                    descriptor = os.open(root / "202608" / "manager_mail" / authority.name, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
                     try:
                         _ = os.write(descriptor, payload)
                     finally:
                         os.close(descriptor)
+                    os.utime(root / "202608", ns=(month_before.st_atime_ns, month_before.st_mtime_ns))
                     os.utime(root, ns=(root_before.st_atime_ns, root_before.st_mtime_ns))
                 return original_stat(path, *stat_args, **stat_kwargs)  # type: ignore[arg-type]
 
@@ -231,10 +159,12 @@ class Source1290DoneReconcileTests(unittest.TestCase):
             args, carrier, todo, authority, audit = self.fixture(Path(tmp))
             authority_before = authority.read_bytes()
             audit_before = audit.read_bytes()
-            memory = args.root / "memory_research_mgr.md"
-            transcription = args.root / "transcription_sw.md"
-            duplicate = args.root / "duplicate_carrier.md"
-            protected_before = (memory.read_bytes(), transcription.read_bytes(), duplicate.read_bytes())
+            todo_before = todo.read_text(encoding="utf-8")
+            protected = tuple(
+                args.root / relative
+                for relative in (ARCHIVE_TODO, ARCHIVED_MEMORY, ARCHIVED_TRANSCRIPTION, DUPLICATE_CARRIER, ARCHIVED_INTERRUPTED_EVAL, ARCHIVED_INTERRUPTED_FIX)
+            )
+            protected_before = tuple(item.read_bytes() for item in protected)
             live = True
 
             def pane(_target: str) -> str:
@@ -274,13 +204,13 @@ class Source1290DoneReconcileTests(unittest.TestCase):
             self.assertIn(SOURCE1290_EXCERPT, carrier.read_text(encoding="utf-8"))
             self.assertIn(f"session_id: `{SESSION_ID}`", carrier.read_text(encoding="utf-8"))
             self.assertEqual(
-                "current:\ntranscription_sw.md wl:32\nduplicate_carrier.md cfg:9\n\nhuman pending:\n\nprevious:\nsource1290_carrier.md cfg:1\nmemory_research_mgr.md wl:32\n",
+                reconcile_todo_text(args.root, carrier, todo_before, CARRIER_TARGET, "previous", ("current",)),
                 todo.read_text(encoding="utf-8"),
             )
             self.assertEqual(authority_before, authority.read_bytes())
             self.assertEqual(audit_before, audit.read_bytes())
-            self.assertEqual(protected_before, (memory.read_bytes(), transcription.read_bytes(), duplicate.read_bytes()))
-            self.assertEqual("cfg:1", shell_close.call_args.args[0])
+            self.assertEqual(protected_before, tuple(item.read_bytes() for item in protected))
+            self.assertEqual(CARRIER_TARGET, shell_close.call_args.args[0])
             self.assertEqual(PANE_ID, shell_close.call_args.args[1])
             completion_gate.assert_not_called()
             email.assert_not_called()
@@ -332,7 +262,7 @@ class Source1290DoneReconcileTests(unittest.TestCase):
                     failed_text,
                     carrier.stat(),
                 )
-            self.assertEqual(("cfg:1", SESSION_ID), (target, session))
+            self.assertEqual((CARRIER_TARGET, SESSION_ID), (target, session))
             recovered = parse_task_metadata(carrier.read_text(encoding="utf-8"), args.root)
             self.assertIsNotNone(recovered)
             assert recovered is not None
@@ -372,6 +302,7 @@ class Source1290DoneReconcileTests(unittest.TestCase):
             args, carrier, todo, authority, audit = self.fixture(Path(tmp))
             authority_before = authority.read_bytes()
             audit_before = audit.read_bytes()
+            todo_before = todo.read_text(encoding="utf-8")
             live = True
 
             def pane(_target: str) -> str:
@@ -448,7 +379,7 @@ class Source1290DoneReconcileTests(unittest.TestCase):
             self.assertEqual(audit_before, audit.read_bytes())
             self.assertEqual(recovery_before, recovery.read_bytes())
             self.assertEqual(
-                "current:\ntranscription_sw.md wl:32\nduplicate_carrier.md cfg:9\n\nhuman pending:\n\nprevious:\nsource1290_carrier.md cfg:1\nmemory_research_mgr.md wl:32\n",
+                reconcile_todo_text(args.root, carrier, todo_before, CARRIER_TARGET, "previous", ("current",)),
                 todo.read_text(encoding="utf-8"),
             )
             self.assertIn(f"session_id: `{SESSION_ID}`", carrier.read_text(encoding="utf-8"))
@@ -595,15 +526,37 @@ class Source1290DoneReconcileTests(unittest.TestCase):
             self.assertEqual(todo_before, todo.read_bytes())
 
     def test_rejects_task_audit_authority_membership_and_pane_drift_before_handoff(self) -> None:
-        cases = ("task", "audit", "envelope_hash", "authority", "owner", "pane")
+        cases = (
+            "task",
+            "todo",
+            "archive_todo",
+            "audit",
+            "envelope_hash",
+            "authority",
+            "memory",
+            "transcription",
+            "duplicate",
+            "interrupted",
+            "prearchive",
+            "owner",
+            "archived_owner",
+            "pane",
+        )
         for case in cases:
             with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
-                args, carrier, _todo, authority, audit = self.fixture(Path(tmp))
+                args, carrier, todo, authority, audit = self.fixture(Path(tmp))
                 original = carrier.read_bytes()
                 if case == "task":
                     changed = carrier.read_text(encoding="utf-8").replace("pending_task_items: []", "pending_task_items:\n  - open")
                     carrier.write_text(changed, encoding="utf-8")
                     args = replace(args, task_sha256=sha256(carrier.read_bytes()))
+                elif case == "todo":
+                    todo.write_text(todo.read_text(encoding="utf-8").replace("current:\n", "current:\n202608/memory_research_mgr.md wl:32\n", 1), encoding="utf-8")
+                    args = replace(args, todo_sha256=sha256(todo.read_bytes()))
+                elif case == "archive_todo":
+                    archive_todo = args.root / ARCHIVE_TODO
+                    archive_todo.write_text(archive_todo.read_text(encoding="utf-8").replace("memory_research_mgr.md wl:32", "memory_research_mgr.md wl:31"), encoding="utf-8")
+                    args = replace(args, archive_todo_sha256=sha256(archive_todo.read_bytes()))
                 elif case == "audit":
                     audit.write_bytes(audit.read_bytes().replace(b"final-result: success", b"final-result: prepared"))
                     args = replace(args, completed_audit_sha256=sha256(audit.read_bytes()))
@@ -614,9 +567,26 @@ class Source1290DoneReconcileTests(unittest.TestCase):
                     args = replace(args, completed_audit_sha256=sha256(audit.read_bytes()))
                 elif case == "authority":
                     authority.write_text("Subject: memory cancellation\n\nchanged\n", encoding="utf-8")
+                elif case in {"memory", "transcription"}:
+                    relative = {"memory": ARCHIVED_MEMORY, "transcription": ARCHIVED_TRANSCRIPTION}[case]
+                    changed = args.root / relative
+                    changed.write_bytes(changed.read_bytes() + b"drift\n")
+                elif case == "duplicate":
+                    changed = args.root / DUPLICATE_CARRIER
+                    changed.write_text(changed.read_text(encoding="utf-8").replace("Close the “memory” thing.", "Change the memory thing."), encoding="utf-8")
+                elif case == "interrupted":
+                    changed = args.root / ARCHIVED_INTERRUPTED_EVAL
+                    changed.write_text(changed.read_text(encoding="utf-8").replace("runat: vldr:2", "runat: vldr:9"), encoding="utf-8")
+                elif case == "prearchive":
+                    (args.root / "memory_research_mgr.md").write_text(task_text(status="done", target="wl:32", manager=True), encoding="utf-8")
                 elif case == "owner":
                     (args.root / "other.md").write_text(
-                        task_text(status="running", target="cfg:1", manager=False),
+                        task_text(status="running", target=CARRIER_TARGET, manager=False),
+                        encoding="utf-8",
+                    )
+                elif case == "archived_owner":
+                    (args.root / "other.md").write_text(
+                        task_text(status="running", target="vldr:2", manager=False),
                         encoding="utf-8",
                     )
                 with (
@@ -629,13 +599,12 @@ class Source1290DoneReconcileTests(unittest.TestCase):
                 close.assert_not_called()
                 if case not in {"task"}:
                     self.assertEqual(original, carrier.read_bytes())
-                if case in {"task", "audit", "envelope_hash", "authority", "owner"}:
-                    validate.assert_not_called()
+                validate.assert_not_called()
 
     def test_rejects_evidence_drift_after_shell_authentication_without_handoff(self) -> None:
-        for case in ("task", "audit", "authority", "transcription", "pane"):
+        for case in ("task", "todo", "archive_todo", "audit", "authority", "memory", "transcription", "interrupted", "membership", "pane"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
-                args, carrier, _todo, authority, audit = self.fixture(Path(tmp))
+                args, carrier, todo, authority, audit = self.fixture(Path(tmp))
                 original = carrier.read_bytes()
                 pane_calls = 0
 
@@ -647,13 +616,21 @@ class Source1290DoneReconcileTests(unittest.TestCase):
                 def drift(*_args: object) -> None:
                     if case == "task":
                         carrier.write_bytes(original + b"concurrent evidence\n")
+                    elif case == "todo":
+                        todo.write_bytes(todo.read_bytes() + b"drift\n")
+                    elif case == "archive_todo":
+                        archive_todo = args.root / ARCHIVE_TODO
+                        archive_todo.write_bytes(archive_todo.read_bytes() + b"drift\n")
                     elif case == "audit":
                         audit.write_bytes(audit.read_bytes() + b"drift: true\n")
                     elif case == "authority":
                         authority.write_bytes(authority.read_bytes() + b"drift\n")
-                    elif case == "transcription":
-                        transcription = args.root / "transcription_sw.md"
-                        transcription.write_bytes(transcription.read_bytes() + b"drift\n")
+                    elif case in {"memory", "transcription", "interrupted"}:
+                        relative = {"memory": ARCHIVED_MEMORY, "transcription": ARCHIVED_TRANSCRIPTION, "interrupted": ARCHIVED_INTERRUPTED_FIX}[case]
+                        changed = args.root / relative
+                        changed.write_bytes(changed.read_bytes() + b"drift\n")
+                    elif case == "membership":
+                        (args.root / "late.md").write_text(task_text(status="running", target="cfg:9", manager=False), encoding="utf-8")
 
                 with (
                     patch("omo_manager.omo_source1290_done_reconcile.exact_pane_id", side_effect=pane),
@@ -668,7 +645,7 @@ class Source1290DoneReconcileTests(unittest.TestCase):
     def test_rejects_duplicate_owner_drift_during_shell_authentication_without_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args, carrier, todo, authority, audit = self.fixture(Path(tmp))
-            duplicate = args.root / "duplicate_carrier.md"
+            duplicate = args.root / DUPLICATE_CARRIER
             carrier_before = carrier.read_bytes()
             todo_before = todo.read_bytes()
             authority_before = authority.read_bytes()
@@ -676,7 +653,7 @@ class Source1290DoneReconcileTests(unittest.TestCase):
 
             def add_duplicate_owner(*_args: object) -> str:
                 duplicate.write_text(
-                    duplicate.read_text(encoding="utf-8").replace("runat: cfg:9", "runat: cfg:1"),
+                    duplicate.read_text(encoding="utf-8").replace("runat: agent_managers:78", f"runat: {CARRIER_TARGET}"),
                     encoding="utf-8",
                 )
                 return CAPTURE_SHA256
@@ -709,7 +686,7 @@ class Source1290DoneReconcileTests(unittest.TestCase):
     def test_final_pre_close_gate_rejects_duplicate_owner_drift_before_pane_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args, carrier, todo, authority, audit = self.fixture(Path(tmp))
-            duplicate = args.root / "duplicate_carrier.md"
+            duplicate = args.root / DUPLICATE_CARRIER
             todo_before = todo.read_bytes()
             authority_before = authority.read_bytes()
             audit_before = audit.read_bytes()
@@ -722,7 +699,7 @@ class Source1290DoneReconcileTests(unittest.TestCase):
                 **kwargs: object,
             ) -> None:
                 duplicate.write_text(
-                    duplicate.read_text(encoding="utf-8").replace("runat: cfg:9", "runat: cfg:1"),
+                    duplicate.read_text(encoding="utf-8").replace("runat: agent_managers:78", f"runat: {CARRIER_TARGET}"),
                     encoding="utf-8",
                 )
                 evidence_is_current = kwargs["evidence_is_current"]
@@ -762,6 +739,8 @@ class Source1290DoneReconcileTests(unittest.TestCase):
                 "a" * 64,
                 "--todo-sha256",
                 "b" * 64,
+                "--archive-todo-sha256",
+                "d" * 64,
                 "--pane-id",
                 PANE_ID,
                 "--session-id",
@@ -771,7 +750,7 @@ class Source1290DoneReconcileTests(unittest.TestCase):
                 "--completed-audit",
                 "/tmp/private/audit.yaml",
                 "--completed-audit-sha256",
-                "c" * 64,
+                SOURCE1290_AUDIT_SHA256,
             ]
         )
         self.assertEqual(Path("carrier.md"), args.task_file)

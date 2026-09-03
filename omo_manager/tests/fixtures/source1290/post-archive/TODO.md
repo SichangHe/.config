@@ -5,9 +5,10 @@ move finished tasks to "previous";
 empty lines around each heading, nowhere else
 
 current:
+mac_logs_publish.md wl:35
+amh1376_execute.md cedit:17
 mem1290_submgr.md vldr:5
 mem1290_fix2.md vldr:4
-amh1376_queue_map.md cedit:18
 amh1376_close.md cedit:15
 amh1376_eval.md cedit:16
 mail_compress_1261.md cedit:25
@@ -27,8 +28,6 @@ vl_b8_push.md vltargeteval4:0
 vl_tree_authority.md vlcontext_recovery:1
 202609/dw1329_mgr.md dw:11
 source1300_reply_peek.md cedit:42
-202608/mem1290_eval.md vldr:2
-202608/mem1290_fix.md vldr:1
 mem1290_mgr.md vldr:0
 mem1290_auth.md vlcontext_recovery:2
 active_task_tree.md agent_managers:5
@@ -150,6 +149,9 @@ vl_contrib_eval_human_resume_11889.md hvl:3
 202608/vlexp_portfolio_hyg.md vlexp:3
 
 previous:
+202608/mem1290_fix.md vldr:1
+202608/mem1290_eval.md vldr:2
+amh1376_queue_map.md cedit:18
 amh1376_queue_tool.md cedit:17
 amh1200_ptr_recover.md agent_managers:90
 restore_custody.md cedit:30

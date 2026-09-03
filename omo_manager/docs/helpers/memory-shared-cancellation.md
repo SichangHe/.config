@@ -27,11 +27,18 @@ failure policy
 interrupted carrier closure
 
 - `omo_source1290_done_reconcile.py`
-  - handles only the non-manager task named by the completed cancellation audit as its authority envelope
-  - requires exact carrier, TODO, completed-audit, mailbox-source, numeric-pane, Codex-session, terminal-report evidence, and sole target ownership before and after shell authentication and at the final finish gate
-  - binds the completed audit's authority-envelope digest to the carrier through only its canonical `running` or `long_running` to done-close status transition
+  - handles only the canonical non-manager authority carrier
+  - authenticates the exact immutable cancellation audit and its original carrier digest
+  - bridges that digest only to the exact frozen post-archive carrier image
+  - authenticates the archived mailbox source through owner-controlled directories and requires its root predecessor absent
+  - binds current TODO and archive TODO to caller-supplied digests
+    - requires exact frozen memory, transcription, duplicate-carrier, and archived-helper bytes
+    - requires archived TODO custody and absent root predecessors
+    - requires the duplicate carrier blocked under its exact Human-pending custody
+    - requires both preserved helper records done, their TODO rows previous, and their retired targets unowned
+  - requires exact carrier, TODO, completed-audit, mailbox-source, numeric-pane, Codex-session, terminal-report evidence, and sole carrier-target ownership before and after shell authentication and at the final finish gate
   - initially requires exact `done_close_in_progress`; an intent retry requires its canonical `done_close_failed`; both require an empty queue, one `current` row, sole target ownership, and one unchanged Source-1290 Human envelope
-  - locks root membership, every Markdown record, TODO, the carrier target, mailbox source, and completed audit
+  - locks root membership, every Markdown record, both TODO indexes, the carrier target, mailbox source, completed audit, and close intent
   - authenticates the unchanged ordinary shell before any write
   - records the canonical `done_close_failed: ... status=not_codex` blocker, fsyncs its bound carrier directory, then durably prepares an adjacent owner-private close intent before pane mutation
   - binds that intent to the authenticated terminal-capture digest, carrier, TODO, completed audit, Source-1290 authority, session, and terminal evidence before closing the exact numeric pane
@@ -40,7 +47,7 @@ interrupted carrier closure
     - an absent-pane finish rechecks all bound evidence and that the symbolic target did not reappear before close-note bookkeeping
     - an ordinary close failure remains in the existing live-pane `done_close_failed` recovery contract
   - on a successful exact-pane close, records the close UUID, moves only the carrier row to `previous`, and sets only the carrier `done`
-  - never calls completion-mail or mailbox APIs and never mutates the completed audit, Human source, memory record, transcription record, or other authority carrier
+  - never calls completion-mail or mailbox APIs and never mutates the completed audit, Human source, memory, transcription, duplicate carrier, or archived helper records
 
 - reject task, TODO, audit, mailbox, authority-envelope, membership, owner, pane, session, terminal, or shell drift before close
 - reject pane absence without a close intent, or an intent bound to different task, audit, authority, session, terminal, or capture evidence

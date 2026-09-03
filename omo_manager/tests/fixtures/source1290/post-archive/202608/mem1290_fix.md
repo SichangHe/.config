@@ -1,7 +1,6 @@
 ---
 version: v1.0.0
-status: blocked
-blocked_on: done_close_in_progress: manager is closing the agent before marking done
+status: done
 runat: vldr:1
 tool: codex
 managerat: vldr:5
