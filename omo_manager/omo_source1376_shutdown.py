@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 import os
 import re
+import secrets
 import stat
 import subprocess
 import sys
@@ -83,9 +86,22 @@ COMPLETED_SHELL_COMPLETION_COMMAND = (
 TRANSFER_JOURNAL = ".omo-source1376-transfer.json"
 LEGACY_TRANSFER_JOURNAL = ".omo-pending-closure-transfer.json"
 PREPARED_BINDING_SCHEMA = "omo-source1376-prepared-binding/v1"
+REVIEW_APPROVAL_SCHEMA = "omo-source1376-review-approval/v1"
+REVIEWER_IDENTITY = "/root/source1376_review"
+REVIEWER_PUBLIC_KEY_PEM = b"""-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAJEGR0M4KgG5uA9N1uYoTS55nG3dlmxsHQMgE/DpxeuA=
+-----END PUBLIC KEY-----
+"""
+REVIEWER_PUBLIC_KEY_SHA256 = "a90757d37ad9ab547a0209fd5db5bdc80e2485240623273d444c7df3a5e25fdf"
+REVIEW_APPROVAL_SCOPE = "one reviewed Source-1376 binding and its continuously locked first queue-transfer commit"
 PREPARED_BINDING_PURPOSE = (
-    "Root-wide locked Source-1376 snapshot prepared for independent review and exact revalidation immediately before "
-    "the first committed queue transfer; the immutable base plan and prior execution binding remain unchanged inputs."
+    "Root-wide locked Source-1376 snapshot for independent review and exact approval while the complete lock set stays "
+    "held through the first committed queue transfer; the immutable base plan and prior execution binding remain unchanged inputs."
+)
+PREPARED_BINDING_EXECUTION_RULE = (
+    "Initial execution must use --reviewed-handoff: publish this exact snapshot while holding the root-membership lock and complete "
+    "prepared task-file lock set, wait for independent approval of its exact SHA-256, revalidate it, and commit the first eligible "
+    "transfer receipt before releasing any lock. Abort on any mismatch; never alter row 15 or substitute a stale digest."
 )
 RECEIPT_DIRECTORY_MODE_CONTRACT = (
     "An inherited setgid bit may be cleared only with an atomic creation-to-open guarantee proving exact custody of a "
@@ -204,6 +220,40 @@ class Args:
     prepared_binding: Path | None = None
     prepared_binding_sha256: str = ""
     prepare_binding: bool = False
+    reviewed_handoff: bool = False
+    review_approval: Path | None = None
+
+
+_HELD_PREPARED_LOCKS_KEY = object()
+
+
+class _HeldPreparedLocks:
+    """Unforgeable-in-normal-use capability for the live prepared-handoff lock scope."""
+
+    __slots__ = ("_active", "_key", "locked_paths", "markdown", "root")
+
+    def __init__(
+        self,
+        key: object,
+        root: Path,
+        markdown: tuple[Path, ...],
+        locked_paths: tuple[Path, ...],
+    ) -> None:
+        if key is not _HELD_PREPARED_LOCKS_KEY:
+            raise RuntimeError("Source-1376 held-lock capability cannot be constructed externally.")
+        self._key = key
+        self._active = True
+        self.root = root
+        self.markdown = markdown
+        self.locked_paths = frozenset(path.resolve() for path in locked_paths)
+
+    def require(self, root: Path, required_paths: tuple[Path, ...]) -> tuple[Path, ...]:
+        if not self._active or self._key is not _HELD_PREPARED_LOCKS_KEY or self.root != root or not {path.resolve() for path in required_paths}.issubset(self.locked_paths):
+            raise TaskFrontmatterError("Source-1376 transfer lacks the live complete prepared-lock capability.")
+        return self.markdown
+
+    def invalidate(self) -> None:
+        self._active = False
 
 
 def sha256(payload: bytes) -> str:
@@ -226,6 +276,107 @@ def canonical_json(value: object) -> bytes:
 
 def queue_sha256(items: tuple[str, ...]) -> str:
     return sha256(json.dumps(items, ensure_ascii=False, separators=(",", ":")).encode())
+
+
+def review_gate(args: Args, challenge: str) -> dict[str, object]:
+    if args.review_approval is None or SHA256_RE.fullmatch(challenge) is None:
+        raise TaskFrontmatterError("Source-1376 review gate is incomplete.")
+    return {
+        "schema": REVIEW_APPROVAL_SCHEMA,
+        "reviewer": REVIEWER_IDENTITY,
+        "signature_algorithm": "Ed25519",
+        "public_key_sha256": REVIEWER_PUBLIC_KEY_SHA256,
+        "challenge": challenge,
+        "approval_output": str(args.review_approval),
+        "scope": REVIEW_APPROVAL_SCOPE,
+    }
+
+
+def review_approval_unsigned(
+    args: Args,
+    prepared_path: Path,
+    prepared_digest: str,
+    prepared_document: dict[str, object],
+) -> dict[str, object]:
+    if args.prepared_binding is None or prepared_path.resolve() != args.prepared_binding.resolve() or SHA256_RE.fullmatch(prepared_digest) is None:
+        raise TaskFrontmatterError("Source-1376 review approval names an invalid prepared binding.")
+    gate = prepared_document.get("review_gate")
+    implementation = prepared_document.get("implementation")
+    if not isinstance(gate, dict) or not isinstance(implementation, dict) or gate != review_gate(args, str(gate.get("challenge", ""))):
+        raise TaskFrontmatterError("Source-1376 prepared review gate is malformed.")
+    implementation_digest = implementation.get("sha256")
+    if SHA256_RE.fullmatch(str(implementation_digest or "")) is None:
+        raise TaskFrontmatterError("Source-1376 prepared implementation digest is malformed.")
+    return {
+        "schema": REVIEW_APPROVAL_SCHEMA,
+        "prepared_binding": str(prepared_path),
+        "prepared_binding_sha256": prepared_digest,
+        "implementation_sha256": str(implementation_digest),
+        "challenge": str(gate["challenge"]),
+        "reviewer": REVIEWER_IDENTITY,
+        "verdict": "PASS",
+        "signature_algorithm": "Ed25519",
+        "public_key_sha256": REVIEWER_PUBLIC_KEY_SHA256,
+        "scope": REVIEW_APPROVAL_SCOPE,
+    }
+
+
+def verify_review_signature(message: bytes, signature: bytes) -> None:
+    if sha256(REVIEWER_PUBLIC_KEY_PEM) != REVIEWER_PUBLIC_KEY_SHA256 or len(signature) != 64:
+        raise TaskFrontmatterError("Source-1376 reviewer key or signature is invalid.")
+    with tempfile.TemporaryDirectory(prefix="omo-source1376-review-") as temporary:
+        directory = Path(temporary)
+        public_key = directory / "reviewer-public.pem"
+        message_path = directory / "approval.json"
+        signature_path = directory / "approval.sig"
+        public_key.write_bytes(REVIEWER_PUBLIC_KEY_PEM)
+        message_path.write_bytes(message)
+        signature_path.write_bytes(signature)
+        os.chmod(public_key, 0o600)
+        os.chmod(message_path, 0o600)
+        os.chmod(signature_path, 0o600)
+        result = subprocess.run(
+            (
+                "/usr/bin/openssl",
+                "pkeyutl",
+                "-verify",
+                "-pubin",
+                "-inkey",
+                str(public_key),
+                "-rawin",
+                "-in",
+                str(message_path),
+                "-sigfile",
+                str(signature_path),
+            ),
+            check=False,
+            capture_output=True,
+        )
+    if result.returncode != 0:
+        raise TaskFrontmatterError("Source-1376 review approval signature is invalid.")
+
+
+def validate_review_approval(
+    args: Args,
+    prepared_path: Path,
+    prepared_digest: str,
+    prepared_document: dict[str, object],
+) -> tuple[dict[str, object], bytes]:
+    if args.review_approval is None:
+        raise TaskFrontmatterError("Source-1376 review-approval path is missing.")
+    loaded = read_private_json(args.review_approval, required=True)
+    assert loaded is not None
+    receipt, payload = loaded
+    unsigned = review_approval_unsigned(args, prepared_path, prepared_digest, prepared_document)
+    signature_value = receipt.get("signature")
+    if set(receipt) != {*unsigned, "signature"} or any(receipt.get(key) != value for key, value in unsigned.items()) or not isinstance(signature_value, str):
+        raise TaskFrontmatterError("Source-1376 review approval does not match the exact prepared binding.")
+    try:
+        signature = base64.b64decode(signature_value, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise TaskFrontmatterError("Source-1376 review approval signature encoding is invalid.") from exc
+    verify_review_signature(canonical_json(unsigned), signature)
+    return receipt, payload
 
 
 def stable_owned_read(path: Path, *, modes: frozenset[int], label: str) -> tuple[bytes, os.stat_result]:
@@ -405,10 +556,10 @@ def prepared_binding_digest(args: Args) -> str:
 def prepared_binding_value(args: Args) -> dict[str, object] | None:
     path = args.prepared_binding
     if path is None:
-        if args.prepared_binding_sha256 or args.prepare_binding:
+        if args.prepared_binding_sha256 or args.prepare_binding or args.reviewed_handoff:
             raise TaskFrontmatterError("Source-1376 prepared-binding arguments are incomplete.")
         return None
-    if args.prepare_binding:
+    if args.prepare_binding or args.reviewed_handoff:
         raise TaskFrontmatterError("a Source-1376 binding being prepared cannot be used for execution.")
     if SHA256_RE.fullmatch(args.prepared_binding_sha256) is None:
         raise TaskFrontmatterError("Source-1376 prepared-binding digest is invalid.")
@@ -416,6 +567,7 @@ def prepared_binding_value(args: Args) -> dict[str, object] | None:
     if sha256(payload) != args.prepared_binding_sha256:
         raise TaskFrontmatterError("Source-1376 prepared binding does not match its independently reviewed digest.")
     validate_prepared_binding_document(args, value)
+    validate_review_approval(args, path, args.prepared_binding_sha256, value)
     return value
 
 
@@ -514,6 +666,7 @@ def validate_prepared_binding_document(args: Args, value: dict[str, object]) -> 
     destination = value.get("destination")
     todo = value.get("todo")
     implementation = value.get("implementation")
+    gate = value.get("review_gate")
     protected = value.get("protected")
     boundaries = value.get("boundaries")
     source1352 = value.get("source1352")
@@ -533,6 +686,7 @@ def validate_prepared_binding_document(args: Args, value: dict[str, object]) -> 
             "prior_execution_binding",
             "authority",
             "implementation",
+            "review_gate",
             "receipt_directory",
             "packet_output",
             "todo",
@@ -566,6 +720,8 @@ def validate_prepared_binding_document(args: Args, value: dict[str, object]) -> 
         or SHA256_RE.fullmatch(str(implementation.get("sha256", ""))) is None
         or not isinstance(implementation.get("mode"), str)
         or not isinstance(implementation.get("size"), int)
+        or not isinstance(gate, dict)
+        or gate != review_gate(args, str(gate.get("challenge", "")))
         or not isinstance(receipt_value, dict)
         or set(receipt_value) != {"path", "mode", "uid", "device", "inode", "initial_entries", "normalization_contract"}
         or receipt_value.get("path") != str(args.receipt_dir)
@@ -641,8 +797,7 @@ def validate_prepared_binding_document(args: Args, value: dict[str, object]) -> 
             "source1352": "preserve accepted receipt and do not resend",
         }
         or value.get("recovery_records_absent") != [TRANSFER_JOURNAL, LEGACY_TRANSFER_JOURNAL]
-        or value.get("execution_rule")
-        != "After independent review, reacquire the root-membership lock and the complete prepared task-file lock set, revalidate this exact snapshot, and commit the first eligible transfer receipt before releasing. Abort on any mismatch; never alter row 15 or substitute a stale digest."
+        or value.get("execution_rule") != PREPARED_BINDING_EXECUTION_RULE
     ):
         raise TaskFrontmatterError("Source-1376 prepared binding breaks its reviewed frozen-snapshot contract.")
     implementation_path = Path(str(implementation["path"])).resolve()
@@ -741,8 +896,12 @@ def snapshot_manifest_entry(root: Path, path: Path, state: os.stat_result, paylo
 
 
 def prepared_binding_lock_paths(args: Args, rows: dict[str, PlanRow], markdown: tuple[Path, ...]) -> tuple[Path, ...]:
-    if args.prepared_binding is None:
-        raise TaskFrontmatterError("Source-1376 prepared-binding path is missing.")
+    if args.prepared_binding is None or args.review_approval is None:
+        raise TaskFrontmatterError("Source-1376 prepared-binding or review-approval path is missing.")
+    schedule = transfer_schedule(rows, include_deferred=False)
+    if not schedule:
+        raise TaskFrontmatterError("Source-1376 prepared handoff has no eligible first transfer.")
+    first_receipt = transfer_receipt_path(args.receipt_dir, schedule[0])
     return tuple(
         sorted(
             {
@@ -754,8 +913,10 @@ def prepared_binding_lock_paths(args: Args, rows: dict[str, PlanRow], markdown: 
                 args.binding,
                 args.authority,
                 args.receipt_dir,
+                first_receipt,
                 args.packet_output,
                 args.prepared_binding,
+                args.review_approval,
                 Path(__file__).resolve(),
                 *(plan_path(args.root, row) for row in rows.values()),
             }
@@ -786,22 +947,77 @@ def validate_empty_receipt_directory(args: Args, expected: dict[str, object]) ->
         raise TaskFrontmatterError("Source-1376 receipt directory changed after the reviewed snapshot.")
 
 
+def wait_for_review_approval(
+    args: Args,
+    path: Path,
+    digest: str,
+    document: dict[str, object],
+) -> str:
+    """Verify and preserve one reviewer-signed approval while the caller retains every lock."""
+
+    if args.review_approval is None:
+        raise TaskFrontmatterError("Source-1376 review-approval output is missing.")
+    unsigned = review_approval_unsigned(args, path, digest, document)
+    signed_payload = canonical_json(unsigned)
+    encoded_payload = base64.b64encode(signed_payload).decode("ascii")
+    print(f"prepared binding ready under locks: {path}", flush=True)
+    print(f"prepared binding sha256: {digest}", flush=True)
+    print(f"review approval unsigned payload base64: {encoded_payload}", flush=True)
+    print("awaiting reviewer Ed25519 signature on stdin: SIGNATURE <base64>", flush=True)
+    approval = sys.stdin.readline()
+    prefix = "SIGNATURE "
+    if not approval.startswith(prefix) or not approval.endswith("\n"):
+        raise TaskFrontmatterError("Source-1376 locked handoff did not receive a reviewer signature.")
+    signature_value = approval[len(prefix) : -1]
+    try:
+        signature = base64.b64decode(signature_value, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise TaskFrontmatterError("Source-1376 review approval signature encoding is invalid.") from exc
+    verify_review_signature(signed_payload, signature)
+    receipt = {**unsigned, "signature": signature_value}
+    payload = write_private_json(args.review_approval, receipt, final=True)
+    validated, validated_payload = validate_review_approval(args, path, digest, document)
+    if validated != receipt or validated_payload != payload:
+        raise TaskFrontmatterError("Source-1376 immutable review approval changed after publication.")
+    return sha256(payload)
+
+
 def publish_prepared_binding(args: Args) -> tuple[Path, str]:
-    if args.prepared_binding is None or not args.prepare_binding or args.prepared_binding_sha256:
-        raise TaskFrontmatterError("Source-1376 prepare mode requires one unbound prepared-binding output.")
+    if args.prepared_binding is None or args.review_approval is None or args.prepare_binding is args.reviewed_handoff or args.prepared_binding_sha256:
+        raise TaskFrontmatterError("Source-1376 preparation requires exactly one unbound prepare or reviewed-handoff mode.")
     output = args.prepared_binding.resolve()
-    if output.parent == args.root or args.root in output.parents or not output.parent.is_dir():
-        raise TaskFrontmatterError("Source-1376 prepared binding must be outside the task root in an existing directory.")
+    approval_output = args.review_approval.resolve()
+    packet_output = args.packet_output.resolve()
+    if (
+        output.parent == args.root
+        or args.root in output.parents
+        or approval_output.parent == args.root
+        or args.root in approval_output.parents
+        or packet_output.parent == args.root
+        or args.root in packet_output.parents
+        or output == approval_output
+        or output == packet_output
+        or approval_output == packet_output
+        or not output.parent.is_dir()
+        or not approval_output.parent.is_dir()
+        or not packet_output.parent.is_dir()
+    ):
+        raise TaskFrontmatterError("Source-1376 binding, review approval, and packet must be distinct external paths in existing directories.")
     prior_rows = load_execution_rows(args.plan, args.binding)
     with root_membership_lock(args.root):
         initial_paths = markdown_paths(args.root)
         with ExitStack() as locks:
-            for locked_path in prepared_binding_lock_paths(args, prior_rows, initial_paths):
+            locked_paths = prepared_binding_lock_paths(args, prior_rows, initial_paths)
+            for locked_path in locked_paths:
                 locks.enter_context(task_file_lock(locked_path))
+            held_locks = _HeldPreparedLocks(_HELD_PREPARED_LOCKS_KEY, args.root, initial_paths, locked_paths)
+            locks.callback(held_locks.invalidate)
             if markdown_paths(args.root) != initial_paths:
                 raise TaskFrontmatterError("Source-1376 task inventory changed while the prepared binding was locked.")
             if path_entry_exists(output):
                 raise TaskFrontmatterError("Source-1376 prepared-binding output already exists.")
+            if path_entry_exists(approval_output):
+                raise TaskFrontmatterError("Source-1376 review-approval output already exists.")
             if path_entry_exists(args.packet_output):
                 raise TaskFrontmatterError("Source-1376 execution packet exists before the prepared handoff.")
             if path_entry_exists(args.root / TRANSFER_JOURNAL):
@@ -930,6 +1146,7 @@ def publish_prepared_binding(args: Args) -> tuple[Path, str]:
                 modes=frozenset({stat.S_IMODE(implementation_path.lstat().st_mode)}),
                 label="Source-1376 prepared implementation",
             )
+            challenge = secrets.token_hex(32)
             effective_rows = {row_id: replace(prior_rows[row_id], task_sha256=str(row_manifest[int(row_id) - 1]["current_sha256"])) for row_id in prior_rows}
             first_schedule = transfer_schedule(effective_rows, include_deferred=False)
             if not first_schedule:
@@ -955,6 +1172,7 @@ def publish_prepared_binding(args: Args) -> tuple[Path, str]:
                     "mode": f"{stat.S_IMODE(implementation_state.st_mode):04o}",
                     "size": len(implementation_payload),
                 },
+                "review_gate": review_gate(args, challenge),
                 "receipt_directory": receipt_binding,
                 "packet_output": str(args.packet_output),
                 "todo": {
@@ -985,7 +1203,7 @@ def publish_prepared_binding(args: Args) -> tuple[Path, str]:
                     "source1352": "preserve accepted receipt and do not resend",
                 },
                 "recovery_records_absent": [TRANSFER_JOURNAL, LEGACY_TRANSFER_JOURNAL],
-                "execution_rule": "After independent review, reacquire the root-membership lock and the complete prepared task-file lock set, revalidate this exact snapshot, and commit the first eligible transfer receipt before releasing. Abort on any mismatch; never alter row 15 or substitute a stale digest.",
+                "execution_rule": PREPARED_BINDING_EXECUTION_RULE,
             }
             payload = write_private_json(output, document, final=True)
             os.chmod(output, 0o444)
@@ -994,7 +1212,32 @@ def publish_prepared_binding(args: Args) -> tuple[Path, str]:
                 os.fsync(output_fd)
             finally:
                 os.close(output_fd)
-            return output, sha256(payload)
+            digest = sha256(payload)
+            if args.reviewed_handoff:
+                approval_digest = wait_for_review_approval(args, output, digest, document)
+                execution_args = replace(
+                    args,
+                    prepared_binding_sha256=digest,
+                    prepare_binding=False,
+                    reviewed_handoff=False,
+                )
+                execution_rows = effective_execution_rows(execution_args)
+                if execution_rows != effective_rows:
+                    raise TaskFrontmatterError("Source-1376 reviewed handoff rows changed after publication.")
+                first_group = first_schedule[0]
+                receipt = transfer_rows(
+                    execution_args,
+                    execution_rows,
+                    first_group,
+                    initial_destination_sha256(execution_args),
+                    require_prepared_snapshot=True,
+                    _held_prepared_locks=held_locks,
+                )
+                if receipt.get("prepared_binding_sha256") != digest:
+                    raise TaskFrontmatterError("Source-1376 first transfer did not retain the approved binding digest.")
+                print(f"review approval receipt sha256: {approval_digest}", flush=True)
+                print(f"committed reviewed first handoff row(s) {','.join(first_group)}", flush=True)
+            return output, digest
 
 
 def validate_prepared_snapshot_locked(
@@ -1049,6 +1292,7 @@ def operation_binding_paths(args: Args, rows: dict[str, PlanRow]) -> tuple[Path,
                 args.authority.resolve(),
                 Path(__file__).resolve(),
                 *(() if args.prepared_binding is None else (args.prepared_binding.resolve(),)),
+                *(() if args.review_approval is None else (args.review_approval.resolve(),)),
                 *(plan_path(args.root, rows[row_id]) for row_id in PROTECTED_ROWS if row_id in rows),
             }
         )
@@ -1420,6 +1664,7 @@ def transfer_rows(
     expected_destination_sha256: str,
     *,
     require_prepared_snapshot: bool = False,
+    _held_prepared_locks: _HeldPreparedLocks | None = None,
 ) -> dict[str, object]:
     if not row_ids or any(row_id in PROTECTED_ROWS for row_id in row_ids):
         raise TaskFrontmatterError("transfer requires eligible non-protected Source-1376 rows.")
@@ -1447,8 +1692,12 @@ def transfer_rows(
         return value
     destination = (args.root / DESTINATION_REF).resolve()
     sources = tuple(plan_path(args.root, row) for row in selected)
-    with root_membership_lock(args.root):
-        initial_paths = markdown_paths(args.root)
+    with ExitStack() as membership:
+        if _held_prepared_locks is None:
+            membership.enter_context(root_membership_lock(args.root))
+            initial_paths = markdown_paths(args.root)
+        else:
+            initial_paths = _held_prepared_locks.markdown
         locked_paths = tuple(
             sorted(
                 {
@@ -1464,8 +1713,11 @@ def transfer_rows(
             )
         )
         with ExitStack() as locks:
-            for locked_path in locked_paths:
-                locks.enter_context(task_file_lock(locked_path))
+            if _held_prepared_locks is None:
+                for locked_path in locked_paths:
+                    locks.enter_context(task_file_lock(locked_path))
+            else:
+                initial_paths = _held_prepared_locks.require(args.root, locked_paths)
             validate_operation_bindings_locked(args, rows)
             if path_entry_exists(legacy_journal_path):
                 raise TaskFrontmatterError("legacy closure-transfer recovery state is present.")
@@ -3180,6 +3432,13 @@ def validate_initial_state(args: Args, rows: dict[str, PlanRow]) -> None:
 
 def apply(args: Args) -> None:
     rows = effective_execution_rows(args)
+    if args.prepared_binding is not None:
+        initial_schedule = transfer_schedule(rows, include_deferred=False)
+        if not initial_schedule:
+            raise TaskFrontmatterError("Source-1376 execution has no eligible first transfer.")
+        first_receipt = transfer_receipt_path(args.receipt_dir, initial_schedule[0])
+        if not path_entry_exists(first_receipt) and not path_entry_exists(args.root / TRANSFER_JOURNAL):
+            raise TaskFrontmatterError("Source-1376 initial execution requires --reviewed-handoff so review and first transfer share one lock acquisition.")
     authority_locator = validate_authority(args.root, args.authority)
     if authority_locator != f"{AUTHORITY_REF}:3-3":
         raise TaskFrontmatterError("Source-1376 authority locator drifted.")
@@ -3450,6 +3709,15 @@ def live_source1352_senders() -> list[int]:
 
 
 def build_packet_locked(args: Args, rows: dict[str, PlanRow], destination_sha256: str) -> None:
+    prepared = prepared_binding_value(args)
+    if prepared is None or args.prepared_binding is None or args.review_approval is None:
+        raise TaskFrontmatterError("Source-1376 packet requires the reviewed prepared binding and approval.")
+    approval, approval_payload = validate_review_approval(
+        args,
+        args.prepared_binding,
+        prepared_binding_digest(args),
+        prepared,
+    )
     transfer_values = validated_transfer_receipts(args, rows)
     close_values: list[dict[str, object]] = []
     for path in sorted(args.receipt_dir.glob("close-*.json")):
@@ -3573,6 +3841,15 @@ def build_packet_locked(args: Args, rows: dict[str, PlanRow], destination_sha256
             "mode": "0444",
             "sha256": prepared_binding_digest(args),
         },
+        "review_approval": {
+            "path": str(args.review_approval),
+            "mode": "0400",
+            "sha256": sha256(approval_payload),
+            "schema": approval["schema"],
+            "reviewer": approval["reviewer"],
+            "verdict": approval["verdict"],
+            "public_key_sha256": approval["public_key_sha256"],
+        },
         "authority": {"source": f"{AUTHORITY_REF}:3-3", "sha256": AUTHORITY_SHA256, "text": AUTHORITY_TEXT},
         "destination": {
             "task": DESTINATION_REF,
@@ -3686,9 +3963,21 @@ def parse_args(argv: list[str]) -> Args:
         help="Independent-review-approved SHA-256 of --prepared-binding; required for execution and forbidden while preparing.",
     )
     _ = parser.add_argument(
+        "--review-approval-output",
+        type=Path,
+        required=True,
+        help="External immutable reviewer-signed approval receipt path.",
+    )
+    preparation = parser.add_mutually_exclusive_group()
+    _ = preparation.add_argument(
         "--prepare-binding",
         action="store_true",
-        help="Publish --prepared-binding under the complete root/task lock set without mutating lifecycle state, then exit.",
+        help="Publish an audit-only --prepared-binding under the complete root/task lock set without mutating lifecycle state, then exit.",
+    )
+    _ = preparation.add_argument(
+        "--reviewed-handoff",
+        action="store_true",
+        help="Publish while retaining every lock, await exact-digest approval on stdin, commit the first transfer, then finish execution.",
     )
     parsed = parser.parse_args(argv)
     root = parsed.root.resolve()
@@ -3700,18 +3989,32 @@ def parse_args(argv: list[str]) -> Args:
         or not parsed.receipt_dir.is_absolute()
         or not parsed.packet_output.is_absolute()
         or not parsed.prepared_binding.is_absolute()
+        or not parsed.review_approval_output.is_absolute()
     ):
-        parser.error("root, plan, binding, authority, receipt directory, packet output, and prepared binding must be absolute paths.")
+        parser.error("root, plan, binding, authority, receipt directory, packet, prepared-binding, and review-approval paths must be absolute.")
     if root != WORK_LOG_ROOT or parsed.plan.resolve() != PLAN_PATH or parsed.binding.resolve() != EXECUTION_BINDING_PATH:
         parser.error(f"this one-shot helper is bound to root {WORK_LOG_ROOT}, plan {PLAN_PATH}, and binding {EXECUTION_BINDING_PATH}.")
     if parsed.packet_output.suffix != ".json":
         parser.error("--packet-output must end with .json.")
+    packet_output = parsed.packet_output.resolve()
+    if packet_output.parent == root or root in packet_output.parents or not packet_output.parent.is_dir():
+        parser.error("--packet-output must be external to the work-log root with an existing parent directory.")
     prepared_binding = parsed.prepared_binding.resolve()
+    review_approval = parsed.review_approval_output.resolve()
     if prepared_binding.suffix != ".json" or prepared_binding.parent == root or root in prepared_binding.parents:
         parser.error("--prepared-binding must be an external .json path.")
-    if parsed.prepare_binding:
+    if (
+        review_approval.suffix != ".json"
+        or review_approval.parent == root
+        or root in review_approval.parents
+        or review_approval == prepared_binding
+        or review_approval == packet_output
+        or prepared_binding == packet_output
+    ):
+        parser.error("prepared binding, review approval, and packet output must be distinct external .json paths.")
+    if parsed.prepare_binding or parsed.reviewed_handoff:
         if parsed.prepared_binding_sha256:
-            parser.error("--prepared-binding-sha256 is forbidden with --prepare-binding.")
+            parser.error("--prepared-binding-sha256 is forbidden while publishing a binding.")
     elif SHA256_RE.fullmatch(parsed.prepared_binding_sha256) is None:
         parser.error("execution requires --prepared-binding-sha256 as 64 lowercase hex characters.")
     return Args(
@@ -3720,19 +4023,30 @@ def parse_args(argv: list[str]) -> Args:
         parsed.binding.resolve(),
         parsed.authority.resolve(),
         ensure_private_dir(parsed.receipt_dir),
-        parsed.packet_output.resolve(),
+        packet_output,
         prepared_binding,
         parsed.prepared_binding_sha256,
         parsed.prepare_binding,
+        parsed.reviewed_handoff,
+        review_approval,
     )
 
 
 def run(args: Args) -> int:
     try:
-        if args.prepare_binding:
+        if args.prepare_binding or args.reviewed_handoff:
             path, digest = publish_prepared_binding(args)
-            print(f"prepared binding: {path}", flush=True)
-            print(f"prepared binding sha256: {digest}", flush=True)
+            if args.reviewed_handoff:
+                execution_args = replace(
+                    args,
+                    prepared_binding_sha256=digest,
+                    prepare_binding=False,
+                    reviewed_handoff=False,
+                )
+                apply(execution_args)
+            else:
+                print(f"prepared binding: {path}", flush=True)
+                print(f"prepared binding sha256: {digest}", flush=True)
         else:
             apply(args)
     except (OSError, TaskFrontmatterError, RuntimeError, ValueError) as exc:

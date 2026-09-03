@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import base64
+import io
 import json
 import os
 import stat
+import subprocess
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -80,6 +83,8 @@ class Source1376ShutdownTests(unittest.TestCase):
         self.addCleanup(self.packet.unlink, missing_ok=True)
         self.prepared = self.root.parent / f"{self.root.name}-prepared.json"
         self.addCleanup(self.prepared.unlink, missing_ok=True)
+        self.approval = self.root.parent / f"{self.root.name}-review-approval.json"
+        self.addCleanup(self.approval.unlink, missing_ok=True)
         self.args = shutdown.Args(self.root, self.plan, self.binding, self.authority, self.receipts, self.packet)
         self.escrow_guard = patch.object(shutdown, "validate_escrow_custody_locked")
         self.escrow_guard.start()
@@ -104,7 +109,7 @@ class Source1376ShutdownTests(unittest.TestCase):
         (self.root / shutdown.DESTINATION_REF).write_text(text, encoding="utf-8")
         return text
 
-    def prepared_args(self, digest_value: str = "", *, prepare: bool) -> shutdown.Args:
+    def prepared_args(self, digest_value: str = "", *, prepare: bool, reviewed_handoff: bool = False) -> shutdown.Args:
         return shutdown.Args(
             self.root,
             self.plan,
@@ -115,6 +120,8 @@ class Source1376ShutdownTests(unittest.TestCase):
             self.prepared,
             digest_value,
             prepare,
+            reviewed_handoff,
+            self.approval,
         )
 
     def publish_small_prepared_binding(
@@ -139,7 +146,22 @@ class Source1376ShutdownTests(unittest.TestCase):
         ):
             path, prepared_digest = shutdown.publish_prepared_binding(self.prepared_args(prepare=True))
         self.assertEqual(self.prepared, path)
+        self.write_test_approval(prepared_digest)
         return rows, prepared_digest
+
+    def write_test_approval(self, prepared_digest: str) -> None:
+        document = json.loads(self.prepared.read_text(encoding="utf-8"))
+        unsigned = shutdown.review_approval_unsigned(
+            self.prepared_args(prepared_digest, prepare=False),
+            self.prepared,
+            prepared_digest,
+            document,
+        )
+        shutdown.write_private_json(
+            self.approval,
+            {**unsigned, "signature": base64.b64encode(b"test-signature".ljust(64, b"\0")).decode("ascii")},
+            final=True,
+        )
 
     def test_loads_exact_immutable_plan(self) -> None:
         rows = shutdown.load_plan(Path("/ssd1/sichangheagent/amh1376-transfer-plan-20260902.md"))
@@ -155,6 +177,46 @@ class Source1376ShutdownTests(unittest.TestCase):
             "ebd60e85d87ae6c7fca6280ee8988c990becbb8027c7b22b5ac5f64a5f02619b",
             shutdown.DESTINATION_INITIAL_SHA256,
         )
+
+    def test_review_signature_verifier_accepts_valid_ed25519_signature(self) -> None:
+        private_key = self.root / "reviewer-private.pem"
+        public_key = self.root / "reviewer-public.pem"
+        message = self.root / "review-message.json"
+        signature = self.root / "review-message.sig"
+        message_payload = b'{"review":"independent","verdict":"PASS"}\n'
+        message.write_bytes(message_payload)
+        subprocess.run(
+            ("/usr/bin/openssl", "genpkey", "-algorithm", "Ed25519", "-out", str(private_key)),
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ("/usr/bin/openssl", "pkey", "-in", str(private_key), "-pubout", "-out", str(public_key)),
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            (
+                "/usr/bin/openssl",
+                "pkeyutl",
+                "-sign",
+                "-inkey",
+                str(private_key),
+                "-rawin",
+                "-in",
+                str(message),
+                "-out",
+                str(signature),
+            ),
+            check=True,
+            capture_output=True,
+        )
+        public_payload = public_key.read_bytes()
+        with (
+            patch.object(shutdown, "REVIEWER_PUBLIC_KEY_PEM", public_payload),
+            patch.object(shutdown, "REVIEWER_PUBLIC_KEY_SHA256", hashlib.sha256(public_payload).hexdigest()),
+        ):
+            shutdown.verify_review_signature(message_payload, signature.read_bytes())
 
     def test_new_or_existing_setgid_receipt_directory_is_never_normalized(self) -> None:
         new_path = self.root / "new-receipts"
@@ -400,6 +462,7 @@ class Source1376ShutdownTests(unittest.TestCase):
             patch.object(shutdown, "validate_authority", return_value=f"{shutdown.AUTHORITY_REF}:3-3"),
             patch.object(shutdown, "source1352_anchor", return_value={"sha256": "1" * 64, "resent": False}),
             patch.object(shutdown, "transfer_schedule", return_value=(("01",),)),
+            patch.object(shutdown, "verify_review_signature"),
             patch.object(shutdown, "root_membership_lock", side_effect=membership_lock),
             patch.object(shutdown, "task_file_lock", side_effect=file_lock),
             patch.object(shutdown, "validate_prepared_snapshot_locked", side_effect=assert_snapshot_locked),
@@ -423,6 +486,181 @@ class Source1376ShutdownTests(unittest.TestCase):
         assert destination_metadata is not None
         self.assertEqual((), source_metadata.pending_task_items)
         self.assertEqual((shutdown.AUTHORITY_TEXT, "move me"), destination_metadata.pending_task_items)
+
+    def test_reviewed_handoff_holds_snapshot_locks_through_approval_and_first_receipt(self) -> None:
+        source_text = task_text("agent_managers:1", ("move me",))
+        source_current = source_text + "drift captured by the held snapshot\n"
+        source = self.root / "source.md"
+        source.write_text(source_current, encoding="utf-8")
+        destination_text = self.destination()
+        self.write_todo((("source.md", "agent_managers:1"), (shutdown.DESTINATION_REF, "cedit:15")))
+        rows = {"01": row("01", "source.md", source_text)}
+        args = self.prepared_args(prepare=False, reviewed_handoff=True)
+        active_files: set[Path] = set()
+        membership = False
+        approved_digest = ""
+        real_finish = shutdown.finish_transfer_journal_locked
+
+        @contextmanager
+        def membership_lock(_root: Path):
+            nonlocal membership
+            membership = True
+            try:
+                yield
+            finally:
+                membership = False
+
+        @contextmanager
+        def file_lock(path: Path):
+            resolved = path.resolve()
+            active_files.add(resolved)
+            try:
+                yield
+            finally:
+                active_files.remove(resolved)
+
+        def approve(
+            locked_args: shutdown.Args,
+            path: Path,
+            prepared_digest: str,
+            document: dict[str, object],
+        ) -> str:
+            nonlocal approved_digest
+            self.assertTrue(membership)
+            self.assertIs(args, locked_args)
+            self.assertEqual(self.prepared, path)
+            self.assertEqual(prepared_digest, digest(path.read_text(encoding="utf-8")))
+            initial_paths = shutdown.markdown_paths(self.root)
+            expected = {candidate.resolve() for candidate in shutdown.prepared_binding_lock_paths(args, rows, initial_paths)}
+            self.assertTrue(expected.issubset(active_files))
+            self.assertIn((self.receipts / "transfer-01.json").resolve(), active_files)
+            self.assertEqual(digest(source_current), document["rows"][0]["current_sha256"])
+            self.write_test_approval(prepared_digest)
+            approved_digest = prepared_digest
+            return digest(self.approval.read_text(encoding="utf-8"))
+
+        def assert_receipt_committed(*call_args: object, **call_kwargs: object) -> dict[str, object]:
+            receipt = real_finish(*call_args, **call_kwargs)  # type: ignore[arg-type]
+            self.assertTrue(membership)
+            self.assertTrue(active_files)
+            self.assertTrue((self.receipts / "transfer-01.json").is_file())
+            return receipt
+
+        with (
+            patch.object(shutdown, "DESTINATION_INITIAL_SHA256", digest(destination_text)),
+            patch.object(shutdown, "load_execution_rows", return_value=rows),
+            patch.object(shutdown, "load_plan", return_value=rows),
+            patch.object(shutdown, "validate_authority", return_value=f"{shutdown.AUTHORITY_REF}:3-3"),
+            patch.object(shutdown, "source1352_anchor", return_value={"sha256": "1" * 64, "resent": False}),
+            patch.object(shutdown, "transfer_schedule", return_value=(("01",),)),
+            patch.object(shutdown, "verify_review_signature"),
+            patch.object(shutdown, "root_membership_lock", side_effect=membership_lock),
+            patch.object(shutdown, "task_file_lock", side_effect=file_lock),
+            patch.object(shutdown, "wait_for_review_approval", side_effect=approve),
+            patch.object(shutdown, "finish_transfer_journal_locked", side_effect=assert_receipt_committed),
+        ):
+            path, prepared_digest = shutdown.publish_prepared_binding(args)
+
+        self.assertEqual(self.prepared, path)
+        self.assertEqual(prepared_digest, approved_digest)
+        self.assertFalse(membership)
+        self.assertEqual(set(), active_files)
+        receipt = json.loads((self.receipts / "transfer-01.json").read_text(encoding="utf-8"))
+        self.assertEqual(prepared_digest, receipt["prepared_binding_sha256"])
+        source_metadata = parse_task_metadata(source.read_text(encoding="utf-8"), self.root)
+        assert source_metadata is not None
+        self.assertEqual((), source_metadata.pending_task_items)
+
+    def test_reviewed_handoff_rejects_inexact_approval_before_any_transfer(self) -> None:
+        source_text = task_text("agent_managers:1", ("move me",))
+        (self.root / "source.md").write_text(source_text, encoding="utf-8")
+        destination_text = self.destination()
+        self.write_todo((("source.md", "agent_managers:1"), (shutdown.DESTINATION_REF, "cedit:15")))
+        rows = {"01": row("01", "source.md", source_text)}
+        args = self.prepared_args(prepare=False, reviewed_handoff=True)
+
+        with (
+            patch.object(shutdown, "DESTINATION_INITIAL_SHA256", digest(destination_text)),
+            patch.object(shutdown, "load_execution_rows", return_value=rows),
+            patch.object(shutdown, "load_plan", return_value=rows),
+            patch.object(shutdown, "validate_authority", return_value=f"{shutdown.AUTHORITY_REF}:3-3"),
+            patch.object(shutdown, "source1352_anchor", return_value={"sha256": "1" * 64, "resent": False}),
+            patch.object(shutdown, "transfer_schedule", return_value=(("01",),)),
+            patch.object(
+                shutdown.sys,
+                "stdin",
+                io.StringIO(f"SIGNATURE {base64.b64encode(bytes(64)).decode('ascii')}\n"),
+            ),
+            self.assertRaisesRegex(shutdown.TaskFrontmatterError, "approval signature is invalid"),
+        ):
+            shutdown.publish_prepared_binding(args)
+
+        self.assertTrue(self.prepared.is_file())
+        self.assertFalse((self.root / shutdown.TRANSFER_JOURNAL).exists())
+        self.assertFalse((self.receipts / "transfer-01.json").exists())
+        self.assertEqual(source_text, (self.root / "source.md").read_text(encoding="utf-8"))
+        self.assertEqual(destination_text, (self.root / shutdown.DESTINATION_REF).read_text(encoding="utf-8"))
+
+    def test_reviewed_handoff_rejects_unsafe_packet_path_before_publication(self) -> None:
+        unsafe_packets = (
+            self.prepared,
+            self.root / "in-root-packet.json",
+            self.root.parent / f"{self.root.name}-missing-parent" / "packet.json",
+        )
+        for packet in unsafe_packets:
+            with self.subTest(packet=packet):
+                args = shutdown.replace(
+                    self.prepared_args(prepare=False, reviewed_handoff=True),
+                    packet_output=packet,
+                )
+                with self.assertRaisesRegex(shutdown.TaskFrontmatterError, "distinct external paths in existing directories"):
+                    shutdown.publish_prepared_binding(args)
+
+                self.assertFalse(self.prepared.exists())
+                self.assertFalse(self.approval.exists())
+                self.assertFalse(packet.exists())
+                self.assertEqual([], list(self.receipts.iterdir()))
+
+    def test_invalidated_held_lock_capability_cannot_skip_transfer_locks(self) -> None:
+        source_text = task_text("agent_managers:1", ("move me",))
+        source = self.root / "source.md"
+        source.write_text(source_text, encoding="utf-8")
+        destination_text = self.destination()
+        self.write_todo((("source.md", "agent_managers:1"), (shutdown.DESTINATION_REF, "cedit:15")))
+        rows = {"01": row("01", "source.md", source_text)}
+        initial_paths = shutdown.markdown_paths(self.root)
+        required = tuple(
+            {
+                *initial_paths,
+                self.root / "TODO.md",
+                *shutdown.operation_binding_paths(self.args, rows),
+                self.root / shutdown.TRANSFER_JOURNAL,
+                self.root / shutdown.LEGACY_TRANSFER_JOURNAL,
+                self.receipts / "transfer-01.json",
+                self.receipts,
+            }
+        )
+        capability = shutdown._HeldPreparedLocks(
+            shutdown._HELD_PREPARED_LOCKS_KEY,
+            self.root,
+            initial_paths,
+            required,
+        )
+        capability.invalidate()
+
+        with self.assertRaisesRegex(shutdown.TaskFrontmatterError, "lacks the live complete prepared-lock capability"):
+            shutdown.transfer_rows(
+                self.args,
+                rows,
+                ("01",),
+                digest(destination_text),
+                _held_prepared_locks=capability,
+            )
+
+        self.assertFalse((self.root / shutdown.TRANSFER_JOURNAL).exists())
+        self.assertFalse((self.receipts / "transfer-01.json").exists())
+        self.assertEqual(source_text, source.read_text(encoding="utf-8"))
+        self.assertEqual(destination_text, (self.root / shutdown.DESTINATION_REF).read_text(encoding="utf-8"))
 
     def test_post_review_snapshot_drift_aborts_before_journal_or_receipt(self) -> None:
         source_text = task_text("agent_managers:1", ("move me",))
@@ -452,6 +690,7 @@ class Source1376ShutdownTests(unittest.TestCase):
             patch.object(shutdown, "validate_authority", return_value=f"{shutdown.AUTHORITY_REF}:3-3"),
             patch.object(shutdown, "source1352_anchor", return_value={"sha256": "1" * 64, "resent": False}),
             patch.object(shutdown, "transfer_schedule", return_value=(("01",),)),
+            patch.object(shutdown, "verify_review_signature"),
             self.assertRaisesRegex(shutdown.TaskFrontmatterError, "snapshot drifted"),
         ):
             shutdown.transfer_rows(
@@ -493,6 +732,7 @@ class Source1376ShutdownTests(unittest.TestCase):
             patch.object(shutdown, "validate_authority", return_value=f"{shutdown.AUTHORITY_REF}:3-3"),
             patch.object(shutdown, "source1352_anchor", return_value={"sha256": "1" * 64, "resent": False}),
             patch.object(shutdown, "transfer_schedule", return_value=(("01",),)),
+            patch.object(shutdown, "verify_review_signature"),
             self.assertRaisesRegex(shutdown.TaskFrontmatterError, "legacy closure-transfer"),
         ):
             shutdown.transfer_rows(
