@@ -71,6 +71,17 @@ Why have you not restarted hwl:3? Do it now"""
 HUMAN_RESTART_TARGET = "hwl:3.0"
 HUMAN_RESTART_ACTION = "restart"
 HUMAN_RESTART_SOURCE_MAX_BYTES = 1_000_000
+HCFG_RESTART_ROOT = Path("/ssd1/sichangheagent/work_logs")
+HCFG_RESTART_TASK_FILE = "helper_audit_human_facing.md"
+HCFG_RESTART_AUTHORITY_FILE = Path("manager_mail/85c5dff58359-1375.txt")
+HCFG_RESTART_AUTHORITY_LINES = (3, 7)
+HCFG_RESTART_AUTHORITY_SHA256 = "d7bff25be32f089e63d1a06c41d0e433fca75ee7eee14bdfd13a6f85b2b45977"
+HCFG_RESTART_AUTHORITY_TEXT = """For manager
+That’s none of this agent's business. Their task is to fix the manager infra
+Re-follow getagentsmd
+Find the original human prompts for this agent and collect only original words to suit a starting prompt
+Then restart hcfg:1 in place"""
+HCFG_RESTART_TARGET = "hcfg:1.0"
 SOURCE1206_ROOT = Path("/ssd1/sichangheagent/work_logs")
 SOURCE1206_AUTHORITY_FILE = Path("manager_mail/85c5dff58359-1206.txt")
 SOURCE1206_AUTHORITY_LINES = (3, 13)
@@ -227,6 +238,17 @@ class HumanRestartAuthority:
     pane_id: str
     window_id: str
     pane_pid: int
+
+
+@dataclass(frozen=True)
+class HumanRestartSpec:
+    root: Path
+    task_file: str
+    authority_file: Path
+    authority_lines: tuple[int, int]
+    authority_sha256: str
+    authority_text: str
+    target: str
 
 
 @dataclass(frozen=True)
@@ -640,25 +662,25 @@ def validate_task(args: Args, pane: Pane, *, verify_target: bool = True) -> Task
     )
 
 
-def human_restart_source(args: Args) -> tuple[Path, os.stat_result, str]:
-    """Read the one byte-exact private email authorized for `hwl:3`."""
+def human_restart_source(args: Args, spec: HumanRestartSpec) -> tuple[Path, os.stat_result, str]:
+    """Read one byte-exact private email authorized for one protected pane."""
 
     if args.human_email_file is None or args.human_email_lines is None:
         raise StartError("human-owned pane restart requires --human-email-file and --human-email-lines.")
     try:
-        approved_root = HUMAN_RESTART_ROOT.resolve(strict=True)
+        approved_root = spec.root.resolve(strict=True)
     except OSError as error:
         raise StartError(f"approved human restart root is unavailable: {error}") from error
     if args.root.resolve(strict=False) != approved_root:
         raise StartError("human restart authority is bound to the exact approved work-log root.")
-    if args.human_email_lines != HUMAN_RESTART_AUTHORITY_LINES:
+    if args.human_email_lines != spec.authority_lines:
         raise StartError("human restart authority does not select the exact approved source lines.")
     candidate = args.human_email_file
     if not candidate.is_absolute():
         candidate = args.root / candidate
     try:
         path = candidate.resolve(strict=True)
-        approved_path = (approved_root / HUMAN_RESTART_AUTHORITY_FILE).resolve(strict=True)
+        approved_path = (approved_root / spec.authority_file).resolve(strict=True)
         mail_root = (approved_root / "manager_mail").resolve(strict=True)
         mail_root_stat = mail_root.stat()
     except OSError as error:
@@ -693,7 +715,7 @@ def human_restart_source(args: Args) -> tuple[Path, os.stat_result, str]:
     ):
         raise StartError("human restart authority source is not one bounded owner-private regular file.")
     digest = hashlib.sha256(data).hexdigest()
-    if digest != HUMAN_RESTART_AUTHORITY_SHA256:
+    if digest != spec.authority_sha256:
         raise StartError("human restart authority source content does not match the exact approved email.")
     try:
         lines = data.decode("utf-8").splitlines()
@@ -703,7 +725,7 @@ def human_restart_source(args: Args) -> tuple[Path, os.stat_result, str]:
     if end_line > len(lines):
         raise StartError("human restart authority line range exceeds its source email.")
     excerpt = "\n".join(lines[start_line - 1 : end_line])
-    if excerpt != HUMAN_RESTART_AUTHORITY_TEXT:
+    if excerpt != spec.authority_text:
         raise StartError("human restart authority excerpt does not match the exact approved request.")
     return path, before, digest
 
@@ -715,14 +737,20 @@ def require_human_restart_authority(args: Args, pane: Pane) -> HumanRestartAutho
         return None
     if not args.restart_running:
         raise StartError("human-owned panes support only email-authorized --restart-running recovery.")
-    if pane.target != HUMAN_RESTART_TARGET:
-        raise StartError("human restart authority applies only to the exact approved hwl:3 pane.")
-    if args.task_file != HUMAN_RESTART_TASK_FILE:
-        raise StartError("human restart authority applies only to the exact approved human_task_planner.md task.")
-    path, source, digest = human_restart_source(args)
+    if pane.target == HUMAN_RESTART_TARGET:
+        spec = HumanRestartSpec(HUMAN_RESTART_ROOT, HUMAN_RESTART_TASK_FILE, HUMAN_RESTART_AUTHORITY_FILE, HUMAN_RESTART_AUTHORITY_LINES, HUMAN_RESTART_AUTHORITY_SHA256, HUMAN_RESTART_AUTHORITY_TEXT, HUMAN_RESTART_TARGET)
+    elif pane.target == HCFG_RESTART_TARGET:
+        spec = HumanRestartSpec(HCFG_RESTART_ROOT, HCFG_RESTART_TASK_FILE, HCFG_RESTART_AUTHORITY_FILE, HCFG_RESTART_AUTHORITY_LINES, HCFG_RESTART_AUTHORITY_SHA256, HCFG_RESTART_AUTHORITY_TEXT, HCFG_RESTART_TARGET)
+    else:
+        raise StartError("human restart authority applies only to the exact approved hwl:3 or hcfg:1 pane.")
+    if args.task_file != spec.task_file:
+        if spec.target == HUMAN_RESTART_TARGET:
+            raise StartError("human restart authority applies only to the exact approved human_task_planner.md task.")
+        raise StartError("human restart authority applies only to the exact approved helper_audit_human_facing.md task.")
+    path, source, digest = human_restart_source(args, spec)
     return HumanRestartAuthority(
         path,
-        HUMAN_RESTART_AUTHORITY_LINES,
+        spec.authority_lines,
         source.st_dev,
         source.st_ino,
         source.st_size,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import os
 import stat
@@ -19,6 +20,10 @@ from omo_manager.omo_codex_start import (
     HUMAN_RESTART_AUTHORITY_FILE,
     HUMAN_RESTART_AUTHORITY_LINES,
     HUMAN_RESTART_TASK_FILE,
+    HCFG_RESTART_AUTHORITY_FILE,
+    HCFG_RESTART_AUTHORITY_LINES,
+    HCFG_RESTART_AUTHORITY_SHA256,
+    HCFG_RESTART_TASK_FILE,
     Pane,
     RECOVERY_EVENT_DIRNAME,
     RECOVERY_RECEIPT_DIRNAME,
@@ -3510,6 +3515,33 @@ class CodexStartTests(unittest.TestCase):
                 self.assertRaisesRegex(StartError, "exact approved human_task_planner.md task"),
             ):
                 require_human_restart_authority(replace(args, task_file="other.md"), pane)
+
+    def test_hcfg_restart_authority_is_bound_to_source_task_root_lines_and_target(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            mail = root / "manager_mail"
+            mail.mkdir(mode=0o700)
+            source = root / HCFG_RESTART_AUTHORITY_FILE
+            source.write_bytes(base64.b64decode(
+                "U3ViamVjdDogUmU6IEludGVybmV0IEFyY2hpdmUgY2hlY2sgc3RhdHVzCgpGb3IgbWFuYWdlcg0KVGhhdOKAmXMgbm9uZSBvZiB0aGlzIGFnZW50J3MgYnVzaW5lc3MuIFRoZWlyIHRhc2sgaXMgdG8gZml4IHRoZSBtYW5hZ2VyIGluZnJhDQpSZS1mb2xsb3cgZ2V0YWdlbnRzbWQNCkZpbmQgdGhlIG9yaWdpbmFsIGh1bWFuIHByb21wdHMgZm9yIHRoaXMgYWdlbnQgYW5kIGNvbGxlY3Qgb25seSBvcmlnaW5hbCB3b3JkcyB0byBzdWl0IGEgc3RhcnRpbmcgcHJvbXB0DQpUaGVuIHJlc3RhcnQgaGNmZzoxIGluIHBsYWNlDQoNCg0KPiBPbiBTZXAgMiwgMjAyNiwgYXQgMTk6MjgsIHNpY2hhbmdoZWFnZW50QGdtYWlsLmNvbSB3cm90ZToNCj4gDQo+IFNob3J0IGFuc3dlcjogbm8uIFdlIGhhdmUgbm90IGNoZWNrZWQgSW50ZXJuZXQgQXJjaGl2ZSBwYWdlIGNvbnRlbnQgZm9yIGV2ZXJ5IHNpdGUgdGhhdCB0aGUgZGV0ZWN0b3IgbGFiZWxlZCBwb3NpdGl2ZSAodGhhdCBpcywgaXRzIHNhbXBsZWQgdGV4dCBsb29rZWQgTExNLWxpa2UpLiBUaGUgYWN0aXZlIERXIHRhc2sgZmlyc3QgcmVxdWlyZXMgY2hvb3NpbmcgdGhlIHNpdGUgZ3JvdXAgYW5kIGFyY2hpdmUtc25hcHNob3QgcnVsZSwgdGhlbiBkb2luZyB0aGUgY2hlY2tzLiBUaGUgZHVwbGljYXRlIG5vdGVzIGF0IHRoZSBlbmQgb2YgdGhlIERXIHJlY29yZCBkaWQgbm90IGNyZWF0ZSBhbm90aGVyIHRhc2suDQo+IA0KPiBUaGUgcHJpb3IgZml2ZS1zaXRlIGludmVzdGlnYXRpb24gdXNlZCBjdXJyZW50IGRldGVjdG9yIHNhbXBsZXMgYW5kIHNvbWUgQ29tbW9uIENyYXdsIGRhdGVzOyBpdCBkaWQgbm90IHJldHJpZXZlIG1hdGNoaW5nIEludGVybmV0IEFyY2hpdmUgcGFnZSBjb250ZW50Lg0KPiANCj4gVGhlIHByb3Bvc2VkIG1ldGhvZCBpczogZm9yIGVhY2ggYXBwcm92ZWQgc2l0ZSwgdGFrZSB0aGUgZXhhY3QgVVJMcyBzYW1wbGVkIGJ5IHRoZSBkZXRlY3RvcjsgcXVlcnkgdGhlIEludGVybmV0IEFyY2hpdmUgQ0RYIGluZGV4OyByZXRyaWV2ZSBhIHByZS1DaGF0R1BUIHNuYXBzaG90IHdoZW4gYXZhaWxhYmxlOyBjb21wYXJlIGl0cyBleHRyYWN0ZWQgdGV4dCB3aXRoIHRoZSBjdXJyZW50IHNhbXBsZWQgdGV4dDsgdGhlbiByZWNvcmQgd2hldGhlciBvbmx5IHRoZSBzaXRlIGV4aXN0ZWQgZWFybHksIHRoZSBzYW1lIHRleHQgZXhpc3RlZCBlYXJseSwgdGhlIHRleHQgY2hhbmdlZCBsYXRlciwgb3Igbm8gdXNhYmxlIHNuYXBzaG90IGV4aXN0cy4gQW4gb2xkIGRvbWFpbiBvciBob21lcGFnZSBhbG9uZSBpcyBub3QgZW5vdWdoLg0KPiANCj4gUGxlYXNlIGNob29zZToNCj4gDQo+IENoZWNrIGFsbCAyLDgwMyBwb3NpdGl2ZSBzaXRlcyBpbiB0aGUgcnVuLCBvciBhIGRlZmluZWQgcmV2aWV3IGdyb3VwPw0KPiBVc2UgMjAyMi0xMS0zMCBhcyB0aGUgY3V0b2ZmLCBvciBhbm90aGVyIGRhdGU/DQo+IFdoZW4gYSBzbmFwc2hvdCBpcyBtaXNzaW5nLCByZXBvcnQg4oCcdW5rbm93bizigJ0gb3IgYWNjZXB0IHRoZSB3ZWFrZXIgZmFjdCB0aGF0IHRoZSBkb21haW4gZXhpc3RlZD8NCj4gVGhlIGxpbmVzIGJlZm9yZSBtZXNzYWdlOiBpbiB0aGUgdGVtcG9yYXJ5IHJlcG9ydCBmaWxlIGFyZSBpbnRlcm5hbCBkZWxpdmVyeSBkYXRhIHRoYXQgcHJldmVudHMgbG9zdCwgZHVwbGljYXRlLCBvciBtaXNyb3V0ZWQgYWdlbnQgdXBkYXRlcy4gVGhlIGFjdHVhbCB1cGRhdGUgc3RhcnRzIGFmdGVyIG1lc3NhZ2U6LiBObyBkZWxpdmVyeS1zeXN0ZW0gY2hhbmdlIHdhcyBtYWRlLg0KPiANCg0K"
+            ))
+            source.chmod(0o600)
+            args = self.args(root, task_file=HCFG_RESTART_TASK_FILE, target="hcfg:1", session_id="", restart_running=True, human_email_file=HCFG_RESTART_AUTHORITY_FILE, human_email_lines=HCFG_RESTART_AUTHORITY_LINES)
+            pane = Pane("hcfg:1.0", "%46", "@1", "bun", root, 4242)
+            self.assertEqual(HCFG_RESTART_AUTHORITY_SHA256, hashlib.sha256(source.read_bytes()).hexdigest())
+            with patch("omo_manager.omo_codex_start.HCFG_RESTART_ROOT", root):
+                self.assertIsNotNone(require_human_restart_authority(args, pane))
+                for changed, error in (
+                    ({"task_file": "other.md"}, "helper_audit_human_facing.md"),
+                    ({"human_email_lines": (3, 3)}, "source lines"),
+                    ({"human_email_file": Path("manager_mail/other.txt")}, "source is unavailable"),
+                ):
+                    with self.subTest(changed=changed), self.assertRaisesRegex(StartError, error):
+                        require_human_restart_authority(replace(args, **changed), pane)
+                with self.assertRaisesRegex(StartError, "hwl:3 or hcfg:1"):
+                    require_human_restart_authority(replace(args, target="hcfg:2"), replace(pane, target="hcfg:2.0"))
+            with self.assertRaisesRegex(StartError, "work-log root"):
+                require_human_restart_authority(args, pane)
 
     def test_human_restart_authority_rejects_other_h_target_and_paraphrase(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
