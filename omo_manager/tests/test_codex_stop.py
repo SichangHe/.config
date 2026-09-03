@@ -1,5 +1,7 @@
+import ast
 import contextlib
 import hashlib
+import inspect
 import io
 import json
 import os
@@ -41,6 +43,8 @@ from omo_manager.omo_codex_stop import (
 )
 
 TEST_COMPLETION_COMMAND = "/opt/omo_completion_email.py --task /tmp/task.md --outcome 'task done'"
+FROZEN_SOURCE1290_HELPER_COMMIT = "7a03a04969d883f4fb07d0095d23b09836bb2656"
+FROZEN_SOURCE1290_HELPER_PATH = "omo_manager/omo_source1290_done_reconcile.py"
 
 
 def exited_session_payload(
@@ -181,7 +185,41 @@ class CodexStopTests(unittest.TestCase):
         capture.assert_called_with("%42", 73)
         close.assert_not_called()
 
-    def test_close_exited_codex_shell_preserves_positional_api_and_failure_order(self) -> None:
+    def test_close_exited_codex_shell_matches_frozen_helper_contract_and_preserves_order(self) -> None:
+        helper_source = subprocess.run(
+            ["git", "show", f"{FROZEN_SOURCE1290_HELPER_COMMIT}:{FROZEN_SOURCE1290_HELPER_PATH}"],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        helper_calls = [node for node in ast.walk(ast.parse(helper_source)) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "close_exited_codex_shell"]
+        self.assertEqual(1, len(helper_calls))
+        helper_call = helper_calls[0]
+        expected_statement = ast.parse(
+            """close_exited_codex_shell(
+    target,
+    args.pane_id,
+    args.session_id,
+    args.terminal_evidence,
+    expected_capture_sha256=capture_sha256,
+    evidence_is_current=lambda: evidence_is_current(args.pane_id),
+)"""
+        ).body[0]
+        assert isinstance(expected_statement, ast.Expr)
+        expected_call = expected_statement.value
+        assert isinstance(expected_call, ast.Call)
+        self.assertEqual(ast.dump(expected_call, include_attributes=False), ast.dump(helper_call, include_attributes=False))
+        helper_keywords = tuple(keyword.arg for keyword in helper_call.keywords)
+        self.assertEqual(("expected_capture_sha256", "evidence_is_current"), helper_keywords)
+        parameters = inspect.signature(close_exited_codex_shell).parameters
+        self.assertEqual(
+            ("target", "expected_pane_id", "session_id", "terminal_evidence", "n_lines", *helper_keywords),
+            tuple(parameters),
+        )
+        for keyword in helper_keywords:
+            self.assertEqual(inspect.Parameter.KEYWORD_ONLY, parameters[keyword].kind)
+
         session_id = "11111111-2222-3333-4444-555555555555"
         events: list[tuple[object, ...]] = []
 
@@ -192,6 +230,10 @@ class CodexStopTests(unittest.TestCase):
         def close(target: str) -> None:
             events.append(("close", target))
 
+        def evidence_is_current() -> bool:
+            events.append(("evidence",))
+            return True
+
         def remaining(target: str) -> str:
             events.append(("pane_id", target))
             return ""
@@ -201,16 +243,71 @@ class CodexStopTests(unittest.TestCase):
             patch("omo_manager.omo_codex_stop.close_tmux_target", side_effect=close),
             patch("omo_manager.omo_codex_stop.pane_id", side_effect=remaining),
         ):
-            close_exited_codex_shell("cfg:1", "%42", session_id, "specific-token", 73)
+            close_exited_codex_shell(
+                "cfg:1",
+                "%42",
+                session_id,
+                "specific-token",
+                73,
+                expected_capture_sha256="a" * 64,
+                evidence_is_current=evidence_is_current,
+            )
 
         self.assertEqual(
             [
                 ("validate", "cfg:1", "%42", session_id, "specific-token", 73),
+                ("evidence",),
                 ("close", "%42"),
                 ("pane_id", "%42"),
             ],
             events,
         )
+
+    def test_close_exited_codex_shell_rejects_capture_digest_before_late_evidence_check(self) -> None:
+        evidence_checked = False
+
+        def evidence_is_current() -> bool:
+            nonlocal evidence_checked
+            evidence_checked = True
+            return True
+
+        with (
+            patch("omo_manager.omo_codex_stop.validate_exited_codex_shell", return_value="a" * 64),
+            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+            patch("omo_manager.omo_codex_stop.pane_id") as remaining,
+            self.assertRaisesRegex(RuntimeError, "capture changed"),
+        ):
+            close_exited_codex_shell(
+                "cfg:1",
+                "%42",
+                "11111111-2222-3333-4444-555555555555",
+                "specific-token",
+                expected_capture_sha256="b" * 64,
+                evidence_is_current=evidence_is_current,
+            )
+
+        self.assertFalse(evidence_checked)
+        close.assert_not_called()
+        remaining.assert_not_called()
+
+    def test_close_exited_codex_shell_rejects_late_evidence_drift_before_close(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.validate_exited_codex_shell", return_value="a" * 64),
+            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+            patch("omo_manager.omo_codex_stop.pane_id") as remaining,
+            self.assertRaisesRegex(RuntimeError, "lifecycle evidence changed"),
+        ):
+            close_exited_codex_shell(
+                "cfg:1",
+                "%42",
+                "11111111-2222-3333-4444-555555555555",
+                "specific-token",
+                expected_capture_sha256="a" * 64,
+                evidence_is_current=lambda: False,
+            )
+
+        close.assert_not_called()
+        remaining.assert_not_called()
 
     def test_validate_exited_codex_shell_rejects_exact_pane_mismatch_before_shell_access(self) -> None:
         with (

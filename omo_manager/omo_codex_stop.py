@@ -1141,10 +1141,23 @@ def validate_exited_codex_shell(target: str, expected_pane_id: str, session_id: 
     return hashlib.sha256(before.encode()).hexdigest()
 
 
-def close_exited_codex_shell(target: str, expected_pane_id: str, session_id: str, terminal_evidence: str, n_lines: int = 2000) -> None:
+def close_exited_codex_shell(
+    target: str,
+    expected_pane_id: str,
+    session_id: str,
+    terminal_evidence: str,
+    n_lines: int = 2000,
+    *,
+    expected_capture_sha256: str = "",
+    evidence_is_current: Callable[[], bool] | None = None,
+) -> None:
     """Close one unchanged shell pane that retains exact terminal Codex evidence."""
 
-    validate_exited_codex_shell(target, expected_pane_id, session_id, terminal_evidence, n_lines)
+    capture_sha256 = validate_exited_codex_shell(target, expected_pane_id, session_id, terminal_evidence, n_lines)
+    if expected_capture_sha256 and capture_sha256 != expected_capture_sha256:
+        raise RuntimeError("terminal shell capture changed after its durable close intent")
+    if evidence_is_current is not None and not evidence_is_current():
+        raise RuntimeError("bound lifecycle evidence changed before exited-shell close")
     close_tmux_target(expected_pane_id)
     if pane_id(expected_pane_id):
         raise RuntimeError(f"exact stale shell pane remained live after close: {expected_pane_id}")
