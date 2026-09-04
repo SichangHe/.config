@@ -136,6 +136,58 @@ class ExportedAgentCloseTests(unittest.TestCase):
         prepare(args)
         self.assertEqual(json.loads(self.packet.read_text())["pane_id"], "%9")
 
+    @patch("omo_manager.omo_exported_agent_close.authoritative_active_target_task_paths")
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="")
+    def test_prepare_shared_absent_manager_preserves_sibling(self, _pane: object, owners: object) -> None:
+        args = self.write_case("shared-absent-manager", target="shared:1", queue=())
+        task = self.root / "task.md"
+        text = task_text("blocked", "shared:1", "mgr:1", True, ())
+        task.write_text(text)
+        self.export.write_text(export_text("task.md", text, self.root))
+        args.task_sha256 = digest(text)
+        args.export_sha256 = digest(self.export.read_text())
+        sibling = self.root / "sibling.md"
+        sibling.write_text(task_text("blocked", "shared:1", "mgr:2", False, ("preserve",)))
+        args.protected_task = Path("sibling.md")
+        args.protected_sha256 = digest(sibling.read_text())
+        owners.return_value = (task, sibling)
+        prepare(args)
+        packet = json.loads(self.packet.read_text())
+        self.assertEqual(packet["mode"], "shared-absent-manager")
+        self.assertEqual(packet["pane_id"], "")
+        self.assertEqual(packet["protected"]["sha256"], args.protected_sha256)
+
+    @patch("omo_manager.omo_exported_agent_close.authoritative_active_target_task_paths")
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="%9")
+    def test_rejects_shared_absent_manager_when_target_becomes_live(self, _pane: object, owners: object) -> None:
+        args = self.write_case("shared-absent-manager", target="shared:1", queue=())
+        text = task_text("blocked", "shared:1", "mgr:1", True, ())
+        (self.root / "task.md").write_text(text)
+        self.export.write_text(export_text("task.md", text, self.root))
+        args.task_sha256 = digest(text)
+        args.export_sha256 = digest(self.export.read_text())
+        sibling = self.root / "sibling.md"
+        sibling.write_text(task_text("blocked", "shared:1", "mgr:2", False, ()))
+        args.protected_task = Path("sibling.md")
+        args.protected_sha256 = digest(sibling.read_text())
+        owners.return_value = (self.root / "task.md", sibling)
+        with self.assertRaisesRegex(TaskFrontmatterError, "shared-absent manager"):
+            prepare(args)
+
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="")
+    def test_rejects_source_as_its_own_protected_sibling(self, _pane: object) -> None:
+        args = self.write_case("shared-absent-manager", target="shared:1", queue=())
+        text = task_text("blocked", "shared:1", "mgr:1", True, ())
+        task = self.root / "task.md"
+        task.write_text(text)
+        self.export.write_text(export_text("task.md", text, self.root))
+        args.task_sha256 = digest(text)
+        args.export_sha256 = digest(self.export.read_text())
+        args.protected_task = Path("task.md")
+        args.protected_sha256 = digest(text)
+        with self.assertRaisesRegex(TaskFrontmatterError, "must differ"):
+            prepare(args)
+
     @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="")
     def test_rejects_changed_export_queue(self, _pane: object) -> None:
         args = self.write_case("absent-worker-unindexed")
@@ -309,6 +361,33 @@ class ExportedAgentCloseTests(unittest.TestCase):
         self.assertEqual(parse_task_metadata((self.root / "task.md").read_text(), self.root).status, "done")
         self.assertTrue(self.audit.is_file())
 
+    @patch("omo_manager.omo_exported_agent_close.authenticated_report", return_value={"producer_target": "review:1"})
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="")
+    def test_execute_recovers_after_partial_rollback_replaced_task_inode(self, _pane: object, _report: object) -> None:
+        args = self.write_case("absent-worker-unindexed")
+        prepare(args)
+        packet = json.loads(self.packet.read_text())
+        audit_keys = (
+            "schema", "mode", "task", "target", "pane_id", "task_before_sha256",
+            "todo_before_sha256", "task_after_sha256", "todo_after_sha256", "export",
+            "export_sha256", "authority", "authority_sha256", "protected", "binding_id",
+        )
+        prepared = {key: packet[key] for key in audit_keys}
+        prepared["state"] = "prepared"
+        Path(f"{self.audit}.prepared").write_text(json.dumps(prepared, sort_keys=True, separators=(",", ":")) + "\n")
+        Path(f"{self.audit}.prepared").chmod(0o600)
+        task = self.root / "task.md"
+        replacement = self.root / "task-replacement.md"
+        replacement.write_bytes(task.read_bytes())
+        replacement.replace(task)
+        (self.root / "TODO.md").write_text(base64.b64decode(packet["todo_after_base64"]).decode())
+        packet_sha = digest(self.packet.read_text())
+        review = self.root / "private" / "review.json"
+        review.write_bytes(b"message:\n" + json.dumps({"schema": "omo-exported-agent-close-review/v1", "verdict": "PASS", "packet_sha256": packet_sha}).encode())
+        execute(Namespace(packet=self.packet, packet_sha256=packet_sha, review=review, review_sha256=digest(review.read_text())))
+        self.assertEqual(parse_task_metadata(task.read_text(), self.root).status, "done")
+        self.assertTrue(self.audit.is_file())
+
     @patch("omo_manager.omo_exported_agent_close.authenticated_report", side_effect=CustodyError("not authenticated"))
     @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="")
     def test_execute_rejects_plain_review_json(self, _pane: object, _report: object) -> None:
@@ -343,6 +422,62 @@ class ExportedAgentCloseTests(unittest.TestCase):
         self.assertEqual(parse_task_metadata((self.root / "task.md").read_text(), self.root).status, "done")
         self.assertEqual(parse_task_metadata(sibling.read_text(), self.root).status, "blocked")
         self.assertEqual(pane.call_count, 3)
+
+    @patch("omo_manager.omo_exported_agent_close.authenticated_report", return_value={"producer_target": "review:1"})
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="")
+    @patch("omo_manager.omo_exported_agent_close.authoritative_active_target_task_paths")
+    def test_execute_shared_absent_manager_keeps_sibling(self, owners: object, pane: object, _report: object) -> None:
+        args = self.write_case("shared-absent-manager", target="shared:1", queue=())
+        text = task_text("blocked", "shared:1", "mgr:1", True, ())
+        task = self.root / "task.md"
+        task.write_text(text)
+        self.export.write_text(export_text("task.md", text, self.root))
+        args.task_sha256 = digest(text)
+        args.export_sha256 = digest(self.export.read_text())
+        sibling = self.root / "sibling.md"
+        sibling.write_text(task_text("blocked", "shared:1", "mgr:2", False, ("preserve",)))
+        sibling_before = sibling.read_bytes()
+        args.protected_task = Path("sibling.md")
+        args.protected_sha256 = digest(sibling.read_text())
+        owners.side_effect = [(task, sibling), (task, sibling), (sibling,)]
+        prepare(args)
+        packet_sha = digest(self.packet.read_text())
+        review = self.root / "private" / "review.json"
+        review.write_bytes(b"message:\n" + json.dumps({"schema": "omo-exported-agent-close-review/v1", "verdict": "PASS", "packet_sha256": packet_sha}).encode())
+        execute(Namespace(packet=self.packet, packet_sha256=packet_sha, review=review, review_sha256=digest(review.read_text())))
+        self.assertEqual(parse_task_metadata(task.read_text(), self.root).status, "done")
+        self.assertEqual(sibling.read_bytes(), sibling_before)
+        self.assertEqual(pane.call_count, 3)
+
+    @patch("omo_manager.omo_exported_agent_close.authenticated_report", return_value={"producer_target": "review:1"})
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="")
+    @patch("omo_manager.omo_exported_agent_close.authoritative_active_target_task_paths")
+    def test_execute_shared_absent_manager_rejects_postwrite_owner_drift(self, owners: object, _pane: object, _report: object) -> None:
+        args = self.write_case("shared-absent-manager", target="shared:1", queue=())
+        text = task_text("blocked", "shared:1", "mgr:1", True, ())
+        task = self.root / "task.md"
+        task.write_text(text)
+        self.export.write_text(export_text("task.md", text, self.root))
+        args.task_sha256 = digest(text)
+        args.export_sha256 = digest(self.export.read_text())
+        sibling = self.root / "sibling.md"
+        sibling.write_text(task_text("blocked", "shared:1", "mgr:2", False, ()))
+        extra = self.root / "extra.md"
+        extra.write_text(task_text("blocked", "shared:1", "mgr:2", False, ()))
+        args.protected_task = Path("sibling.md")
+        args.protected_sha256 = digest(sibling.read_text())
+        owners.side_effect = [(task, sibling), (task, sibling), (sibling, extra)]
+        prepare(args)
+        packet_sha = digest(self.packet.read_text())
+        review = self.root / "private" / "review.json"
+        review.write_bytes(b"message:\n" + json.dumps({"schema": "omo-exported-agent-close-review/v1", "verdict": "PASS", "packet_sha256": packet_sha}).encode())
+        task_before = task.read_bytes()
+        todo_before = (self.root / "TODO.md").read_bytes()
+        with self.assertRaisesRegex(TaskFrontmatterError, "bytes were restored"):
+            execute(Namespace(packet=self.packet, packet_sha256=packet_sha, review=review, review_sha256=digest(review.read_text())))
+        self.assertEqual(task.read_bytes(), task_before)
+        self.assertEqual((self.root / "TODO.md").read_bytes(), todo_before)
+        self.assertFalse(self.audit.exists())
 
     @patch("omo_manager.omo_exported_agent_close.authenticated_report", return_value={"producer_target": "review:1"})
     @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="")

@@ -6,6 +6,7 @@
   - absent `long_running` manager indexed in `previous`
   - absent blocked worker with no TODO row
   - blocked worker sharing a live target with one exact protected sibling
+  - blocked manager sharing an absent target name with one exact protected active sibling
 - prepare
   - binds exact task, TODO, export, Human-authority envelope, target, queue, sibling, pane, file, and ancestor state
   - writes one owner-private immutable packet without changing lifecycle state
@@ -19,6 +20,6 @@
   - leaves tmux unchanged
   - rolls TODO back if the task write fails
 - exclusions
-  - managers sharing a target
+  - shared-target managers whose target is live or whose exact protected sibling is not uniquely bound
   - malformed or pending-marker tasks
   - changed exports, queues, TODO rows, targets, panes, or sibling ownership

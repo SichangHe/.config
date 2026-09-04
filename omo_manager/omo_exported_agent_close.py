@@ -51,7 +51,12 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SCHEMA = "omo-exported-agent-close/v1"
 REVIEW_SCHEMA = "omo-exported-agent-close-review/v1"
 # 🧑 "get all their pending task items, write them down into another file ... Then you simply close that agent"
-MODES = {"absent-manager-previous", "absent-worker-unindexed", "shared-live-worker"}
+MODES = {
+    "absent-manager-previous",
+    "absent-worker-unindexed",
+    "shared-absent-manager",
+    "shared-live-worker",
+}
 PACKET_KEYS = {
     "schema", "mode", "root", "task", "target", "pane_id", "task_before_sha256",
     "todo_before_sha256", "task_after_sha256", "todo_after_sha256", "task_after_base64",
@@ -320,6 +325,23 @@ def require_private_output(path: Path, inputs: set[Path]) -> Path:
     return path.resolve()
 
 
+def restore_exact_after(path: Path, expected_after_sha256: str, before_text: str) -> None:
+    """Restore one transaction leaf only while its exact after-image remains linked."""
+
+    data, identity, ancestors = absolute_file_binding(path, f"closure rollback input {path}")
+    if sha256(data) != expected_after_sha256:
+        raise IndeterminateClose(f"closure rollback refused changed after-image: {path}")
+    held = hold_absolute(identity, ancestors)
+    try:
+        replace_held(held, before_text)
+    except Exception as exc:
+        raise IndeterminateClose(f"closure rollback is incomplete for {path}: {exc}") from exc
+    finally:
+        os.close(held.descriptor)
+        for descriptor in reversed(held.directories):
+            os.close(descriptor)
+
+
 def prepare(ns: argparse.Namespace) -> None:
     root = ns.root.resolve(strict=True)
     task = (root / ns.task).resolve(strict=True)
@@ -385,12 +407,18 @@ def prepare_locked(ns: argparse.Namespace, root: Path, task: Path, todo: Path) -
     elif ns.mode == "absent-worker-unindexed":
         if metadata.status != "blocked" or metadata.is_manager or pane_id:
             raise TaskFrontmatterError("absent-worker closure shape does not match.")
-    else:
+    elif ns.mode == "shared-live-worker":
         if metadata.status != "blocked" or metadata.is_manager or not pane_id or pane_id != ns.pane_id:
             raise TaskFrontmatterError("shared-live worker closure shape does not match.")
+    else:
+        if metadata.status != "blocked" or not metadata.is_manager or pane_id or ns.pane_id:
+            raise TaskFrontmatterError("shared-absent manager closure shape does not match.")
+    if ns.mode in {"shared-absent-manager", "shared-live-worker"}:
         if ns.protected_task is None or not ns.protected_sha256:
-            raise TaskFrontmatterError("shared-live closure requires one exact protected sibling.")
+            raise TaskFrontmatterError("shared closure requires one exact protected sibling.")
         protected_path = (root / ns.protected_task).resolve(strict=True)
+        if protected_path == task:
+            raise TaskFrontmatterError("shared closure protected sibling must differ from the source task.")
         protected_data, _ = read_regular(protected_path, ns.protected_sha256)
         owners = {relative_task_ref(root, path) for path in authoritative_active_target_task_paths(root, ns.target)}
         if owners != {relative_task_ref(root, task), relative_task_ref(root, protected_path)}:
@@ -499,7 +527,7 @@ def execute(ns: argparse.Namespace) -> None:
             if prepared_exists and Path(identity.path) in {task, todo}:
                 current_data, current_identity, current_ancestors = absolute_file_binding(Path(identity.path), "recoverable closure input")
                 after_sha = packet["task_after_sha256"] if Path(identity.path) == task else packet["todo_after_sha256"]
-                if sha256(current_data) == after_sha:
+                if sha256(current_data) in {identity.sha256, after_sha}:
                     identity, ancestors = current_identity, current_ancestors
             held = hold_absolute(identity, ancestors)
             held_inputs.append(held)
@@ -523,7 +551,7 @@ def execute(ns: argparse.Namespace) -> None:
         if isinstance(protected, dict):
             read_regular(root / protected["task"], protected["sha256"])
         pane_id = park_target_pane_id(packet["target"])
-        if packet["mode"] == "shared-live-worker":
+        if packet["mode"] in {"shared-absent-manager", "shared-live-worker"}:
             owners = {relative_task_ref(root, path) for path in authoritative_active_target_task_paths(root, packet["target"])}
             expected_owners = (
                 {packet["task"], protected["task"]}
@@ -563,12 +591,17 @@ def execute(ns: argparse.Namespace) -> None:
             if isinstance(exc, IndeterminateClose):
                 raise
             raise TaskFrontmatterError(f"task update failed after TODO update; rollback completed: {exc}") from exc
-        if packet["mode"] == "shared-live-worker":
+        verification_error = ""
+        if packet["mode"] in {"shared-absent-manager", "shared-live-worker"}:
             owners = {relative_task_ref(root, path) for path in authoritative_active_target_task_paths(root, packet["target"])}
             if park_target_pane_id(packet["target"]) != packet["pane_id"] or owners != {protected["task"]}:
-                raise TaskFrontmatterError("shared pane or surviving ownership changed after metadata-only closure.")
+                verification_error = "shared target or surviving ownership changed after metadata-only closure."
         elif park_target_pane_id(packet["target"]):
-            raise TaskFrontmatterError("absent target became live after metadata-only closure.")
+            verification_error = "absent target became live after metadata-only closure."
+        if verification_error:
+            restore_exact_after(task, packet["task_after_sha256"], task_data.decode())
+            restore_exact_after(todo, packet["todo_after_sha256"], todo_data.decode())
+            raise TaskFrontmatterError(f"{verification_error} Exact task and TODO bytes were restored.")
         publish_or_validate(Path(packet["audit"]), audit_data, "committed closure audit")
     print(Path(packet["audit"]))
 
