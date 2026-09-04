@@ -14,11 +14,15 @@ import re
 import secrets
 import stat
 import sys
-from dataclasses import asdict
+from collections.abc import Mapping
 from contextlib import ExitStack
+from dataclasses import asdict
 from pathlib import Path
 
+import yaml
+
 from omo_manager.omo_agent_status import TaskFrontmatterError, parse_task_metadata
+from omo_manager.omo_task_metadata import UniqueKeyLoader, frontmatter_text
 from omo_manager.omo_task_lock import task_file_lock, task_target_lock
 from omo_manager.omo_task_status import (
     Args as StatusArgs,
@@ -361,7 +365,25 @@ def direct_children(root: Path, task: Path, target: str) -> list[dict[str, objec
         if "manager_mail" in candidate.parts or candidate == task:
             continue
         data, _ = read_regular_unbound(candidate)
-        metadata = parse_task_metadata(data.decode(), root)
+        text = data.decode()
+        try:
+            metadata = parse_task_metadata(text, root)
+        except TaskFrontmatterError as error:
+            try:
+                source = frontmatter_text(text)
+            except TaskFrontmatterError:
+                if re.search(r"^\s*managerat\s*:", text, re.MULTILINE):
+                    raise error
+                continue
+            try:
+                values = yaml.load(source, Loader=UniqueKeyLoader) if source is not None else None
+            except (TaskFrontmatterError, TypeError, ValueError, yaml.YAMLError):
+                if source is not None and re.search(r"^\s*managerat\s*:", source, re.MULTILINE):
+                    raise error
+                continue
+            if isinstance(values, Mapping) and values.get("managerat") == target:
+                raise error
+            continue
         if metadata is not None and metadata.managerat == target:
             result.append({
                 "task": relative_task_ref(root, candidate),

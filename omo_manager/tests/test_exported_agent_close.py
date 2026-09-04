@@ -166,6 +166,54 @@ class ExportedAgentCloseTests(unittest.TestCase):
     @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value=object())
     @patch("omo_manager.omo_exported_agent_close.target_identity", return_value=("%9", 123, 456))
     @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="%9")
+    def test_prepare_live_manager_ignores_malformed_unrelated_task(
+        self, _pane: object, _identity: object, _inspect: object
+    ) -> None:
+        args = self.write_live_manager_case()
+        (self.root / "unrelated.md").write_text("---\nversion: v1.0.0\nstatus: done\nrunat: retired\n---\n")
+        prepare(args)
+        self.assertTrue(self.packet.is_file())
+
+    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value=object())
+    @patch("omo_manager.omo_exported_agent_close.target_identity", return_value=("%9", 123, 456))
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="%9")
+    def test_prepare_live_manager_ignores_unterminated_unrelated_frontmatter(
+        self, _pane: object, _identity: object, _inspect: object
+    ) -> None:
+        args = self.write_live_manager_case()
+        (self.root / "unrelated.md").write_text("---\nversion: v1.0.0\nstatus: done\n")
+        prepare(args)
+        self.assertTrue(self.packet.is_file())
+
+    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value=object())
+    @patch("omo_manager.omo_exported_agent_close.target_identity", return_value=("%9", 123, 456))
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="%9")
+    def test_prepare_live_manager_rejects_indented_manager_in_unterminated_frontmatter(
+        self, _pane: object, _identity: object, _inspect: object
+    ) -> None:
+        args = self.write_live_manager_case()
+        (self.root / "child.md").write_text("---\nversion: v1.0.0\n  managerat: live:1\n")
+        with self.assertRaises(TaskFrontmatterError):
+            prepare(args)
+
+    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value=object())
+    @patch("omo_manager.omo_exported_agent_close.target_identity", return_value=("%9", 123, 456))
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="%9")
+    def test_prepare_live_manager_rejects_semantic_malformed_child(
+        self, _pane: object, _identity: object, _inspect: object
+    ) -> None:
+        for manager_line in ('managerat: "live:1"', "managerat: live:1 # direct child"):
+            with self.subTest(manager_line=manager_line):
+                args = self.write_live_manager_case()
+                (self.root / "malformed-child.md").write_text(
+                    f"---\nversion: v1.0.0\nstatus: done\nrunat: retired\n{manager_line}\n---\n"
+                )
+                with self.assertRaises(TaskFrontmatterError):
+                    prepare(args)
+
+    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value=object())
+    @patch("omo_manager.omo_exported_agent_close.target_identity", return_value=("%9", 123, 456))
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="%9")
     def test_prepare_live_manager_rejects_nonterminal_child(
         self, _pane: object, _identity: object, _inspect: object
     ) -> None:
