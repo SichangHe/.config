@@ -4866,11 +4866,16 @@ def validate_manager_consumed_report(args: Args, path: Path) -> bool:
     required_manager = [
         path.name,
         args.active_target,
+        args.terminal_evidence,
         args.expected_pane_id,
         f"{args.expected_pane_pid}/{args.expected_pane_start_ticks}",
+        args.expected_session_id,
+        hashlib.sha256(render_done_live_close_audit(args, path, DoneLiveCloseAudit("reserved")).encode()).hexdigest(),
         str(terminal_receipt_sha256),
-        "task done, queue empty, TODO previous",
-        "accepted terminal report evidence is absent before terminalization",
+        "task status done",
+        "ordered queue empty",
+        "TODO placement previous",
+        "no Human mail",
     ]
     if (
         manager_metadata is None

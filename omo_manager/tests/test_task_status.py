@@ -1865,11 +1865,13 @@ class TaskStatusTests(unittest.TestCase):
             encoding="utf-8",
         )
         manager_body = (
-            f"sole owner {task.name} at {args.active_target}\n"
-            f"terminal receipt {terminal_receipt_sha256}\n"
-            "task done, queue empty, TODO previous\n"
-            f"pane {args.expected_pane_id}, PID/start {args.expected_pane_pid}/{args.expected_pane_start_ticks}\n"
-            "accepted terminal report evidence is absent before terminalization\n"
+            f"task {task.name}; target {args.active_target}; worker report {args.terminal_evidence}; "
+            f"terminal receipt {terminal_receipt_sha256}; task status done; ordered queue empty; "
+            f"TODO placement previous; pane {args.expected_pane_id}; "
+            f"PID/start ticks {args.expected_pane_pid}/{args.expected_pane_start_ticks}; "
+            f"Codex session {args.expected_session_id}; reserved close-audit SHA-256 "
+            f"{hashlib.sha256(render_done_live_close_audit(args, task, DoneLiveCloseAudit('reserved')).encode()).hexdigest()}; "
+            "and no Human mail.\n"
         ).encode()
         manager = self.write_report_transaction(private, manager_task, "wl:1", manager_body, "manager-report")
         receipt: dict[str, object] = {
