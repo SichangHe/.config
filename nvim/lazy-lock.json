@@ -63,7 +63,6 @@
   "quarto-nvim": { "branch": "main", "commit": "0e9491509b38efbd83d3f41dbfacc7fc4bd40191" },
   "rainbow-delimiters.nvim": { "branch": "master", "commit": "8aafe2cbd89cd4090f573a98cab6b20366576fde" },
   "render-markdown.nvim": { "branch": "main", "commit": "7a43c8b444fa15b7736b34b248addb951126f723" },
-  "robbielyman--latex.nvim": { "branch": "fix-get-node-range-null", "commit": "9eccdb3621009e95c2a8effd6a66c9682aebfaad" },
   "rustaceanvim": { "branch": "master", "commit": "823d2adfed6e8ba13e6e0dfd5d2e278868557017" },
   "sibling-swap.nvim": { "branch": "main", "commit": "75e696c340429769aa34d0bbae1511c8d9660c0b" },
   "snacks.nvim": { "branch": "main", "commit": "fe7cfe9800a182274d0f868a74b7263b8c0c020b" },

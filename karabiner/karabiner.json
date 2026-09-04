@@ -741,7 +741,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 1"
+                                        "shell_command": "EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 1"
                                     }
                                 ],
                                 "type": "basic"
@@ -759,7 +759,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 2"
+                                        "shell_command": "EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 2"
                                     }
                                 ],
                                 "type": "basic"
@@ -777,7 +777,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 3"
+                                        "shell_command": "EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 3"
                                     }
                                 ],
                                 "type": "basic"
@@ -795,7 +795,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 4"
+                                        "shell_command": "EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 4"
                                     }
                                 ],
                                 "type": "basic"
@@ -813,7 +813,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 5"
+                                        "shell_command": "EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 5"
                                     }
                                 ],
                                 "type": "basic"
@@ -831,7 +831,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 6"
+                                        "shell_command": "EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 6"
                                     }
                                 ],
                                 "type": "basic"
@@ -849,7 +849,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 7"
+                                        "shell_command": "EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 7"
                                     }
                                 ],
                                 "type": "basic"
@@ -867,7 +867,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 8"
+                                        "shell_command": "EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 8"
                                     }
                                 ],
                                 "type": "basic"
@@ -885,7 +885,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 9"
+                                        "shell_command": "EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 9"
                                     }
                                 ],
                                 "type": "basic"
@@ -903,7 +903,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 10"
+                                        "shell_command": "EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 10"
                                     }
                                 ],
                                 "type": "basic"
@@ -921,7 +921,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 11"
+                                        "shell_command": "EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 11"
                                     }
                                 ],
                                 "type": "basic"
@@ -939,7 +939,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 12"
+                                        "shell_command": "EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 12"
                                     }
                                 ],
                                 "type": "basic"
@@ -957,7 +957,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 13"
+                                        "shell_command": "EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 13"
                                     }
                                 ],
                                 "type": "basic"
@@ -975,7 +975,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 14"
+                                        "shell_command": "EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 14"
                                     }
                                 ],
                                 "type": "basic"
@@ -993,7 +993,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 15"
+                                        "shell_command": "EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 15"
                                     }
                                 ],
                                 "type": "basic"
@@ -1012,7 +1012,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space prev"
+                                        "shell_command": "EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space prev"
                                     }
                                 ],
                                 "type": "basic"
@@ -1031,7 +1031,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch last"
+                                        "shell_command": "EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch last"
                                     }
                                 ],
                                 "type": "basic"
@@ -1050,7 +1050,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch next"
+                                        "shell_command": "EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch next"
                                     }
                                 ],
                                 "type": "basic"
@@ -1069,7 +1069,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space next"
+                                        "shell_command": "EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space next"
                                     }
                                 ],
                                 "type": "basic"
@@ -1278,7 +1278,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch info"
+                                        "shell_command": "EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch info"
                                     }
                                 ],
                                 "type": "basic"
@@ -1297,7 +1297,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space 1 && EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 1"
+                                        "shell_command": "/usr/local/bin/yabai -m window --space 1 && EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 1"
                                     }
                                 ],
                                 "type": "basic"
@@ -1315,7 +1315,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space 2 && EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 2"
+                                        "shell_command": "/usr/local/bin/yabai -m window --space 2 && EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 2"
                                     }
                                 ],
                                 "type": "basic"
@@ -1333,7 +1333,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space 3 && EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 3"
+                                        "shell_command": "/usr/local/bin/yabai -m window --space 3 && EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 3"
                                     }
                                 ],
                                 "type": "basic"
@@ -1351,7 +1351,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space 4 && EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 4"
+                                        "shell_command": "/usr/local/bin/yabai -m window --space 4 && EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 4"
                                     }
                                 ],
                                 "type": "basic"
@@ -1369,7 +1369,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space 5 && EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 5"
+                                        "shell_command": "/usr/local/bin/yabai -m window --space 5 && EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 5"
                                     }
                                 ],
                                 "type": "basic"
@@ -1387,7 +1387,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space 6 && EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 6"
+                                        "shell_command": "/usr/local/bin/yabai -m window --space 6 && EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 6"
                                     }
                                 ],
                                 "type": "basic"
@@ -1405,7 +1405,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space 7 && EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 7"
+                                        "shell_command": "/usr/local/bin/yabai -m window --space 7 && EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 7"
                                     }
                                 ],
                                 "type": "basic"
@@ -1423,7 +1423,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space 8 && EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 8"
+                                        "shell_command": "/usr/local/bin/yabai -m window --space 8 && EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 8"
                                     }
                                 ],
                                 "type": "basic"
@@ -1441,7 +1441,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space 9 && EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 9"
+                                        "shell_command": "/usr/local/bin/yabai -m window --space 9 && EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 9"
                                     }
                                 ],
                                 "type": "basic"
@@ -1459,7 +1459,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space 10 && EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 10"
+                                        "shell_command": "/usr/local/bin/yabai -m window --space 10 && EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 10"
                                     }
                                 ],
                                 "type": "basic"
@@ -1477,7 +1477,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space 11 && EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 11"
+                                        "shell_command": "/usr/local/bin/yabai -m window --space 11 && EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 11"
                                     }
                                 ],
                                 "type": "basic"
@@ -1495,7 +1495,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space 12 && EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 12"
+                                        "shell_command": "/usr/local/bin/yabai -m window --space 12 && EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 12"
                                     }
                                 ],
                                 "type": "basic"
@@ -1513,7 +1513,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space 13 && EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 13"
+                                        "shell_command": "/usr/local/bin/yabai -m window --space 13 && EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 13"
                                     }
                                 ],
                                 "type": "basic"
@@ -1531,7 +1531,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space 14 && EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 14"
+                                        "shell_command": "/usr/local/bin/yabai -m window --space 14 && EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 14"
                                     }
                                 ],
                                 "type": "basic"
@@ -1549,7 +1549,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space 15 && EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space 15"
+                                        "shell_command": "/usr/local/bin/yabai -m window --space 15 && EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space 15"
                                     }
                                 ],
                                 "type": "basic"
@@ -1568,7 +1568,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space prev && EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space prev"
+                                        "shell_command": "/usr/local/bin/yabai -m window --space prev && EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space prev"
                                     }
                                 ],
                                 "type": "basic"
@@ -1612,7 +1612,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space next && EXCLUDE_APPS=zoom.us ~/.cargo/bin/yabaiswitch space next"
+                                        "shell_command": "/usr/local/bin/yabai -m window --space next && EXCLUDE_APPS=eoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space next"
                                     }
                                 ],
                                 "type": "basic"

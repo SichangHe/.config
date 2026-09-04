@@ -101,3 +101,8 @@ set --export PATH $BUN_INSTALL/bin $PATH
 
 # opencode
 fish_add_path /Users/sichanghe/.opencode/bin
+
+# swift
+if test -e "$HOME/.swiftly/env.fish"
+    source "$HOME/.swiftly/env.fish"
+end
