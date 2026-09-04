@@ -184,7 +184,14 @@ def closed_todo(root: Path, task: Path, text: str, mode: str, target: str) -> st
         if rows:
             raise TaskFrontmatterError("unindexed closure requires no TODO row.")
     else:
-        if len(rows) != 1 or rows[0][1] != ("previous" if mode == "absent-manager-previous" else "current"):
+        allowed_sections = (
+            {"previous"}
+            if mode == "absent-manager-previous"
+            else {"current", "human pending"}
+            if mode == "shared-live-worker"
+            else {"current"}
+        )
+        if len(rows) != 1 or rows[0][1] not in allowed_sections:
             raise TaskFrontmatterError("closure TODO row is absent, duplicated, or in the wrong section.")
         index, _ = rows[0]
         if lines[index].strip() != f"{ref} {target}":

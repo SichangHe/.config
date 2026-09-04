@@ -5,7 +5,7 @@
 - supported shapes
   - absent `long_running` manager indexed in `previous`
   - absent blocked worker with no TODO row
-  - blocked worker sharing a live target with one exact protected sibling
+  - blocked worker indexed in `current` or `human pending`, sharing a live target with one exact protected sibling
   - blocked manager sharing an absent target name with one exact protected active sibling
 - prepare
   - binds exact task, TODO, export, Human-authority envelope, target, queue, sibling, pane, file, and ancestor state

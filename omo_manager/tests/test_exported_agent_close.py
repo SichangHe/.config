@@ -137,6 +137,22 @@ class ExportedAgentCloseTests(unittest.TestCase):
         self.assertEqual(json.loads(self.packet.read_text())["pane_id"], "%9")
 
     @patch("omo_manager.omo_exported_agent_close.authoritative_active_target_task_paths")
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="%9")
+    def test_prepare_shared_live_accepts_human_pending_row(self, _pane: object, owners: object) -> None:
+        args = self.write_case("shared-live-worker", target="shared:1")
+        todo = (self.root / "TODO.md").read_text().replace("current:\ntask.md shared:1", "current:").replace("human pending:\n", "human pending:\ntask.md shared:1\n")
+        (self.root / "TODO.md").write_text(todo)
+        args.todo_sha256 = digest(todo)
+        sibling = self.root / "sibling.md"
+        sibling.write_text(task_text("blocked", "shared:1", "mgr:1", False, ()))
+        args.protected_task = Path("sibling.md")
+        args.protected_sha256 = digest(sibling.read_text())
+        args.pane_id = "%9"
+        owners.return_value = (self.root / "task.md", sibling)
+        prepare(args)
+        self.assertTrue(self.packet.is_file())
+
+    @patch("omo_manager.omo_exported_agent_close.authoritative_active_target_task_paths")
     @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="")
     def test_prepare_shared_absent_manager_preserves_sibling(self, _pane: object, owners: object) -> None:
         args = self.write_case("shared-absent-manager", target="shared:1", queue=())
