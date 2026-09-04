@@ -214,7 +214,10 @@ class CodexStopTests(unittest.TestCase):
 
     def test_consumed_report_shell_validation_only_waives_visible_acceptance(self) -> None:
         session_id = "11111111-2222-3333-4444-555555555555"
-        transcript = f"terminal report sent\nTo continue this session, run codex resume {session_id}\n$ "
+        transcript = (
+            f"terminal report sent\nTo continue this session, run:\n  codex resume {session_id}\n"
+            "Or run codex resume and select Define manager worker defaults.\n$ "
+        )
         with (
             patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
             patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),

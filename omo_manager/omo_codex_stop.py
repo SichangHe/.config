@@ -53,7 +53,8 @@ HUMAN_REPLACE_DIRECTIVE_RE = re.compile(
 HUMAN_REPLACE_CANDIDATE_RE = re.compile(r"(?m)^Replace the failed PCODX manager\b.*$")
 UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 RESUME_RE = re.compile(rf"(?i)\bcodex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
-EXIT_RESUME_RE = re.compile(rf"(?i)\bTo\s+(?:resume|continue this session),\s+run\s+codex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
+EXIT_RESUME_RE = re.compile(rf"(?i)\bTo\s+(?:resume|continue this session),\s+run:?\s+codex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
+EXIT_SELECTOR_RE = re.compile(r"(?m)^Or run codex resume and select [^\r\n]+\.$")
 STATUS_SESSION_RE = re.compile(rf"\bSession:\s*({UUID_RE})\b")
 DONE_LIVE_CLOSE_OPERATION = "done-live-no-mail-close"
 DONE_LIVE_CLOSE_AUDIT_KEYS = frozenset(
@@ -1759,6 +1760,7 @@ def _validate_exited_codex_shell(
     if len(resume_matches) != 1 or resume_matches[0].group(1) != session_id or extract_resume_id(exit_text) != session_id:
         raise RuntimeError("captured terminal Codex session does not match the supplied session id")
     shell_tail = exit_text[resume_matches[0].end() :].strip("\r\n")
+    shell_tail = EXIT_SELECTOR_RE.sub("", shell_tail, count=1).strip("\r\n")
     if not shell_tail or len(shell_tail.splitlines()) != 1:
         raise RuntimeError("pane contains shell activity after the terminal Codex exit")
     if (
