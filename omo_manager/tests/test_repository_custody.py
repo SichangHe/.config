@@ -527,6 +527,36 @@ message:
             with self.assertRaisesRegex(CustodyError, "drifted"):
                 execute(binding, self.review(binding), state_root=self.state)
 
+    def test_repository_remote_and_tracking_relationship_drift_fail(self) -> None:
+        binding = self.prepare_binding()
+        subprocess.run(["git", "-C", self.repo, "remote", "set-url", "origin", str(self.base / "other")], check=True)
+        with patch("omo_manager.omo_repository_custody.target_identity", side_effect=self.target):
+            with self.assertRaisesRegex(CustodyError, "drifted"):
+                execute(binding, self.review(binding), state_root=self.state)
+
+        subprocess.run(["git", "-C", self.repo, "remote", "set-url", "origin", str(self.repo)], check=True)
+        tracking = self.private / "tracking"
+        tracking.mkdir(mode=0o700)
+        binding = self.prepare_binding_for(tracking)
+        subprocess.run(["git", "-C", self.repo, "update-ref", "refs/remotes/origin/other", "HEAD"], check=True)
+        subprocess.run(
+            ["git", "-C", self.repo, "branch", "--set-upstream-to", "origin/other"],
+            check=True,
+            capture_output=True,
+        )
+        with patch("omo_manager.omo_repository_custody.target_identity", side_effect=self.target):
+            with self.assertRaisesRegex(CustodyError, "drifted"):
+                execute(binding, self.review_at(binding, tracking), state_root=self.state)
+
+    def test_binding_records_remote_tracking_and_divergence(self) -> None:
+        binding = self.prepare_binding()
+        repository = json.loads(binding.read_bytes())["repository"]
+        self.assertEqual("refs/remotes/origin/main", repository["upstream_ref"])
+        self.assertEqual("origin", repository["upstream_remote"])
+        self.assertEqual(str(self.repo), repository["remote_url"])
+        self.assertEqual(0, repository["ahead"])
+        self.assertEqual(0, repository["behind"])
+
     def test_prepared_and_ledger_crashes_recover_idempotently(self) -> None:
         for phase in ("prepared", "ledger"):
             with self.subTest(phase=phase):

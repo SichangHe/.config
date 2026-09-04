@@ -127,6 +127,11 @@ class RepositoryIdentity:
     branch: str
     head: str
     upstream: str
+    upstream_ref: str
+    upstream_remote: str
+    remote_url: str
+    ahead: int
+    behind: int
     index_path: str
     index_mode: int
     index_device: int
@@ -418,9 +423,19 @@ def repository_identity(repository: Path) -> tuple[RepositoryIdentity, tuple[Dir
     details = os.stat(root, follow_symlinks=False)
     if not stat.S_ISDIR(details.st_mode):
         raise CustodyError("repository must be a directory")
-    branch = os.fsdecode(git(root, "branch", "--show-current").strip())
-    head = os.fsdecode(git(root, "rev-parse", "HEAD").strip())
-    upstream = os.fsdecode(git(root, "rev-parse", "@{upstream}").strip())
+    def ref_state() -> tuple[str, str, str, str, str, str, int, int]:
+        branch = os.fsdecode(git(root, "branch", "--show-current").strip())
+        head = os.fsdecode(git(root, "rev-parse", "HEAD").strip())
+        upstream = os.fsdecode(git(root, "rev-parse", "@{upstream}").strip())
+        upstream_ref = os.fsdecode(git(root, "rev-parse", "--symbolic-full-name", "@{upstream}").strip())
+        upstream_remote = os.fsdecode(git(root, "config", "--get", f"branch.{branch}.remote").strip())
+        remote_url = os.fsdecode(git(root, "remote", "get-url", upstream_remote).strip())
+        divergence = os.fsdecode(git(root, "rev-list", "--left-right", "--count", "HEAD...@{upstream}").strip()).split()
+        if len(divergence) != 2 or any(not value.isdecimal() for value in divergence):
+            raise CustodyError("repository upstream divergence is invalid")
+        return branch, head, upstream, upstream_ref, upstream_remote, remote_url, int(divergence[0]), int(divergence[1])
+
+    refs = ref_state()
     index_raw = git(root, "rev-parse", "--git-path", "index").strip()
     index_path = Path(os.fsdecode(index_raw))
     if not index_path.is_absolute():
@@ -430,7 +445,8 @@ def repository_identity(repository: Path) -> tuple[RepositoryIdentity, tuple[Dir
     porcelain_after = git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none")
     index_after, index_details_after = read_regular_nofollow(index_path.resolve(strict=True), "Git index")
     if (
-        porcelain != porcelain_after
+        refs != ref_state()
+        or porcelain != porcelain_after
         or index_data != index_after
         or (
             index_identity.mode,
@@ -454,9 +470,7 @@ def repository_identity(repository: Path) -> tuple[RepositoryIdentity, tuple[Dir
         str(root),
         details.st_dev,
         details.st_ino,
-        branch,
-        head,
-        upstream,
+        *refs,
         str(index_path.resolve(strict=True)),
         index_identity.mode,
         index_identity.device,

@@ -13,7 +13,7 @@ prepare
 - prove the invoking process descends from the receiver's bound tmux pane
 - bind both task files, their exact TODO membership rows, and live tmux process generations
 - inspect tmux through a descriptor-pinned root-owned executable and a minimal environment
-- bind repository device, branch, HEAD, upstream, full index, and full porcelain state
+- bind repository device, branch, HEAD, upstream commit/ref/remote/URL, ahead/behind relation, full index, and full porcelain state
 - run repository inspection through the pinned root-owned Git executable by descriptor, with a minimal environment and executable Git configuration disabled
 - bind each unique relative path by no-follow file identity and SHA-256
 - bind and retain every no-follow repository-to-leaf directory identity
