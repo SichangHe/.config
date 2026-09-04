@@ -72,6 +72,18 @@ class ExportedAgentCloseTests(unittest.TestCase):
         (self.root / "private").mkdir(mode=0o700)
         self.packet = self.root / "private" / "packet.json"
         self.audit = self.root / "private" / "audit.json"
+        report_patch = patch(
+            "omo_manager.omo_exported_agent_close.authenticated_report",
+            return_value={"producer_target": "review:1"},
+        )
+        report_patch.start()
+        self.addCleanup(report_patch.stop)
+        tail_patch = patch(
+            "omo_manager.omo_exported_agent_close.exact_tail",
+            return_value=(True, ["fatal"]),
+        )
+        tail_patch.start()
+        self.addCleanup(tail_patch.stop)
 
     def write_case(
         self,
@@ -113,6 +125,8 @@ class ExportedAgentCloseTests(unittest.TestCase):
             pane_pid=0,
             pane_start_ticks=0,
             session_id="",
+            stop_evidence=None,
+            stop_evidence_sha256="",
             audit=self.audit,
             packet=self.packet,
         )
@@ -131,6 +145,30 @@ class ExportedAgentCloseTests(unittest.TestCase):
         args.pane_pid = 123
         args.pane_start_ticks = 456
         args.session_id = "01a0495f-2fa6-70b3-ae64-941ed9b4acd7"
+        sender = self.root / "private" / "async-result"
+        sender.mkdir(mode=0o700, exist_ok=True)
+        metadata = sender / "metadata.tsv"
+        status = sender / "status.txt"
+        metadata.write_text("id\ttest\ntarget\tlive:1\n")
+        status.write_text("failed\n")
+        evidence = self.root / "private" / "stop-evidence.md"
+        evidence.write_bytes(b"message:\n" + json.dumps({
+            "schema": "omo-exported-agent-close-stop-evidence/v1",
+            "target": "live:1",
+            "pane_id": "%9",
+            "pane_pid": 123,
+            "pane_start_ticks": 456,
+            "session_id": "01a0495f-2fa6-70b3-ae64-941ed9b4acd7",
+            "sender_metadata": str(metadata),
+            "sender_metadata_sha256": digest(metadata.read_text()),
+            "sender_status": str(status),
+            "sender_status_sha256": digest(status.read_text()),
+            "recovery": "non-destructive",
+            "refreshed_status": "error",
+            "refreshed_tail_sha256": digest("fatal"),
+        }).encode())
+        args.stop_evidence = evidence
+        args.stop_evidence_sha256 = digest(evidence.read_text())
         return args
 
     @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="")
@@ -147,7 +185,7 @@ class ExportedAgentCloseTests(unittest.TestCase):
         self.assertTrue(self.packet.is_file())
 
     @patch("omo_manager.omo_exported_agent_close.stop_target")
-    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value=object())
+    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value="error")
     @patch("omo_manager.omo_exported_agent_close.target_identity", return_value=("%9", 123, 456))
     @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="%9")
     def test_prepare_live_manager_binds_terminal_children_without_stopping(
@@ -163,7 +201,7 @@ class ExportedAgentCloseTests(unittest.TestCase):
         }])
         stop.assert_not_called()
 
-    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value=object())
+    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value="error")
     @patch("omo_manager.omo_exported_agent_close.target_identity", return_value=("%9", 123, 456))
     @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="%9")
     def test_prepare_live_manager_ignores_malformed_unrelated_task(
@@ -220,6 +258,35 @@ class ExportedAgentCloseTests(unittest.TestCase):
         args = self.write_live_manager_case()
         (self.root / "child.md").write_text(task_text("blocked", "child:1", "live:1", False, ()))
         with self.assertRaisesRegex(TaskFrontmatterError, "nonterminal children"):
+            prepare(args)
+
+    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value="error")
+    @patch("omo_manager.omo_exported_agent_close.target_identity", return_value=("%9", 123, 456))
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="%9")
+    def test_prepare_live_manager_rejects_successful_sender(
+        self, _pane: object, _identity: object, _inspect: object
+    ) -> None:
+        args = self.write_live_manager_case()
+        Path(json.loads(args.stop_evidence.read_bytes().split(b"message:\n", 1)[1])["sender_status"]).write_text(
+            "succeeded\n"
+        )
+        evidence = json.loads(args.stop_evidence.read_bytes().split(b"message:\n", 1)[1])
+        evidence["sender_status_sha256"] = digest("succeeded\n")
+        args.stop_evidence.write_bytes(b"message:\n" + json.dumps(evidence).encode())
+        args.stop_evidence_sha256 = digest(args.stop_evidence.read_text())
+        with self.assertRaisesRegex(TaskFrontmatterError, "terminal failed sender"):
+            prepare(args)
+
+    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value="error")
+    @patch("omo_manager.omo_exported_agent_close.target_identity", return_value=("%9", 123, 456))
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="%9")
+    def test_prepare_live_manager_requires_stop_evidence(
+        self, _pane: object, _identity: object, _inspect: object
+    ) -> None:
+        args = self.write_live_manager_case()
+        args.stop_evidence = None
+        args.stop_evidence_sha256 = ""
+        with self.assertRaisesRegex(TaskFrontmatterError, "requires independent"):
             prepare(args)
 
     @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value=object())
@@ -466,7 +533,7 @@ class ExportedAgentCloseTests(unittest.TestCase):
 
     @patch("omo_manager.omo_exported_agent_close.authenticated_report", return_value={"producer_target": "review:1"})
     @patch("omo_manager.omo_exported_agent_close.stop_target")
-    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value=object())
+    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value="error")
     @patch("omo_manager.omo_exported_agent_close.target_identity", return_value=("%9", 123, 456))
     @patch(
         "omo_manager.omo_exported_agent_close.park_target_pane_id",
@@ -497,7 +564,7 @@ class ExportedAgentCloseTests(unittest.TestCase):
 
     @patch("omo_manager.omo_exported_agent_close.authenticated_report", return_value={"producer_target": "review:1"})
     @patch("omo_manager.omo_exported_agent_close.stop_target")
-    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value=object())
+    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value="error")
     @patch("omo_manager.omo_exported_agent_close.target_identity", return_value=("%9", 123, 456))
     @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="%9")
     def test_execute_live_manager_rejects_child_drift_before_stop(
@@ -555,6 +622,42 @@ class ExportedAgentCloseTests(unittest.TestCase):
 
     @patch("omo_manager.omo_exported_agent_close.authenticated_report", return_value={"producer_target": "review:1"})
     @patch("omo_manager.omo_exported_agent_close.stop_target")
+    @patch(
+        "omo_manager.omo_exported_agent_close.exact_tail",
+        side_effect=[(True, ["fatal"]), (True, ["different fatal"])],
+    )
+    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value="error")
+    @patch("omo_manager.omo_exported_agent_close.target_identity", return_value=("%9", 123, 456))
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="%9")
+    def test_execute_live_manager_rejects_fatal_tail_drift_before_stop(
+        self,
+        _pane: object,
+        _identity: object,
+        _inspect: object,
+        _tail: object,
+        stop: object,
+        _report: object,
+    ) -> None:
+        args = self.write_live_manager_case()
+        prepare(args)
+        packet_sha = digest(self.packet.read_text())
+        review = self.root / "private" / "review.json"
+        review.write_bytes(b"message:\n" + json.dumps({
+            "schema": "omo-exported-agent-close-review/v1",
+            "verdict": "PASS",
+            "packet_sha256": packet_sha,
+        }).encode())
+        with self.assertRaisesRegex(TaskFrontmatterError, "fatal-error tail drifted"):
+            execute(Namespace(
+                packet=self.packet,
+                packet_sha256=packet_sha,
+                review=review,
+                review_sha256=digest(review.read_text()),
+            ))
+        stop.assert_not_called()
+
+    @patch("omo_manager.omo_exported_agent_close.authenticated_report", return_value={"producer_target": "review:1"})
+    @patch("omo_manager.omo_exported_agent_close.stop_target")
     @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value="absent")
     @patch(
         "omo_manager.omo_exported_agent_close.target_identity",
@@ -574,7 +677,7 @@ class ExportedAgentCloseTests(unittest.TestCase):
             "schema", "mode", "task", "target", "pane_id", "task_before_sha256",
             "todo_before_sha256", "task_after_sha256", "todo_after_sha256", "export",
             "export_sha256", "authority", "authority_sha256", "protected", "binding_id",
-            "pane_pid", "pane_start_ticks", "session_id", "children",
+            "pane_pid", "pane_start_ticks", "session_id", "children", "stop_evidence",
         )
         prepared = {key: packet[key] for key in audit_keys}
         prepared["state"] = "prepared"
@@ -608,7 +711,7 @@ class ExportedAgentCloseTests(unittest.TestCase):
             "schema", "mode", "task", "target", "pane_id", "task_before_sha256",
             "todo_before_sha256", "task_after_sha256", "todo_after_sha256", "export",
             "export_sha256", "authority", "authority_sha256", "protected", "binding_id",
-            "pane_pid", "pane_start_ticks", "session_id", "children",
+            "pane_pid", "pane_start_ticks", "session_id", "children", "stop_evidence",
         )
         prepared = {key: packet[key] for key in audit_keys}
         prepared["state"] = "prepared"
@@ -632,7 +735,7 @@ class ExportedAgentCloseTests(unittest.TestCase):
             "schema", "mode", "task", "target", "pane_id", "task_before_sha256",
             "todo_before_sha256", "task_after_sha256", "todo_after_sha256", "export",
             "export_sha256", "authority", "authority_sha256", "protected", "binding_id",
-            "pane_pid", "pane_start_ticks", "session_id", "children",
+            "pane_pid", "pane_start_ticks", "session_id", "children", "stop_evidence",
         )
         prepared = {key: packet[key] for key in audit_keys}
         prepared["state"] = "prepared"

@@ -8,8 +8,10 @@
   - blocked worker indexed in `current` or `human pending`, sharing a live target with one exact protected sibling
   - blocked manager sharing an absent target name with one exact protected active sibling
   - blocked queue-empty live manager whose exact bound children are all terminal
+    - requires an independent authenticated recovery record, its exact failed asynchronous sender metadata/status, and a freshly unchanged fatal-error state
 - prepare
   - binds exact task, TODO, export, Human-authority envelope, target, queue, sibling, pane, file, and ancestor state
+  - binds the live-manager stop evidence and terminal sender files
   - writes one owner-private immutable packet without changing lifecycle state
   - never signals a live manager during preparation or review
 - execute
@@ -25,5 +27,6 @@
 - exclusions
   - shared-target managers whose target is live or whose exact protected sibling is not uniquely bound
   - live managers with an open queue, a nonterminal or changed child, or changed pane, process, or session identity
+  - live managers without a terminal failed sender and independent non-destructive-recovery evidence for the unchanged fatal error
   - malformed or pending-marker tasks
   - changed exports, queues, TODO rows, targets, panes, or sibling ownership

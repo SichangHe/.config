@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.13"
+# dependencies = ["pyyaml>=6.0.2"]
+# ///
 """Prepare and apply one export-bound metadata-only agent closure."""
 
 from __future__ import annotations
@@ -21,7 +25,11 @@ from pathlib import Path
 
 import yaml
 
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from omo_manager.omo_agent_status import TaskFrontmatterError, parse_task_metadata
+from omo_manager.omo_codex_status import exact_tail
 from omo_manager.omo_task_metadata import UniqueKeyLoader, frontmatter_text
 from omo_manager.omo_task_lock import task_file_lock, task_target_lock
 from omo_manager.omo_task_status import (
@@ -55,6 +63,7 @@ from omo_manager.omo_namespace_drain import stop_target, target_identity, inspec
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SCHEMA = "omo-exported-agent-close/v1"
 REVIEW_SCHEMA = "omo-exported-agent-close-review/v1"
+STOP_EVIDENCE_SCHEMA = "omo-exported-agent-close-stop-evidence/v1"
 # 🧑 "get all their pending task items, write them down into another file ... Then you simply close that agent"
 MODES = {
     "absent-manager-previous",
@@ -70,6 +79,7 @@ PACKET_KEYS = {
     "protected", "audit", "authority_envelope",
     "destination_target", "inputs", "authority_envelope_sha256", "binding_id",
     "pane_pid", "pane_start_ticks", "session_id", "children",
+    "stop_evidence",
 }
 
 
@@ -394,6 +404,85 @@ def direct_children(root: Path, task: Path, target: str) -> list[dict[str, objec
     return sorted(result, key=lambda item: item["task"])
 
 
+STOP_EVIDENCE_KEYS = {
+    "schema", "target", "pane_id", "pane_pid", "pane_start_ticks", "session_id",
+    "sender_metadata", "sender_metadata_sha256", "sender_status", "sender_status_sha256",
+    "recovery", "refreshed_status", "refreshed_tail_sha256",
+}
+
+
+def validate_stop_evidence(
+    path: Path,
+    expected_sha256: str,
+    *,
+    target: str,
+    pane_id: str,
+    pane_pid: int,
+    pane_start_ticks: int,
+    session_id: str,
+    destination_target: str,
+) -> dict[str, object]:
+    """Validate one independent fatal-error recovery and failed-delivery record."""
+
+    data, _ = read_regular(path.resolve(strict=True), expected_sha256)
+    report = authenticated_report(data, "exported-agent stop evidence")
+    try:
+        evidence = json.loads(data.split(b"message:\n", 1)[1])
+    except (IndexError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise TaskFrontmatterError("authenticated stop evidence body is not JSON.") from exc
+    if not isinstance(evidence, dict) or set(evidence) != STOP_EVIDENCE_KEYS:
+        raise TaskFrontmatterError("authenticated stop evidence has the wrong field set.")
+    expected = {
+        "schema": STOP_EVIDENCE_SCHEMA,
+        "target": target,
+        "pane_id": pane_id,
+        "pane_pid": pane_pid,
+        "pane_start_ticks": pane_start_ticks,
+        "session_id": session_id,
+        "recovery": "non-destructive",
+        "refreshed_status": "error",
+    }
+    if any(evidence.get(key) != value for key, value in expected.items()):
+        raise TaskFrontmatterError("stop evidence does not bind the requested fatal-error pane.")
+    if report["producer_target"] in {target, destination_target}:
+        raise TaskFrontmatterError("stop evidence producer is not independent of source and destination.")
+    if not isinstance(evidence["refreshed_tail_sha256"], str) or not SHA256_RE.fullmatch(evidence["refreshed_tail_sha256"]):
+        raise TaskFrontmatterError("stop evidence refreshed tail digest is malformed.")
+    sender_metadata = Path(evidence["sender_metadata"]).resolve(strict=True)
+    sender_status = Path(evidence["sender_status"]).resolve(strict=True)
+    if sender_metadata.parent != sender_status.parent or sender_metadata.name != "metadata.tsv" or sender_status.name != "status.txt":
+        raise TaskFrontmatterError("stop evidence sender files are not one canonical async result.")
+    result_dir = sender_metadata.parent.stat()
+    if not stat.S_ISDIR(result_dir.st_mode) or result_dir.st_uid != os.getuid() or stat.S_IMODE(result_dir.st_mode) & 0o077:
+        raise TaskFrontmatterError("stop evidence sender result directory is not owner-private.")
+    metadata_data, _ = read_regular(sender_metadata, evidence["sender_metadata_sha256"])
+    status_data, _ = read_regular(sender_status, evidence["sender_status_sha256"])
+    metadata_fields = dict(
+        line.split("\t", 1) for line in metadata_data.decode().splitlines() if "\t" in line
+    )
+    if metadata_fields.get("target") != target or status_data != b"failed\n":
+        raise TaskFrontmatterError("stop evidence does not bind a terminal failed sender for this target.")
+    return {
+        "path": str(path.resolve()),
+        "sha256": expected_sha256,
+        "producer_target": report["producer_target"],
+        "sender_metadata": str(sender_metadata),
+        "sender_metadata_sha256": evidence["sender_metadata_sha256"],
+        "sender_status": str(sender_status),
+        "sender_status_sha256": evidence["sender_status_sha256"],
+        "refreshed_tail_sha256": evidence["refreshed_tail_sha256"],
+    }
+
+
+def validate_refreshed_tail(target: str, stop_evidence: dict[str, object]) -> None:
+    """Require the live pane tail to remain the independently recorded fatal generation."""
+
+    captured, lines = exact_tail(target, 80)
+    tail_sha256 = sha256("\n".join(lines).encode()) if captured else ""
+    if tail_sha256 != stop_evidence["refreshed_tail_sha256"]:
+        raise TaskFrontmatterError("live manager fatal-error tail drifted from stop evidence.")
+
+
 def prepare(ns: argparse.Namespace) -> None:
     root = ns.root.resolve(strict=True)
     task = (root / ns.task).resolve(strict=True)
@@ -407,6 +496,28 @@ def prepare(ns: argparse.Namespace) -> None:
     todo = root / "TODO.md"
     envelope = (root / ns.authority_envelope).resolve(strict=True)
     lock_paths = {task, todo, ns.export.resolve(strict=True), ns.authority.resolve(strict=True), envelope}
+    stop_evidence = None
+    if ns.mode == "live-manager-terminal-children":
+        if ns.stop_evidence is None or not ns.stop_evidence_sha256:
+            raise TaskFrontmatterError("live manager closure requires independent fatal-error stop evidence.")
+        stop_evidence = validate_stop_evidence(
+            ns.stop_evidence,
+            ns.stop_evidence_sha256,
+            target=ns.target,
+            pane_id=ns.pane_id,
+            pane_pid=ns.pane_pid,
+            pane_start_ticks=ns.pane_start_ticks,
+            session_id=ns.session_id,
+            destination_target=ns.destination_target,
+        )
+        lock_paths.update({
+            Path(stop_evidence["path"]),
+            Path(stop_evidence["sender_metadata"]),
+            Path(stop_evidence["sender_status"]),
+        })
+    elif ns.stop_evidence is not None or ns.stop_evidence_sha256:
+        raise TaskFrontmatterError("stop evidence is only valid for live manager closure.")
+    ns.stop_evidence_binding = stop_evidence
     if ns.protected_task is not None:
         protected_path = (root / ns.protected_task).resolve(strict=True)
         try:
@@ -471,6 +582,7 @@ def prepare_locked(ns: argparse.Namespace, root: Path, task: Path, todo: Path) -
     pane_start_ticks = 0
     session_id = ""
     children: list[dict[str, object]] = []
+    stop_evidence = None
     if ns.mode == "absent-manager-previous":
         if metadata.status != "long_running" or not metadata.is_manager or pane_id:
             raise TaskFrontmatterError("absent-manager closure shape does not match.")
@@ -485,6 +597,19 @@ def prepare_locked(ns: argparse.Namespace, root: Path, task: Path, todo: Path) -
         identity = target_identity(ns.target, inspect_target(ns.target))
         if identity != (ns.pane_id, ns.pane_pid, ns.pane_start_ticks):
             raise TaskFrontmatterError("live manager pane process identity does not match.")
+        stop_evidence = validate_stop_evidence(
+            ns.stop_evidence,
+            ns.stop_evidence_sha256,
+            target=ns.target,
+            pane_id=ns.pane_id,
+            pane_pid=ns.pane_pid,
+            pane_start_ticks=ns.pane_start_ticks,
+            session_id=ns.session_id,
+            destination_target=ns.destination_target,
+        )
+        if stop_evidence != ns.stop_evidence_binding:
+            raise TaskFrontmatterError("live manager stop evidence changed before packet binding.")
+        validate_refreshed_tail(ns.target, stop_evidence)
         children = direct_children(root, task, ns.target)
         if children != ns.bound_children:
             raise TaskFrontmatterError("live manager child identity changed before packet binding.")
@@ -515,6 +640,8 @@ def prepare_locked(ns: argparse.Namespace, root: Path, task: Path, todo: Path) -
     if protected is not None:
         input_paths.append(root / protected["task"])
     input_paths.extend(root / child["task"] for child in children)
+    if stop_evidence is not None:
+        input_paths.extend(Path(stop_evidence[key]) for key in ("path", "sender_metadata", "sender_status"))
     inputs = []
     for input_path in input_paths:
         _, identity, ancestors = absolute_file_binding(input_path.resolve(), f"closure input {input_path}")
@@ -545,6 +672,7 @@ def prepare_locked(ns: argparse.Namespace, root: Path, task: Path, todo: Path) -
         "pane_start_ticks": pane_start_ticks,
         "session_id": session_id,
         "children": children,
+        "stop_evidence": stop_evidence,
         "audit": str(ns.audit.resolve()),
         "destination_target": ns.destination_target,
         "inputs": inputs,
@@ -592,6 +720,7 @@ def execute(ns: argparse.Namespace) -> None:
             "todo_before_sha256", "task_after_sha256", "todo_after_sha256", "export",
             "export_sha256", "authority", "authority_sha256", "protected", "binding_id",
             "pane_pid", "pane_start_ticks", "session_id", "children",
+            "stop_evidence",
         )
     }
     prepared_data = (json.dumps({**audit, "state": "prepared"}, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -624,6 +753,29 @@ def execute(ns: argparse.Namespace) -> None:
         if not SHA256_RE.fullmatch(child["sha256"]):
             raise TaskFrontmatterError("closure packet child digest is malformed.")
         lock_paths.add(child_path)
+    stop_evidence = packet.get("stop_evidence")
+    if packet["mode"] == "live-manager-terminal-children":
+        if not isinstance(stop_evidence, dict):
+            raise TaskFrontmatterError("live manager packet has no stop evidence.")
+        rebound_stop_evidence = validate_stop_evidence(
+            Path(stop_evidence.get("path", "")),
+            stop_evidence.get("sha256", ""),
+            target=packet["target"],
+            pane_id=packet["pane_id"],
+            pane_pid=packet["pane_pid"],
+            pane_start_ticks=packet["pane_start_ticks"],
+            session_id=packet["session_id"],
+            destination_target=packet["destination_target"],
+        )
+        if rebound_stop_evidence != stop_evidence:
+            raise TaskFrontmatterError("live manager stop evidence binding is malformed.")
+        lock_paths.update({
+            Path(stop_evidence["path"]),
+            Path(stop_evidence["sender_metadata"]),
+            Path(stop_evidence["sender_status"]),
+        })
+    elif stop_evidence is not None:
+        raise TaskFrontmatterError("non-live closure packet unexpectedly binds stop evidence.")
     with root_membership_lock(root), task_target_lock(root, packet["target"]), ExitStack() as locks:
         for path in sorted(lock_paths, key=str):
             locks.enter_context(task_file_lock(path))
@@ -664,11 +816,16 @@ def execute(ns: argparse.Namespace) -> None:
             read_regular(root / protected["task"], protected["sha256"])
         pane_id = park_target_pane_id(packet["target"])
         if packet["mode"] == "live-manager-terminal-children":
-            live_identity = target_identity(packet["target"], inspect_target(packet["target"]))
+            current_state = inspect_target(packet["target"])
+            live_identity = target_identity(packet["target"], current_state)
             if live_identity != (packet["pane_id"], packet["pane_pid"], packet["pane_start_ticks"]) and not (
                 prepared_exists and live_identity == ("", 0, 0)
             ):
                 raise TaskFrontmatterError("live manager pane identity drifted.")
+            if live_identity != ("", 0, 0) and current_state != "error":
+                raise TaskFrontmatterError("live manager no longer has the bound fatal-error status.")
+            if live_identity != ("", 0, 0):
+                validate_refreshed_tail(packet["target"], stop_evidence)
             current_children = direct_children(root, task, packet["target"])
             if current_children != children:
                 raise TaskFrontmatterError("live manager child identity drifted.")
@@ -767,6 +924,8 @@ def parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--pane-pid", type=int, default=0)
     prepare_parser.add_argument("--pane-start-ticks", type=int, default=0)
     prepare_parser.add_argument("--session-id", default="")
+    prepare_parser.add_argument("--stop-evidence", type=Path)
+    prepare_parser.add_argument("--stop-evidence-sha256", default="")
     prepare_parser.add_argument("--audit", type=Path, required=True)
     prepare_parser.add_argument("--packet", type=Path, required=True)
     execute_parser = sub.add_parser("execute")
