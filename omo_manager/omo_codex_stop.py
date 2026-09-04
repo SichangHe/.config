@@ -1747,11 +1747,14 @@ def _validate_exited_codex_shell(
     interrupted_at = before.rfind("Conversation interrupted")
     compact_report = re.sub(r"\s+", "", before[:interrupted_at])
     accepted_at = compact_report.rfind('"accepted":true')
-    if before.count("Conversation interrupted") != 1 or (
-        not accepted_terminal_report and (accepted_at < 0 or evidence not in compact_report[accepted_at:])
+    marker_count = before.count("Conversation interrupted")
+    if (
+        marker_count > 1
+        or (not accepted_terminal_report and marker_count != 1)
+        or (not accepted_terminal_report and (accepted_at < 0 or evidence not in compact_report[accepted_at:]))
     ):
         raise RuntimeError("terminal report evidence is absent before the final Codex exit marker")
-    exit_text = before[interrupted_at:]
+    exit_text = before[interrupted_at:] if marker_count == 1 else before
     resume_matches = list(EXIT_RESUME_RE.finditer(exit_text))
     if len(resume_matches) != 1 or resume_matches[0].group(1) != session_id or extract_resume_id(exit_text) != session_id:
         raise RuntimeError("captured terminal Codex session does not match the supplied session id")
