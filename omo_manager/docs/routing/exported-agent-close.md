@@ -7,9 +7,11 @@
   - absent blocked worker with no TODO row
   - blocked worker indexed in `current` or `human pending`, sharing a live target with one exact protected sibling
   - blocked manager sharing an absent target name with one exact protected active sibling
+  - blocked queue-empty live manager whose exact bound children are all terminal
 - prepare
   - binds exact task, TODO, export, Human-authority envelope, target, queue, sibling, pane, file, and ancestor state
   - writes one owner-private immutable packet without changing lifecycle state
+  - never signals a live manager during preparation or review
 - execute
   - requires an authenticated exact PASS from a different source and destination target
   - revalidates every bound input under lifecycle locks
@@ -18,8 +20,10 @@
   - restores the exact prior leaf after a safe exchange failure or preserves it under the transaction name and reports an indeterminate state
   - clears the task queue, marks the task done, and records targetless `previous` custody
   - leaves tmux unchanged
+    - except the live-manager shape, whose authenticated execute step closes only the bound pane before metadata closure
   - rolls TODO back if the task write fails
 - exclusions
   - shared-target managers whose target is live or whose exact protected sibling is not uniquely bound
+  - live managers with an open queue, a nonterminal or changed child, or changed pane, process, or session identity
   - malformed or pending-marker tasks
   - changed exports, queues, TODO rows, targets, panes, or sibling ownership

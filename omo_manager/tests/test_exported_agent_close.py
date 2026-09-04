@@ -23,10 +23,14 @@ def digest(text: str) -> str:
 
 def task_text(status: str, target: str, manager: str, is_manager: bool, queue: tuple[str, ...]) -> str:
     pending = "pending_task_items: []" if not queue else "pending_task_items:\n" + "".join(f"  - {item}\n" for item in queue).rstrip()
-    blocker = "persistent manager role" if status == "long_running" else "retired work"
+    blocker = (
+        "blocked_on: persistent manager role\n" if status == "long_running"
+        else "blocked_on: retired work\n" if status == "blocked"
+        else ""
+    )
     return (
         "---\nversion: v1.0.0\n"
-        f"status: {status}\nblocked_on: {blocker}\nrunat: {target}\ntool: codex\nmanagerat: {manager}\n"
+        f"status: {status}\n{blocker}runat: {target}\ntool: codex\nmanagerat: {manager}\n"
         f"is_manager: {str(is_manager).lower()}\n{pending}\n---\nbody\n"
     )
 
@@ -106,9 +110,28 @@ class ExportedAgentCloseTests(unittest.TestCase):
             protected_task=None,
             protected_sha256="",
             pane_id="",
+            pane_pid=0,
+            pane_start_ticks=0,
+            session_id="",
             audit=self.audit,
             packet=self.packet,
         )
+
+    def write_live_manager_case(self) -> Namespace:
+        args = self.write_case("live-manager-terminal-children", target="live:1", queue=())
+        task = self.root / "task.md"
+        text = task_text("blocked", "live:1", "mgr:1", True, ()).replace(
+            "tool: codex\n", "tool: codex\nsession_id: 01a0495f-2fa6-70b3-ae64-941ed9b4acd7\n"
+        )
+        task.write_text(text)
+        self.export.write_text(export_text("task.md", text, self.root))
+        args.task_sha256 = digest(text)
+        args.export_sha256 = digest(self.export.read_text())
+        args.pane_id = "%9"
+        args.pane_pid = 123
+        args.pane_start_ticks = 456
+        args.session_id = "01a0495f-2fa6-70b3-ae64-941ed9b4acd7"
+        return args
 
     @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="")
     def test_prepare_absent_manager_previous(self, _pane: object) -> None:
@@ -122,6 +145,45 @@ class ExportedAgentCloseTests(unittest.TestCase):
     def test_prepare_absent_worker_without_todo_row(self, _pane: object) -> None:
         prepare(self.write_case("absent-worker-unindexed"))
         self.assertTrue(self.packet.is_file())
+
+    @patch("omo_manager.omo_exported_agent_close.stop_target")
+    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value=object())
+    @patch("omo_manager.omo_exported_agent_close.target_identity", return_value=("%9", 123, 456))
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="%9")
+    def test_prepare_live_manager_binds_terminal_children_without_stopping(
+        self, _pane: object, _identity: object, _inspect: object, stop: object
+    ) -> None:
+        args = self.write_live_manager_case()
+        child = self.root / "child.md"
+        child.write_text(task_text("done", "child:1", "live:1", False, ()))
+        prepare(args)
+        packet = json.loads(self.packet.read_text())
+        self.assertEqual(packet["children"], [{
+            "task": "child.md", "sha256": digest(child.read_text()), "status": "done", "pending_items": 0
+        }])
+        stop.assert_not_called()
+
+    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value=object())
+    @patch("omo_manager.omo_exported_agent_close.target_identity", return_value=("%9", 123, 456))
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="%9")
+    def test_prepare_live_manager_rejects_nonterminal_child(
+        self, _pane: object, _identity: object, _inspect: object
+    ) -> None:
+        args = self.write_live_manager_case()
+        (self.root / "child.md").write_text(task_text("blocked", "child:1", "live:1", False, ()))
+        with self.assertRaisesRegex(TaskFrontmatterError, "nonterminal children"):
+            prepare(args)
+
+    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value=object())
+    @patch("omo_manager.omo_exported_agent_close.target_identity", return_value=("%9", 123, 456))
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="%9")
+    def test_prepare_live_manager_rejects_done_child_with_queue(
+        self, _pane: object, _identity: object, _inspect: object
+    ) -> None:
+        args = self.write_live_manager_case()
+        (self.root / "child.md").write_text(task_text("done", "child:1", "live:1", False, ("unfinished",)))
+        with self.assertRaisesRegex(TaskFrontmatterError, "nonterminal children"):
+            prepare(args)
 
     @patch("omo_manager.omo_exported_agent_close.authoritative_active_target_task_paths")
     @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="%9")
@@ -355,6 +417,140 @@ class ExportedAgentCloseTests(unittest.TestCase):
         self.assertEqual(pane.call_count, 3)
 
     @patch("omo_manager.omo_exported_agent_close.authenticated_report", return_value={"producer_target": "review:1"})
+    @patch("omo_manager.omo_exported_agent_close.stop_target")
+    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value=object())
+    @patch("omo_manager.omo_exported_agent_close.target_identity", return_value=("%9", 123, 456))
+    @patch(
+        "omo_manager.omo_exported_agent_close.park_target_pane_id",
+        side_effect=["%9", "%9", "%9", "", ""],
+    )
+    def test_execute_live_manager_stops_only_after_authenticated_review(
+        self, _pane: object, _identity: object, _inspect: object, stop: object, _report: object
+    ) -> None:
+        args = self.write_live_manager_case()
+        child = self.root / "child.md"
+        child.write_text(task_text("done", "child:1", "live:1", False, ()))
+        prepare(args)
+        packet_sha = digest(self.packet.read_text())
+        review = self.root / "private" / "review.json"
+        review.write_bytes(b"message:\n" + json.dumps({
+            "schema": "omo-exported-agent-close-review/v1",
+            "verdict": "PASS",
+            "packet_sha256": packet_sha,
+        }).encode())
+        execute(Namespace(
+            packet=self.packet,
+            packet_sha256=packet_sha,
+            review=review,
+            review_sha256=digest(review.read_text()),
+        ))
+        stop.assert_called_once_with("live:1", "%9", 123, 456, "01a0495f-2fa6-70b3-ae64-941ed9b4acd7")
+        self.assertEqual(parse_task_metadata((self.root / "task.md").read_text(), self.root).status, "done")
+
+    @patch("omo_manager.omo_exported_agent_close.authenticated_report", return_value={"producer_target": "review:1"})
+    @patch("omo_manager.omo_exported_agent_close.stop_target")
+    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value=object())
+    @patch("omo_manager.omo_exported_agent_close.target_identity", return_value=("%9", 123, 456))
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="%9")
+    def test_execute_live_manager_rejects_child_drift_before_stop(
+        self, _pane: object, _identity: object, _inspect: object, stop: object, _report: object
+    ) -> None:
+        args = self.write_live_manager_case()
+        child = self.root / "child.md"
+        child.write_text(task_text("done", "child:1", "live:1", False, ()))
+        prepare(args)
+        packet_sha = digest(self.packet.read_text())
+        review = self.root / "private" / "review.json"
+        review.write_bytes(b"message:\n" + json.dumps({
+            "schema": "omo-exported-agent-close-review/v1",
+            "verdict": "PASS",
+            "packet_sha256": packet_sha,
+        }).encode())
+        child.write_text(child.read_text() + "drift\n")
+        with self.assertRaisesRegex(CustodyError, "identity drifted"):
+            execute(Namespace(
+                packet=self.packet,
+                packet_sha256=packet_sha,
+                review=review,
+                review_sha256=digest(review.read_text()),
+            ))
+        stop.assert_not_called()
+
+    @patch("omo_manager.omo_exported_agent_close.authenticated_report", return_value={"producer_target": "review:1"})
+    @patch("omo_manager.omo_exported_agent_close.stop_target")
+    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value=object())
+    @patch(
+        "omo_manager.omo_exported_agent_close.target_identity",
+        side_effect=[("%9", 123, 456), ("%9", 999, 456)],
+    )
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="%9")
+    def test_execute_live_manager_rejects_process_drift_before_stop(
+        self, _pane: object, _identity: object, _inspect: object, stop: object, _report: object
+    ) -> None:
+        args = self.write_live_manager_case()
+        prepare(args)
+        packet_sha = digest(self.packet.read_text())
+        review = self.root / "private" / "review.json"
+        review.write_bytes(b"message:\n" + json.dumps({
+            "schema": "omo-exported-agent-close-review/v1",
+            "verdict": "PASS",
+            "packet_sha256": packet_sha,
+        }).encode())
+        with self.assertRaisesRegex(TaskFrontmatterError, "pane identity drifted"):
+            execute(Namespace(
+                packet=self.packet,
+                packet_sha256=packet_sha,
+                review=review,
+                review_sha256=digest(review.read_text()),
+            ))
+        stop.assert_not_called()
+
+    @patch("omo_manager.omo_exported_agent_close.authenticated_report", return_value={"producer_target": "review:1"})
+    @patch("omo_manager.omo_exported_agent_close.stop_target")
+    @patch("omo_manager.omo_exported_agent_close.inspect_target", return_value="absent")
+    @patch(
+        "omo_manager.omo_exported_agent_close.target_identity",
+        side_effect=[("%9", 123, 456), ("", 0, 0)],
+    )
+    @patch(
+        "omo_manager.omo_exported_agent_close.park_target_pane_id",
+        side_effect=["%9", "", "", "", ""],
+    )
+    def test_execute_live_manager_recovers_after_successful_stop(
+        self, _pane: object, _identity: object, _inspect: object, stop: object, _report: object
+    ) -> None:
+        args = self.write_live_manager_case()
+        prepare(args)
+        packet = json.loads(self.packet.read_text())
+        audit_keys = (
+            "schema", "mode", "task", "target", "pane_id", "task_before_sha256",
+            "todo_before_sha256", "task_after_sha256", "todo_after_sha256", "export",
+            "export_sha256", "authority", "authority_sha256", "protected", "binding_id",
+            "pane_pid", "pane_start_ticks", "session_id", "children",
+        )
+        prepared = {key: packet[key] for key in audit_keys}
+        prepared["state"] = "prepared"
+        Path(f"{self.audit}.prepared").write_text(
+            json.dumps(prepared, sort_keys=True, separators=(",", ":")) + "\n"
+        )
+        Path(f"{self.audit}.prepared").chmod(0o600)
+        packet_sha = digest(self.packet.read_text())
+        review = self.root / "private" / "review.json"
+        review.write_bytes(b"message:\n" + json.dumps({
+            "schema": "omo-exported-agent-close-review/v1",
+            "verdict": "PASS",
+            "packet_sha256": packet_sha,
+        }).encode())
+        execute(Namespace(
+            packet=self.packet,
+            packet_sha256=packet_sha,
+            review=review,
+            review_sha256=digest(review.read_text()),
+        ))
+        stop.assert_not_called()
+        self.assertEqual(parse_task_metadata((self.root / "task.md").read_text(), self.root).status, "done")
+
+    @patch("omo_manager.omo_exported_agent_close.authenticated_report", return_value={"producer_target": "review:1"})
     @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="")
     def test_execute_recovers_after_todo_write(self, _pane: object, _report: object) -> None:
         args = self.write_case("absent-worker-unindexed")
@@ -364,6 +560,7 @@ class ExportedAgentCloseTests(unittest.TestCase):
             "schema", "mode", "task", "target", "pane_id", "task_before_sha256",
             "todo_before_sha256", "task_after_sha256", "todo_after_sha256", "export",
             "export_sha256", "authority", "authority_sha256", "protected", "binding_id",
+            "pane_pid", "pane_start_ticks", "session_id", "children",
         )
         prepared = {key: packet[key] for key in audit_keys}
         prepared["state"] = "prepared"
@@ -387,6 +584,7 @@ class ExportedAgentCloseTests(unittest.TestCase):
             "schema", "mode", "task", "target", "pane_id", "task_before_sha256",
             "todo_before_sha256", "task_after_sha256", "todo_after_sha256", "export",
             "export_sha256", "authority", "authority_sha256", "protected", "binding_id",
+            "pane_pid", "pane_start_ticks", "session_id", "children",
         )
         prepared = {key: packet[key] for key in audit_keys}
         prepared["state"] = "prepared"
