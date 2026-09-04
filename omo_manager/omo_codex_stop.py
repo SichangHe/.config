@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Stop a Codex tmux pane and print the captured resume id if Codex exposes one."""
+
 from __future__ import annotations
 
 import argparse
@@ -11,6 +12,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -41,9 +43,7 @@ STOPPABLE_CODEX_STATUSES = {"error", "ready", "running", "stuck_input", "waiting
 LOCAL_ENV_PATH = Path(__file__).resolve().with_name("local.env")
 HUMAN_CLOSE_SOURCE_RE = re.compile(r"manager_mail/[A-Za-z0-9_.-]+\.txt\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
-HUMAN_CLOSE_DIRECTIVE_RE = re.compile(
-    r"(?im)^\s*close\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?=$|[\s,.;:])"
-)
+HUMAN_CLOSE_DIRECTIVE_RE = re.compile(r"(?im)^\s*close\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?=$|[\s,.;:])")
 HUMAN_CLOSE_REPLY_DIRECTIVE_RE = re.compile(r"(?im)^\s*cancel\s+this\s+task(?=$|[\s,.;:])")
 HUMAN_REPLACE_DIRECTIVE_RE = re.compile(
     r"(?m)^Replace the failed PCODX manager (?P<task>[A-Za-z0-9_./-]+\.md) at "
@@ -53,10 +53,19 @@ HUMAN_REPLACE_DIRECTIVE_RE = re.compile(
 HUMAN_REPLACE_CANDIDATE_RE = re.compile(r"(?m)^Replace the failed PCODX manager\b.*$")
 UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 RESUME_RE = re.compile(rf"(?i)\bcodex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
-EXIT_RESUME_RE = re.compile(
-    rf"(?i)\bTo\s+(?:resume|continue this session),\s+run\s+codex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b"
-)
+EXIT_RESUME_RE = re.compile(rf"(?i)\bTo\s+(?:resume|continue this session),\s+run\s+codex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
 STATUS_SESSION_RE = re.compile(rf"\bSession:\s*({UUID_RE})\b")
+DONE_LIVE_CLOSE_OPERATION = "done-live-no-mail-close"
+DONE_LIVE_CLOSE_AUDIT_KEYS = frozenset(
+    {
+        "version", "operation", "state", "task", "target", "manager_target",
+        "task_sha256", "todo_sha256", "pane_id", "pane_pid",
+        "pane_start_ticks", "session_id", "terminal_evidence_sha256",
+        "terminal_capture_sha256", "close_proof_commitment", "close_note",
+        "completed_task_sha256",
+    }
+)
+DONE_LIVE_CONSUMED_AUDIT_KEYS = DONE_LIVE_CLOSE_AUDIT_KEYS | {"manager_consumed_receipt_sha256"}
 
 
 @dataclass(frozen=True)
@@ -95,6 +104,12 @@ class Args:
     bound_pre_input_check: Callable[[], None] | None = None
 
 
+@dataclass(frozen=True)
+class ExitedCodexShell:
+    session_id: str
+    capture_sha256: str
+
+
 class ParsedArgs(argparse.Namespace):
     target: str = ""
     wait_s: float = 10.0
@@ -113,7 +128,7 @@ def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-epilog="""This is the lower-level stop helper used by
+        epilog="""This is the lower-level stop helper used by
 `omo_task_status.py TASK.md done`. Use it directly only for a non-task pane;
 normal task closure goes through `omo_task_status.py`. The sole exception is
 an exact `h*` task target with hash-bound human-close authority; it requires
@@ -222,12 +237,7 @@ def extract_exit_resume_id(before: str, after: str) -> str:
     if session_id:
         return session_id
     before_lines = {line.strip() for line in before.splitlines() if line.strip()}
-    matches = [
-        match.group(1)
-        for line in after.splitlines()
-        if line.strip() not in before_lines
-        for match in EXIT_RESUME_RE.finditer(line)
-    ]
+    matches = [match.group(1) for line in after.splitlines() if line.strip() not in before_lines for match in EXIT_RESUME_RE.finditer(line)]
     return matches[-1] if matches else ""
 
 
@@ -283,11 +293,7 @@ def configured_mail_root() -> Path:
         payload = LOCAL_ENV_PATH.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         raise RuntimeError("trusted manager-mail configuration is unavailable") from exc
-    if (
-        not stat.S_ISREG(info.st_mode)
-        or info.st_uid != os.getuid()
-        or stat.S_IMODE(info.st_mode) & 0o022
-    ):
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o022:
         raise RuntimeError("trusted manager-mail configuration is unsafe")
     matches = re.findall(r'^export OMO_WORK_LOGS_ROOT="([^"\n]+)"$', payload, flags=re.MULTILINE)
     if len(matches) != 1 or not Path(matches[0]).is_absolute():
@@ -416,18 +422,10 @@ def validate_human_close_authorization(args: Args) -> None:
     subject_lines = [line[len("Subject:") :].strip() for line in authority_text.splitlines() if line.startswith("Subject:")]
     task_token = re.compile(rf"(?<![A-Za-z0-9_./-]){re.escape(task_reference)}(?![A-Za-z0-9_./-])")
     body = authority_text.replace("\r\n", "\n").partition("\n\n")[2]
-    replacements = [
-        match
-        for match in HUMAN_REPLACE_DIRECTIVE_RE.finditer(body)
-        if match.group("task") == task_reference and match.group("target") in target_aliases(target)
-    ]
+    replacements = [match for match in HUMAN_REPLACE_DIRECTIVE_RE.finditer(body) if match.group("task") == task_reference and match.group("target") in target_aliases(target)]
     replacement_candidates = HUMAN_REPLACE_CANDIDATE_RE.findall(body)
     body_nonempty_lines = [line.strip() for line in body.splitlines() if line.strip()]
-    exact_replacement = (
-        len(replacement_candidates) == 1
-        and len(replacements) == 1
-        and body_nonempty_lines == [replacements[0].group(0).strip(), "Just do it"]
-    )
+    exact_replacement = len(replacement_candidates) == 1 and len(replacements) == 1 and body_nonempty_lines == [replacements[0].group(0).strip(), "Just do it"]
     subject_names_task = len(subject_lines) == 1 and task_token.search(subject_lines[0]) is not None
     reply_binds_task = len(subject_lines) == 1 and reply_authorizes_bound_task(subject_lines[0], body, target)
     if replacement_candidates and not exact_replacement:
@@ -518,14 +516,8 @@ def resume_cmd(args: Args, session_id: str) -> str:
 def close_note(target: str, session_id: str, now: datetime | None = None) -> str:
     stamp = (now or datetime.now().astimezone()).strftime("%m-%d %H:%M %Z")
     if session_id:
-        return (
-            f"\n(manager closed Codex agent {stamp}; tmux target `{target}`; "
-            f"session_id: `{session_id}`.)\n"
-        )
-    return (
-        f"\n(manager closed Codex agent {stamp}; tmux target `{target}`; "
-        "Codex session id not found in captured tmux output.)\n"
-    )
+        return f"\n(manager closed Codex agent {stamp}; tmux target `{target}`; session_id: `{session_id}`.)\n"
+    return f"\n(manager closed Codex agent {stamp}; tmux target `{target}`; Codex session id not found in captured tmux output.)\n"
 
 
 def has_close_note(text: str, target: str, session_id: str) -> bool:
@@ -833,6 +825,8 @@ def close_bound_tmux_target(
     expected_pane_pid: int = 0,
     expected_pane_start_ticks: int = 0,
     pre_input_check: Callable[[], None] | None = None,
+    proof_operation: str = "",
+    proof_audit_sha256: str = "",
 ) -> None:
     """Close a non-human pane only while its symbolic and numeric identities agree."""
 
@@ -855,6 +849,16 @@ def close_bound_tmux_target(
             or hashlib.sha256(proof_secret.encode()).hexdigest() != proof_commitment
         ):
             raise RuntimeError("bound close proof identity is invalid")
+        if proof_operation:
+            if (
+                proof_operation != DONE_LIVE_CLOSE_OPERATION
+                or SHA256_RE.fullmatch(proof_audit_sha256) is None
+                or expected_pane_pid <= 1
+                or expected_pane_start_ticks <= 0
+            ):
+                raise RuntimeError("done-live bound close requires one exact audit and process binding")
+        elif proof_audit_sha256:
+            raise RuntimeError("bound close audit digest requires an explicit proof operation")
         if expected_pane_pid and expected_pane_start_ticks:
             writer = shlex.join(
                 [
@@ -869,6 +873,7 @@ def close_bound_tmux_target(
                     audit_path,
                     proof_secret,
                     proof_commitment,
+                    *([proof_operation, proof_audit_sha256] if proof_operation else []),
                 ]
             )
             commands = [["run-shell", writer]]
@@ -888,15 +893,315 @@ def close_bound_tmux_target(
     try:
         output = guarded_tmux_sequence(symbolic_target, expected_pane_id, commands, expected_pane_pid) if expected_pane_pid else guarded_tmux_sequence(symbolic_target, expected_pane_id, commands)
     except RuntimeError:
-        if proof_path and has_bound_close_proof(Path(proof_path), proof_commitment):
+        if proof_path and has_bound_close_proof(Path(proof_path), proof_commitment, proof_audit_sha256):
             return
         raise
     if output:
         raise RuntimeError("guarded tmux close produced unexpected output")
 
 
+def done_live_close_audit_authorizes(
+    audit_text: str,
+    audit: object,
+    commitment: str,
+    *,
+    target: str = "",
+    pane_id_value: str = "",
+    pane_pid: int = 0,
+    pane_start_ticks: int = 0,
+) -> bool:
+    """Validate the exact terminalized audit permitted to close a done worker."""
+
+    if not isinstance(audit, dict):
+        return False
+    record: dict[str, object] = {}
+    for key, value in audit.items():
+        if not isinstance(key, str):
+            return False
+        record[key] = value
+    version = record.get("version")
+    expected_keys = DONE_LIVE_CONSUMED_AUDIT_KEYS if version == "v2.0.0" else DONE_LIVE_CLOSE_AUDIT_KEYS
+    if set(record) != expected_keys:
+        return False
+    canonical = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+    task = record.get("task")
+    owner_target = record.get("target")
+    manager_target = record.get("manager_target")
+    audit_pane_id = record.get("pane_id")
+    audit_pane_pid = record.get("pane_pid")
+    audit_start_ticks = record.get("pane_start_ticks")
+    task_path_value = Path(task) if isinstance(task, str) else Path()
+    exact_target = r"[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?"
+    if (
+        audit_text != canonical
+        or version not in {"v1.0.0", "v2.0.0"}
+        or (version == "v1.0.0" and "manager_consumed_receipt_sha256" in record)
+        or (
+            version == "v2.0.0"
+            and SHA256_RE.fullmatch(str(record.get("manager_consumed_receipt_sha256"))) is None
+        )
+        or record.get("operation") != DONE_LIVE_CLOSE_OPERATION
+        or record.get("state") != "terminalized"
+        or not isinstance(task, str)
+        or not task.endswith(".md")
+        or task_path_value.is_absolute()
+        or not task_path_value.parts
+        or any(part in {"", ".", ".."} for part in task_path_value.parts)
+        or not isinstance(owner_target, str)
+        or re.fullmatch(exact_target, owner_target) is None
+        or owner_target.partition(":")[0].startswith("h")
+        or not isinstance(manager_target, str)
+        or re.fullmatch(exact_target, manager_target) is None
+        or manager_target.partition(":")[0].startswith("h")
+        or not isinstance(audit_pane_id, str)
+        or re.fullmatch(r"%[0-9]+", audit_pane_id) is None
+        or type(audit_pane_pid) is not int
+        or audit_pane_pid <= 1
+        or type(audit_start_ticks) is not int
+        or audit_start_ticks <= 0
+        or not isinstance(record.get("session_id"), str)
+        or re.fullmatch(UUID_RE, str(record.get("session_id"))) is None
+        or any(SHA256_RE.fullmatch(str(record.get(field))) is None for field in ("task_sha256", "todo_sha256", "terminal_evidence_sha256", "terminal_capture_sha256"))
+        or record.get("close_proof_commitment") != commitment
+        or record.get("close_note") != ""
+        or record.get("completed_task_sha256") != ""
+    ):
+        return False
+    if target and (owner_target, audit_pane_id, audit_pane_pid, audit_start_ticks) != (target, pane_id_value, pane_pid, pane_start_ticks):
+        return False
+    return True
+
+
+def validate_done_live_close_audit_file(
+    audit_path: Path,
+    commitment: str,
+    target: str,
+    pane_id_value: str,
+    pane_pid: int,
+    pane_start_ticks: int,
+    expected_audit_sha256: str,
+) -> None:
+    """Revalidate the done-live close authority inside the bound child."""
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd: int | None = None
+    try:
+        fd = os.open(audit_path, flags)
+        before = os.fstat(fd)
+        with os.fdopen(os.dup(fd), "r", encoding="utf-8") as source:
+            audit_text = source.read(65537)
+        after = os.fstat(fd)
+        current = audit_path.lstat()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RuntimeError("done-live close audit is unavailable inside the bound close") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
+    try:
+        audit: object = json.loads(audit_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("done-live close audit is invalid inside the bound close") from exc
+    identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+    after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+    current_identity = (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or len(audit_text.encode()) > 65536
+        or SHA256_RE.fullmatch(expected_audit_sha256) is None
+        or hashlib.sha256(audit_text.encode()).hexdigest() != expected_audit_sha256
+        or identity != after_identity
+        or identity != current_identity
+        or not done_live_close_audit_authorizes(
+            audit_text,
+            audit,
+            commitment,
+            target=target,
+            pane_id_value=pane_id_value,
+            pane_pid=pane_pid,
+            pane_start_ticks=pane_start_ticks,
+        )
+    ):
+        raise RuntimeError("done-live close audit drifted before exact pane kill")
+
+
+def done_live_close_started_path(audit_path: Path) -> Path:
+    """Return the durable pre-kill marker path for one done-live audit."""
+
+    return audit_path.with_name(f".{audit_path.name}.owner-close-started")
+
+
+def done_live_close_marker_text(secret: str, audit_sha256: str) -> str:
+    """Render one canonical proof marker bound to exact terminalized audit bytes."""
+
+    record = {
+        "audit_sha256": audit_sha256,
+        "operation": DONE_LIVE_CLOSE_OPERATION,
+        "secret": secret,
+        "version": "v1.0.0",
+    }
+    return json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def path_entry_exists(path: Path) -> bool:
+    """Return whether a directory entry exists without following symlinks."""
+
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def bound_close_secret(path: Path, commitment: str, expected_audit_sha256: str = "") -> str:
+    """Read an exact owner-private close proof, returning its committed secret."""
+
+    if (
+        not path.is_absolute()
+        or SHA256_RE.fullmatch(commitment) is None
+        or (expected_audit_sha256 and SHA256_RE.fullmatch(expected_audit_sha256) is None)
+    ):
+        return ""
+    try:
+        parent_info = path.parent.stat()
+    except OSError:
+        return ""
+    if not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != os.getuid() or stat.S_IMODE(parent_info.st_mode) & 0o077:
+        return ""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return ""
+    try:
+        before = os.fstat(fd)
+        with os.fdopen(os.dup(fd), "r", encoding="utf-8") as source:
+            content = source.read(1025)
+        after = os.fstat(fd)
+        current = path.lstat()
+    except (OSError, UnicodeDecodeError):
+        return ""
+    finally:
+        os.close(fd)
+    identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or len(content.encode()) > 1024
+        or identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        or identity != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
+    ):
+        return ""
+    secret = ""
+    if expected_audit_sha256:
+        try:
+            record: object = json.loads(content)
+        except json.JSONDecodeError:
+            return ""
+        if not isinstance(record, dict) or set(record) != {"audit_sha256", "operation", "secret", "version"}:
+            return ""
+        secret_value = record.get("secret")
+        if (
+            content != json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+            or record.get("version") != "v1.0.0"
+            or record.get("operation") != DONE_LIVE_CLOSE_OPERATION
+            or record.get("audit_sha256") != expected_audit_sha256
+            or not isinstance(secret_value, str)
+        ):
+            return ""
+        secret = secret_value
+    elif len(content) == 65 and content.endswith("\n"):
+        secret = content[:-1]
+    if SHA256_RE.fullmatch(secret) is None or hashlib.sha256(secret.encode()).hexdigest() != commitment:
+        return ""
+    return secret
+
+
+def write_done_live_close_started(
+    proof_path: Path,
+    audit_path: Path,
+    secret: str,
+    commitment: str,
+    expected_audit_sha256: str,
+    target: str,
+    pane_id_value: str,
+    pane_pid: int,
+    pane_start_ticks: int,
+) -> Path:
+    """Durably record the exact close intent before the pane kill."""
+
+    started_path = done_live_close_started_path(audit_path)
+    expected_proof_path = audit_path.with_name(f".{audit_path.name}.owner-stopped")
+    if (
+        not proof_path.is_absolute()
+        or not audit_path.is_absolute()
+        or proof_path != expected_proof_path
+        or SHA256_RE.fullmatch(secret) is None
+        or hashlib.sha256(secret.encode()).hexdigest() != commitment
+    ):
+        raise RuntimeError("done-live close-started identity is invalid")
+    validate_done_live_close_audit_file(
+        audit_path,
+        commitment,
+        target,
+        pane_id_value,
+        pane_pid,
+        pane_start_ticks,
+        expected_audit_sha256,
+    )
+    if path_entry_exists(proof_path):
+        raise RuntimeError("done-live final close proof already exists before pane kill")
+    existing = bound_close_secret(started_path, commitment, expected_audit_sha256)
+    if existing:
+        if existing != secret:
+            raise RuntimeError("done-live close-started marker secret drifted")
+        return started_path
+    if path_entry_exists(started_path):
+        raise RuntimeError("done-live close-started marker is malformed")
+    parent_info = audit_path.parent.stat()
+    if not stat.S_ISDIR(parent_info.st_mode) or parent_info.st_uid != os.getuid() or stat.S_IMODE(parent_info.st_mode) & 0o077:
+        raise RuntimeError("done-live close-started directory must be owner-private")
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=audit_path.parent, prefix=f".{audit_path.name}.close-started.", delete=False) as output:
+            temporary = Path(output.name)
+            os.fchmod(output.fileno(), 0o600)
+            output.write(done_live_close_marker_text(secret, expected_audit_sha256))
+            output.flush()
+            os.fsync(output.fileno())
+        validate_done_live_close_audit_file(
+            audit_path,
+            commitment,
+            target,
+            pane_id_value,
+            pane_pid,
+            pane_start_ticks,
+            expected_audit_sha256,
+        )
+        if path_entry_exists(proof_path):
+            raise RuntimeError("done-live final close proof appeared before pane kill")
+        try:
+            os.link(temporary, started_path, follow_symlinks=False)
+        except FileExistsError:
+            existing = bound_close_secret(started_path, commitment, expected_audit_sha256)
+            if existing != secret:
+                raise RuntimeError("done-live close-started marker raced with different evidence") from None
+        directory_fd = os.open(audit_path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        if bound_close_secret(started_path, commitment, expected_audit_sha256) != secret:
+            raise RuntimeError("done-live close-started marker changed after durable creation")
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return started_path
+
+
 def write_bound_close_proof(path: Path, audit_path: Path, secret: str, commitment: str) -> None:
-    """Persist a guarded close capability committed by one prepared park audit."""
+    """Persist a guarded close capability committed by one exact lifecycle audit."""
 
     expected_path = audit_path.with_name(f".{audit_path.name}.owner-stopped")
     if (
@@ -924,15 +1229,18 @@ def write_bound_close_proof(path: Path, audit_path: Path, secret: str, commitmen
         audit = yaml.safe_load(audit_text)
     except yaml.YAMLError as exc:
         raise RuntimeError("bound close proof audit is invalid") from exc
+    legacy_authorized = (
+        isinstance(audit, dict)
+        and audit.get("operation") in {"park-unlinked", "manager-replace"}
+        and audit.get("state") == "prepared"
+        and audit.get("close_proof_commitment") == commitment
+    )
     if (
         not stat.S_ISREG(audit_info.st_mode)
         or audit_info.st_uid != os.getuid()
         or stat.S_IMODE(audit_info.st_mode) != 0o600
         or len(audit_text.encode()) > 65536
-        or not isinstance(audit, dict)
-        or audit.get("operation") not in {"park-unlinked", "manager-replace"}
-        or audit.get("state") != "prepared"
-        or audit.get("close_proof_commitment") != commitment
+        or not legacy_authorized
     ):
         raise RuntimeError("bound close proof audit does not authorize this exact capability")
     if audit.get("operation") == "manager-replace":
@@ -1009,9 +1317,7 @@ def write_bound_close_proof(path: Path, audit_path: Path, secret: str, commitmen
         os.close(directory_fd)
 
 
-def manager_replace_close_identity_matches(
-    replacement: dict[str, object], authority: dict[str, object], commitment: str
-) -> bool:
+def manager_replace_close_identity_matches(replacement: dict[str, object], authority: dict[str, object], commitment: str) -> bool:
     expected = {
         "id": authority.get("old_pane_id"),
         "pid": authority.get("old_pane_pid"),
@@ -1036,9 +1342,7 @@ def manager_replace_close_identity_matches(
     return False
 
 
-def manager_replace_close_authority_paths(
-    replacement_path: Path, replacement: dict[str, object], manager_authority: Path
-) -> set[Path]:
+def manager_replace_close_authority_paths(replacement_path: Path, replacement: dict[str, object], manager_authority: Path) -> set[Path]:
     paths = {manager_authority}
     descendants = replacement.get("descendants")
     if not isinstance(descendants, list):
@@ -1060,10 +1364,24 @@ def kill_bound_and_write_close_proof(
     audit_path: Path,
     secret: str,
     commitment: str,
+    proof_operation: str = "",
+    expected_audit_sha256: str = "",
 ) -> None:
-    """Kill one revalidated pane, then persist its prepared close capability."""
+    """Kill one revalidated pane with a crash-recoverable close capability."""
 
     # 🧑 "Atomically close only exact failed `guest_hees:0` ... Verify old owner absent"
+    if proof_operation:
+        if proof_operation != DONE_LIVE_CLOSE_OPERATION or SHA256_RE.fullmatch(expected_audit_sha256) is None:
+            raise RuntimeError("bound close proof operation is unsupported")
+        validate_done_live_close_audit_file(
+            audit_path,
+            commitment,
+            symbolic_target,
+            expected_pane_id,
+            expected_pane_pid,
+            expected_pane_start_ticks,
+            expected_audit_sha256,
+        )
     if (
         expected_pane_pid <= 0
         or expected_pane_start_ticks <= 0
@@ -1072,50 +1390,167 @@ def kill_bound_and_write_close_proof(
         or process_start_ticks(expected_pane_pid) != expected_pane_start_ticks
     ):
         raise RuntimeError("bound close identity changed before exact pane kill")
-    _ = tmux(["kill-pane", "-t", expected_pane_id], check=True)
+    if proof_operation:
+        write_done_live_close_started(
+            proof_path,
+            audit_path,
+            secret,
+            commitment,
+            expected_audit_sha256,
+            symbolic_target,
+            expected_pane_id,
+            expected_pane_pid,
+            expected_pane_start_ticks,
+        )
+        validate_done_live_close_audit_file(
+            audit_path,
+            commitment,
+            symbolic_target,
+            expected_pane_id,
+            expected_pane_pid,
+            expected_pane_start_ticks,
+            expected_audit_sha256,
+        )
+        if (
+            pane_id(symbolic_target) != expected_pane_id
+            or pane_id(expected_pane_id) != expected_pane_id
+            or process_start_ticks(expected_pane_pid) != expected_pane_start_ticks
+        ):
+            raise RuntimeError("bound close identity changed after durable close-started evidence")
+        validate_done_live_close_audit_file(
+            audit_path,
+            commitment,
+            symbolic_target,
+            expected_pane_id,
+            expected_pane_pid,
+            expected_pane_start_ticks,
+            expected_audit_sha256,
+        )
+        if bound_close_secret(done_live_close_started_path(audit_path), commitment, expected_audit_sha256) != secret:
+            raise RuntimeError("done-live close-started marker drifted before exact pane kill")
+        output = guarded_tmux_sequence(
+            symbolic_target,
+            expected_pane_id,
+            [["kill-pane", "-t", expected_pane_id]],
+            expected_pane_pid,
+        )
+        if output:
+            raise RuntimeError("bound close produced unexpected output")
+    else:
+        _ = tmux(["kill-pane", "-t", expected_pane_id], check=True)
     deadline_s = time.monotonic() + 5.0
     while process_start_ticks(expected_pane_pid) is not None and time.monotonic() < deadline_s:
         time.sleep(0.05)
     if pane_id(symbolic_target) or pane_id(expected_pane_id) or process_start_ticks(expected_pane_pid) is not None:
         raise RuntimeError("bound close could not prove exact pane and process absence")
-    write_bound_close_proof(proof_path, audit_path, secret, commitment)
+    if proof_operation:
+        promote_done_live_close_started(
+            proof_path,
+            audit_path,
+            commitment,
+            expected_audit_sha256,
+            symbolic_target,
+            expected_pane_id,
+            expected_pane_pid,
+            expected_pane_start_ticks,
+        )
+    else:
+        write_bound_close_proof(proof_path, audit_path, secret, commitment)
 
 
-def has_bound_close_proof(path: Path, commitment: str) -> bool:
+def has_bound_close_proof(path: Path, commitment: str, expected_audit_sha256: str = "") -> bool:
     """Verify one exact durable close proof without targeting any pane."""
 
-    if not path.is_absolute() or SHA256_RE.fullmatch(commitment) is None:
-        return False
-    try:
-        parent_info = path.parent.stat()
-    except OSError:
-        return False
-    if (
-        not stat.S_ISDIR(parent_info.st_mode)
-        or parent_info.st_uid != os.getuid()
-        or stat.S_IMODE(parent_info.st_mode) & 0o077
-    ):
-        return False
-    try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    except OSError:
-        return False
-    try:
-        info = os.fstat(fd)
-        with os.fdopen(os.dup(fd), "r", encoding="utf-8") as source:
-            content = source.read(66)
-    except (OSError, UnicodeDecodeError):
-        return False
-    finally:
-        os.close(fd)
-    secret = content[:-1] if len(content) == 65 and content.endswith("\n") else ""
-    return (
-        stat.S_ISREG(info.st_mode)
-        and info.st_uid == os.getuid()
-        and stat.S_IMODE(info.st_mode) == 0o600
-        and SHA256_RE.fullmatch(secret) is not None
-        and hashlib.sha256(secret.encode()).hexdigest() == commitment
+    return bool(bound_close_secret(path, commitment, expected_audit_sha256))
+
+
+def done_live_close_identity_is_absent(symbolic_target: str, expected_pane_id: str, expected_pane_pid: int) -> bool:
+    """Require both tmux names and the pinned process identity to be absent."""
+
+    return not pane_id(symbolic_target) and not pane_id(expected_pane_id) and process_start_ticks(expected_pane_pid) is None
+
+
+def promote_done_live_close_started(
+    proof_path: Path,
+    audit_path: Path,
+    commitment: str,
+    expected_audit_sha256: str,
+    symbolic_target: str,
+    expected_pane_id: str,
+    expected_pane_pid: int,
+    expected_pane_start_ticks: int,
+) -> str:
+    """Promote durable close intent after exact absence, tolerating link/unlink crashes."""
+
+    expected_proof_path = audit_path.with_name(f".{audit_path.name}.owner-stopped")
+    started_path = done_live_close_started_path(audit_path)
+    if not proof_path.is_absolute() or not audit_path.is_absolute() or proof_path != expected_proof_path:
+        raise RuntimeError("done-live close proof path is not bound to its audit")
+    validate_done_live_close_audit_file(
+        audit_path,
+        commitment,
+        symbolic_target,
+        expected_pane_id,
+        expected_pane_pid,
+        expected_pane_start_ticks,
+        expected_audit_sha256,
     )
+    final_secret = bound_close_secret(proof_path, commitment, expected_audit_sha256)
+    started_secret = bound_close_secret(started_path, commitment, expected_audit_sha256)
+    if path_entry_exists(proof_path) and not final_secret:
+        raise RuntimeError("done-live final close proof is malformed")
+    if path_entry_exists(started_path) and not started_secret:
+        raise RuntimeError("done-live close-started marker is malformed")
+    if not final_secret and not started_secret:
+        raise RuntimeError("done-live close lacks durable pre-kill evidence")
+    if final_secret and started_secret:
+        final_info = proof_path.lstat()
+        started_info = started_path.lstat()
+        if (final_info.st_dev, final_info.st_ino) != (started_info.st_dev, started_info.st_ino) or final_secret != started_secret:
+            raise RuntimeError("done-live close proof and started marker are not one atomic promotion")
+    if not done_live_close_identity_is_absent(symbolic_target, expected_pane_id, expected_pane_pid):
+        raise RuntimeError("done-live close proof cannot advance while pane identity remains live")
+    validate_done_live_close_audit_file(
+        audit_path,
+        commitment,
+        symbolic_target,
+        expected_pane_id,
+        expected_pane_pid,
+        expected_pane_start_ticks,
+        expected_audit_sha256,
+    )
+    if not final_secret:
+        try:
+            os.link(started_path, proof_path, follow_symlinks=False)
+        except FileExistsError:
+            final_info = proof_path.lstat()
+            started_info = started_path.lstat()
+            if (final_info.st_dev, final_info.st_ino) != (started_info.st_dev, started_info.st_ino):
+                raise RuntimeError("done-live close proof raced with different evidence") from None
+        directory_fd = os.open(audit_path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        final_secret = bound_close_secret(proof_path, commitment, expected_audit_sha256)
+        if final_secret != started_secret:
+            raise RuntimeError("done-live close proof promotion lost its exact evidence")
+    if not done_live_close_identity_is_absent(symbolic_target, expected_pane_id, expected_pane_pid):
+        raise RuntimeError("done-live pane identity appeared during close-proof promotion")
+    if path_entry_exists(started_path):
+        final_info = proof_path.lstat()
+        started_info = started_path.lstat()
+        if (final_info.st_dev, final_info.st_ino) != (started_info.st_dev, started_info.st_ino):
+            raise RuntimeError("done-live close-started marker changed before cleanup")
+        started_path.unlink()
+        directory_fd = os.open(audit_path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    if bound_close_secret(proof_path, commitment, expected_audit_sha256) != final_secret:
+        raise RuntimeError("done-live close proof changed after durable promotion")
+    return final_secret
 
 
 def close_authorized_human_pane(target: str, identity_is_current: Callable[[], bool]) -> None:
@@ -1130,8 +1565,165 @@ def close_authorized_human_pane(target: str, identity_is_current: Callable[[], b
     _ = tmux(["kill-pane", "-t", target], check=True)
 
 
-def close_exited_codex_shell(target: str, expected_pane_id: str, session_id: str, terminal_evidence: str, n_lines: int = 2000) -> None:
-    """Close one unchanged shell pane that retains exact terminal Codex evidence."""
+def _terminalize_bound_codex_to_shell(
+    target: str,
+    expected_pane_id: str,
+    expected_pane_pid: int,
+    expected_pane_start_ticks: int,
+    expected_session_id: str,
+    terminal_evidence: str,
+    evidence_is_current: Callable[[], None],
+    *,
+    accepted_terminal_report: bool = False,
+    wait_s: float = 10.0,
+    n_lines: int = 2000,
+) -> ExitedCodexShell:
+    """Exit one exact non-human Codex process while preserving its shell pane."""
+
+    if not re.fullmatch(r"%[0-9]+", expected_pane_id):
+        raise RuntimeError("expected pane id must be an exact numeric tmux pane id")
+    if expected_pane_pid <= 1 or expected_pane_start_ticks <= 0:
+        raise RuntimeError("expected pane process identity must be exact")
+    if not re.fullmatch(UUID_RE, expected_session_id):
+        raise RuntimeError("session id must be an exact Codex UUID")
+    evidence = terminal_evidence.strip()
+    if len(evidence) < 12:
+        raise RuntimeError("terminal evidence must be a specific nonempty report token")
+    if wait_s < 0 or n_lines <= 0:
+        raise RuntimeError("terminalization bounds are invalid")
+    if is_human_owned_target(target) or is_human_owned_target(target_session_name(expected_pane_id)):
+        raise RuntimeError(f"refusing to terminalize human-owned target: {target}")
+    if pane_id(target) != expected_pane_id or pane_id(expected_pane_id) != expected_pane_id:
+        raise RuntimeError(f"target no longer resolves to expected pane {expected_pane_id}")
+    if expected_pane_id == current_pane_id():
+        raise RuntimeError(f"refusing to terminalize the current pane: {expected_pane_id}")
+    if process_start_ticks(expected_pane_pid) != expected_pane_start_ticks:
+        raise RuntimeError("bound target process identity changed")
+    tmux_guard = (target, expected_pane_id)
+    numeric_target = bound_guarded_read(
+        *tmux_guard,
+        ["display-message", "-p", "-t", expected_pane_id, "#{session_name}:#{window_index}.#{pane_index}"],
+        expected_pane_pid,
+    ).strip()
+
+    def identity_is_current() -> bool:
+        if process_start_ticks(expected_pane_pid) != expected_pane_start_ticks:
+            return False
+        try:
+            identity = bound_guarded_read(
+                *tmux_guard,
+                ["display-message", "-p", "-t", expected_pane_id, "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}"],
+                expected_pane_pid,
+            ).strip()
+        except RuntimeError:
+            return False
+        return identity == f"{expected_pane_id}\t{numeric_target}"
+
+    initial_capture = guarded_capture(expected_pane_id, n_lines, tmux_guard, expected_pane_pid)
+    lines = [line.rstrip() for line in initial_capture.splitlines()]
+    while lines and not lines[-1]:
+        lines.pop()
+    report = report_from_lines(lines)
+    if report.status not in STOPPABLE_CODEX_STATUSES:
+        raise RuntimeError(f"target is not a supported live Codex pane: {target} status={report.status}")
+    marker_count = initial_capture.count("Conversation interrupted")
+    if marker_count > 1:
+        raise RuntimeError("bound Codex pane has ambiguous interruption markers")
+    marker_at = initial_capture.rfind("Conversation interrupted")
+    if marker_count == 1 and EXIT_RESUME_RE.search(initial_capture[marker_at:]):
+        raise RuntimeError("bound Codex pane contains a completed prior exit marker")
+    evidence_region = initial_capture if marker_count == 0 else initial_capture[:marker_at]
+    compact_capture = re.sub(r"\s+", "", evidence_region)
+    accepted_at = compact_capture.rfind('"accepted":true')
+    if not accepted_terminal_report and (accepted_at < 0 or evidence not in compact_capture[accepted_at:]):
+        raise RuntimeError("accepted terminal report evidence is absent before terminalization")
+    evidence_is_current()
+    session_id, before_close = query_status_session_id(
+        expected_pane_id,
+        n_lines,
+        wait_s,
+        identity_is_current,
+        tmux_guard,
+        strict_status_response=True,
+        expected_pane_pid=expected_pane_pid,
+        pre_input_check=evidence_is_current,
+    )
+    if session_id.lower() != expected_session_id.lower():
+        raise RuntimeError(f"bound Codex session id mismatch before interrupt: expected {expected_session_id.lower()}, found {session_id or '<missing>'}")
+    if not identity_is_current():
+        raise RuntimeError("tmux pane identity changed before interrupt")
+    send_exit_keys(expected_pane_id, identity_is_current, tmux_guard, expected_pane_pid, evidence_is_current)
+    if not wait_shell(expected_pane_id, time.monotonic() + wait_s, tmux_guard, expected_pane_pid):
+        raise RuntimeError("bound Codex pane did not exit to a shell")
+    if not identity_is_current():
+        raise RuntimeError("tmux pane identity changed after terminalization")
+    capture_sha256 = _validate_exited_codex_shell(
+        target,
+        expected_pane_id,
+        session_id,
+        evidence,
+        n_lines,
+        accepted_terminal_report=accepted_terminal_report,
+    )
+    if not identity_is_current():
+        raise RuntimeError("tmux pane identity changed during shell authentication")
+    evidence_is_current()
+    if not before_close:
+        raise RuntimeError("bound Codex status response was empty")
+    return ExitedCodexShell(session_id.lower(), capture_sha256)
+
+
+def terminalize_bound_codex_to_shell(
+    target: str,
+    expected_pane_id: str,
+    expected_pane_pid: int,
+    expected_pane_start_ticks: int,
+    expected_session_id: str,
+    terminal_evidence: str,
+    evidence_is_current: Callable[[], None],
+    *,
+    wait_s: float = 10.0,
+    n_lines: int = 2000,
+) -> ExitedCodexShell:
+    """Exit one exact Codex process after its accepted report is visible."""
+
+    return _terminalize_bound_codex_to_shell(
+        target, expected_pane_id, expected_pane_pid, expected_pane_start_ticks,
+        expected_session_id, terminal_evidence, evidence_is_current, wait_s=wait_s, n_lines=n_lines,
+    )
+
+
+def terminalize_bound_codex_to_shell_with_consumed_report(
+    target: str,
+    expected_pane_id: str,
+    expected_pane_pid: int,
+    expected_pane_start_ticks: int,
+    expected_session_id: str,
+    terminal_evidence: str,
+    evidence_is_current: Callable[[], None],
+    *,
+    wait_s: float = 10.0,
+    n_lines: int = 2000,
+) -> ExitedCodexShell:
+    """Exit one exact Codex process after external manager acceptance is authenticated."""
+
+    return _terminalize_bound_codex_to_shell(
+        target, expected_pane_id, expected_pane_pid, expected_pane_start_ticks,
+        expected_session_id, terminal_evidence, evidence_is_current,
+        accepted_terminal_report=True, wait_s=wait_s, n_lines=n_lines,
+    )
+
+
+def _validate_exited_codex_shell(
+    target: str,
+    expected_pane_id: str,
+    session_id: str,
+    terminal_evidence: str,
+    n_lines: int = 2000,
+    *,
+    accepted_terminal_report: bool = False,
+) -> str:
+    """Authenticate one unchanged shell pane and return its exact capture digest."""
 
     if not re.fullmatch(r"%[0-9]+", expected_pane_id):
         raise RuntimeError("expected pane id must be an exact numeric tmux pane id")
@@ -1153,8 +1745,11 @@ def close_exited_codex_shell(target: str, expected_pane_id: str, session_id: str
         raise RuntimeError(f"expected an exited non-Codex shell: {expected_pane_id} status={actual}")
     before = capture(expected_pane_id, n_lines)
     interrupted_at = before.rfind("Conversation interrupted")
-    accepted_at = before.rfind('"accepted":true', 0, interrupted_at)
-    if before.count("Conversation interrupted") != 1 or accepted_at < 0 or evidence not in before[accepted_at:interrupted_at]:
+    compact_report = re.sub(r"\s+", "", before[:interrupted_at])
+    accepted_at = compact_report.rfind('"accepted":true')
+    if before.count("Conversation interrupted") != 1 or (
+        not accepted_terminal_report and (accepted_at < 0 or evidence not in compact_report[accepted_at:])
+    ):
         raise RuntimeError("terminal report evidence is absent before the final Codex exit marker")
     exit_text = before[interrupted_at:]
     resume_matches = list(EXIT_RESUME_RE.finditer(exit_text))
@@ -1172,6 +1767,166 @@ def close_exited_codex_shell(target: str, expected_pane_id: str, session_id: str
         or capture(expected_pane_id, n_lines) != before
     ):
         raise RuntimeError("pane identity or shell evidence changed during recovery; retry")
+    return hashlib.sha256(before.encode()).hexdigest()
+
+
+def validate_exited_codex_shell(target: str, expected_pane_id: str, session_id: str, terminal_evidence: str, n_lines: int = 2000) -> str:
+    """Authenticate a shell pane retaining exact visible accepted-report evidence."""
+
+    return _validate_exited_codex_shell(target, expected_pane_id, session_id, terminal_evidence, n_lines)
+
+
+def validate_exited_codex_shell_with_consumed_report(
+    target: str,
+    expected_pane_id: str,
+    session_id: str,
+    terminal_evidence: str,
+    n_lines: int = 2000,
+) -> str:
+    """Authenticate a shell pane whose report acceptance was externally authenticated."""
+
+    return _validate_exited_codex_shell(
+        target, expected_pane_id, session_id, terminal_evidence, n_lines,
+        accepted_terminal_report=True,
+    )
+
+
+def close_exited_codex_shell(
+    target: str,
+    expected_pane_id: str,
+    session_id: str,
+    terminal_evidence: str,
+    n_lines: int = 2000,
+    *,
+    expected_capture_sha256: str = "",
+    evidence_is_current: Callable[[], bool] | None = None,
+) -> None:
+    """Close one unchanged shell pane that retains exact terminal Codex evidence."""
+
+    capture_sha256 = validate_exited_codex_shell(target, expected_pane_id, session_id, terminal_evidence, n_lines)
+    if expected_capture_sha256 and capture_sha256 != expected_capture_sha256:
+        raise RuntimeError("terminal shell capture changed after its durable close intent")
+    if evidence_is_current is not None and not evidence_is_current():
+        raise RuntimeError("bound lifecycle evidence changed before exited-shell close")
+    close_tmux_target(expected_pane_id)
+    if pane_id(expected_pane_id):
+        raise RuntimeError(f"exact stale shell pane remained live after close: {expected_pane_id}")
+
+
+def close_exited_codex_shell_with_task_receipt(
+    target: str,
+    expected_pane_id: str,
+    session_id: str,
+    task_payload: bytes,
+    expected_task_sha256: str,
+    task_receipt: str,
+    accepted_message_id: str,
+    *,
+    session_payload: bytes,
+    expected_session_sha256: str,
+    expected_completion_command: str,
+    n_lines: int = 2000,
+) -> None:
+    """Close one exited shell by cross-binding task, session, and pane evidence."""
+
+    if SHA256_RE.fullmatch(expected_task_sha256) is None or hashlib.sha256(task_payload).hexdigest() != expected_task_sha256:
+        raise RuntimeError("exited-shell task bytes do not match the supplied immutable digest")
+    try:
+        task_text = task_payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("exited-shell task evidence is not UTF-8") from exc
+    receipt = task_receipt.strip()
+    message_id = accepted_message_id.strip()
+    if len(receipt) < 12 or len(message_id) < 12:
+        raise RuntimeError("exited-shell task receipt and Message-ID must be specific evidence tokens")
+    compact_task = re.sub(r"\s+", "", task_text)
+    if receipt not in compact_task or f"acceptedasMessage-ID<{message_id}>" not in compact_task:
+        raise RuntimeError("immutable task bytes do not bind the accepted receipt and Message-ID")
+    if SHA256_RE.fullmatch(expected_session_sha256) is None or hashlib.sha256(session_payload).hexdigest() != expected_session_sha256:
+        raise RuntimeError("exited-shell session bytes do not match the supplied immutable digest")
+    try:
+        session_text = session_payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("exited-shell session evidence is not UTF-8") from exc
+    records: list[dict[str, object]] = []
+    try:
+        for line in session_text.splitlines():
+            value = json.loads(line)
+            if not isinstance(value, dict):
+                raise RuntimeError("exited-shell session JSONL contains a non-object record")
+            records.append(value)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("exited-shell session evidence is not valid JSONL") from exc
+    session_metadata = [value.get("payload") for value in records if value.get("type") == "session_meta"]
+    if len(session_metadata) != 1 or not isinstance(session_metadata[0], dict) or session_metadata[0].get("id") != session_id:
+        raise RuntimeError("exited-shell session evidence does not bind one exact session id")
+    accepted_indexes: list[int] = []
+    completion_indexes: list[int] = []
+    expected_completion_output = f"Emailed the human\nMessage-ID: <{message_id}>\n"
+    for index, value in enumerate(records):
+        payload = value.get("payload")
+        if value.get("type") != "event_msg" or not isinstance(payload, dict) or payload.get("type") != "item_completed":
+            continue
+        item = payload.get("item")
+        if not isinstance(item, dict) or item.get("type") != "CommandExecution" or item.get("status") != "completed":
+            continue
+        stdout = item.get("stdout")
+        if isinstance(stdout, str):
+            try:
+                accepted = json.loads(stdout)
+            except json.JSONDecodeError:
+                accepted = None
+            if (
+                isinstance(accepted, dict)
+                and accepted.get("accepted") is True
+                and accepted.get("manager_acknowledged") is True
+                and accepted.get("reason") == "manager acknowledged routed report"
+                and accepted.get("receipt_id") == receipt
+            ):
+                if item.get("exit_code") != 0 or item.get("aggregated_output") != stdout:
+                    raise RuntimeError("accepted task receipt command did not complete cleanly")
+                accepted_indexes.append(index)
+        if stdout == expected_completion_output:
+            if item.get("exit_code") != 0 or item.get("aggregated_output") != expected_completion_output or item.get("command") != ["/usr/bin/zsh", "-lc", expected_completion_command]:
+                raise RuntimeError("completion notice command does not match the bound successful invocation")
+            completion_indexes.append(index)
+    if len(accepted_indexes) != 1 or len(completion_indexes) != 1 or accepted_indexes[0] >= completion_indexes[0]:
+        raise RuntimeError("immutable session does not bind one accepted receipt followed by one completion notice")
+    if not re.fullmatch(r"%[0-9]+", expected_pane_id):
+        raise RuntimeError("expected pane id must be an exact numeric tmux pane id")
+    if is_human_owned_target(target) or is_human_owned_target(target_session_name(expected_pane_id)):
+        raise RuntimeError(f"refusing to close human-owned target: {target}")
+    if not re.fullmatch(UUID_RE, session_id):
+        raise RuntimeError("session id must be an exact Codex UUID")
+    if pane_id(target) != expected_pane_id or pane_id(expected_pane_id) != expected_pane_id:
+        raise RuntimeError(f"target no longer resolves to expected pane {expected_pane_id}")
+    if expected_pane_id == current_pane_id():
+        raise RuntimeError(f"refusing to close the current pane: {expected_pane_id}")
+    numeric_target = pane_target(expected_pane_id)
+    report = inspect(StatusArgs(numeric_target, 80)) if numeric_target else None
+    if report is None or report.status != "not_codex" or current_command(expected_pane_id) not in SHELL_COMMANDS:
+        actual = report.status if report is not None else "missing"
+        raise RuntimeError(f"expected an exited non-Codex shell: {expected_pane_id} status={actual}")
+    before = capture(expected_pane_id, n_lines)
+    interrupted_at = before.rfind("Conversation interrupted")
+    if before.count("Conversation interrupted") != 1 or interrupted_at < 0:
+        raise RuntimeError("terminal transcript lacks one unambiguous final Codex exit marker")
+    exit_text = before[interrupted_at:]
+    resume_matches = list(EXIT_RESUME_RE.finditer(exit_text))
+    if len(resume_matches) != 1 or resume_matches[0].group(1) != session_id or extract_resume_id(exit_text) != session_id:
+        raise RuntimeError("captured terminal Codex session does not match the supplied session id")
+    shell_tail = exit_text[resume_matches[0].end() :].strip("\r\n")
+    if not shell_tail or len(shell_tail.splitlines()) != 1:
+        raise RuntimeError("pane contains shell activity after the terminal Codex exit")
+    if (
+        pane_id(target) != expected_pane_id
+        or pane_id(expected_pane_id) != expected_pane_id
+        or pane_target(expected_pane_id) != numeric_target
+        or current_command(expected_pane_id) not in SHELL_COMMANDS
+        or inspect(StatusArgs(numeric_target, 80)).status != "not_codex"
+        or capture(expected_pane_id, n_lines) != before
+    ):
+        raise RuntimeError("pane identity or cross-bound evidence changed during recovery; retry")
     close_tmux_target(expected_pane_id)
     if pane_id(expected_pane_id):
         raise RuntimeError(f"exact stale shell pane remained live after close: {expected_pane_id}")
@@ -1189,7 +1944,7 @@ def feedback_prompt(task_file: str) -> str:
         "Before the manager closes this session, please send concise process feedback if this was a non-trivial task. "
         "If there is anything worth preserving, first run `REPORT_FILE=$(omo_report.sh --alloc-message-file)`, "
         "write the report file through an editor, apply_patch, or another non-shell text channel, "
-        "then run `omo_report.sh --status done --message-file \"$REPORT_FILE\"`. "
+        'then run `omo_report.sh --status done --message-file "$REPORT_FILE"`. '
         "Do not use cat, heredocs, or shell text injection for report bodies. "
         "Say whether you had partial-compaction access, whether you used it, why or why not, and any feedback about the PCODX instructions, tools, or compaction triggers. "
         "Mention unclear instructions, routing/communication gaps, missing tooling/docs, check friction, or whether manager-triggered compaction would have helped you continue. "
@@ -1241,10 +1996,7 @@ def stop(args: Args) -> str:
             or bool(args.bound_pane_pid) != bool(args.bound_pane_start_ticks)
             or args.bound_pane_pid < 0
             or args.bound_pane_start_ticks < 0
-            or (
-                args.bound_expected_session_id
-                and re.fullmatch(UUID_RE, args.bound_expected_session_id) is None
-            )
+            or (args.bound_expected_session_id and re.fullmatch(UUID_RE, args.bound_expected_session_id) is None)
         ):
             raise RuntimeError("bound target does not resolve to the exact pinned pane")
         tmux_guard = (args.bound_symbolic_target, args.bound_pane_id)
@@ -1300,6 +2052,7 @@ def stop(args: Args) -> str:
         raise RuntimeError(f"refusing to stop human-owned target: {args.target}")
     if human_authorized and numeric_target not in target_aliases(authorized_target):
         raise RuntimeError("human-close target no longer resolves to the exact authorized tmux pane")
+
     def identity_is_current() -> bool:
         if tmux_guard is not None:
             if args.bound_pane_start_ticks and process_start_ticks(args.bound_pane_pid) != args.bound_pane_start_ticks:
@@ -1322,11 +2075,9 @@ def stop(args: Args) -> str:
         if pane_id(target_pane) != target_pane or pane_target(target_pane) != numeric_target:
             return False
         if human_authorized:
-            return (
-                target_session_name(target_pane) == authorized_target.partition(":")[0]
-                and numeric_target in target_aliases(authorized_target)
-            )
+            return target_session_name(target_pane) == authorized_target.partition(":")[0] and numeric_target in target_aliases(authorized_target)
         return True
+
     if tmux_guard is None:
         report = inspect(StatusArgs(numeric_target, 80)) if numeric_target else None
     else:
@@ -1347,18 +2098,12 @@ def stop(args: Args) -> str:
         # Re-read both durable authority bindings after the pane is pinned and
         # immediately before the first human-pane input.
         validate_human_close_authorization(args)
-    if args.bound_pre_input_check is not None and (
-        tmux_guard is None
-        or not all(proof_fields)
-        or (not human_authorized and not args.bound_expected_session_id)
-    ):
+    if args.bound_pre_input_check is not None and (tmux_guard is None or not all(proof_fields) or (not human_authorized and not args.bound_expected_session_id)):
         raise RuntimeError("bound pre-input check requires a session-bound guarded close capability")
     identity_check = identity_is_current if human_authorized or args.bound_symbolic_target else None
     if task_tool(args) == "cursor":
         before_close = (
-            capture(resolved_args.target, resolved_args.lines)
-            if tmux_guard is None
-            else guarded_capture(resolved_args.target, resolved_args.lines, tmux_guard, resolved_args.bound_pane_pid)
+            capture(resolved_args.target, resolved_args.lines) if tmux_guard is None else guarded_capture(resolved_args.target, resolved_args.lines, tmux_guard, resolved_args.bound_pane_pid)
         )
         session_id = ""
     elif identity_check is None:
@@ -1374,14 +2119,8 @@ def stop(args: Args) -> str:
             expected_pane_pid=resolved_args.bound_pane_pid,
             pre_input_check=resolved_args.bound_pre_input_check,
         )
-    if (
-        resolved_args.bound_expected_session_id
-        and session_id.lower() != resolved_args.bound_expected_session_id.lower()
-    ):
-        raise RuntimeError(
-            "bound Codex session id mismatch before interrupt: "
-            f"expected {resolved_args.bound_expected_session_id.lower()}, found {session_id or '<missing>'}"
-        )
+    if resolved_args.bound_expected_session_id and session_id.lower() != resolved_args.bound_expected_session_id.lower():
+        raise RuntimeError(f"bound Codex session id mismatch before interrupt: expected {resolved_args.bound_expected_session_id.lower()}, found {session_id or '<missing>'}")
     if (identity_check is not None and not identity_is_current()) or (identity_check is None and pane_id(resolved_args.target) != target_pane):
         raise RuntimeError(f"tmux target disappeared before interrupt: {args.target}")
     if identity_check is None:
@@ -1395,11 +2134,7 @@ def stop(args: Args) -> str:
             resolved_args.bound_pre_input_check,
         )
     _ = wait_shell(resolved_args.target, time.monotonic() + resolved_args.wait_s, tmux_guard, resolved_args.bound_pane_pid)
-    after = (
-        capture(resolved_args.target, resolved_args.lines)
-        if tmux_guard is None
-        else guarded_capture(resolved_args.target, resolved_args.lines, tmux_guard, resolved_args.bound_pane_pid)
-    )
+    after = capture(resolved_args.target, resolved_args.lines) if tmux_guard is None else guarded_capture(resolved_args.target, resolved_args.lines, tmux_guard, resolved_args.bound_pane_pid)
     if identity_check is not None and not identity_is_current():
         raise RuntimeError("tmux pane identity changed before close")
     if identity_check is not None and tmux_guard is not None:
@@ -1424,7 +2159,10 @@ def stop(args: Args) -> str:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) == 9 and argv[0] == "--kill-bound-and-write-close-proof":
+    if argv and argv[0] == "--kill-bound-and-write-close-proof":
+        if len(argv) not in {9, 11}:
+            print("omo_codex_stop.py: bound close child arguments are incomplete", file=sys.stderr)
+            return 1
         try:
             kill_bound_and_write_close_proof(
                 argv[1],
@@ -1435,6 +2173,8 @@ def main(argv: list[str]) -> int:
                 Path(argv[6]),
                 argv[7],
                 argv[8],
+                argv[9] if len(argv) == 11 else "",
+                argv[10] if len(argv) == 11 else "",
             )
         except (OSError, RuntimeError, ValueError) as exc:
             print(f"omo_codex_stop.py: {exc}", file=sys.stderr)

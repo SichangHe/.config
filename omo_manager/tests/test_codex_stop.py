@@ -1,5 +1,7 @@
+import ast
 import contextlib
 import hashlib
+import inspect
 import io
 import json
 import os
@@ -18,9 +20,11 @@ from omo_manager.omo_codex_stop import (
     close_authorized_human_pane,
     close_note,
     close_exited_codex_shell,
+    close_exited_codex_shell_with_task_receipt,
     close_tmux_target,
     codex_status,
     current_pane_id,
+    done_live_close_started_path,
     extract_exit_resume_id,
     extract_new_status_session_id,
     extract_resume_id,
@@ -36,7 +40,92 @@ from omo_manager.omo_codex_stop import (
     resume_cmd,
     send_exit_keys,
     stop,
+    validate_exited_codex_shell,
+    validate_exited_codex_shell_with_consumed_report,
 )
+
+TEST_COMPLETION_COMMAND = "/opt/omo_completion_email.py --task /tmp/task.md --outcome 'task done'"
+FROZEN_SOURCE1290_HELPER_COMMIT = "7a03a04969d883f4fb07d0095d23b09836bb2656"
+FROZEN_SOURCE1290_HELPER_PATH = "omo_manager/omo_source1290_done_reconcile.py"
+
+
+def exited_session_payload(
+    session_id: str,
+    receipt: str,
+    message_id: str,
+    *,
+    completion_command: str = TEST_COMPLETION_COMMAND,
+) -> bytes:
+    accepted_output = (
+        json.dumps(
+            {
+                "accepted": True,
+                "manager_acknowledged": True,
+                "reason": "manager acknowledged routed report",
+                "receipt_id": receipt,
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    completion_output = f"Emailed the human\nMessage-ID: <{message_id}>\n"
+    records = (
+        {"type": "session_meta", "payload": {"id": session_id}},
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CommandExecution",
+                    "status": "completed",
+                    "exit_code": 0,
+                    "stdout": accepted_output,
+                    "aggregated_output": accepted_output,
+                    "command": ["/usr/bin/zsh", "-lc", "omo_report.sh --status done"],
+                },
+            },
+        },
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {
+                    "type": "CommandExecution",
+                    "status": "completed",
+                    "exit_code": 0,
+                    "stdout": completion_output,
+                    "aggregated_output": completion_output,
+                    "command": ["/usr/bin/zsh", "-lc", completion_command],
+                },
+            },
+        },
+    )
+    return b"".join((json.dumps(value, separators=(",", ":")) + "\n").encode() for value in records)
+
+
+def done_live_close_audit(commitment: str, *, target: str = "vl:2", consumed: bool = False) -> str:
+    record: dict[str, object] = {
+        "version": "v2.0.0" if consumed else "v1.0.0",
+        "operation": "done-live-no-mail-close",
+        "state": "terminalized",
+        "task": "task.md",
+        "target": target,
+        "manager_target": "vl:1",
+        "task_sha256": "a" * 64,
+        "todo_sha256": "b" * 64,
+        "pane_id": "%42",
+        "pane_pid": 4242,
+        "pane_start_ticks": 999,
+        "session_id": "019e9ed9-6262-71c0-b4b3-72ffd4182e98",
+        "terminal_evidence_sha256": "c" * 64,
+        "terminal_capture_sha256": "d" * 64,
+        "close_proof_commitment": commitment,
+        "close_note": "",
+        "completed_task_sha256": "",
+    }
+    if consumed:
+        record["manager_consumed_receipt_sha256"] = "e" * 64
+    return json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
 
 
 class CodexStopTests(unittest.TestCase):
@@ -102,6 +191,346 @@ class CodexStopTests(unittest.TestCase):
             close_exited_codex_shell("cfg:1", "%42", session_id, "specific-token")
 
         self.assertEqual("%42", close.call_args.args[0])
+
+    def test_validate_exited_codex_shell_authenticates_without_closing(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f'{{"accepted":true,"receipt":"specific-token"}}\nConversation interrupted\nTo continue this session, run codex resume {session_id}\n$ '
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.pane_target", return_value="cfg:1.0") as numeric_target,
+            patch("omo_manager.omo_codex_stop.current_command", return_value="zsh") as current_command,
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["$ "])),
+            patch("omo_manager.omo_codex_stop.capture", return_value=transcript) as capture,
+            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+        ):
+            capture_sha256 = validate_exited_codex_shell("cfg:1", "%42", session_id, "specific-token", 73)
+
+        self.assertEqual(hashlib.sha256(transcript.encode()).hexdigest(), capture_sha256)
+        numeric_target.assert_called_with("%42")
+        current_command.assert_called_with("%42")
+        capture.assert_called_with("%42", 73)
+        close.assert_not_called()
+
+    def test_consumed_report_shell_validation_only_waives_visible_acceptance(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f"terminal report sent\nConversation interrupted\nTo continue this session, run codex resume {session_id}\n$ "
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.pane_target", return_value="cfg:1.0"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="zsh"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["$ "])),
+            patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "terminal report evidence is absent"):
+                validate_exited_codex_shell("cfg:1", "%42", session_id, "specific-token")
+            observed = validate_exited_codex_shell_with_consumed_report(
+                "cfg:1", "%42", session_id, "specific-token"
+            )
+        self.assertEqual(hashlib.sha256(transcript.encode()).hexdigest(), observed)
+
+    def test_close_exited_codex_shell_matches_frozen_helper_contract_and_preserves_order(self) -> None:
+        helper_source = subprocess.run(
+            ["git", "show", f"{FROZEN_SOURCE1290_HELPER_COMMIT}:{FROZEN_SOURCE1290_HELPER_PATH}"],
+            cwd=Path(__file__).resolve().parents[2],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        helper_calls = [node for node in ast.walk(ast.parse(helper_source)) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "close_exited_codex_shell"]
+        self.assertEqual(1, len(helper_calls))
+        helper_call = helper_calls[0]
+        expected_statement = ast.parse(
+            """close_exited_codex_shell(
+    target,
+    args.pane_id,
+    args.session_id,
+    args.terminal_evidence,
+    expected_capture_sha256=capture_sha256,
+    evidence_is_current=lambda: evidence_is_current(args.pane_id),
+)"""
+        ).body[0]
+        assert isinstance(expected_statement, ast.Expr)
+        expected_call = expected_statement.value
+        assert isinstance(expected_call, ast.Call)
+        self.assertEqual(ast.dump(expected_call, include_attributes=False), ast.dump(helper_call, include_attributes=False))
+        helper_keywords = tuple(keyword.arg for keyword in helper_call.keywords)
+        self.assertEqual(("expected_capture_sha256", "evidence_is_current"), helper_keywords)
+        parameters = inspect.signature(close_exited_codex_shell).parameters
+        self.assertEqual(
+            ("target", "expected_pane_id", "session_id", "terminal_evidence", "n_lines", *helper_keywords),
+            tuple(parameters),
+        )
+        for keyword in helper_keywords:
+            self.assertEqual(inspect.Parameter.KEYWORD_ONLY, parameters[keyword].kind)
+
+        session_id = "11111111-2222-3333-4444-555555555555"
+        events: list[tuple[object, ...]] = []
+
+        def validate(*args: object) -> str:
+            events.append(("validate", *args))
+            return "a" * 64
+
+        def close(target: str) -> None:
+            events.append(("close", target))
+
+        def evidence_is_current() -> bool:
+            events.append(("evidence",))
+            return True
+
+        def remaining(target: str) -> str:
+            events.append(("pane_id", target))
+            return ""
+
+        with (
+            patch("omo_manager.omo_codex_stop.validate_exited_codex_shell", side_effect=validate),
+            patch("omo_manager.omo_codex_stop.close_tmux_target", side_effect=close),
+            patch("omo_manager.omo_codex_stop.pane_id", side_effect=remaining),
+        ):
+            close_exited_codex_shell(
+                "cfg:1",
+                "%42",
+                session_id,
+                "specific-token",
+                73,
+                expected_capture_sha256="a" * 64,
+                evidence_is_current=evidence_is_current,
+            )
+
+        self.assertEqual(
+            [
+                ("validate", "cfg:1", "%42", session_id, "specific-token", 73),
+                ("evidence",),
+                ("close", "%42"),
+                ("pane_id", "%42"),
+            ],
+            events,
+        )
+
+    def test_close_exited_codex_shell_rejects_capture_digest_before_late_evidence_check(self) -> None:
+        evidence_checked = False
+
+        def evidence_is_current() -> bool:
+            nonlocal evidence_checked
+            evidence_checked = True
+            return True
+
+        with (
+            patch("omo_manager.omo_codex_stop.validate_exited_codex_shell", return_value="a" * 64),
+            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+            patch("omo_manager.omo_codex_stop.pane_id") as remaining,
+            self.assertRaisesRegex(RuntimeError, "capture changed"),
+        ):
+            close_exited_codex_shell(
+                "cfg:1",
+                "%42",
+                "11111111-2222-3333-4444-555555555555",
+                "specific-token",
+                expected_capture_sha256="b" * 64,
+                evidence_is_current=evidence_is_current,
+            )
+
+        self.assertFalse(evidence_checked)
+        close.assert_not_called()
+        remaining.assert_not_called()
+
+    def test_close_exited_codex_shell_rejects_late_evidence_drift_before_close(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.validate_exited_codex_shell", return_value="a" * 64),
+            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+            patch("omo_manager.omo_codex_stop.pane_id") as remaining,
+            self.assertRaisesRegex(RuntimeError, "lifecycle evidence changed"),
+        ):
+            close_exited_codex_shell(
+                "cfg:1",
+                "%42",
+                "11111111-2222-3333-4444-555555555555",
+                "specific-token",
+                expected_capture_sha256="a" * 64,
+                evidence_is_current=lambda: False,
+            )
+
+        close.assert_not_called()
+        remaining.assert_not_called()
+
+    def test_validate_exited_codex_shell_rejects_exact_pane_mismatch_before_shell_access(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%41"),
+            patch("omo_manager.omo_codex_stop.current_pane_id") as current_pane,
+            patch("omo_manager.omo_codex_stop.pane_target") as numeric_target,
+            patch("omo_manager.omo_codex_stop.current_command") as current_command,
+            patch("omo_manager.omo_codex_stop.inspect") as inspect_pane,
+            patch("omo_manager.omo_codex_stop.capture") as capture,
+            self.assertRaisesRegex(RuntimeError, "no longer resolves to expected pane"),
+        ):
+            validate_exited_codex_shell(
+                "cfg:1",
+                "%42",
+                "11111111-2222-3333-4444-555555555555",
+                "specific-token",
+            )
+
+        current_pane.assert_not_called()
+        numeric_target.assert_not_called()
+        current_command.assert_not_called()
+        inspect_pane.assert_not_called()
+        capture.assert_not_called()
+
+    def test_validate_exited_codex_shell_rejects_non_shell_before_capture(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="codex") as current_command,
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["$ "])),
+            patch("omo_manager.omo_codex_stop.capture") as capture,
+            self.assertRaisesRegex(RuntimeError, "expected an exited non-Codex shell"),
+        ):
+            validate_exited_codex_shell(
+                "cfg:1",
+                "%42",
+                "11111111-2222-3333-4444-555555555555",
+                "specific-token",
+            )
+
+        current_command.assert_called_once_with("%42")
+        capture.assert_not_called()
+
+    def test_validate_exited_codex_shell_rejects_capture_drift_without_closing(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f'{{"accepted":true,"receipt":"specific-token"}}\nConversation interrupted\nTo continue this session, run codex resume {session_id}\n$ '
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="zsh"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["$ "])),
+            patch("omo_manager.omo_codex_stop.capture", side_effect=(transcript, transcript + "changed")),
+            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+            self.assertRaisesRegex(RuntimeError, "changed during recovery"),
+        ):
+            validate_exited_codex_shell("cfg:1", "%42", session_id, "specific-token")
+
+        close.assert_not_called()
+
+    def test_close_exited_codex_shell_cross_binds_immutable_task_receipt(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        receipt = "receipt-token-123456"
+        message_id = "123.456.789@example.com"
+        task_payload = (f"accepted report receipt {receipt}\ncompletion notice was accepted as Message-ID <{message_id}>\n").encode()
+        session_payload = exited_session_payload(session_id, receipt, message_id)
+        transcript = f"Conversation interrupted\nTo continue this session, run codex resume {session_id}\n$ "
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", side_effect=["%42", "%42", "%42", "%42", ""]),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="zsh"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["$ "])),
+            patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
+            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+        ):
+            close_exited_codex_shell_with_task_receipt(
+                "cfg:1",
+                "%42",
+                session_id,
+                task_payload,
+                hashlib.sha256(task_payload).hexdigest(),
+                receipt,
+                message_id,
+                session_payload=session_payload,
+                expected_session_sha256=hashlib.sha256(session_payload).hexdigest(),
+                expected_completion_command=TEST_COMPLETION_COMMAND,
+            )
+
+        close.assert_called_once_with("%42")
+
+    def test_close_exited_codex_shell_rejects_task_or_terminal_evidence_mismatch(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        task_payload = b"receipt receipt-token-123456 accepted as Message-ID <123@example.com>\n"
+        session_payload = exited_session_payload(session_id, "receipt-token-123456", "123@example.com")
+        with self.assertRaisesRegex(RuntimeError, "immutable digest"):
+            close_exited_codex_shell_with_task_receipt(
+                "cfg:1",
+                "%42",
+                session_id,
+                task_payload,
+                "0" * 64,
+                "receipt-token-123456",
+                "123@example.com",
+                session_payload=session_payload,
+                expected_session_sha256=hashlib.sha256(session_payload).hexdigest(),
+                expected_completion_command=TEST_COMPLETION_COMMAND,
+            )
+
+    def test_close_exited_codex_shell_requires_receipt_in_bound_session(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        receipt = "receipt-token-123456"
+        message_id = "123.456.789@example.com"
+        task_payload = f"receipt {receipt} accepted as Message-ID <{message_id}>\n".encode()
+        session_payload = exited_session_payload(session_id, "different-receipt-123456", message_id)
+        with (
+            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+            self.assertRaisesRegex(RuntimeError, "does not bind one accepted receipt"),
+        ):
+            close_exited_codex_shell_with_task_receipt(
+                "cfg:1",
+                "%42",
+                session_id,
+                task_payload,
+                hashlib.sha256(task_payload).hexdigest(),
+                receipt,
+                message_id,
+                session_payload=session_payload,
+                expected_session_sha256=hashlib.sha256(session_payload).hexdigest(),
+                expected_completion_command=TEST_COMPLETION_COMMAND,
+            )
+        close.assert_not_called()
+
+    def test_close_exited_codex_shell_requires_message_id_in_bound_completion(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        receipt = "receipt-token-123456"
+        message_id = "123.456.789@example.com"
+        task_payload = f"receipt {receipt} accepted as Message-ID <{message_id}>\n".encode()
+        session_payload = exited_session_payload(session_id, receipt, "different.message@example.com")
+        with (
+            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+            self.assertRaisesRegex(RuntimeError, "does not bind one accepted receipt"),
+        ):
+            close_exited_codex_shell_with_task_receipt(
+                "cfg:1",
+                "%42",
+                session_id,
+                task_payload,
+                hashlib.sha256(task_payload).hexdigest(),
+                receipt,
+                message_id,
+                session_payload=session_payload,
+                expected_session_sha256=hashlib.sha256(session_payload).hexdigest(),
+                expected_completion_command=TEST_COMPLETION_COMMAND,
+            )
+        close.assert_not_called()
+
+    def test_close_exited_codex_shell_rejects_session_digest_mismatch(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        receipt = "receipt-token-123456"
+        message_id = "123.456.789@example.com"
+        task_payload = f"receipt {receipt} accepted as Message-ID <{message_id}>\n".encode()
+        session_payload = exited_session_payload(session_id, receipt, message_id)
+        with (
+            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+            self.assertRaisesRegex(RuntimeError, "session bytes do not match"),
+        ):
+            close_exited_codex_shell_with_task_receipt(
+                "cfg:1",
+                "%42",
+                session_id,
+                task_payload,
+                hashlib.sha256(task_payload).hexdigest(),
+                receipt,
+                message_id,
+                session_payload=session_payload,
+                expected_session_sha256="0" * 64,
+                expected_completion_command=TEST_COMPLETION_COMMAND,
+            )
+        close.assert_not_called()
 
     def test_close_authorized_human_pane_kills_only_the_exact_pane(self) -> None:
         with (
@@ -245,10 +674,7 @@ class CodexStopTests(unittest.TestCase):
 
     def test_extract_exit_resume_id_from_continue_line_after_repaint(self) -> None:
         before = "› ready\ncodex resume 11111111-2222-3333-4444-555555555555\n"
-        after = (
-            "› ready\n\n"
-            "To continue this session, run codex resume 99999999-aaaa-bbbb-cccc-dddddddddddd\n"
-        )
+        after = "› ready\n\nTo continue this session, run codex resume 99999999-aaaa-bbbb-cccc-dddddddddddd\n"
         self.assertEqual("99999999-aaaa-bbbb-cccc-dddddddddddd", extract_exit_resume_id(before, after))
 
     def test_extract_exit_resume_id_ignores_stale_continue_line(self) -> None:
@@ -312,8 +738,7 @@ class CodexStopTests(unittest.TestCase):
             root = Path(tmp)
             task = root / "task.md"
             _ = task.write_text(
-                "runat: cfg:1 codex\n"
-                "prior note with session_id: `11111111-2222-3333-4444-555555555555`\n",
+                "runat: cfg:1 codex\nprior note with session_id: `11111111-2222-3333-4444-555555555555`\n",
                 encoding="utf-8",
             )
 
@@ -330,8 +755,7 @@ class CodexStopTests(unittest.TestCase):
             root = Path(tmp)
             task = root / "task.md"
             _ = task.write_text(
-                "runat: cfg:1 codex\n"
-                "(manager closed Codex agent text with tmux target `cfg:1.0` and session_id: `11111111-2222-3333-4444-555555555555`.)\n",
+                "runat: cfg:1 codex\n(manager closed Codex agent text with tmux target `cfg:1.0` and session_id: `11111111-2222-3333-4444-555555555555`.)\n",
                 encoding="utf-8",
             )
 
@@ -348,8 +772,7 @@ class CodexStopTests(unittest.TestCase):
             root = Path(tmp)
             task = root / "task.md"
             _ = task.write_text(
-                "runat: cfg:1 codex\n"
-                "(manager closed Codex agent fabricated-record; tmux target `cfg:1.0`; session_id: `11111111-2222-3333-4444-555555555555`.)\n",
+                "runat: cfg:1 codex\n(manager closed Codex agent fabricated-record; tmux target `cfg:1.0`; session_id: `11111111-2222-3333-4444-555555555555`.)\n",
                 encoding="utf-8",
             )
 
@@ -366,8 +789,7 @@ class CodexStopTests(unittest.TestCase):
             root = Path(tmp)
             task = root / "task.md"
             _ = task.write_text(
-                "runat: cfg:1 codex\n"
-                " (manager closed Codex agent 07-14 11:00 PDT; tmux target `cfg:1.0`; session_id: `11111111-2222-3333-4444-555555555555`.)\n",
+                "runat: cfg:1 codex\n (manager closed Codex agent 07-14 11:00 PDT; tmux target `cfg:1.0`; session_id: `11111111-2222-3333-4444-555555555555`.)\n",
                 encoding="utf-8",
             )
 
@@ -384,8 +806,7 @@ class CodexStopTests(unittest.TestCase):
             root = Path(tmp)
             task = root / "task.md"
             _ = task.write_text(
-                "runat: cfg:1 codex\n"
-                "(manager closed Codex agent 07-14 11:00 PDT; tmux target `cfg:2.0`; Codex session id not found in captured tmux output.)\n",
+                "runat: cfg:1 codex\n(manager closed Codex agent 07-14 11:00 PDT; tmux target `cfg:2.0`; Codex session id not found in captured tmux output.)\n",
                 encoding="utf-8",
             )
 
@@ -490,9 +911,7 @@ class CodexStopTests(unittest.TestCase):
             task = root / "task.md"
             _ = task.write_text("runat: cfg:1 codex\n", encoding="utf-8")
             out = io.StringIO()
-            with patch("omo_manager.omo_codex_stop.stop", return_value="11111111-2222-3333-4444-555555555555"), contextlib.redirect_stdout(
-                out
-            ):
+            with patch("omo_manager.omo_codex_stop.stop", return_value="11111111-2222-3333-4444-555555555555"), contextlib.redirect_stdout(out):
                 self.assertEqual(
                     0,
                     main(["--target", "cfg:1.0", "--root", str(root), "--task-file", "task.md"]),
@@ -584,9 +1003,7 @@ class CodexStopTests(unittest.TestCase):
 
     def test_source1240_exact_replacement_sentence_authorizes_named_human_pane(self) -> None:
         authority = (
-            b"Subject: Re: Low-priority task decisions\n\n"
-            b"Replace the failed PCODX manager task.md at hwork:1 with one fresh plain-Codex manager inheriting all tasks and comments.\n"
-            b"Just do it\n"
+            b"Subject: Re: Low-priority task decisions\n\nReplace the failed PCODX manager task.md at hwork:1 with one fresh plain-Codex manager inheriting all tasks and comments.\nJust do it\n"
         )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -905,10 +1322,7 @@ class CodexStopTests(unittest.TestCase):
         cases = (
             b"> This is not from the responsible hwork:1 EDA/C++ owner.\n",
             b"> Do not take this from the responsible hwork:1 EDA/C++ owner.\n",
-            (
-                b"> This is a mailbox-compression summary of reports from the responsible other:1 EDA/C++ owner. "
-                b"It does not change task ownership.\n"
-            ),
+            (b"> This is a mailbox-compression summary of reports from the responsible other:1 EDA/C++ owner. It does not change task ownership.\n"),
             (
                 b"> This is a mailbox-compression summary of reports from the responsible hwork:1 EDA/C++ owner. "
                 b"It does not change task ownership.\n"
@@ -938,15 +1352,8 @@ class CodexStopTests(unittest.TestCase):
                 b"> > This is a mailbox-compression summary of reports from the responsible other:1 EDA/C++ owner. "
                 b"It does not change task ownership.\n"
             ),
-            (
-                b"This is a mailbox-compression summary of reports from the responsible hwork:1 EDA/C++ owner. "
-                b"It does not change task ownership.\n"
-            ),
-            (
-                b"close other:1\n"
-                b"> This is a mailbox-compression summary of reports from the responsible hwork:1 EDA/C++ owner. "
-                b"It does not change task ownership.\n"
-            ),
+            (b"This is a mailbox-compression summary of reports from the responsible hwork:1 EDA/C++ owner. It does not change task ownership.\n"),
+            (b"close other:1\n> This is a mailbox-compression summary of reports from the responsible hwork:1 EDA/C++ owner. It does not change task ownership.\n"),
         )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -966,9 +1373,11 @@ class CodexStopTests(unittest.TestCase):
             )
             for binding in cases:
                 authority = b"Subject: Re: thread\n\nCancel this task\n\n" + binding
-                with self.subTest(binding=binding), patch(
-                    "omo_manager.omo_codex_stop.read_human_close_authorization", return_value=authority
-                ), self.assertRaisesRegex(RuntimeError, "reply does not bind it"):
+                with (
+                    self.subTest(binding=binding),
+                    patch("omo_manager.omo_codex_stop.read_human_close_authorization", return_value=authority),
+                    self.assertRaisesRegex(RuntimeError, "reply does not bind it"),
+                ):
                     codex_stop.validate_human_close_authorization(args)
 
     def test_reply_human_authority_requires_one_direct_unquoted_cancellation(self) -> None:
@@ -978,10 +1387,7 @@ class CodexStopTests(unittest.TestCase):
             b"Close this task\n",
             b"Please consider this task done\n",
         )
-        binding = (
-            b"> This is a mailbox-compression summary of reports from the responsible hwork:1 EDA/C++ owner. "
-            b"It does not change task ownership.\n"
-        )
+        binding = b"> This is a mailbox-compression summary of reports from the responsible hwork:1 EDA/C++ owner. It does not change task ownership.\n"
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _ = (root / "task.md").write_text("---\nrunat: hwork:1\n---\n", encoding="utf-8")
@@ -1000,9 +1406,11 @@ class CodexStopTests(unittest.TestCase):
             )
             for direct_body in direct_bodies:
                 authority = b"Subject: Re: thread\n\n" + direct_body + binding
-                with self.subTest(direct_body=direct_body), patch(
-                    "omo_manager.omo_codex_stop.read_human_close_authorization", return_value=authority
-                ), self.assertRaisesRegex(RuntimeError, "reply does not bind it"):
+                with (
+                    self.subTest(direct_body=direct_body),
+                    patch("omo_manager.omo_codex_stop.read_human_close_authorization", return_value=authority),
+                    self.assertRaisesRegex(RuntimeError, "reply does not bind it"),
+                ):
                     codex_stop.validate_human_close_authorization(args)
 
     def test_stop_refuses_pinned_human_pane_that_moves_before_interrupt(self) -> None:
@@ -1220,9 +1628,7 @@ class CodexStopTests(unittest.TestCase):
                     bound_pane_id="%42",
                 )
             )
-        guarded.assert_called_once_with(
-            "vl:2", "%42", ["display-message", "-p", "-t", "vl:2", "#{pane_id}"]
-        )
+        guarded.assert_called_once_with("vl:2", "%42", ["display-message", "-p", "-t", "vl:2", "#{pane_id}"])
         raw_pane_id.assert_not_called()
         raw_inspect.assert_not_called()
         raw_capture.assert_not_called()
@@ -1399,13 +1805,237 @@ class CodexStopTests(unittest.TestCase):
                 patch("omo_manager.omo_codex_stop.guarded_current_command", return_value="zsh"),
                 patch("omo_manager.omo_codex_stop.guarded_tmux_sequence", return_value="") as guarded,
             ):
-                codex_stop.close_bound_tmux_target(
-                    "%42", lambda: True, "vl:2", "%42", str(proof), str(audit), secret, commitment, 4242, 999
-                )
+                codex_stop.close_bound_tmux_target("%42", lambda: True, "vl:2", "%42", str(proof), str(audit), secret, commitment, 4242, 999)
         commands = guarded.call_args.args[2]
         self.assertEqual("run-shell", commands[0][0])
         self.assertIn("--kill-bound-and-write-close-proof", commands[0][1])
         self.assertNotIn("kill-window", commands[0][1])
+
+    def test_done_live_bound_close_passes_operation_to_server_guarded_child(self) -> None:
+        secret = "a" * 64
+        commitment = hashlib.sha256(secret.encode()).hexdigest()
+        audit_sha256 = "b" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = Path(tmp) / "done-live.json"
+            proof = Path(tmp) / ".done-live.json.owner-stopped"
+            with (
+                patch("omo_manager.omo_codex_stop.guarded_current_command", return_value="zsh"),
+                patch("omo_manager.omo_codex_stop.guarded_tmux_sequence", return_value="") as guarded,
+            ):
+                codex_stop.close_bound_tmux_target(
+                    "%42", lambda: True, "vl:2", "%42",
+                    str(proof), str(audit), secret, commitment, 4242, 999,
+                    proof_operation="done-live-no-mail-close",
+                    proof_audit_sha256=audit_sha256,
+                )
+        commands = guarded.call_args.args[2]
+        self.assertEqual("run-shell", commands[0][0])
+        self.assertIn("done-live-no-mail-close", commands[0][1])
+        self.assertIn(audit_sha256, commands[0][1])
+        guarded.assert_called_once()
+        self.assertEqual(("vl:2", "%42"), guarded.call_args.args[:2])
+
+    def test_done_live_bound_close_rejects_operation_without_process_identity(self) -> None:
+        secret = "a" * 64
+        commitment = hashlib.sha256(secret.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = Path(tmp) / "done-live.json"
+            proof = Path(tmp) / ".done-live.json.owner-stopped"
+            with (
+                patch("omo_manager.omo_codex_stop.guarded_current_command", return_value="zsh"),
+                patch("omo_manager.omo_codex_stop.guarded_tmux_sequence") as guarded,
+                self.assertRaisesRegex(RuntimeError, "exact audit and process binding"),
+            ):
+                codex_stop.close_bound_tmux_target(
+                    "%42", lambda: True, "vl:2", "%42",
+                    str(proof), str(audit), secret, commitment,
+                    proof_operation="done-live-no-mail-close",
+                    proof_audit_sha256="b" * 64,
+                )
+        guarded.assert_not_called()
+
+    def test_done_live_bound_child_accepts_only_complete_v2_consumed_receipt_binding(self) -> None:
+        commitment = "a" * 64
+        text = done_live_close_audit(commitment, consumed=True)
+        record = json.loads(text)
+        self.assertTrue(
+            codex_stop.done_live_close_audit_authorizes(
+                text, record, commitment, target="vl:2", pane_id_value="%42", pane_pid=4242,
+                pane_start_ticks=999,
+            )
+        )
+        record.pop("manager_consumed_receipt_sha256")
+        changed = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+        self.assertFalse(
+            codex_stop.done_live_close_audit_authorizes(
+                changed, record, commitment, target="vl:2", pane_id_value="%42", pane_pid=4242,
+                pane_start_ticks=999,
+            )
+        )
+
+    def test_done_live_bound_child_rejects_audit_identity_drift_before_kill(self) -> None:
+        secret = "a" * 64
+        commitment = hashlib.sha256(secret.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp)
+            private.chmod(0o700)
+            audit = private / "done-live.json"
+            audit_text = done_live_close_audit(commitment, target="vl:9")
+            audit.write_text(audit_text, encoding="utf-8")
+            audit.chmod(0o600)
+            proof = private / ".done-live.json.owner-stopped"
+            with (
+                patch("omo_manager.omo_codex_stop.tmux") as tmux,
+                patch("omo_manager.omo_codex_stop.write_bound_close_proof") as writer,
+                self.assertRaisesRegex(RuntimeError, "audit drifted"),
+            ):
+                codex_stop.kill_bound_and_write_close_proof(
+                    "vl:2", "%42", 4242, 999, proof, audit, secret, commitment,
+                    "done-live-no-mail-close", hashlib.sha256(audit_text.encode()).hexdigest(),
+                )
+        tmux.assert_not_called()
+        writer.assert_not_called()
+
+    def test_done_live_bound_child_rejects_full_audit_replacement_before_kill(self) -> None:
+        secret = "a" * 64
+        commitment = hashlib.sha256(secret.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp)
+            private.chmod(0o700)
+            audit = private / "done-live.json"
+            original = done_live_close_audit(commitment)
+            audit.write_text(original, encoding="utf-8")
+            audit.chmod(0o600)
+            changed = json.loads(original)
+            changed["terminal_evidence_sha256"] = "e" * 64
+            audit.write_text(json.dumps(changed, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+            proof = private / ".done-live.json.owner-stopped"
+            with (
+                patch("omo_manager.omo_codex_stop.pane_id") as pane,
+                patch("omo_manager.omo_codex_stop.guarded_tmux_sequence") as guarded,
+                self.assertRaisesRegex(RuntimeError, "audit drifted"),
+            ):
+                codex_stop.kill_bound_and_write_close_proof(
+                    "vl:2", "%42", 4242, 999, proof, audit, secret, commitment,
+                    "done-live-no-mail-close", hashlib.sha256(original.encode()).hexdigest(),
+                )
+            self.assertFalse(done_live_close_started_path(audit).exists())
+        pane.assert_not_called()
+        guarded.assert_not_called()
+
+    def test_done_live_bound_child_recovers_kill_before_final_proof(self) -> None:
+        secret = "a" * 64
+        commitment = hashlib.sha256(secret.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp)
+            private.chmod(0o700)
+            audit = private / "done-live.json"
+            audit_text = done_live_close_audit(commitment)
+            audit_sha256 = hashlib.sha256(audit_text.encode()).hexdigest()
+            audit.write_text(audit_text, encoding="utf-8")
+            audit.chmod(0o600)
+            proof = private / ".done-live.json.owner-stopped"
+            state = {"live": True}
+
+            def target_pane(_target: str) -> str:
+                return "%42" if state["live"] else ""
+
+            def start_ticks(_pid: int) -> int | None:
+                return 999 if state["live"] else None
+
+            def kill(*_values: object) -> str:
+                state["live"] = False
+                return ""
+
+            with (
+                patch("omo_manager.omo_codex_stop.pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_codex_stop.process_start_ticks", side_effect=start_ticks),
+                patch("omo_manager.omo_codex_stop.guarded_tmux_sequence", side_effect=kill),
+                patch("omo_manager.omo_codex_stop.promote_done_live_close_started", side_effect=KeyboardInterrupt),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                codex_stop.kill_bound_and_write_close_proof(
+                    "vl:2", "%42", 4242, 999, proof, audit, secret, commitment,
+                    "done-live-no-mail-close", audit_sha256,
+                )
+            started = done_live_close_started_path(audit)
+            self.assertTrue(started.is_file())
+            self.assertFalse(proof.exists())
+            with (
+                patch("omo_manager.omo_codex_stop.pane_id", return_value=""),
+                patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=None),
+            ):
+                recovered = codex_stop.promote_done_live_close_started(
+                    proof, audit, commitment, audit_sha256, "vl:2", "%42", 4242, 999,
+                )
+            self.assertEqual(secret, recovered)
+            self.assertTrue(codex_stop.has_bound_close_proof(proof, commitment, audit_sha256))
+            self.assertFalse(started.exists())
+
+    def test_done_live_close_promotion_recovers_link_before_started_cleanup(self) -> None:
+        secret = "a" * 64
+        commitment = hashlib.sha256(secret.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp)
+            private.chmod(0o700)
+            audit = private / "done-live.json"
+            audit_text = done_live_close_audit(commitment)
+            audit_sha256 = hashlib.sha256(audit_text.encode()).hexdigest()
+            audit.write_text(audit_text, encoding="utf-8")
+            audit.chmod(0o600)
+            proof = private / ".done-live.json.owner-stopped"
+            started = codex_stop.write_done_live_close_started(
+                proof, audit, secret, commitment, audit_sha256, "vl:2", "%42", 4242, 999,
+            )
+            os.link(started, proof)
+            with (
+                patch("omo_manager.omo_codex_stop.pane_id", return_value=""),
+                patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=None),
+            ):
+                recovered = codex_stop.promote_done_live_close_started(
+                    proof, audit, commitment, audit_sha256, "vl:2", "%42", 4242, 999,
+                )
+            self.assertEqual(secret, recovered)
+            self.assertTrue(codex_stop.has_bound_close_proof(proof, commitment, audit_sha256))
+            self.assertFalse(started.exists())
+
+    def test_done_live_bound_child_kills_only_through_server_identity_predicate(self) -> None:
+        secret = "a" * 64
+        commitment = hashlib.sha256(secret.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp)
+            private.chmod(0o700)
+            audit = private / "done-live.json"
+            audit_text = done_live_close_audit(commitment)
+            audit.write_text(audit_text, encoding="utf-8")
+            audit.chmod(0o600)
+            proof = private / ".done-live.json.owner-stopped"
+            state = {"live": True}
+
+            def target_pane(_target: str) -> str:
+                return "%42" if state["live"] else ""
+
+            def start_ticks(_pid: int) -> int | None:
+                return 999 if state["live"] else None
+
+            def kill(*_values: object) -> str:
+                state["live"] = False
+                return ""
+
+            with (
+                patch("omo_manager.omo_codex_stop.pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_codex_stop.process_start_ticks", side_effect=start_ticks),
+                patch("omo_manager.omo_codex_stop.guarded_tmux_sequence", side_effect=kill) as guarded,
+                patch("omo_manager.omo_codex_stop.tmux") as raw_tmux,
+            ):
+                codex_stop.kill_bound_and_write_close_proof(
+                    "vl:2", "%42", 4242, 999, proof, audit, secret, commitment,
+                    "done-live-no-mail-close", hashlib.sha256(audit_text.encode()).hexdigest(),
+                )
+            self.assertTrue(codex_stop.has_bound_close_proof(proof, commitment, hashlib.sha256(audit_text.encode()).hexdigest()))
+            self.assertFalse(done_live_close_started_path(audit).exists())
+        guarded.assert_called_once_with("vl:2", "%42", [["kill-pane", "-t", "%42"]], 4242)
+        raw_tmux.assert_not_called()
 
     def test_bound_close_accepts_lost_guard_marker_only_with_durable_proof(self) -> None:
         secret = "a" * 64
@@ -1422,9 +2052,7 @@ class CodexStopTests(unittest.TestCase):
                 patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=999),
                 patch("omo_manager.omo_codex_stop.has_bound_close_proof", return_value=True),
             ):
-                codex_stop.close_bound_tmux_target(
-                    "%42", lambda: True, "vl:2", "%42", str(proof), str(audit), secret, commitment, 4242, 999
-                )
+                codex_stop.close_bound_tmux_target("%42", lambda: True, "vl:2", "%42", str(proof), str(audit), secret, commitment, 4242, 999)
 
     def test_bound_close_rejects_lost_guard_marker_without_durable_proof(self) -> None:
         with (
@@ -1449,9 +2077,7 @@ class CodexStopTests(unittest.TestCase):
                 patch("omo_manager.omo_codex_stop.tmux") as tmux,
                 patch("omo_manager.omo_codex_stop.write_bound_close_proof") as writer,
             ):
-                codex_stop.kill_bound_and_write_close_proof(
-                    "vl:2", "%42", 4242, 999, proof, audit, secret, commitment
-                )
+                codex_stop.kill_bound_and_write_close_proof("vl:2", "%42", 4242, 999, proof, audit, secret, commitment)
         tmux.assert_called_once_with(["kill-pane", "-t", "%42"], check=True)
         writer.assert_called_once_with(proof, audit, secret, commitment)
 
@@ -1464,8 +2090,7 @@ class CodexStopTests(unittest.TestCase):
             audit = private / "park.yaml"
             proof = private / ".park.yaml.owner-stopped"
             audit.write_text(
-                "operation: park-unlinked\nstate: prepared\n"
-                f"close_proof_commitment: {'0' * 64}\n",
+                f"operation: park-unlinked\nstate: prepared\nclose_proof_commitment: {'0' * 64}\n",
                 encoding="utf-8",
             )
             audit.chmod(0o600)
@@ -1490,9 +2115,7 @@ class CodexStopTests(unittest.TestCase):
                 "old_target": "vl:2",
                 "old_pane": {"id": "%42", "pid": 4242, "start_ticks": 999},
             }
-            replacement_record["record_sha256"] = hashlib.sha256(
-                json.dumps(replacement_record, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest()
+            replacement_record["record_sha256"] = hashlib.sha256(json.dumps(replacement_record, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             replacement_bytes = (json.dumps(replacement_record, sort_keys=True, separators=(",", ":")) + "\n").encode()
             replacement.write_bytes(replacement_bytes)
             replacement.chmod(0o600)
