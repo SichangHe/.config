@@ -72,6 +72,7 @@ MODES = {
     "shared-absent-manager",
     "shared-live-worker",
     "live-manager-terminal-children",
+    "live-manager-exported-park",
 }
 PACKET_KEYS = {
     "schema", "mode", "root", "task", "target", "pane_id", "task_before_sha256",
@@ -207,6 +208,8 @@ def closed_todo(root: Path, task: Path, text: str, mode: str, target: str) -> st
             if mode == "absent-manager-previous"
             else {"current"}
             if mode == "absent-manager-current"
+            else {"current"}
+            if mode == "live-manager-exported-park"
             else {"current", "human pending"}
             if mode == "shared-live-worker"
             else {"current"}
@@ -217,12 +220,27 @@ def closed_todo(root: Path, task: Path, text: str, mode: str, target: str) -> st
         if lines[index].strip() != f"{ref} {target}":
             raise TaskFrontmatterError("closure requires one canonical targetful TODO row.")
         lines.pop(index)
-    previous = next(index for index, line in enumerate(lines) if line.rstrip("\r\n") == "previous:")
-    lines.insert(previous + 1, ref + "\n")
+    destination = "low priority" if mode == "live-manager-exported-park" else "previous"
+    destination_index = next(index for index, line in enumerate(lines) if line.rstrip("\r\n") == f"{destination}:")
+    lines.insert(destination_index + 1, ref + "\n")
     return "".join(lines)
 
 
 def closed_task(root: Path, task: Path, text: str, export: Path, export_sha256: str, mode: str) -> str:
+    if mode == "live-manager-exported-park":
+        blocker = f"work preserved in exported non-running custody {export}; SHA-256 {export_sha256}"
+        updated = update_frontmatter_status(text, "blocked", blocker, root).rstrip("\n")
+        result = f"{updated}\n\n(Source-1402 exported-agent park: {blocker}; exact bound pane closed)\n"
+        metadata = parse_task_metadata(result, root)
+        original = parse_task_metadata(text, root)
+        if (
+            metadata is None
+            or original is None
+            or metadata.status != "blocked"
+            or metadata.pending_task_items != original.pending_task_items
+        ):
+            raise TaskFrontmatterError("exported park did not preserve the blocked task queue.")
+        return result
     cleared = cleared_pending_task_text(text, root)
     updated = update_frontmatter_status(cleared, "done", "", root).rstrip("\n")
     pane_result = "exact bound pane closed" if mode == "live-manager-terminal-children" else "tmux unchanged"
@@ -407,6 +425,30 @@ def direct_children(root: Path, task: Path, target: str) -> list[dict[str, objec
     return sorted(result, key=lambda item: item["task"])
 
 
+def validate_terminal_absent_children(root: Path, children: list[dict[str, object]]) -> None:
+    """Require every exact bound child to be done, queue-empty, and absent."""
+
+    for child in children:
+        path = root / str(child["task"])
+        data, _ = read_regular_unbound(path)
+        metadata = parse_task_metadata(data.decode(), root)
+        if (
+            metadata is None
+            or sha256(data) != child["sha256"]
+            or metadata.status != "done"
+            or metadata.pending_task_items
+            or park_target_pane_id(metadata.runat) != ""
+        ):
+            raise TaskFrontmatterError("live manager has a nonterminal or live direct child.")
+
+
+def has_source1402_export_park_authority(excerpt: str) -> bool:
+    """Recognize the Human's exact document-all-work and close-all-agents instruction."""
+
+    normalized = " ".join(excerpt.casefold().split()).strip(" .!?")
+    return normalized == "make all the work documented and close all agents"
+
+
 STOP_EVIDENCE_KEYS = {
     "schema", "target", "pane_id", "pane_pid", "pane_start_ticks", "session_id",
     "sender_metadata", "sender_metadata_sha256", "sender_status", "sender_status_sha256",
@@ -529,7 +571,7 @@ def prepare(ns: argparse.Namespace) -> None:
             raise TaskFrontmatterError("protected sibling must stay inside the task root.") from exc
         lock_paths.add(protected_path)
     with root_membership_lock(root):
-        if ns.mode == "live-manager-terminal-children":
+        if ns.mode in {"live-manager-exported-park", "live-manager-terminal-children"}:
             ns.bound_children = direct_children(root, task, ns.target)
             lock_paths.update(root / child["task"] for child in ns.bound_children)
         else:
@@ -576,7 +618,10 @@ def prepare_locked(ns: argparse.Namespace, root: Path, task: Path, todo: Path) -
     )
     excerpt, locator = read_park_authority(status_args)
     envelope_identity = read_park_authority_envelope(status_args, excerpt, locator)
-    if not has_export_then_close_authority(excerpt):
+    if ns.mode == "live-manager-exported-park":
+        if not has_source1402_export_park_authority(excerpt):
+            raise TaskFrontmatterError("authority does not contain the exact Source-1402 export-and-park instruction.")
+    elif not has_export_then_close_authority(excerpt):
         raise TaskFrontmatterError("authority does not contain the complete export-then-close procedure.")
     validate_export(export_text, relative_task_ref(root, task), ns.task_sha256, metadata)
     if metadata.runat != ns.target:
@@ -594,6 +639,27 @@ def prepare_locked(ns: argparse.Namespace, root: Path, task: Path, todo: Path) -
     elif ns.mode == "absent-worker-unindexed":
         if metadata.status != "blocked" or metadata.is_manager or pane_id:
             raise TaskFrontmatterError("absent-worker closure shape does not match.")
+    elif ns.mode == "live-manager-exported-park":
+        current_state = inspect_target(ns.target)
+        identity = target_identity(ns.target, current_state)
+        owners = {relative_task_ref(root, path) for path in authoritative_active_target_task_paths(root, ns.target)}
+        if (
+            metadata.status != "long_running"
+            or not metadata.is_manager
+            or not metadata.pending_task_items
+            or pane_id != ns.pane_id
+            or current_state != "ready"
+            or identity != (ns.pane_id, ns.pane_pid, ns.pane_start_ticks)
+            or metadata.session_id != ns.session_id
+            or not ns.session_id
+            or owners != {relative_task_ref(root, task)}
+        ):
+            raise TaskFrontmatterError("live exported-manager park shape does not match.")
+        children = direct_children(root, task, ns.target)
+        if children != ns.bound_children:
+            raise TaskFrontmatterError("live exported-manager child identity changed before binding.")
+        validate_terminal_absent_children(root, children)
+        pane_pid, pane_start_ticks, session_id = ns.pane_pid, ns.pane_start_ticks, ns.session_id
     elif ns.mode == "live-manager-terminal-children":
         if metadata.status != "blocked" or not metadata.is_manager or metadata.pending_task_items or pane_id != ns.pane_id:
             raise TaskFrontmatterError("live terminal-child manager closure shape does not match.")
@@ -749,7 +815,7 @@ def execute(ns: argparse.Namespace) -> None:
         for child in children
     ):
         raise TaskFrontmatterError("closure packet child manifest is malformed.")
-    if packet["mode"] != "live-manager-terminal-children" and children:
+    if packet["mode"] not in {"live-manager-exported-park", "live-manager-terminal-children"} and children:
         raise TaskFrontmatterError("closure packet unexpectedly binds child tasks.")
     for child in children:
         child_path = (root / child["task"]).resolve(strict=True)
@@ -841,6 +907,26 @@ def execute(ns: argparse.Namespace) -> None:
                 for child in current_children
             ):
                 raise TaskFrontmatterError("live manager gained a nonterminal child.")
+        elif packet["mode"] == "live-manager-exported-park":
+            current_state = inspect_target(packet["target"])
+            live_identity = target_identity(packet["target"], current_state)
+            if live_identity != (packet["pane_id"], packet["pane_pid"], packet["pane_start_ticks"]) and not (
+                prepared_exists and live_identity == ("", 0, 0)
+            ):
+                raise TaskFrontmatterError("live exported-manager pane identity drifted.")
+            if live_identity != ("", 0, 0) and current_state != "ready":
+                raise TaskFrontmatterError("live exported-manager is no longer ready.")
+            current_children = direct_children(root, task, packet["target"])
+            if current_children != children:
+                raise TaskFrontmatterError("live exported-manager child identity drifted.")
+            validate_terminal_absent_children(root, current_children)
+            owners = {
+                relative_task_ref(root, path)
+                for path in authoritative_active_target_task_paths(root, packet["target"])
+            }
+            expected_owners = {packet["task"]}
+            if owners != expected_owners:
+                raise TaskFrontmatterError("live exported-manager ownership drifted.")
         elif packet["mode"] in {"shared-absent-manager", "shared-live-worker"}:
             owners = {relative_task_ref(root, path) for path in authoritative_active_target_task_paths(root, packet["target"])}
             expected_owners = (
@@ -862,13 +948,16 @@ def execute(ns: argparse.Namespace) -> None:
             if existing != audit_data:
                 raise TaskFrontmatterError("closure audit output is already occupied.")
             return
-        if packet["mode"] == "live-manager-terminal-children":
-            if park_target_pane_id(packet["target"]):
+        if packet["mode"] in {"live-manager-exported-park", "live-manager-terminal-children"}:
+            current_pane = park_target_pane_id(packet["target"])
+            if current_pane == packet["pane_id"]:
                 stop_target(
                     packet["target"], packet["pane_id"], packet["pane_pid"],
                     packet["pane_start_ticks"], packet["session_id"],
                 )
-            if park_target_pane_id(packet["target"]):
+            elif not (prepared_exists and current_pane == ""):
+                raise IndeterminateClose("live manager pane identity changed before reviewed close attempt.")
+            if park_target_pane_id(packet["target"]) != "":
                 raise IndeterminateClose("live manager pane remains after reviewed close attempt.")
         held_by_path = {Path(held.identity.path): held for held in held_inputs}
         if todo_sha == packet["todo_before_sha256"]:
@@ -890,7 +979,14 @@ def execute(ns: argparse.Namespace) -> None:
                 raise
             raise TaskFrontmatterError(f"task update failed after TODO update; rollback completed: {exc}") from exc
         verification_error = ""
-        if packet["mode"] == "live-manager-terminal-children":
+        if packet["mode"] == "live-manager-exported-park":
+            owners = {
+                relative_task_ref(root, path)
+                for path in authoritative_active_target_task_paths(root, packet["target"])
+            }
+            if park_target_pane_id(packet["target"]) != "" or owners != {packet["task"]}:
+                verification_error = "exported-manager target or ownership reappeared after park."
+        elif packet["mode"] == "live-manager-terminal-children":
             if park_target_pane_id(packet["target"]):
                 verification_error = "live manager target reappeared after closure."
         elif packet["mode"] in {"shared-absent-manager", "shared-live-worker"}:
