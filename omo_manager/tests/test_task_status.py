@@ -553,6 +553,76 @@ class TaskStatusTests(unittest.TestCase):
                 close_missing_target(args, task, text, task.stat())
             self.assertEqual("done", parse_task_metadata(task.read_text(), root).status)
 
+    def test_close_missing_target_accepts_source1398_export_then_close_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, _todo, _todo_text, args = self.write_close_missing_case(root)
+            authority = root / "manager_mail/close.txt"
+            source1398 = (
+                "Subject: decision\n\n"
+                "This sounds overly complicated. I don't understand the problem. What do you\n"
+                "mean the active tasks changed files Are you saying that task items went\n"
+                "from one task file to another? Why does it happen? Is it because another\n"
+                "agent is also cleaning up things to close agents you simply need to get all\n"
+                "their pending task items, write them down into another file, not\n"
+                "necessarily a task file, perhaps just a to do file. Then you simply close\n"
+                "that agent and that's it?\n"
+            )
+            authority.write_text(source1398)
+            authority.chmod(0o600)
+            excerpt = "".join(source1398.splitlines(keepends=True)[2:9])
+            envelope = root / "request_task.md"
+            envelope_text = (
+                '<human_instruction authoritative="true" source="manager_mail/close.txt:3-9">\n'
+                f"{excerpt}</human_instruction>\n"
+            )
+            envelope.write_text(envelope_text)
+            args = replace(
+                args,
+                authority_lines=(3, 9),
+                authority_sha256=hashlib.sha256(source1398.encode()).hexdigest(),
+                authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                close_missing_target(args, task, text, task.stat())
+            self.assertEqual("done", parse_task_metadata(task.read_text(), root).status)
+
+    def test_close_missing_target_rejects_unsafe_export_then_close_questions(self) -> None:
+        decisions = (
+            "Then you simply close that agent and that's it?",
+            "If you get all their pending task items, write them down into another file, then you simply close that agent?",
+            "Do not get all their pending task items, write them down into another file, then you simply close that agent.",
+            "Get all their pending task items, write them down into another file, then you simply close that agent only if the export is independently verified.",
+            "Get all their pending task items, write them down into another file, then you simply close that agent after a Human confirms it.",
+        )
+        for decision in decisions:
+            with self.subTest(decision=decision), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, _todo, _todo_text, args = self.write_close_missing_case(root)
+                authority = root / "manager_mail/close.txt"
+                unsafe = f"Subject: decision\n\n{decision}\n"
+                authority.write_text(unsafe)
+                authority.chmod(0o600)
+                excerpt = unsafe.splitlines(keepends=True)[2]
+                envelope = root / "request_task.md"
+                envelope_text = (
+                    '<human_instruction authoritative="true" source="manager_mail/close.txt:3-3">\n'
+                    f"{excerpt}</human_instruction>\n"
+                )
+                envelope.write_text(envelope_text)
+                args = replace(
+                    args,
+                    authority_lines=(3, 3),
+                    authority_sha256=hashlib.sha256(unsafe.encode()).hexdigest(),
+                    authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+                )
+                with (
+                    patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""),
+                    self.assertRaisesRegex(TaskFrontmatterError, "does not explicitly authorize"),
+                ):
+                    close_missing_target(args, task, text, task.stat())
+                self.assertEqual(text, task.read_text())
+
     def test_close_missing_target_accepts_crlf_authority_with_exact_digest_and_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

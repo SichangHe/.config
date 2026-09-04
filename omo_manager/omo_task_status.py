@@ -1941,6 +1941,32 @@ def validate_missing_close_recovery_audit(
     return record
 
 
+# 🧑 "get all their pending task items, write them down into another file ... Then you simply close that agent"
+def has_export_then_close_authority(excerpt: str) -> bool:
+    """Recognize the Human's complete export-before-close procedure."""
+
+    normalized = re.sub(r"\s+", " ", excerpt)
+    procedure = re.search(
+        r"\bget all their pending task items\b.{0,240}?"
+        r"\bwrite them down into another file\b.{0,240}?"
+        r"\bthen you simply close that agent\b",
+        normalized,
+        re.IGNORECASE,
+    )
+    if procedure is None:
+        return False
+    action = r"(?:get|write|close)\b"
+    condition = r"(?:only if|if|unless|whether|when|after|before|once|until|depending on|provided that|subject to)"
+    prohibited = re.search(
+        rf"\b(?:do not|don't|must not|never)\b[^.!?]*\b{action}"
+        rf"|\b{condition}\b[^.!?]*\b{action}"
+        rf"|\b{action}[^.!?]*\b{condition}\b",
+        normalized,
+        re.IGNORECASE,
+    )
+    return prohibited is None
+
+
 def close_missing_target(args: Args, path: Path, text: str, before: os.stat_result) -> None:
     """Close one exact absent blocked record without starting or stopping tmux."""
 
@@ -1976,7 +2002,7 @@ def close_missing_target(args: Args, path: Path, text: str, before: os.stat_resu
         )
         return not uncertain and re.search(direct_close, stripped, re.IGNORECASE) is not None
 
-    explicit_authority = any(
+    explicit_authority = has_export_then_close_authority(normalized_excerpt) or any(
         unambiguous_close_authority(sentence) for sentence in sentences
     )
     prohibited_authority = re.search(
