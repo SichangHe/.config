@@ -92,13 +92,13 @@ class ExportedAgentCloseTests(unittest.TestCase):
         target: str = "gone:1",
         queue: tuple[str, ...] = ("keep this",),
     ) -> Namespace:
-        is_manager = mode == "absent-manager-previous"
+        is_manager = mode in {"absent-manager-current", "absent-manager-previous"}
         status = "long_running" if is_manager else "blocked"
         task = self.root / "task.md"
         text = task_text(status, target, "mgr:1", is_manager, queue)
         task.write_text(text)
         self.export.write_text(export_text("task.md", text, self.root))
-        section = "previous" if is_manager else "current"
+        section = "previous" if mode == "absent-manager-previous" else "current"
         row = "" if mode == "absent-worker-unindexed" else f"task.md {target}\n"
         todo = "current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\n"
         if row:
@@ -178,6 +178,37 @@ class ExportedAgentCloseTests(unittest.TestCase):
         packet = json.loads(self.packet.read_text())
         self.assertEqual(packet["mode"], "absent-manager-previous")
         self.assertNotEqual(packet["task_before_sha256"], packet["task_after_sha256"])
+
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="")
+    def test_prepare_absent_manager_current(self, _pane: object) -> None:
+        args = self.write_case("absent-manager-current")
+        prepare(args)
+        packet = json.loads(self.packet.read_text())
+        self.assertEqual(packet["mode"], "absent-manager-current")
+        after_todo = base64.b64decode(packet["todo_after_base64"]).decode()
+        self.assertNotIn("task.md gone:1", after_todo)
+        self.assertIn("previous:\ntask.md\n", after_todo)
+
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="")
+    def test_rejects_absent_manager_current_from_previous(self, _pane: object) -> None:
+        args = self.write_case("absent-manager-current")
+        todo = (self.root / "TODO.md").read_text().replace(
+            "current:\ntask.md gone:1", "current:"
+        ).replace("previous:\n", "previous:\ntask.md gone:1\n")
+        (self.root / "TODO.md").write_text(todo)
+        args.todo_sha256 = digest(todo)
+        with self.assertRaisesRegex(TaskFrontmatterError, "wrong section"):
+            prepare(args)
+
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value=None)
+    def test_rejects_absent_manager_current_when_absence_probe_fails(self, _pane: object) -> None:
+        with self.assertRaisesRegex(TaskFrontmatterError, "shape does not match"):
+            prepare(self.write_case("absent-manager-current"))
+
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="")
+    def test_rejects_absent_manager_current_human_target(self, _pane: object) -> None:
+        with self.assertRaisesRegex(TaskFrontmatterError, "Human-owned"):
+            prepare(self.write_case("absent-manager-current", target="hwl:4"))
 
     @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="")
     def test_prepare_absent_worker_without_todo_row(self, _pane: object) -> None:
@@ -530,6 +561,44 @@ class ExportedAgentCloseTests(unittest.TestCase):
         self.assertEqual(metadata.pending_task_items, ())
         self.assertTrue(self.audit.is_file())
         self.assertEqual(pane.call_count, 3)
+
+    @patch("omo_manager.omo_exported_agent_close.authenticated_report", return_value={"producer_target": "review:1"})
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="")
+    def test_execute_and_replay_absent_manager_current(self, pane: object, _report: object) -> None:
+        args = self.write_case("absent-manager-current")
+        prepare(args)
+        packet_sha = digest(self.packet.read_text())
+        review = self.root / "private" / "review.json"
+        review.write_bytes(b"message:\n" + json.dumps({
+            "schema": "omo-exported-agent-close-review/v1",
+            "verdict": "PASS",
+            "packet_sha256": packet_sha,
+        }).encode())
+        execute(Namespace(packet=self.packet, packet_sha256=packet_sha, review=review, review_sha256=digest(review.read_text())))
+        execute(Namespace(packet=self.packet, packet_sha256=packet_sha, review=review, review_sha256=digest(review.read_text())))
+        metadata = parse_task_metadata((self.root / "task.md").read_text(), self.root)
+        self.assertEqual(metadata.status, "done")
+        self.assertEqual(metadata.pending_task_items, ())
+        self.assertEqual((self.root / "TODO.md").read_text().count("task.md"), 1)
+        self.assertEqual(pane.call_count, 4)
+
+    @patch("omo_manager.omo_exported_agent_close.authenticated_report", return_value={"producer_target": "review:1"})
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", side_effect=["", None])
+    def test_execute_absent_manager_current_rejects_failed_absence_probe(
+        self, _pane: object, _report: object
+    ) -> None:
+        args = self.write_case("absent-manager-current")
+        prepare(args)
+        packet_sha = digest(self.packet.read_text())
+        review = self.root / "private" / "review.json"
+        review.write_bytes(b"message:\n" + json.dumps({
+            "schema": "omo-exported-agent-close-review/v1",
+            "verdict": "PASS",
+            "packet_sha256": packet_sha,
+        }).encode())
+        with self.assertRaisesRegex(TaskFrontmatterError, "absent target became live"):
+            execute(Namespace(packet=self.packet, packet_sha256=packet_sha, review=review, review_sha256=digest(review.read_text())))
+        self.assertFalse(self.audit.exists())
 
     @patch("omo_manager.omo_exported_agent_close.authenticated_report", return_value={"producer_target": "review:1"})
     @patch("omo_manager.omo_exported_agent_close.stop_target")

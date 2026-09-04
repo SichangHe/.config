@@ -3,6 +3,7 @@
 `omo_exported_agent_close.py` closes task metadata only after Source-1398 queue custody was exported and verified.
 
 - supported shapes
+  - absent `long_running` manager indexed in `current`
   - absent `long_running` manager indexed in `previous`
   - absent blocked worker with no TODO row
   - blocked worker indexed in `current` or `human pending`, sharing a live target with one exact protected sibling
@@ -25,6 +26,7 @@
     - except the live-manager shape, whose authenticated execute step closes only the bound pane before metadata closure
   - rolls TODO back if the task write fails
 - exclusions
+  - Human-owned `h*` targets and absence-probe errors or ambiguity
   - shared-target managers whose target is live or whose exact protected sibling is not uniquely bound
   - live managers with an open queue, a nonterminal or changed child, or changed pane, process, or session identity
   - live managers without a terminal failed sender and independent non-destructive-recovery evidence for the unchanged fatal error

@@ -66,6 +66,7 @@ REVIEW_SCHEMA = "omo-exported-agent-close-review/v1"
 STOP_EVIDENCE_SCHEMA = "omo-exported-agent-close-stop-evidence/v1"
 # 🧑 "get all their pending task items, write them down into another file ... Then you simply close that agent"
 MODES = {
+    "absent-manager-current",
     "absent-manager-previous",
     "absent-worker-unindexed",
     "shared-absent-manager",
@@ -204,6 +205,8 @@ def closed_todo(root: Path, task: Path, text: str, mode: str, target: str) -> st
         allowed_sections = (
             {"previous"}
             if mode == "absent-manager-previous"
+            else {"current"}
+            if mode == "absent-manager-current"
             else {"current", "human pending"}
             if mode == "shared-live-worker"
             else {"current"}
@@ -558,6 +561,8 @@ def prepare_locked(ns: argparse.Namespace, root: Path, task: Path, todo: Path) -
     metadata = parse_task_metadata(task_text, root)
     if metadata is None or metadata.version != "v1.0.0" or has_pending_marker(task_text):
         raise TaskFrontmatterError("exported closure requires one canonical v1 task without a pending marker.")
+    if ns.target.partition(":")[0].startswith("h"):
+        raise TaskFrontmatterError("exported closure cannot modify a Human-owned target.")
     status_args = StatusArgs(
         root,
         ns.task,
@@ -583,8 +588,8 @@ def prepare_locked(ns: argparse.Namespace, root: Path, task: Path, todo: Path) -
     session_id = ""
     children: list[dict[str, object]] = []
     stop_evidence = None
-    if ns.mode == "absent-manager-previous":
-        if metadata.status != "long_running" or not metadata.is_manager or pane_id:
+    if ns.mode in {"absent-manager-current", "absent-manager-previous"}:
+        if metadata.status != "long_running" or not metadata.is_manager or pane_id != "":
             raise TaskFrontmatterError("absent-manager closure shape does not match.")
     elif ns.mode == "absent-worker-unindexed":
         if metadata.status != "blocked" or metadata.is_manager or pane_id:
@@ -708,6 +713,8 @@ def execute(ns: argparse.Namespace) -> None:
     if review_report["producer_target"] in {packet["target"], packet["destination_target"]}:
         raise TaskFrontmatterError("review producer is not independent of source and destination.")
     root = Path(packet["root"])
+    if packet["target"].partition(":")[0].startswith("h"):
+        raise TaskFrontmatterError("exported closure cannot modify a Human-owned target.")
     task = root / packet["task"]
     todo = root / "TODO.md"
     export = Path(packet["export"])
@@ -843,7 +850,7 @@ def execute(ns: argparse.Namespace) -> None:
             )
             if pane_id != packet["pane_id"] or owners != expected_owners:
                 raise TaskFrontmatterError("shared target or sibling ownership drifted.")
-        elif pane_id:
+        elif pane_id != "":
             raise TaskFrontmatterError("absent target became live.")
         after_task = decoded(packet["task_after_base64"])
         after_todo = decoded(packet["todo_after_base64"])
@@ -890,7 +897,7 @@ def execute(ns: argparse.Namespace) -> None:
             owners = {relative_task_ref(root, path) for path in authoritative_active_target_task_paths(root, packet["target"])}
             if park_target_pane_id(packet["target"]) != packet["pane_id"] or owners != {protected["task"]}:
                 verification_error = "shared target or surviving ownership changed after metadata-only closure."
-        elif park_target_pane_id(packet["target"]):
+        elif park_target_pane_id(packet["target"]) != "":
             verification_error = "absent target became live after metadata-only closure."
         if verification_error:
             restore_exact_after(task, packet["task_after_sha256"], task_data.decode())
