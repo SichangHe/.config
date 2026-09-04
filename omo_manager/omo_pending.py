@@ -48,6 +48,7 @@ class Args:
     notice_id: str = ""
     answer_subject_file: Path | None = None
     answer_message_file: Path | None = None
+    no_email: bool = False
 
 
 def pending_item_state(item: PendingTaskItem) -> str:
@@ -78,8 +79,20 @@ def parse_args(argv: list[str]) -> Args:
     )
     remove.add_argument("--item", action="append")
     remove.add_argument("--item-id")
-    remove.add_argument("--outcome", choices=("completed", "cancelled"))
+    remove.add_argument(
+        "--outcome",
+        choices=("completed", "cancelled"),
+        help="Required with --item-id and accepted as optional documentation with legacy --item.",
+    )
     remove.add_argument("--evidence", required=True)
+    remove.add_argument(
+        "--no-email",
+        action="store_true",
+        help=(
+            "For legacy --item removal only, remove the verified item without sending email. "
+            "This cannot be combined with answer-email options."
+        ),
+    )
     remove.add_argument("--answer-subject-file", type=Path, help="One-line email subject for the combined human answer.")
     remove.add_argument("--answer-message-file", type=Path, help="Email body for the combined human answer.")
     wake_ack = sub.add_parser("wake-ack", help="Acknowledge one durable ready-item notice.")
@@ -97,8 +110,10 @@ def parse_args(argv: list[str]) -> Args:
             parser.error("remove requires exactly one of --item or --item-id.")
         if parsed.item_id and not parsed.outcome:
             parser.error("remove with --item-id requires --outcome.")
-        if parsed.item and parsed.outcome:
-            parser.error("legacy --item removal does not accept --outcome.")
+        if parsed.no_email and parsed.item_id:
+            parser.error("--no-email is supported only for legacy --item removal.")
+        if parsed.no_email and (parsed.answer_subject_file or parsed.answer_message_file):
+            parser.error("--no-email cannot be combined with answer-email options.")
         if bool(parsed.answer_subject_file) != bool(parsed.answer_message_file):
             parser.error("remove requires both --answer-subject-file and --answer-message-file when either is used.")
         items = normalized_items(tuple(parsed.item or ()))
@@ -110,6 +125,7 @@ def parse_args(argv: list[str]) -> Args:
             outcome=parsed.outcome or "",
             answer_subject_file=parsed.answer_subject_file,
             answer_message_file=parsed.answer_message_file,
+            no_email=parsed.no_email,
         )
     if parsed.command == "wake-ack":
         return Args("wake-ack", notice_id=parsed.notice_id)
@@ -129,6 +145,8 @@ def human_answer(args: Args) -> tuple[str, str]:
 
 
 def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
+    if args.no_email and (args.item_id or args.answer_subject_file or args.answer_message_file):
+        raise ValueError("--no-email requires legacy --item removal without answer-email options")
     path = current_active_task(root)
     metadata = read_task_metadata(path, root)
     if metadata is None:
@@ -229,6 +247,10 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
             return 0
         updated, count = remove_pending_items(text, args.items)
         updated = append_comment(updated, pending_remove_evidence_comment(count, args.evidence))
+        if args.no_email:
+            replace_if_unchanged(path, updated, before)
+            print(f"removed {count} pending item(s) without email; verify each item was actually done or cancelled")
+            return 0
         email = plan_completion_email(
             root,
             path,

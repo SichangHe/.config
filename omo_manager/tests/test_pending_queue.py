@@ -101,6 +101,79 @@ class PendingQueueTests(unittest.TestCase):
             parse_args(["remove", "--help"])
         self.assertIn("answer a human question and remove its pending item with one email", " ".join(output.getvalue().split()))
 
+    def test_legacy_remove_no_email_preserves_evidence_without_mail_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text(task_text(items=("finish review",)), encoding="utf-8")
+            with patch("omo_manager.omo_pending.current_active_task", return_value=path), patch(
+                "omo_manager.omo_pending.plan_completion_email"
+            ) as plan, patch("omo_manager.omo_pending.require_owner_completion") as require:
+                self.assertEqual(
+                    0,
+                    run(
+                        Args(
+                            "remove",
+                            ("finish review",),
+                            evidence="review passed",
+                            outcome="completed",
+                            no_email=True,
+                        ),
+                        root,
+                    ),
+                )
+            plan.assert_not_called()
+            require.assert_not_called()
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("pending_task_items: []", text)
+            self.assertIn("verified removed pending item: review passed", text)
+
+    def test_legacy_remove_no_email_failure_does_not_call_mail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            original = task_text(items=("finish review",))
+            path.write_text(original, encoding="utf-8")
+            with patch("omo_manager.omo_pending.current_active_task", return_value=path), patch(
+                "omo_manager.omo_pending.plan_completion_email"
+            ) as plan, patch("omo_manager.omo_pending.require_owner_completion") as require:
+                with self.assertRaisesRegex(TaskFrontmatterError, "pending task item not found"):
+                    run(Args("remove", ("different item",), evidence="not applicable", no_email=True), root)
+            plan.assert_not_called()
+            require.assert_not_called()
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+
+    def test_legacy_remove_no_email_rejects_email_options(self) -> None:
+        for option in ("--answer-subject-file", "--answer-message-file"):
+            with self.subTest(option=option), self.assertRaises(SystemExit):
+                parse_args(
+                    [
+                        "remove",
+                        "--item",
+                        "finish review",
+                        "--evidence",
+                        "review passed",
+                        "--no-email",
+                        option,
+                        "answer.txt",
+                    ]
+                )
+
+    def test_legacy_remove_accepts_documented_outcome(self) -> None:
+        args = parse_args(
+            [
+                "remove",
+                "--item",
+                "finish review",
+                "--evidence",
+                "review passed",
+                "--outcome",
+                "completed",
+            ]
+        )
+        self.assertEqual("completed", args.outcome)
+        self.assertFalse(args.no_email)
+
     def test_remove_with_answer_files_sends_only_combined_email(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
