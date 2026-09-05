@@ -66,6 +66,7 @@ SOURCE_1140_APPROVAL_SHA256 = "a80ed239e1acbd07750c2f55202ec2d5a68e6bd53068ae9c1
 SOURCE_1179_APPROVAL_FILE = "85c5dff58359-1179.txt"
 SOURCE_1179_APPROVAL_QUOTE = "Trash the emails that I no longer need to read that are not read yet."
 SOURCE_1179_APPROVAL_SHA256 = "0c470c290d70d8cf66a95ba8fabce3d2881b4ca0edb866267f28eabc529ce6db"
+REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION = "v1.1.0"
 GMAIL_IDENTITY_UID_BATCH = 40
 GMAIL_THREAD_OR_BATCH = 32
 EXPORT_FULL_FETCH_ATTEMPTS = 2
@@ -282,6 +283,7 @@ class ScopedSource:
     gmail_msgid: str
     gmail_thrid: str
     raw_sha256: str
+    read_state: str = ""
 
 
 @dataclass(frozen=True)
@@ -292,6 +294,7 @@ class RetainedReplacement:
     raw_sha256: str
     body_bytes: int
     body_sha256: str
+    read_state: str
 
 
 @dataclass
@@ -329,19 +332,21 @@ class ExactRemovalEvidence:
 def parse_explicit_source(value: str, *, with_task: bool = False) -> ScopedSource:
     """Parse one in-memory source binding without creating evidence files."""
     fields = value.split(":")
-    expected_fields = 5 if with_task else 4
+    expected_fields = 6 if with_task else 5
     if len(fields) != expected_fields:
         prefix = "TASK-ID:" if with_task else ""
-        raise ValueError(f"explicit source must be {prefix}UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256")
+        raise ValueError(f"explicit source must be {prefix}UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256:READ-STATE")
     task_id = fields.pop(0) if with_task else ""
-    uid, gmail_msgid, gmail_thrid, raw_sha256 = fields
+    uid, gmail_msgid, gmail_thrid, raw_sha256, read_state = fields
     if with_task and (not task_id or tsv_value(task_id) != task_id):
         raise ValueError("explicit source task identity must be one nonempty line")
     if not uid.isdecimal() or not gmail_msgid.isdecimal() or not gmail_thrid.isdecimal():
         raise ValueError("explicit source UID and Gmail identities must be decimal")
     if not re.fullmatch(r"[0-9a-f]{64}", raw_sha256):
         raise ValueError("explicit source raw SHA-256 must be lowercase hexadecimal")
-    return ScopedSource(task_id, uid, gmail_msgid, gmail_thrid, raw_sha256)
+    if read_state not in {"read", "unread"}:
+        raise ValueError("explicit source read state must be read or unread")
+    return ScopedSource(task_id, uid, gmail_msgid, gmail_thrid, raw_sha256, read_state)
 
 
 def parse_explicit_context(value: str) -> ScopedSource:
@@ -360,16 +365,18 @@ def parse_explicit_context(value: str) -> ScopedSource:
 def parse_retained_replacement(value: str) -> RetainedReplacement:
     """Parse one reviewed retained replacement binding."""
     fields = value.split(":")
-    if len(fields) != 6:
-        raise ValueError("retained replacement must be UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256:BODY-BYTES:BODY-SHA256")
-    uid, gmail_msgid, gmail_thrid, raw_sha256, body_bytes, body_sha256 = fields
+    if len(fields) != 7:
+        raise ValueError("retained replacement must be UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256:BODY-BYTES:BODY-SHA256:READ-STATE")
+    uid, gmail_msgid, gmail_thrid, raw_sha256, body_bytes, body_sha256, read_state = fields
     if not uid.isdecimal() or not gmail_msgid.isdecimal() or not gmail_thrid.isdecimal() or not body_bytes.isdecimal():
         raise ValueError("retained replacement UID, Gmail identities, and body size must be decimal")
     if int(body_bytes) < 1:
         raise ValueError("retained replacement body size must be positive")
     if not re.fullmatch(r"[0-9a-f]{64}", raw_sha256) or not re.fullmatch(r"[0-9a-f]{64}", body_sha256):
         raise ValueError("retained replacement digests must be lowercase SHA-256")
-    return RetainedReplacement(uid, gmail_msgid, gmail_thrid, raw_sha256, int(body_bytes), body_sha256)
+    if read_state not in {"read", "unread"}:
+        raise ValueError("retained replacement read state must be read or unread")
+    return RetainedReplacement(uid, gmail_msgid, gmail_thrid, raw_sha256, int(body_bytes), body_sha256, read_state)
 
 
 def load_reviewed_scope(path: Path) -> ReviewedScope:
@@ -786,17 +793,44 @@ def imap_list_value(value: str) -> str:
     return " ".join(value[1:-1].split()) if value.startswith("(") and value.endswith(")") else ""
 
 
+IMAP_FLAG_ATOM_FORBIDDEN = frozenset('(){}%"\\]*')
+
+
+def valid_imap_flag_token(token: str) -> bool:
+    raw = token[1:] if token.startswith("\\") else token
+    return bool(raw) and all(0x20 < ord(char) < 0x7f and char not in IMAP_FLAG_ATOM_FORBIDDEN for char in raw)
+
+
+def required_flags_value(attributes: dict[str, str], error: str) -> str:
+    value = attributes.get("FLAGS")
+    if value is None or not value.startswith("(") or not value.endswith(")"):
+        raise RuntimeError(error)
+    inner = value[1:-1]
+    flags = inner.split(" ") if inner else []
+    if any(not valid_imap_flag_token(flag) for flag in flags):
+        raise RuntimeError(error)
+    return inner
+
+
+# 🧑 Source-1349: "bind exact source and retained-replacement read/unread flags ... compare them immediately before MOVE"
+def read_state_from_flags(flags: str) -> str:
+    return "read" if any(flag.casefold() == r"\seen" for flag in flags.split()) else "unread"
+
+
 def fetch_gmail_metadata_detail(client: imaplib.IMAP4_SSL, uid: str) -> GmailMetadata:
     typ, data = imap_uid(client, f"gmail-metadata-fetch uid={uid}", "fetch", uid, GMAIL_METADATA_FETCH)
     if typ != "OK":
         raise RuntimeError(f"IMAP Gmail metadata fetch failed: typ={typ}")
-    attributes = imap_fetch_attributes(imap_response_text(data))
+    attributes = imap_fetch_attributes(
+        imap_response_text(data),
+        reject_duplicate_keys=frozenset({"FLAGS", "X-GM-MSGID", "X-GM-THRID", "X-GM-LABELS"}),
+    )
     gmail_msgid = attributes.get("X-GM-MSGID", "")
     gmail_thrid = attributes.get("X-GM-THRID", "")
     return GmailMetadata(
         gmail_msgid if gmail_msgid.isdecimal() else "",
         gmail_thrid if gmail_thrid.isdecimal() else "",
-        imap_list_value(attributes.get("FLAGS", "")),
+        required_flags_value(attributes, "IMAP Gmail metadata fetch returned missing FLAGS"),
         imap_list_value(attributes.get("X-GM-LABELS", "")),
     )
 
@@ -821,7 +855,10 @@ def fetch_gmail_metadata_records(client: imaplib.IMAP4_SSL, uids: list[str]) -> 
             response = item[0]
         else:
             continue
-        attributes = imap_fetch_attributes(response.decode("utf-8", errors="replace"))
+        attributes = imap_fetch_attributes(
+            response.decode("utf-8", errors="replace"),
+            reject_duplicate_keys=frozenset({"UID", "FLAGS", "X-GM-MSGID", "X-GM-THRID", "X-GM-LABELS"}),
+        )
         uid = attributes.get("UID", "")
         message_id = attributes.get("X-GM-MSGID", "")
         thread_id = attributes.get("X-GM-THRID", "")
@@ -832,7 +869,7 @@ def fetch_gmail_metadata_records(client: imaplib.IMAP4_SSL, uids: list[str]) -> 
         metadata_by_uid[uid] = GmailMetadata(
             message_id,
             thread_id,
-            imap_list_value(attributes.get("FLAGS", "")),
+            required_flags_value(attributes, "IMAP Gmail metadata batch fetch returned missing FLAGS"),
             imap_list_value(attributes.get("X-GM-LABELS", "")),
         )
     if set(metadata_by_uid) != set(uids):
@@ -985,7 +1022,7 @@ def fetch_final_gate_records(client: imaplib.IMAP4_SSL, uids: list[str]) -> list
             message_text(msg),
             gmail_msgid,
             gmail_thrid,
-            imap_list_value(attributes.get("FLAGS", "")),
+            required_flags_value(attributes, "IMAP final-gate fetch returned missing FLAGS"),
             imap_list_value(attributes.get("X-GM-LABELS", "")),
             hashlib.sha256(item[1]).hexdigest(),
         )
@@ -2628,14 +2665,14 @@ def require_source_1140_direct_removal(
     for row in rows:
         values.setdefault(row["kind"], []).append(row["value"])
     expected_single = {
-        "version": ["v1.0.0"],
+        "version": [REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION],
         "approval_sha256": [expected_sha256],
         "task_id": [task_id],
         "preparer": [preparer],
         "reviewer": [reviewer],
         "verdict": ["PASS"],
     }
-    expected_sources = sorted(f"{source.uid}:{source.gmail_msgid}:{source.gmail_thrid}:{source.raw_sha256}" for source in sources)
+    expected_sources = sorted(f"{source.uid}:{source.gmail_msgid}:{source.gmail_thrid}:{source.raw_sha256}:{source.read_state}" for source in sources)
     expected_contexts = sorted(f"{context.gmail_msgid}:{context.gmail_thrid}:{context.raw_sha256}" for context in contexts)
     if (
         set(values) != {*expected_single, "source", "context"}
@@ -3716,6 +3753,7 @@ def retained_replacements_intact(
         and record.raw_sha256 == expected_by_uid[record.uid].raw_sha256
         and record.body_bytes == expected_by_uid[record.uid].body_bytes
         and hashlib.sha256(record.body.encode()).hexdigest() == expected_by_uid[record.uid].body_sha256
+        and read_state_from_flags(record.flags) == expected_by_uid[record.uid].read_state
         for record in records
     )
 
@@ -3745,7 +3783,8 @@ def final_inbox_bindings_intact(
     retained_by_uid = {item.uid: item for item in retained}
     sources_intact = all(
         is_manager_record(record, sender_email, recipient_email)
-        and (not require_unread_sources or r"\Seen" not in record.flags)
+        and read_state_from_flags(record.flags) == sources_by_uid[record.uid].read_state
+        and (not require_unread_sources or sources_by_uid[record.uid].read_state == "unread")
         and (
             record.gmail_msgid,
             record.gmail_thrid,
@@ -3765,6 +3804,7 @@ def final_inbox_bindings_intact(
             record.raw_sha256,
             record.body_bytes,
             hashlib.sha256(record.body.encode()).hexdigest(),
+            read_state_from_flags(record.flags),
         )
         == (
             retained_by_uid[record.uid].gmail_msgid,
@@ -3772,6 +3812,7 @@ def final_inbox_bindings_intact(
             retained_by_uid[record.uid].raw_sha256,
             retained_by_uid[record.uid].body_bytes,
             retained_by_uid[record.uid].body_sha256,
+            retained_by_uid[record.uid].read_state,
         )
         for record in (records_by_uid[uid] for uid in retained_by_uid)
     )
@@ -3802,6 +3843,7 @@ def observe_explicit_sources(
                 not is_manager_record(record, sender_email, recipient_email)
                 or (record.gmail_msgid, record.gmail_thrid, record.raw_sha256)
                 != (source.gmail_msgid, source.gmail_thrid, source.raw_sha256)
+                or read_state_from_flags(record.flags) != source.read_state
             ):
                 raise RuntimeError("explicit source identity, content, or boundary changed")
             observed[location].append(record)
@@ -4604,8 +4646,8 @@ This command moves the old message only from Inbox to recoverable Gmail Trash an
         "--source",
         action="append",
         default=[],
-        metavar="UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256",
-        help="Exact current source binding; repeat once per superseded message.",
+        metavar="UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256:READ-STATE",
+        help="Exact current source binding including read or unread state; repeat once per superseded message.",
     )
     direct.add_argument(
         "--context",
@@ -4638,8 +4680,8 @@ This command moves the old message only from Inbox to recoverable Gmail Trash an
         "--retained-replacement",
         action="append",
         default=[],
-        metavar="UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256:BODY-BYTES:BODY-SHA256",
-        help="Required reviewed retained Inbox binding; repeat once per --replacement-message-id. Omit only with --replacement-not-required. The final gate authenticates UIDVALIDITY separately.",
+        metavar="UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256:BODY-BYTES:BODY-SHA256:READ-STATE",
+        help="Required reviewed retained Inbox binding including read or unread state; repeat once per --replacement-message-id. Omit only with --replacement-not-required. The final gate authenticates UIDVALIDITY separately.",
     )
     direct.add_argument(
         "--runtime-bundle-sha256",

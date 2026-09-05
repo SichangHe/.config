@@ -74,6 +74,7 @@ from omo_manager.omo_manager_mail_compress import (
     export_batches,
     fetch_msg_bytes,
     fetch_gmail_metadata,
+    fetch_gmail_metadata_records,
     fetch_header_records,
     fetch_direct_thread_contexts,
     fetch_full_records,
@@ -90,6 +91,7 @@ from omo_manager.omo_manager_mail_compress import (
     local_python_import_closure_entries,
     mail_boundary,
     mailbox_exists,
+    observe_explicit_sources,
     parse_explicit_context,
     parse_explicit_source,
     parse_retained_replacement,
@@ -120,8 +122,8 @@ from omo_manager.omo_manager_mail_compress import (
 from omo_manager.omo_email_subject import subject_tmux_target
 
 TEST_RETAINED_BODY = "x"
-TEST_RETAINED_REPLACEMENT = f"18692:999:300:{'d' * 64}:1:{hashlib.sha256(TEST_RETAINED_BODY.encode()).hexdigest()}"
-TEST_RETAINED_REPLACEMENT_998 = f"18693:998:301:{'e' * 64}:1:{hashlib.sha256(TEST_RETAINED_BODY.encode()).hexdigest()}"
+TEST_RETAINED_REPLACEMENT = f"18692:999:300:{'d' * 64}:1:{hashlib.sha256(TEST_RETAINED_BODY.encode()).hexdigest()}:unread"
+TEST_RETAINED_REPLACEMENT_998 = f"18693:998:301:{'e' * 64}:1:{hashlib.sha256(TEST_RETAINED_BODY.encode()).hexdigest()}:unread"
 
 
 def cmd_trash_explicit(args: argparse.Namespace) -> int:
@@ -1132,7 +1134,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
     def test_unread_summary_refuses_missing_thread_identity_and_invalid_bounds(self) -> None:
         client = FakeClient({("fetch", "7", GMAIL_METADATA_BATCH_FETCH): ("OK", [b"7 (UID 7 FLAGS () X-GM-MSGID 100 X-GM-LABELS (\\Inbox))"])})
-        with self.assertRaisesRegex(RuntimeError, "incomplete or duplicate UIDs|requires Gmail thread identities"):
+        with self.assertRaisesRegex(RuntimeError, "incomplete or duplicate UIDs|requires Gmail thread identities|missing FLAGS"):
             unread_records_with_metadata(client, [MailRecord("7", "", "", "", "subject", "")])  # type: ignore[arg-type]
         with (
             patch("omo_manager.omo_manager_mail_compress.open_mailbox", side_effect=AssertionError("mailbox opened")),
@@ -1316,6 +1318,65 @@ with tempfile.TemporaryDirectory() as tmp:
     def test_fetch_gmail_metadata_keeps_identity_flags_and_labels(self) -> None:
         client = FakeClient({("fetch", "7", GMAIL_METADATA_FETCH): self.gmail_metadata("7", flags=r"\Flagged", labels=r"\Inbox \Important")})
         self.assertEqual(("100", "200", r"\Flagged", r"\Inbox \Important"), fetch_gmail_metadata(client, "7"))
+        client = FakeClient({("fetch", "7", GMAIL_METADATA_FETCH): self.gmail_metadata("7", flags=r"\seen", labels=r"\Inbox")})
+        self.assertEqual(r"\seen", fetch_gmail_metadata(client, "7")[2])
+
+    def test_fetch_gmail_metadata_rejects_missing_malformed_or_duplicate_flags(self) -> None:
+        responses = (
+            [b"7 (X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+            [b"7 (FLAGS NIL X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+            [b"7 (FLAGS ( \\Seen) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+            [b"7 (FLAGS (\\Seen ) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+            [b"7 (FLAGS (\\Seen  \\Flagged) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+            [b"7 (FLAGS (\\Seen\t\\Flagged) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+            [b'7 (FLAGS ("\\Seen") X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))'],
+            [b'7 (FLAGS (("\\Seen")) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))'],
+            [b'7 (FLAGS (Bad"Flag) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))'],
+            [b"7 (FLAGS (Bad}Flag) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+            [b"7 (FLAGS (\\) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+            [b"7 (FLAGS () FLAGS (\\Seen) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+        )
+        for response in responses:
+            with self.subTest(response=response):
+                client = FakeClient({("fetch", "7", GMAIL_METADATA_FETCH): ("OK", response)})
+                with self.assertRaisesRegex(RuntimeError, "missing FLAGS"):
+                    fetch_gmail_metadata(client, "7")
+
+    def test_fetch_gmail_metadata_batch_keeps_lowercase_and_mixed_case_seen_flags(self) -> None:
+        client = FakeClient(
+            {
+                ("fetch", "7,8", GMAIL_METADATA_BATCH_FETCH): (
+                    "OK",
+                    [
+                        b"1 (UID 7 FLAGS (\\seen) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))",
+                        b"2 (UID 8 FLAGS (\\SEEN) X-GM-MSGID 101 X-GM-THRID 201 X-GM-LABELS (\\Inbox))",
+                    ],
+                )
+            }
+        )
+        metadata = fetch_gmail_metadata_records(client, ["7", "8"])
+        self.assertEqual((r"\seen", r"\SEEN"), (metadata["7"].flags, metadata["8"].flags))
+
+    def test_fetch_gmail_metadata_batch_rejects_missing_malformed_or_duplicate_flags(self) -> None:
+        responses = (
+            [b"1 (UID 7 X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+            [b"1 (UID 7 FLAGS NIL X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+            [b"1 (UID 7 FLAGS ( \\Seen) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+            [b"1 (UID 7 FLAGS (\\Seen ) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+            [b"1 (UID 7 FLAGS (\\Seen  \\Flagged) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+            [b"1 (UID 7 FLAGS (\\Seen\t\\Flagged) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+            [b'1 (UID 7 FLAGS ("\\Seen") X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))'],
+            [b'1 (UID 7 FLAGS (("\\Seen")) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))'],
+            [b'1 (UID 7 FLAGS (Bad"Flag) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))'],
+            [b"1 (UID 7 FLAGS (Bad}Flag) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+            [b"1 (UID 7 FLAGS (\\) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+            [b"1 (UID 7 FLAGS () FLAGS (\\Seen) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+        )
+        for response in responses:
+            with self.subTest(response=response):
+                client = FakeClient({("fetch", "7", GMAIL_METADATA_BATCH_FETCH): ("OK", response)})
+                with self.assertRaisesRegex(RuntimeError, "missing FLAGS|incomplete or duplicate UIDs"):
+                    fetch_gmail_metadata_records(client, ["7"])
 
     def test_fetch_gmail_metadata_ignores_identity_text_inside_labels(self) -> None:
         client = FakeClient(
@@ -3055,18 +3116,20 @@ with tempfile.TemporaryDirectory() as tmp:
 
     def test_trash_explicit_accepts_only_exact_in_memory_source_bindings(self) -> None:
         digest = "a" * 64
-        source = parse_explicit_source(f"7:100:200:{digest}")
-        self.assertEqual(("7", "100", "200", digest), (source.uid, source.gmail_msgid, source.gmail_thrid, source.raw_sha256))
+        source = parse_explicit_source(f"7:100:200:{digest}:unread")
+        self.assertEqual(("7", "100", "200", digest, "unread"), (source.uid, source.gmail_msgid, source.gmail_thrid, source.raw_sha256, source.read_state))
         with self.assertRaisesRegex(ValueError, "UID:GMAIL-MSGID"):
             parse_explicit_source("7:100:200")
         with self.assertRaisesRegex(ValueError, "SHA-256"):
-            parse_explicit_source("7:100:200:not-a-digest")
+            parse_explicit_source("7:100:200:not-a-digest:unread")
+        with self.assertRaisesRegex(ValueError, "read state"):
+            parse_explicit_source(f"7:100:200:{digest}:maybe")
 
     def test_trash_explicit_help_requires_no_evidence_directory(self) -> None:
         helper = Path(__file__).parents[1] / "omo_manager_mail_compress.py"
         result = subprocess.run([helper, "trash-explicit", "--help"], capture_output=True, text=True, check=False)
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("--source UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256", result.stdout)
+        self.assertIn("--source UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256:READ-STATE", result.stdout)
         self.assertIn("--context GMAIL-MSGID:GMAIL-THRID:RAW-SHA256", result.stdout)
         self.assertIn("--route-resolution TASK-ID=SESSION:WINDOW[.PANE]", result.stdout)
         self.assertIn("--replacement-not-required", result.stdout)
@@ -3074,7 +3137,7 @@ with tempfile.TemporaryDirectory() as tmp:
         self.assertIn("--strict-fresh", result.stdout)
         self.assertIn("--recover-partial-move", result.stdout)
         self.assertIn("Explicit interrupted-operation recovery mode", result.stdout)
-        self.assertIn("--retained-replacement UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256:BODY-BYTES:BODY-SHA256", result.stdout)
+        self.assertIn("--retained-replacement UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256:BODY-BYTES:BODY-SHA256:READ-STATE", result.stdout)
         self.assertIn("--runtime-bundle-sha256 RUNTIME_BUNDLE_SHA256", result.stdout)
         self.assertIn("reviewed immutable .pyz runtime", result.stdout)
         self.assertIn("Required reviewed retained Inbox binding", result.stdout)
@@ -3088,7 +3151,7 @@ with tempfile.TemporaryDirectory() as tmp:
         digest = "a" * 64
         args = argparse.Namespace(
             yes=True,
-            source=[f"7:100:200:{digest}"],
+            source=[f"7:100:200:{digest}:unread"],
             context=[f"100:200:{digest}"],
             replacement_id=["<replacement@example.test>"],
             task_id=["task-a"],
@@ -3102,6 +3165,32 @@ with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(2, cmd_trash_explicit(args))
         open_mailbox_mock.assert_not_called()
 
+    def test_trash_explicit_production_parser_requires_source_read_state(self) -> None:
+        digest = "a" * 64
+        args = argparse.Namespace(
+            yes=True,
+            source=[f"7:100:200:{digest}"],
+            context=[f"100:200:{digest}"],
+            source_location_mode="strict-fresh",
+            replacement_id=["<replacement@example.test>"],
+            retained_replacement=[TEST_RETAINED_REPLACEMENT],
+            task_id=["task-a"],
+            preparer="owner-a",
+            reviewer="reviewer-b",
+            task_source=["1:100"],
+            route_resolution=[],
+            source_uidvalidity="1",
+            runtime_bundle_sha256="a" * 64,
+        )
+        with (
+            patch("omo_manager.omo_manager_mail_compress.validate_runtime_bundle"),
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox") as open_mailbox_mock,
+            redirect_stderr(io.StringIO()) as error,
+        ):
+            self.assertEqual(2, production_cmd_trash_explicit(args))
+        self.assertIn("READ-STATE", error.getvalue())
+        open_mailbox_mock.assert_not_called()
+
     def test_trash_explicit_replacement_free_requires_source_1140_before_mailbox(self) -> None:
         digest = "a" * 64
         args = type(
@@ -3109,7 +3198,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{digest}"],
+                "source": [f"7:100:200:{digest}:unread"],
                 "context": [f"100:200:{digest}"],
                 "replacement_id": [],
                 "replacement_not_required": True,
@@ -3128,9 +3217,61 @@ with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(2, cmd_trash_explicit(args))
         open_mailbox_mock.assert_not_called()
 
+    def test_trash_explicit_replacement_free_rejects_reviewed_read_state_drift_before_mailbox(self) -> None:
+        digest = "a" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail_root = root / "manager_mail"
+            mail_root.mkdir(mode=0o700)
+            approval = mail_root / SOURCE_1140_APPROVAL_FILE
+            approval.write_text(SOURCE_1140_APPROVAL_QUOTE, encoding="utf-8")
+            approval.chmod(0o600)
+            approval_sha256 = hashlib.sha256(approval.read_bytes()).hexdigest()
+            review = root / "review.tsv"
+            review.write_text(
+                "kind\tvalue\n"
+                "version\tv1.1.0\n"
+                f"approval_sha256\t{approval_sha256}\n"
+                "task_id\ttask-a\n"
+                "preparer\towner-a\n"
+                "reviewer\treviewer-b\n"
+                "verdict\tPASS\n"
+                f"source\t7:100:200:{digest}:read\n"
+                f"context\t100:200:{digest}\n",
+                encoding="utf-8",
+            )
+            review.chmod(0o600)
+            args = type(
+                "DirectArgs",
+                (),
+                {
+                    "yes": True,
+                    "source": [f"7:100:200:{digest}:unread"],
+                    "context": [f"100:200:{digest}"],
+                    "replacement_id": [],
+                    "replacement_not_required": True,
+                    "human_approval_file": approval,
+                    "human_approval_quote": SOURCE_1140_APPROVAL_QUOTE,
+                    "independent_review_file": review,
+                    "task_id": ["task-a"],
+                    "preparer": "owner-a",
+                    "reviewer": "reviewer-b",
+                    "task_source": ["1:100"],
+                    "route_resolution": [],
+                    "source_uidvalidity": "1",
+                },
+            )()
+            with (
+                patch("omo_manager.omo_manager_mail_compress.configured_work_logs_root", return_value=root),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_1140_APPROVAL_SHA256", approval_sha256),
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox") as open_mailbox_mock,
+            ):
+                self.assertEqual(2, cmd_trash_explicit(args))
+            open_mailbox_mock.assert_not_called()
+
     def test_source_1140_direct_removal_binds_exact_reviewed_operation(self) -> None:
         digest = "a" * 64
-        source = parse_explicit_source(f"7:100:200:{digest}")
+        source = parse_explicit_source(f"7:100:200:{digest}:unread")
         context = parse_explicit_context(f"100:200:{digest}")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3143,13 +3284,13 @@ with tempfile.TemporaryDirectory() as tmp:
             review = root / "review.tsv"
             review.write_text(
                 "kind\tvalue\n"
-                "version\tv1.0.0\n"
+                "version\tv1.1.0\n"
                 f"approval_sha256\t{approval_sha256}\n"
                 "task_id\ttask-a\n"
                 "preparer\towner-a\n"
                 "reviewer\treviewer-b\n"
                 "verdict\tPASS\n"
-                f"source\t7:100:200:{digest}\n"
+                f"source\t7:100:200:{digest}:unread\n"
                 f"context\t100:200:{digest}\n",
                 encoding="utf-8",
             )
@@ -3179,10 +3320,79 @@ with tempfile.TemporaryDirectory() as tmp:
                         "owner-a",
                         "reviewer-b",
                     )
+                review.write_text(
+                    "kind\tvalue\n"
+                    "version\tv1.1.0\n"
+                    f"approval_sha256\t{approval_sha256}\n"
+                    "task_id\ttask-a\n"
+                    "preparer\towner-a\n"
+                    "reviewer\treviewer-b\n"
+                    "verdict\tPASS\n"
+                    f"source\t7:100:200:{digest}\n"
+                    f"context\t100:200:{digest}\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(RuntimeError, "does not match the exact operation"):
+                    require_source_1140_direct_removal(
+                        approval,
+                        SOURCE_1140_APPROVAL_QUOTE,
+                        review,
+                        "task-a",
+                        [source],
+                        [context],
+                        "owner-a",
+                        "reviewer-b",
+                    )
+                review.write_text(
+                    "kind\tvalue\n"
+                    "version\tv1.1.0\n"
+                    f"approval_sha256\t{approval_sha256}\n"
+                    "task_id\ttask-a\n"
+                    "preparer\towner-a\n"
+                    "reviewer\treviewer-b\n"
+                    "verdict\tPASS\n"
+                    f"source\t7:100:200:{digest}:read\n"
+                    f"context\t100:200:{digest}\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(RuntimeError, "does not match the exact operation"):
+                    require_source_1140_direct_removal(
+                        approval,
+                        SOURCE_1140_APPROVAL_QUOTE,
+                        review,
+                        "task-a",
+                        [source],
+                        [context],
+                        "owner-a",
+                        "reviewer-b",
+                    )
+                review.write_text(
+                    "kind\tvalue\n"
+                    "version\tv1.0.0\n"
+                    f"approval_sha256\t{approval_sha256}\n"
+                    "task_id\ttask-a\n"
+                    "preparer\towner-a\n"
+                    "reviewer\treviewer-b\n"
+                    "verdict\tPASS\n"
+                    f"source\t7:100:200:{digest}:unread\n"
+                    f"context\t100:200:{digest}\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(RuntimeError, "does not match the exact operation"):
+                    require_source_1140_direct_removal(
+                        approval,
+                        SOURCE_1140_APPROVAL_QUOTE,
+                        review,
+                        "task-a",
+                        [source],
+                        [context],
+                        "owner-a",
+                        "reviewer-b",
+                    )
 
     def test_source_1179_direct_removal_binds_exact_reviewed_operation(self) -> None:
         digest = "a" * 64
-        source = parse_explicit_source(f"7:100:200:{digest}")
+        source = parse_explicit_source(f"7:100:200:{digest}:unread")
         context = parse_explicit_context(f"100:200:{digest}")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3195,13 +3405,13 @@ with tempfile.TemporaryDirectory() as tmp:
             review = root / "review.tsv"
             review.write_text(
                 "kind\tvalue\n"
-                "version\tv1.0.0\n"
+                "version\tv1.1.0\n"
                 f"approval_sha256\t{approval_sha256}\n"
                 "task_id\ttask-a\n"
                 "preparer\towner-a\n"
                 "reviewer\treviewer-b\n"
                 "verdict\tPASS\n"
-                f"source\t7:100:200:{digest}\n"
+                f"source\t7:100:200:{digest}:unread\n"
                 f"context\t100:200:{digest}\n",
                 encoding="utf-8",
             )
@@ -3233,7 +3443,7 @@ with tempfile.TemporaryDirectory() as tmp:
                     )
 
     def test_source_1179_final_binding_rejects_seen_source(self) -> None:
-        source_binding = parse_explicit_source(f"7:100:200:{'a' * 64}")
+        source_binding = parse_explicit_source(f"7:100:200:{'a' * 64}:unread")
         source = MailRecord(
             "7",
             "",
@@ -3395,7 +3605,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{digest}"],
+                "source": [f"7:100:200:{digest}:unread"],
                 "context": [f"100:200:{digest}"],
                 "replacement_id": "<replacement@example.test>",
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -3415,7 +3625,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{digest}"],
+                "source": [f"7:100:200:{digest}:unread"],
                 "context": [f"100:200:{digest}"],
                 "replacement_id": "<replacement@example.test>",
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -3456,8 +3666,8 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"task-b:7:100:200:{digest}"],
-                "context": [f"7:100:200:{digest}"],
+                "source": [f"task-b:7:100:200:{digest}:unread"],
+                "context": [f"7:100:200:{digest}:unread"],
                 "replacement_id": "<replacement@example.test>",
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": "task-a",
@@ -3535,11 +3745,44 @@ with tempfile.TemporaryDirectory() as tmp:
         ):
             self.assertFalse(direct_contexts_intact(FakeClient({}), "[Gmail]/All Mail", expected, allow_additive=False))
 
+    def test_batched_final_context_allows_unrelated_later_arrival_only_in_additive_mode(self) -> None:
+        source = MailRecord("7", "", "", "", "", "source", gmail_msgid="100", gmail_thrid="200", raw_sha256="a" * 64)
+        later = replace(source, uid="8", gmail_msgid="101", raw_sha256="b" * 64)
+        expected = {"200": [parse_explicit_context(f"100:200:{'a' * 64}")]}
+        with (
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+            patch("omo_manager.omo_manager_mail_compress.gmail_thread_uids_union", side_effect=[[], ["7", "8"]]),
+            patch("omo_manager.omo_manager_mail_compress.fetch_full_records", side_effect=[[], [source, later]]),
+        ):
+            self.assertTrue(
+                direct_contexts_intact(
+                    FakeClient({}),
+                    "[Gmail]/All Mail",
+                    expected,
+                    allow_additive=True,
+                    expected_nontrash_by_thread={"200": {"100"}},
+                )
+            )
+        with (
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+            patch("omo_manager.omo_manager_mail_compress.gmail_thread_uids_union", side_effect=[[], ["8"]]),
+            patch("omo_manager.omo_manager_mail_compress.fetch_full_records", side_effect=[[], [later]]),
+        ):
+            self.assertFalse(
+                direct_contexts_intact(
+                    FakeClient({}),
+                    "[Gmail]/All Mail",
+                    expected,
+                    allow_additive=True,
+                    expected_nontrash_by_thread={"200": {"100"}},
+                )
+            )
+
     def test_final_inbox_binding_rejects_source_archive_and_retained_drift(self) -> None:
-        source_binding = parse_explicit_source(f"7:100:200:{'a' * 64}")
+        source_binding = parse_explicit_source(f"7:100:200:{'a' * 64}:unread")
         retained_body = "retained\n"
         retained_binding = parse_retained_replacement(
-            f"8:300:400:{'b' * 64}:{len(retained_body.encode())}:{hashlib.sha256(retained_body.encode()).hexdigest()}"
+            f"8:300:400:{'b' * 64}:{len(retained_body.encode())}:{hashlib.sha256(retained_body.encode()).hexdigest()}:unread"
         )
         source = MailRecord(
             "7", "", "Agent <agent@example.test>", "Human <human@example.test>", "source", "source", "", "100", "200", raw_sha256="a" * 64
@@ -3557,12 +3800,45 @@ with tempfile.TemporaryDirectory() as tmp:
                 )
             )
         fetch_mock.assert_called_once()
+        with (
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+            patch("omo_manager.omo_manager_mail_compress.selected_uidvalidity", return_value="1"),
+            patch("omo_manager.omo_manager_mail_compress.fetch_final_gate_records", return_value=[replace(source, flags=r"\Seen"), retained]),
+        ):
+            self.assertFalse(
+                final_inbox_bindings_intact(
+                    client, "1", [source_binding], [retained_binding], "agent@example.test", "human@example.test"
+                )
+            )
+        with (
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+            patch("omo_manager.omo_manager_mail_compress.selected_uidvalidity", return_value="1"),
+            patch("omo_manager.omo_manager_mail_compress.fetch_final_gate_records", return_value=[replace(source, flags=r"\seen"), retained]),
+        ):
+            self.assertFalse(
+                final_inbox_bindings_intact(
+                    client, "1", [source_binding], [retained_binding], "agent@example.test", "human@example.test"
+                )
+            )
+        with (
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+            patch("omo_manager.omo_manager_mail_compress.selected_uidvalidity", return_value="1"),
+            patch("omo_manager.omo_manager_mail_compress.fetch_final_gate_records", return_value=[replace(source, flags=r"\SEEN"), retained]),
+        ):
+            self.assertFalse(
+                final_inbox_bindings_intact(
+                    client, "1", [source_binding], [retained_binding], "agent@example.test", "human@example.test"
+                )
+            )
         retained_drifts = (
             replace(retained, gmail_msgid="301"),
             replace(retained, gmail_thrid="401"),
             replace(retained, raw_sha256="c" * 64),
             replace(retained, body=f"{retained_body}x"),
             replace(retained, body=retained_body.upper()),
+            replace(retained, flags=r"\Seen"),
+            replace(retained, flags=r"\seen"),
+            replace(retained, flags=r"\SEEN"),
         )
         for changed in retained_drifts:
             with (
@@ -3577,13 +3853,40 @@ with tempfile.TemporaryDirectory() as tmp:
                     )
                 )
 
+    def test_observe_explicit_sources_rejects_source_read_state_drift(self) -> None:
+        source_binding = parse_explicit_source(f"7:100:200:{'a' * 64}:unread")
+        changed = MailRecord(
+            "7",
+            "",
+            "Agent <agent@example.test>",
+            "Human <human@example.test>",
+            "source",
+            "source",
+            gmail_msgid="100",
+            gmail_thrid="200",
+            flags=r"\Seen",
+            raw_sha256="a" * 64,
+        )
+        with (
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+            patch("omo_manager.omo_manager_mail_compress.gmail_message_uids", side_effect=[["7"], []]),
+            patch("omo_manager.omo_manager_mail_compress.fetch_record", return_value=changed),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "identity, content, or boundary changed"):
+                observe_explicit_sources(
+                    FakeClient({}),
+                    [source_binding],
+                    "agent@example.test",
+                    "human@example.test",
+                )
+
     def test_strict_fresh_source_location_gate_requires_exact_inbox_set_before_move(self) -> None:
         first = MailRecord("7", "", "Agent", "Human", "source-a", "a", gmail_msgid="100", gmail_thrid="200", raw_sha256="a" * 64)
         second = MailRecord("9", "", "Agent", "Human", "source-b", "b", gmail_msgid="101", gmail_thrid="200", raw_sha256="b" * 64)
         first_trash = replace(first, uid="70")
         second_trash = replace(second, uid="90")
         extra = replace(second, uid="11", gmail_msgid="102")
-        sources = [parse_explicit_source(f"7:100:200:{'a' * 64}"), parse_explicit_source(f"9:101:200:{'b' * 64}")]
+        sources = [parse_explicit_source(f"7:100:200:{'a' * 64}:unread"), parse_explicit_source(f"9:101:200:{'b' * 64}:unread")]
         cases = (
             ("exact", [first, second], [], True),
             ("first-already-trash", [second], [first_trash], False),
@@ -3597,7 +3900,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 self.assertEqual(intact, strict_fresh_source_locations_intact(sources, inbox, trash))
                 args = argparse.Namespace(
                     yes=True,
-                    source=[f"7:100:200:{'a' * 64}", f"9:101:200:{'b' * 64}"],
+                    source=[f"7:100:200:{'a' * 64}:unread", f"9:101:200:{'b' * 64}:unread"],
                     context=[f"100:200:{'a' * 64}", f"101:200:{'b' * 64}"],
                     source_location_mode="strict-fresh",
                     replacement_id=["<replacement@example.test>"],
@@ -3679,6 +3982,17 @@ with tempfile.TemporaryDirectory() as tmp:
         raw = b"From: Agent <agent@example.test>\r\nTo: Human <human@example.test>\r\n\r\nbody\r\n"
         responses = (
             [(b"1 (UID 7 BODY[] {80}", raw), b")"],
+            [(b"1 (UID 7 X-GM-MSGID 300 X-GM-THRID 400 X-GM-LABELS (\\Inbox) BODY[] {80}", raw), b")"],
+            [(b"1 (UID 7 FLAGS NIL X-GM-MSGID 300 X-GM-THRID 400 X-GM-LABELS (\\Inbox) BODY[] {80}", raw), b")"],
+            [(b"1 (UID 7 FLAGS ( \\Seen) X-GM-MSGID 300 X-GM-THRID 400 X-GM-LABELS (\\Inbox) BODY[] {80}", raw), b")"],
+            [(b"1 (UID 7 FLAGS (\\Seen ) X-GM-MSGID 300 X-GM-THRID 400 X-GM-LABELS (\\Inbox) BODY[] {80}", raw), b")"],
+            [(b"1 (UID 7 FLAGS (\\Seen  \\Flagged) X-GM-MSGID 300 X-GM-THRID 400 X-GM-LABELS (\\Inbox) BODY[] {80}", raw), b")"],
+            [(b"1 (UID 7 FLAGS (\\Seen\t\\Flagged) X-GM-MSGID 300 X-GM-THRID 400 X-GM-LABELS (\\Inbox) BODY[] {80}", raw), b")"],
+            [(b'1 (UID 7 FLAGS ("\\Seen") X-GM-MSGID 300 X-GM-THRID 400 X-GM-LABELS (\\Inbox) BODY[] {80}', raw), b")"],
+            [(b'1 (UID 7 FLAGS (("\\Seen")) X-GM-MSGID 300 X-GM-THRID 400 X-GM-LABELS (\\Inbox) BODY[] {80}', raw), b")"],
+            [(b'1 (UID 7 FLAGS (Bad"Flag) X-GM-MSGID 300 X-GM-THRID 400 X-GM-LABELS (\\Inbox) BODY[] {80}', raw), b")"],
+            [(b"1 (UID 7 FLAGS (Bad}Flag) X-GM-MSGID 300 X-GM-THRID 400 X-GM-LABELS (\\Inbox) BODY[] {80}", raw), b")"],
+            [(b"1 (UID 7 FLAGS (\\) X-GM-MSGID 300 X-GM-THRID 400 X-GM-LABELS (\\Inbox) BODY[] {80}", raw), b")"],
             [
                 (b"1 (UID 7 X-GM-MSGID 300 X-GM-THRID 400 BODY[] {80}", raw),
                 b")",
@@ -3699,25 +4013,37 @@ with tempfile.TemporaryDirectory() as tmp:
             (
                 "18692:1874858195211945940:1874832269607972216:"
                 "796701fadec87d3e2b2399a6f50a49d98274259d63a2b73b11e437082742829f:3708:"
-                "d1ecf9c36d114f29b7ea837d967f101cac2838c121314318b9a1bd0effa7c897",
-                ("18692", "1874858195211945940", "1874832269607972216", 3708),
+                "d1ecf9c36d114f29b7ea837d967f101cac2838c121314318b9a1bd0effa7c897:unread",
+                ("18692", "1874858195211945940", "1874832269607972216", 3708, "unread"),
             ),
             (
                 "18693:1874860920982136423:1874844935645274852:"
                 "753ecf258f29155a4deb851076cc5f67085c921a4237af89f3a8038c83e21969:7627:"
-                "c921eb8b19440fe2a473498db2621976d887346ecf0ba8448e028cbc9ba0722a",
-                ("18693", "1874860920982136423", "1874844935645274852", 7627),
+                "c921eb8b19440fe2a473498db2621976d887346ecf0ba8448e028cbc9ba0722a:read",
+                ("18693", "1874860920982136423", "1874844935645274852", 7627, "read"),
             ),
         )
         for value, expected in bindings:
             with self.subTest(uid=expected[0]):
                 binding = parse_retained_replacement(value)
-                self.assertEqual(expected, (binding.uid, binding.gmail_msgid, binding.gmail_thrid, binding.body_bytes))
+                self.assertEqual(expected, (binding.uid, binding.gmail_msgid, binding.gmail_thrid, binding.body_bytes, binding.read_state))
+        with self.assertRaisesRegex(ValueError, "READ-STATE"):
+            parse_retained_replacement(
+                "18692:1874858195211945940:1874832269607972216:"
+                "796701fadec87d3e2b2399a6f50a49d98274259d63a2b73b11e437082742829f:3708:"
+                "d1ecf9c36d114f29b7ea837d967f101cac2838c121314318b9a1bd0effa7c897"
+            )
+        with self.assertRaisesRegex(ValueError, "read state"):
+            parse_retained_replacement(
+                "18692:1874858195211945940:1874832269607972216:"
+                "796701fadec87d3e2b2399a6f50a49d98274259d63a2b73b11e437082742829f:3708:"
+                "d1ecf9c36d114f29b7ea837d967f101cac2838c121314318b9a1bd0effa7c897:maybe"
+            )
 
     def test_retained_replacement_gate_rejects_every_exact_binding_drift(self) -> None:
         body = "reviewed replacement\n"
         binding = parse_retained_replacement(
-            f"18692:300:400:{'a' * 64}:{len(body.encode())}:{hashlib.sha256(body.encode()).hexdigest()}"
+            f"18692:300:400:{'a' * 64}:{len(body.encode())}:{hashlib.sha256(body.encode()).hexdigest()}:unread"
         )
         exact = MailRecord(
             binding.uid,
@@ -3738,6 +4064,7 @@ with tempfile.TemporaryDirectory() as tmp:
             "raw-digest": ([binding.uid], [replace(exact, raw_sha256="b" * 64)], binding),
             "body-size": ([binding.uid], [exact], replace(binding, body_bytes=binding.body_bytes + 1)),
             "body-digest": ([binding.uid], [exact], replace(binding, body_sha256="b" * 64)),
+            "read-state": ([binding.uid], [replace(exact, flags=r"\Seen")], binding),
         }
         client = FakeClient({})
         with (
@@ -3766,7 +4093,7 @@ with tempfile.TemporaryDirectory() as tmp:
             raw_sha256="a" * 64,
         )
         body = "reviewed replacement\n"
-        retained_value = f"18692:300:400:{'b' * 64}:{len(body.encode())}:{hashlib.sha256(body.encode()).hexdigest()}"
+        retained_value = f"18692:300:400:{'b' * 64}:{len(body.encode())}:{hashlib.sha256(body.encode()).hexdigest()}:unread"
         retained = MailRecord(
             "18692",
             "",
@@ -3782,7 +4109,7 @@ with tempfile.TemporaryDirectory() as tmp:
         trashed = replace(source, uid="70")
         args = argparse.Namespace(
             yes=True,
-            source=[f"7:100:200:{'a' * 64}"],
+            source=[f"7:100:200:{'a' * 64}:unread"],
             context=[f"100:200:{'a' * 64}"],
             replacement_id=["<replacement@example.test>"],
             retained_replacement=[retained_value],
@@ -3855,7 +4182,7 @@ with tempfile.TemporaryDirectory() as tmp:
         )
         body = "reviewed replacement\n"
         body_sha256 = hashlib.sha256(body.encode()).hexdigest()
-        retained_value = f"18692:300:400:{'b' * 64}:{len(body.encode())}:{body_sha256}"
+        retained_value = f"18692:300:400:{'b' * 64}:{len(body.encode())}:{body_sha256}:unread"
         exact = MailRecord(
             "18692",
             "",
@@ -3869,20 +4196,24 @@ with tempfile.TemporaryDirectory() as tmp:
             raw_sha256="b" * 64,
         )
         cases = {
-            "source-archive": (exact, False, True, None),
-            "uid-absence": (exact, True, False, None),
-            "uidvalidity": (exact, False, False, ["1", "1", "1", "2"]),
-            "gmail-message": (replace(exact, gmail_msgid="301"), False, False, None),
-            "gmail-thread": (replace(exact, gmail_thrid="401"), False, False, None),
-            "raw-digest": (replace(exact, raw_sha256="c" * 64), False, False, None),
-            "body-size": (replace(exact, body=f"{body}x"), False, False, None),
-            "body-digest": (replace(exact, body=body.upper()), False, False, None),
+            "source-archive": (source, exact, False, True, None),
+            "source-read-state": (replace(source, flags=r"\Seen"), exact, False, False, None),
+            "uid-absence": (source, exact, True, False, None),
+            "uidvalidity": (source, exact, False, False, ["1", "1", "1", "2"]),
+            "gmail-message": (source, replace(exact, gmail_msgid="301"), False, False, None),
+            "gmail-thread": (source, replace(exact, gmail_thrid="401"), False, False, None),
+            "raw-digest": (source, replace(exact, raw_sha256="c" * 64), False, False, None),
+            "body-size": (source, replace(exact, body=f"{body}x"), False, False, None),
+            "body-digest": (source, replace(exact, body=body.upper()), False, False, None),
+            "retained-read-state": (source, replace(exact, flags=r"\Seen"), False, False, None),
+            "retained-read-state-lowercase": (source, replace(exact, flags=r"\seen"), False, False, None),
+            "retained-read-state-uppercase": (source, replace(exact, flags=r"\SEEN"), False, False, None),
         }
-        for name, (retained, absent, archived, uidvalidities) in cases.items():
+        for name, (final_source, retained, absent, archived, uidvalidities) in cases.items():
             with self.subTest(name=name):
                 args = argparse.Namespace(
                     yes=True,
-                    source=[f"7:100:200:{'a' * 64}"],
+                    source=[f"7:100:200:{'a' * 64}:unread"],
                     context=[f"100:200:{'a' * 64}"],
                     replacement_id=["<replacement@example.test>"],
                     retained_replacement=[retained_value],
@@ -3903,7 +4234,7 @@ with tempfile.TemporaryDirectory() as tmp:
                     return [uid for uid in uids if not (absent and uid == "18692") and not (archived and uid == "7")]
 
                 def final_records(_client: FakeClient, _uids: list[str]) -> list[MailRecord]:
-                    return [record for record in (source, retained) if not (absent and record.uid == "18692") and not (archived and record.uid == "7")]
+                    return [record for record in (final_source, retained) if not (absent and record.uid == "18692") and not (archived and record.uid == "7")]
 
                 def context_gate(*_args: object, observed: object = None, **_kwargs: object) -> bool:
                     assert callable(observed)
@@ -3945,6 +4276,79 @@ with tempfile.TemporaryDirectory() as tmp:
                 self.assertIn("final_gate_passed=0", output.getvalue())
                 self.assertIn("move_attempted=0", output.getvalue())
 
+    def test_trash_explicit_rejects_malformed_final_flags_before_move(self) -> None:
+        digest = "a" * 64
+        raw = b"From: Agent <agent@example.test>\r\nTo: Human <human@example.test>\r\nSubject: source\r\nMessage-ID: <source@example.test>\r\n\r\nbody\r\n"
+        cases = {
+            "quoted": b'1 (UID 7 FLAGS ("\\Seen") X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox) BODY[] {120}',
+            "nested": b'1 (UID 7 FLAGS (("\\Seen")) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox) BODY[] {120}',
+            "doubled-space": b"1 (UID 7 FLAGS (\\Seen  \\Flagged) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox) BODY[] {120}",
+            "atom-special": b"1 (UID 7 FLAGS (Bad}Flag) X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox) BODY[] {120}",
+        }
+        for name, metadata in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                mail_root = root / "manager_mail"
+                mail_root.mkdir(mode=0o700)
+                approval = mail_root / SOURCE_1140_APPROVAL_FILE
+                approval.write_text(SOURCE_1140_APPROVAL_QUOTE, encoding="utf-8")
+                approval.chmod(0o600)
+                approval_sha256 = hashlib.sha256(approval.read_bytes()).hexdigest()
+                review = root / "review.tsv"
+                review.write_text(
+                    "kind\tvalue\n"
+                    "version\tv1.1.0\n"
+                    f"approval_sha256\t{approval_sha256}\n"
+                    "task_id\ttask-a\n"
+                    "preparer\towner-a\n"
+                    "reviewer\treviewer-b\n"
+                    "verdict\tPASS\n"
+                    f"source\t7:100:200:{digest}:unread\n"
+                    f"context\t100:200:{digest}\n",
+                    encoding="utf-8",
+                )
+                review.chmod(0o600)
+                source = MailRecord("7", "", "Agent <agent@example.test>", "Human <human@example.test>", "source", "msg", gmail_msgid="100", gmail_thrid="200", raw_sha256=digest)
+                client = FakeClient({})
+                final_context_client = FakeClient({("fetch", "7", FINAL_GATE_FETCH): ("OK", [(metadata, raw), b")"])})
+                args = argparse.Namespace(
+                    yes=True,
+                    source=[f"7:100:200:{digest}:unread"],
+                    context=[f"100:200:{digest}"],
+                    replacement_id=[],
+                    replacement_not_required=True,
+                    human_approval_file=approval,
+                    human_approval_quote=SOURCE_1140_APPROVAL_QUOTE,
+                    independent_review_file=review,
+                    task_id=["task-a"],
+                    preparer="owner-a",
+                    reviewer="reviewer-b",
+                    task_source=["1:100"],
+                    route_resolution=[],
+                    source_uidvalidity="1",
+                )
+                with (
+                    patch("omo_manager.omo_manager_mail_compress.configured_work_logs_root", return_value=root),
+                    patch("omo_manager.omo_manager_mail_compress.SOURCE_1140_APPROVAL_SHA256", approval_sha256),
+                    patch("omo_manager.omo_manager_mail_compress.open_mailbox", side_effect=[(client, {}), (final_context_client, {})]),
+                    patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+                    patch("omo_manager.omo_manager_mail_compress.selected_uidvalidity", return_value="1"),
+                    patch("omo_manager.omo_manager_mail_compress.mailbox_exists", return_value=True),
+                    patch("omo_manager.omo_manager_mail_compress.special_use_mailboxes", return_value={r"\All": "[Gmail]/All Mail", r"\Sent": "[Gmail]/Sent Mail"}),
+                    patch("omo_manager.omo_manager_mail_compress.observe_explicit_sources", side_effect=[([source], []), ([source], [])]),
+                    patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [source]}),
+                    patch("omo_manager.omo_manager_mail_compress.direct_context_intact", return_value=True),
+                    patch("omo_manager.omo_manager_mail_compress.direct_contexts_intact", return_value=True),
+                    patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+                    patch("omo_manager.omo_manager_mail_compress.inbox_subset", side_effect=lambda _client, uids: list(uids)),
+                    redirect_stdout(io.StringIO()) as output,
+                ):
+                    self.assertEqual(1, cmd_trash_explicit(args))
+                self.assertEqual([("fetch", "7", FINAL_GATE_FETCH)], final_context_client.uid_calls)
+                self.assertFalse(any(call and call[0] == "MOVE" for call in client.uid_calls))
+                self.assertIn("final_gate_passed=0", output.getvalue())
+                self.assertIn("move_attempted=0", output.getvalue())
+
     def test_trash_explicit_rejects_missing_conflicting_or_wrong_sender_target(self) -> None:
         raw_sha256 = "a" * 64
         other_sha256 = "b" * 64
@@ -3973,7 +4377,7 @@ with tempfile.TemporaryDirectory() as tmp:
                     (),
                     {
                         "yes": True,
-                        "source": [f"7:100:200:{raw_sha256}"],
+                        "source": [f"7:100:200:{raw_sha256}:unread"],
                         "context": context_args,
                         "replacement_id": "<replacement@example.test>",
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -4023,7 +4427,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{raw_sha256}", f"9:102:201:{'c' * 64}"],
+                "source": [f"7:100:200:{raw_sha256}:unread", f"9:102:201:{'c' * 64}:unread"],
                 "context": [f"100:200:{raw_sha256}", f"101:200:{prior_sha256}", f"102:201:{'c' * 64}"],
                 "replacement_id": "<replacement@example.test>",
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -4107,7 +4511,7 @@ with tempfile.TemporaryDirectory() as tmp:
         )
         args = argparse.Namespace(
             yes=True,
-            source=[f"7:100:200:{raw_sha256}"],
+            source=[f"7:100:200:{raw_sha256}:unread"],
             context=[f"100:200:{raw_sha256}"],
             replacement_id=[],
             replacement_not_required=True,
@@ -4188,7 +4592,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{raw_sha256}"],
+                "source": [f"7:100:200:{raw_sha256}:unread"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": "<replacement@example.test>",
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -4243,7 +4647,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{raw_sha256}"],
+                "source": [f"7:100:200:{raw_sha256}:unread"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": "<replacement@example.test>",
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -4295,6 +4699,76 @@ with tempfile.TemporaryDirectory() as tmp:
         self.assertIn("post_move_reconciled=0", output.getvalue())
         self.assertEqual(1, imap_uid_mock.call_count)
 
+    def test_trash_explicit_post_move_retained_read_state_drift_fails_reconciliation(self) -> None:
+        raw_sha256 = "a" * 64
+        source = MailRecord(
+            "7",
+            "",
+            "Agent <agent@example.test>",
+            "Human <human@example.test>",
+            "[worker:0] complete",
+            "msg-a",
+            gmail_msgid="100",
+            gmail_thrid="200",
+            raw_sha256=raw_sha256,
+        )
+        retained = MailRecord(
+            "18692",
+            "",
+            "Agent",
+            "Human",
+            "[worker:0] replacement",
+            "x",
+            TEST_RETAINED_BODY,
+            "999",
+            "300",
+            flags=r"\Seen",
+            raw_sha256="d" * 64,
+        )
+        trashed = replace(source, uid="70")
+        args = type(
+            "DirectArgs",
+            (),
+            {
+                "yes": True,
+                "source": [f"7:100:200:{raw_sha256}:unread"],
+                "context": [f"100:200:{raw_sha256}"],
+                "replacement_id": "<replacement@example.test>",
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
+                "task_id": "task-a",
+                "preparer": "owner-a",
+                "reviewer": "reviewer-b",
+                "task_source": ["1:100"],
+                "source_uidvalidity": "1",
+            },
+        )()
+        client = FakeClient({})
+        with (
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {})),
+            patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            patch("omo_manager.omo_manager_mail_compress.selected_uidvalidity", return_value="1"),
+            patch("omo_manager.omo_manager_mail_compress.mailbox_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.special_use_mailboxes", return_value={r"\All": "[Gmail]/All Mail", r"\Sent": "[Gmail]/Sent Mail"}),
+            patch("omo_manager.omo_manager_mail_compress.observe_explicit_sources", side_effect=[([source], []), ([source], []), ([], [trashed])]),
+            patch("omo_manager.omo_manager_mail_compress.replacement_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.replacement_gmail_msgid", return_value="999"),
+            patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[worker:0] replacement"),
+            patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [source]}),
+            patch("omo_manager.omo_manager_mail_compress.direct_context_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.direct_contexts_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.final_inbox_bindings_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+            patch("omo_manager.omo_manager_mail_compress.inbox_subset", side_effect=lambda _client, uids: list(uids)),
+            patch("omo_manager.omo_manager_mail_compress.fetch_records", return_value=[retained]),
+            patch("omo_manager.omo_manager_mail_compress.imap_uid", return_value=("OK", [b""])),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(1, cmd_trash_explicit(args))
+        self.assertIn("move_attempted=1", output.getvalue())
+        self.assertIn("post_move_reconciliation_ran=1", output.getvalue())
+        self.assertIn("post_move_reconciled=0", output.getvalue())
+        self.assertIn("post_move_verification_error=retained", output.getvalue())
+
     def test_trash_explicit_move_timeout_returns_unknown_outcome_summary(self) -> None:
         raw_sha256 = "a" * 64
         source = MailRecord(
@@ -4314,7 +4788,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{raw_sha256}"],
+                "source": [f"7:100:200:{raw_sha256}:unread"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": "<replacement@example.test>",
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -4462,7 +4936,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{raw_sha256}"],
+                "source": [f"7:100:200:{raw_sha256}:unread"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement@example.test>"],
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -4515,7 +4989,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{raw_sha256}"],
+                "source": [f"7:100:200:{raw_sha256}:unread"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement@example.test>"],
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -4576,7 +5050,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{raw_sha256}"],
+                "source": [f"7:100:200:{raw_sha256}:unread"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement@example.test>"],
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -4630,7 +5104,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{raw_sha256}"],
+                "source": [f"7:100:200:{raw_sha256}:unread"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement@example.test>"],
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -4666,7 +5140,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{raw_sha256}"],
+                "source": [f"7:100:200:{raw_sha256}:unread"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement@example.test>"],
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -4711,7 +5185,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{raw_sha256}"],
+                "source": [f"7:100:200:{raw_sha256}:unread"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement@example.test>"],
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -4744,7 +5218,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{raw_sha256}"],
+                "source": [f"7:100:200:{raw_sha256}:unread"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement@example.test>"],
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -4817,7 +5291,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{raw_sha256}"],
+                "source": [f"7:100:200:{raw_sha256}:unread"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement@example.test>"],
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -4863,7 +5337,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{raw_sha256}"],
+                "source": [f"7:100:200:{raw_sha256}:unread"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement@example.test>"],
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -4920,7 +5394,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{raw_sha256}"],
+                "source": [f"7:100:200:{raw_sha256}:unread"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement@example.test>"],
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -4981,7 +5455,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{raw_sha256}"],
+                "source": [f"7:100:200:{raw_sha256}:unread"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": "<replacement@example.test>",
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -5044,7 +5518,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{raw_sha256}"],
+                "source": [f"7:100:200:{raw_sha256}:unread"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": "<replacement@example.test>",
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -5106,7 +5580,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{raw_sha256}"],
+                "source": [f"7:100:200:{raw_sha256}:unread"],
                 "context": [f"100:200:{raw_sha256}", f"101:200:{prior_sha256}"],
                 "replacement_id": "<replacement@example.test>",
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -5147,7 +5621,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{raw_sha256}"],
+                "source": [f"7:100:200:{raw_sha256}:unread"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement-a@example.test>"],
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT],
@@ -5182,7 +5656,7 @@ with tempfile.TemporaryDirectory() as tmp:
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{raw_sha256}"],
+                "source": [f"7:100:200:{raw_sha256}:unread"],
                 "context": [f"100:200:{raw_sha256}", f"101:200:{prior_sha256}"],
                 "replacement_id": ["<replacement-a@example.test>", "<replacement-b@example.test>"],
                 "retained_replacement": [TEST_RETAINED_REPLACEMENT_998, TEST_RETAINED_REPLACEMENT],
@@ -5218,7 +5692,7 @@ with tempfile.TemporaryDirectory() as tmp:
     def test_trash_explicit_rejects_replacement_source_overlap(self) -> None:
         raw_sha256 = "a" * 64
         source = MailRecord("7", "", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] subject", "msg", gmail_msgid="100", gmail_thrid="200", raw_sha256=raw_sha256)
-        args = type("DirectArgs", (), {"yes": True, "source": [f"7:100:200:{raw_sha256}"], "context": [f"100:200:{raw_sha256}"], "replacement_id": "<replacement@example.test>", "retained_replacement": [TEST_RETAINED_REPLACEMENT], "task_id": "task:a", "preparer": "owner-a", "reviewer": "reviewer-b", "task_source": ["1:100"], "source_uidvalidity": "1"})()
+        args = type("DirectArgs", (), {"yes": True, "source": [f"7:100:200:{raw_sha256}:unread"], "context": [f"100:200:{raw_sha256}"], "replacement_id": "<replacement@example.test>", "retained_replacement": [TEST_RETAINED_REPLACEMENT], "task_id": "task:a", "preparer": "owner-a", "reviewer": "reviewer-b", "task_source": ["1:100"], "source_uidvalidity": "1"})()
         client = FakeClient({})
         with (
             patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {})),
@@ -5239,7 +5713,7 @@ with tempfile.TemporaryDirectory() as tmp:
         source = MailRecord("7", "", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] subject", "msg", gmail_msgid="100", gmail_thrid="200", raw_sha256=raw_sha256)
         args = argparse.Namespace(
             yes=True,
-            source=[f"7:100:200:{raw_sha256}"],
+            source=[f"7:100:200:{raw_sha256}:unread"],
             context=[f"100:200:{raw_sha256}"],
             replacement_id="<replacement@example.test>",
             retained_replacement=[TEST_RETAINED_REPLACEMENT],

@@ -74,4 +74,6 @@ Treat a retained self-contained full memo as its task's current message when it 
 
 Report the starting and final total accepted manager-sent Inbox counts, overview count, protected recurring count, separately retained question/decision count, full-memo exceptions, moved-to-Trash count, later-arrival handling, and unresolved blockers.
 
+In Human-facing mailbox-compression reports, omit routine reminders that messages moved to Trash are recoverable and that Gmail normally deletes Trash after 30 days. Keep recoverability, retention, and permanent-deletion safeguards in the operational procedure. Mention recovery or deletion timing to the Human only when a specific recovery action, deletion decision, exception, or material risk requires their attention.
+
 Use the configured private mailbox path. Keep message bodies and identifiers out of reports. Do not mark messages read as cleanup. Do not expunge, permanently delete, mutate Gmail All Mail, or move unreviewed mail.
