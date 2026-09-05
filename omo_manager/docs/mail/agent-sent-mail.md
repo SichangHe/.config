@@ -1,5 +1,7 @@
 # per-agent sent mail
 
+Primary Human mail sent through `email_me.py` uses an owner-only, exact subject-and-body claim for five minutes. This applies to ordinary agent mail and `--manager-human`, so replaying the same system-spam report is an idempotent success instead of a second email. The claim is created only after local validation and is released after a connection or login failure known to precede delivery; failures from the `send_message` boundary retain it because delivery may be uncertain. Different content remains sendable. `OMO_MANAGER_EMAIL_DEDUPE_S` controls the window; guest replies retain their separate obligation pipeline.
+
 `omo_manager_mail_compress.py agent-unread` reads the Human mailbox and lists only mail still unread after the final metadata fetch. It prints no bodies. Gmail's Human-side unread flag is authoritative; sender-side Sent flags are not used.
 
 New mail carries both its tmux target and immutable Codex session UUID. A current session sees its own mail plus legacy same-target mail without a session header. The JSON marks only current-session mail `trashable`; bound mail from an earlier agent that reused the pane is hidden, and legacy mail remains read-only.

@@ -30,11 +30,23 @@ literal `touch /tmp/email-me-should-not-run-backtick`
 
 class EmailMeTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.env_patch = patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0", "TMUX": "", "TMUX_PANE": "", "OMO_AGENT_TMUX_TARGET": "", "OMO_MANAGER_TMUX_TARGET": ""})
+        self.state_tmp = tempfile.TemporaryDirectory()
+        self.env_patch = patch.dict(
+            os.environ,
+            {
+                "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
+                "OMO_MANAGER_STATE_DIR": self.state_tmp.name,
+                "TMUX": "",
+                "TMUX_PANE": "",
+                "OMO_AGENT_TMUX_TARGET": "",
+                "OMO_MANAGER_TMUX_TARGET": "",
+            },
+        )
         self.env_patch.start()
 
     def tearDown(self) -> None:
         self.env_patch.stop()
+        self.state_tmp.cleanup()
 
     def test_appends_pwd_footer_to_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1616,6 +1628,83 @@ class EmailMeTests(unittest.TestCase):
             self.assertIn("Skipped duplicate human email", stdout.getvalue())
             self.assertEqual("[wl:1] Manager update\nbody\n", send_log.read_text(encoding="utf-8"))
             self.assertIn("[wl:1] Manager update", (state_dir / "human-email-sent.tsv").read_text(encoding="utf-8"))
+
+    def test_ordinary_human_mode_dedupes_exact_system_spam_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            send_log = Path(tmp) / "sent.txt"
+            body = Path(tmp) / "body.md"
+            body.write_text("The same manager directive was delivered twice.\n", encoding="utf-8")
+            env = {
+                "EMAIL_ME_FAKE_SEND_LOG": str(send_log),
+                "OMO_MANAGER_STATE_DIR": str(state_dir),
+                "OMO_MANAGER_EMAIL_DEDUPE_S": "300",
+                "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
+            }
+            argv = ["--subject", "Duplicate manager directive", "--message-file", str(body)]
+            with patch.dict(os.environ, env, clear=False), patch("sys.stdout", new_callable=StringIO) as stdout:
+                first = email_me.main(argv)
+                second = email_me.main(argv)
+
+            self.assertEqual(0, first)
+            self.assertEqual(0, second)
+            self.assertEqual(1, stdout.getvalue().count("Email sent."))
+            self.assertIn("Skipped duplicate human email", stdout.getvalue())
+            self.assertEqual(
+                "Duplicate manager directive\nThe same manager directive was delivered twice.\n",
+                send_log.read_text(encoding="utf-8"),
+            )
+
+    def test_ordinary_human_mode_does_not_claim_before_credential_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            send_log = Path(tmp) / "sent.txt"
+            body = Path(tmp) / "body.md"
+            body.write_text("same report\n", encoding="utf-8")
+            env = {
+                "OMO_MANAGER_STATE_DIR": str(state_dir),
+                "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
+            }
+            argv = ["--subject", "Duplicate manager directive", "--message-file", str(body)]
+            with patch.dict(os.environ, env, clear=False), patch.object(
+                email_me, "configured_agent_mail", return_value=None
+            ), patch.object(email_me, "parse_env_file", return_value={}), patch("sys.stderr", new_callable=StringIO):
+                first = email_me.main(argv)
+            with patch.dict(os.environ, {**env, "EMAIL_ME_FAKE_SEND_LOG": str(send_log)}, clear=False):
+                second = email_me.main(argv)
+
+            self.assertEqual(2, first)
+            self.assertEqual(0, second)
+            self.assertEqual("Duplicate manager directive\nsame report\n", send_log.read_text(encoding="utf-8"))
+
+    def test_ordinary_human_mode_releases_claim_after_smtp_connect_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            send_log = Path(tmp) / "sent.txt"
+            body = Path(tmp) / "body.md"
+            body.write_text("same report\n", encoding="utf-8")
+            settings = type(
+                "Settings",
+                (),
+                {"agent_address": "agent@example.test", "human_address": "human@example.test", "app_password": "secret"},
+            )()
+            env = {
+                "OMO_MANAGER_STATE_DIR": str(state_dir),
+                "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
+            }
+            argv = ["--subject", "Duplicate manager directive", "--message-file", str(body)]
+            with patch.dict(os.environ, env, clear=False), patch.object(
+                email_me, "configured_agent_mail", return_value=settings
+            ), patch.object(email_me.smtplib, "SMTP_SSL", side_effect=OSError("connection refused")), patch(
+                "sys.stderr", new_callable=StringIO
+            ):
+                first = email_me.main(argv)
+            with patch.dict(os.environ, {**env, "EMAIL_ME_FAKE_SEND_LOG": str(send_log)}, clear=False):
+                second = email_me.main(argv)
+
+            self.assertEqual(1, first)
+            self.assertEqual(0, second)
+            self.assertEqual("Duplicate manager directive\nsame report\n", send_log.read_text(encoding="utf-8"))
 
     def test_manager_human_mode_rejects_missing_tmux_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

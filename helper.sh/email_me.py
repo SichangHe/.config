@@ -843,7 +843,15 @@ def manager_email_dedupe_digest(subject: str, content: str) -> str:
     return hashlib.sha256(subject.encode() + b"\0" + content.encode()).hexdigest()
 
 
-def should_send_manager_email_key(dedupe_subject: str, display_subject: str, content: str, state_scope: str = "human") -> bool:
+# 🧑 “If there is a bug in the system, report it to the operations manager. Report it all the way up through the manager chain to find the proper agent to handle this.”
+def update_manager_email_key(
+    dedupe_subject: str,
+    display_subject: str,
+    content: str,
+    state_scope: str,
+    *,
+    release: bool,
+) -> bool:
     try:
         state_dir = manager_state_dir()
         state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -865,9 +873,13 @@ def should_send_manager_email_key(dedupe_subject: str, display_subject: str, con
                         rows.append((sent_s, old_digest, old_subject))
             except (OSError, ValueError):
                 pass
-            if any(old_digest == digest for _, old_digest, _ in rows):
+            claimed = any(old_digest == digest for _, old_digest, _ in rows)
+            if not release and claimed:
                 return False
-            rows.append((now_s, digest, display_subject.replace("\t", " ").replace("\n", " ")))
+            if release:
+                rows = [row for row in rows if row[1] != digest]
+            else:
+                rows.append((now_s, digest, display_subject.replace("\t", " ").replace("\n", " ")))
             tmp = dedupe_file.with_name(f".{dedupe_file.name}.tmp")
             tmp.write_text("".join(f"{sent_s}\t{old_digest}\t{old_subject}\n" for sent_s, old_digest, old_subject in rows), encoding="utf-8")
             tmp.chmod(0o600)
@@ -875,6 +887,14 @@ def should_send_manager_email_key(dedupe_subject: str, display_subject: str, con
     except (OSError, ValueError):
         return True
     return True
+
+
+def should_send_manager_email_key(dedupe_subject: str, display_subject: str, content: str, state_scope: str = "human") -> bool:
+    return update_manager_email_key(dedupe_subject, display_subject, content, state_scope, release=False)
+
+
+def release_manager_email_key(dedupe_subject: str, display_subject: str, content: str, state_scope: str = "human") -> None:
+    _ = update_manager_email_key(dedupe_subject, display_subject, content, state_scope, release=True)
 
 
 def log_manager_email(subject: str, state_scope: str = "human") -> None:
@@ -1001,17 +1021,19 @@ def main(argv: list[str]) -> int:
     dedupe_subject = normalized_subject_key(title) if args.manager_human and normalized_subject_key is not None else subject
     dedupe_content = args.content + "\0" + "\0".join(args.guest_image_references)
     state_scope = "guest-hees" if args.guest_hees else "human"
-    if args.manager_human and not args.guest_hees and not should_send_manager_email_key(
-        dedupe_subject, subject, dedupe_content, state_scope
-    ):
-        print("Skipped duplicate human email")
-        return 0
     if fake_log := fake_send_log_path():
         if args.guest_hees:
             print("EMAIL_ME_FAKE_SEND_LOG cannot verify a guest reply", file=sys.stderr)
             return 2
         fake_log.parent.mkdir(parents=True, exist_ok=True)
-        fake_log.write_text(f"{subject}\n{args.content}", encoding="utf-8")
+        if not should_send_manager_email_key(dedupe_subject, subject, dedupe_content, state_scope):
+            print("Skipped duplicate human email")
+            return 0
+        try:
+            fake_log.write_text(f"{subject}\n{args.content}", encoding="utf-8")
+        except OSError:
+            release_manager_email_key(dedupe_subject, subject, dedupe_content, state_scope)
+            raise
         if args.manager_human:
             log_manager_email(subject, state_scope)
             print("Emailed the human")
@@ -1097,6 +1119,19 @@ def main(argv: list[str]) -> int:
         return 1
     try:
         ssl_context = ssl.create_default_context()
+    except OSError as exc:
+        if guest_claim is not None:
+            guest_claim.close()
+        print(f"Email send failed before SMTP: {exc}", file=sys.stderr)
+        return 1
+    email_claimed = False
+    if not args.guest_hees:
+        if not should_send_manager_email_key(dedupe_subject, subject, dedupe_content, state_scope):
+            print("Skipped duplicate human email")
+            return 0
+        email_claimed = True
+    smtp_delivery_attempted = False
+    try:
         with smtplib.SMTP_SSL(
             host=SMTP_HOST,
             port=SMTP_PORT,
@@ -1104,8 +1139,11 @@ def main(argv: list[str]) -> int:
             context=ssl_context,
         ) as smtp:
             _ = smtp.login(sender_email, app_password)
+            smtp_delivery_attempted = True
             _ = smtp.send_message(msg)
     except smtplib.SMTPAuthenticationError:
+        if email_claimed:
+            release_manager_email_key(dedupe_subject, subject, dedupe_content, state_scope)
         if args.guest_hees:
             guest_claim.close()
         print(
@@ -1114,6 +1152,10 @@ def main(argv: list[str]) -> int:
         )
         return 1
     except (OSError, smtplib.SMTPException) as exc:
+        if email_claimed and not smtp_delivery_attempted:
+            release_manager_email_key(dedupe_subject, subject, dedupe_content, state_scope)
+            print(f"Email send failed before delivery: {exc}", file=sys.stderr)
+            return 1
         print(f"Email send failed: {exc}", file=sys.stderr)
         print(f"Delivery-uncertain Message-ID: {msg['Message-ID']}", file=sys.stderr)
         smtp_uncertain = True

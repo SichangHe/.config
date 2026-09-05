@@ -18,6 +18,7 @@ from omo_manager.omo_tmux_send import (
     ExistingInputCapture,
     async_job_from_query,
     cancel_existing_codex_input,
+    claim_recent_tmux_delivery,
     capture_complete_existing_input,
     clear_existing_input_before_send,
     exact_capacity_error,
@@ -124,6 +125,13 @@ def options(**kwargs: object) -> CodexSendOptions:
 
 
 class TmuxSendTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.state_tmp = tempfile.TemporaryDirectory()
+        self.state_env = patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": self.state_tmp.name})
+        self.state_env.start()
+        self.addCleanup(self.state_env.stop)
+        self.addCleanup(self.state_tmp.cleanup)
+
     def test_exact_capacity_error_rejects_other_errors(self) -> None:
         capacity = ["Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]
         non_codex = ["Selected model is at capacity. Please try a different model."]
@@ -488,9 +496,15 @@ class TmuxSendTests(unittest.TestCase):
     def test_raw_control_sender_is_narrowly_allowlisted(self) -> None:
         with patch("omo_manager.omo_tmux_send._run_tmux_payload") as raw:
             run_control_to_codex("cfg:1.0", "/compact\n", options())
-            raw.assert_called_once_with("cfg:1.0", "/compact\n", options())
+            raw.assert_called_once_with("cfg:1.0", "/compact\n", options(), dedupe_delivery=False)
             with self.assertRaisesRegex(RuntimeError, "unsupported raw"):
                 run_control_to_codex("cfg:1.0", "freeze everything", options())
+
+    def test_recent_delivery_claim_is_exact_and_atomic(self) -> None:
+        self.assertTrue(claim_recent_tmux_delivery("cfg:1", "same prompt\n"))
+        self.assertFalse(claim_recent_tmux_delivery("cfg:1.0", "same prompt\n"))
+        self.assertTrue(claim_recent_tmux_delivery("cfg:1.0", "changed prompt\n"))
+        self.assertTrue(claim_recent_tmux_delivery("cfg:2.0", "same prompt\n"))
 
     def test_send_message_file_to_codex_reads_file_without_caller_tempfile(self) -> None:
         calls: list[tuple[str, str]] = []
@@ -1517,6 +1531,79 @@ class TmuxSendTests(unittest.TestCase):
                 run_tmux("cfg:1.0", "prompt\n", options(), before_paste=before_paste)
 
         self.assertFalse(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+
+    def test_run_tmux_suppresses_exact_retry_after_unverified_paste(self) -> None:
+        calls: list[list[str]] = []
+        callback_calls = 0
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        def before_paste() -> None:
+            nonlocal callback_calls
+            callback_calls += 1
+
+        lines = [
+            "• Working (19m 47s • esc to interrupt)",
+            "",
+            "› a different queued prompt",
+            "  tab to queue message 28% context left",
+        ]
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch(
+            "omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""
+        ) as clear, patch("omo_manager.omo_tmux_send.revalidate_error_transition"), patch(
+            "omo_manager.omo_tmux_send.require_no_existing_input"
+        ), patch(
+            "omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=False
+        ), patch(
+            "omo_manager.omo_tmux_send.tail", return_value=lines
+        ), patch(
+            "omo_manager.omo_tmux_send.time.monotonic", side_effect=[0.0, 2.0]
+        ), patch(
+            "omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run
+        ):
+            with self.assertRaisesRegex(RuntimeError, "input box has different text, status=running.*outcome is unknown"):
+                run_tmux("cfg:1.0", "same manager instruction\n", options(), before_paste=before_paste)
+            with patch("sys.stdout", new_callable=StringIO) as stdout:
+                run_tmux("cfg:1", "same manager instruction\n", options(), before_paste=before_paste)
+
+        paste_calls = [command for command in calls if command[:2] == ["tmux", "paste-buffer"]]
+        load_calls = [command for command in calls if command[:2] == ["tmux", "load-buffer"]]
+        self.assertEqual(1, len(paste_calls))
+        self.assertEqual(1, len(load_calls))
+        self.assertEqual(1, clear.call_count)
+        self.assertEqual(1, callback_calls)
+        self.assertFalse(any(command[:2] == ["tmux", "send-keys"] for command in calls))
+        self.assertIn("skipped duplicate recent delivery", stdout.getvalue())
+
+    def test_run_tmux_releases_claim_after_definitive_paste_failure(self) -> None:
+        paste_attempts = 0
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            nonlocal paste_attempts
+            if command[:2] == ["tmux", "paste-buffer"]:
+                paste_attempts += 1
+                if paste_attempts == 1:
+                    raise subprocess.CalledProcessError(1, command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch(
+            "omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""
+        ), patch("omo_manager.omo_tmux_send.revalidate_error_transition"), patch(
+            "omo_manager.omo_tmux_send.require_no_existing_input"
+        ), patch(
+            "omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True
+        ), patch(
+            "omo_manager.omo_tmux_send.verify_submit"
+        ), patch(
+            "omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run
+        ):
+            with self.assertRaises(subprocess.CalledProcessError):
+                run_tmux("cfg:1.0", "retry after known failure\n", options())
+            run_tmux("cfg:1.0", "retry after known failure\n", options())
+
+        self.assertEqual(2, paste_attempts)
 
     def test_verify_submit_requires_running_and_prompt_gone(self) -> None:
         tails = iter(
