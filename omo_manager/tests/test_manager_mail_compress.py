@@ -3572,6 +3572,9 @@ with tempfile.TemporaryDirectory() as tmp:
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("--uids UIDS", result.stdout)
         self.assertIn("--task-id TASK_ID", result.stdout)
+        self.assertIn("retained_replacement=UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256:BODY-BYTES:BODY-SHA256:READ-STATE", result.stdout)
+        self.assertIn("decoded body encoded as UTF-8", result.stdout)
+        self.assertIn("do not hash the displayed export block", result.stdout)
         self.assertNotIn("--out-dir", result.stdout)
 
     def test_inspect_explicit_prints_complete_live_bindings_and_body_readonly(self) -> None:
@@ -3582,7 +3585,7 @@ with tempfile.TemporaryDirectory() as tmp:
             "Human <human@example.test>",
             "Re: [wl:7.0] task update",
             "msg-a",
-            body="complete body",
+            body="complete café",
             gmail_msgid="100",
             gmail_thrid="200",
             raw_sha256="a" * 64,
@@ -3604,6 +3607,10 @@ with tempfile.TemporaryDirectory() as tmp:
         open_mailbox_mock.assert_called_once_with(readonly=True)
         output = stdout.getvalue()
         self.assertIn(f"source=7:100:200:{'a' * 64}", output)
+        self.assertIn(
+            f"retained_replacement=7:100:200:{'a' * 64}:14:{hashlib.sha256('complete café'.encode()).hexdigest()}:unread",
+            output,
+        )
         self.assertIn(f"context=100:200:{'a' * 64}", output)
         self.assertIn(f"context=101:200:{'b' * 64}", output)
         self.assertIn("context_date=date", output)
@@ -3613,7 +3620,7 @@ with tempfile.TemporaryDirectory() as tmp:
         self.assertIn("selected_source_sender_tmux_target=wl:7", output)
         self.assertIn("prior complete body", output)
         self.assertIn("Source-UIDVALIDITY: 9", output)
-        self.assertIn("complete body", output)
+        self.assertIn("complete café", output)
 
     def test_inspect_explicit_rejects_boundary_mismatch(self) -> None:
         source = MailRecord("7", "date", "other@example.test", "human@example.test", "subject", "msg", gmail_msgid="100", gmail_thrid="200", raw_sha256="a" * 64)

@@ -2068,6 +2068,12 @@ def cmd_inspect_explicit(args: argparse.Namespace) -> int:
         print(f"source_uidvalidity={uidvalidity}")
         for record in records:
             print(f"source={record.uid}:{record.gmail_msgid}:{record.gmail_thrid}:{record.raw_sha256}")
+            print(
+                "retained_replacement="
+                f"{record.uid}:{record.gmail_msgid}:{record.gmail_thrid}:{record.raw_sha256}:"
+                f"{record.body_bytes}:{hashlib.sha256(record.body.encode()).hexdigest()}:"
+                f"{read_state_from_flags(record.flags)}"
+            )
         selected_message_ids = {record.gmail_msgid for record in records}
         for gmail_thrid in sorted(records_by_thread):
             for record in sorted(records_by_thread[gmail_thrid], key=lambda value: value.gmail_msgid):
@@ -4685,8 +4691,22 @@ This command moves the old message only from Inbox to recoverable Gmail Trash an
         description="""Move every Inbox message on the distinct configured agent-to-Human address boundary to Gmail Trash. Human-sent mail is excluded by that address boundary. The command accepts no per-message list, replacement, review, retention, read-state, or confirmation arguments. It never marks mail read, deletes permanently, or expunges. On success it prints one JSON receipt containing every source UID, Gmail message identity, resulting Trash UID, original unread state, and exact before/after Inbox total and unread counts.""",
     )
     owner_agent_trash.set_defaults(func=cmd_owner_trash_agent_mail)
-    inspect_explicit = sub.add_parser("inspect-explicit", help="Print exact live bindings and bodies for selected manager UIDs without creating evidence files.")
-    inspect_explicit.add_argument("--uids", required=True, help="Comma or whitespace separated current INBOX UIDs.")
+    inspect_explicit = sub.add_parser(
+        "inspect-explicit",
+        help="Print exact live bindings and bodies for selected manager UIDs without creating evidence files.",
+        description=(
+            "Read selected current INBOX messages without mutation and print source/context bindings, bodies, and one canonical "
+            "retained_replacement=UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256:BODY-BYTES:BODY-SHA256:READ-STATE line per selected UID. "
+            "BODY-BYTES and BODY-SHA256 bind the decoded body encoded as UTF-8, exactly as the trash-explicit final gate validates it; "
+            "do not hash the displayed export block."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    inspect_explicit.add_argument(
+        "--uids",
+        required=True,
+        help="Comma or whitespace separated current INBOX source or retained-replacement UIDs.",
+    )
     inspect_explicit.add_argument("--task-id", required=True, help="Task identity assigned to every selected source.")
     inspect_explicit.set_defaults(func=cmd_inspect_explicit)
     locate_replacement = sub.add_parser("locate-replacement", help="Find the unique exact current manager-mail subject and print its RFC Message-ID.")
