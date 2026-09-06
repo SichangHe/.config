@@ -191,14 +191,16 @@ if [ -n "$env_root" ]; then root="$env_root"; fi
 task_file=""
 producer_target=""
 status=""
+recover_moved=""
 message_file=""
 alloc_message_file=0
 describe=0
 verify_consumed=0
 agent="${OMO_AGENT_NAME:-agent}"
+agent_explicit=0
 usage() {
   printf '%s\n' \
-    "Usage: omo_report.sh --status STATUS --message-file FILE [--agent NAME]" \
+    "Usage: omo_report.sh --status STATUS --message-file FILE [--agent NAME] [--recover-moved REPLAY_ID]" \
     "       omo_report.sh --describe --status STATUS --message-file FILE [--agent NAME]" \
     "       omo_report.sh --verify-consumed --status STATUS --message-file FILE [--agent NAME]" \
     "       omo_report.sh --alloc-message-file" \
@@ -209,14 +211,15 @@ usage() {
 }
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --status|--message-file|--agent)
+    --status|--message-file|--agent|--recover-moved)
       if [ "$#" -lt 2 ]; then echo "missing value for $1" >&2; usage >&2; exit 2; fi
       option="$1"
       value="$2"
       case "$option" in
         --status) status="$value" ;;
         --message-file) message_file="$value" ;;
-        --agent) agent="$value" ;;
+        --agent) agent="$value"; agent_explicit=1 ;;
+        --recover-moved) recover_moved="$value" ;;
       esac
       shift 2
       ;;
@@ -228,10 +231,12 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 if [ "$alloc_message_file" -eq 1 ] && [ -n "$message_file" ]; then echo "--alloc-message-file cannot be combined with --message-file" >&2; exit 2; fi
+if [ "$alloc_message_file" -eq 1 ] && [ -n "$recover_moved" ]; then echo "--alloc-message-file cannot be combined with --recover-moved" >&2; exit 2; fi
 if [ "$alloc_message_file" -eq 1 ] && [ "$describe" -eq 1 ]; then echo "--alloc-message-file cannot be combined with --describe" >&2; exit 2; fi
 if [ "$alloc_message_file" -eq 1 ] && [ "$verify_consumed" -eq 1 ]; then echo "--alloc-message-file cannot be combined with --verify-consumed" >&2; exit 2; fi
 if [ "$describe" -eq 1 ] && [ "$verify_consumed" -eq 1 ]; then echo "--describe cannot be combined with --verify-consumed" >&2; exit 2; fi
 if [ "$alloc_message_file" -eq 0 ] && { [ -z "$status" ] || [ -z "$message_file" ]; }; then usage >&2; exit 2; fi
+if [ -n "$recover_moved" ] && [ "$agent_explicit" -ne 1 ]; then echo "--recover-moved requires explicit --agent" >&2; exit 2; fi
 root_real=$(python3 -I -S -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$root")
 task_root_real="$root_real"
 if [ -z "$task_file" ]; then
@@ -388,6 +393,40 @@ def task_refs(root: Path, sections: set[str]) -> list[tuple[Path, tuple[str, ...
             refs.append((path, listed_targets))
     return refs
 
+def exact_done_previous_candidates(root: Path, current: str) -> tuple[list[Path], list[Path]]:
+    """Return exact close-compatible done custody, plus malformed candidates."""
+    todo = root / "TODO.md"
+    text = route_text(todo)
+    if text is None:
+        return [], []
+    lines = text.splitlines()
+    previous_headers = sum(line == "previous:" for line in lines)
+    candidates: list[Path] = []
+    invalid: list[Path] = []
+    for candidate, _listed_targets in task_refs(root, TASK_SECTIONS):
+        metadata = parse_frontmatter(candidate)
+        if metadata is None or metadata.get("status") != "done":
+            continue
+        runat = metadata.get("runat", "")
+        if TARGET_RE.fullmatch(runat) is None or not same_tmux_target(runat, current):
+            continue
+        relative = candidate.relative_to(root).as_posix()
+        expected = f"{relative} {runat}"
+        section = ""
+        occurrences: list[tuple[str, str]] = []
+        for line in lines:
+            if line.strip().endswith(":"):
+                section = line.strip()[:-1]
+                continue
+            refs = re.findall(r"`?([A-Za-z0-9_./-]+\.md)`?", line)
+            if any((root / ref).resolve(strict=False) == candidate for ref in refs):
+                occurrences.append((section, line))
+        if previous_headers == 1 and occurrences == [("previous", expected)]:
+            candidates.append(candidate)
+        else:
+            invalid.append(candidate)
+    return candidates, invalid
+
 current = current_tmux_target()
 if not current:
     print("current tmux pane/window could not be identified; cannot infer report task", file=sys.stderr)
@@ -421,6 +460,21 @@ for root in roots:
             raise SystemExit(0)
         choices = ", ".join(str(path.relative_to(root)) for path in matches)
         print(f"multiple active task files match tmux target {current}: {choices}", file=sys.stderr)
+        raise SystemExit(2)
+    done_matches, invalid_done_matches = exact_done_previous_candidates(root, current)
+    if invalid_done_matches:
+        choices = ", ".join(str(path.relative_to(root)) for path in invalid_done_matches)
+        print(f"done task TODO custody is not exact for tmux target {current}: {choices}", file=sys.stderr)
+        raise SystemExit(2)
+    if len(done_matches) == 1:
+        done_metadata = parse_frontmatter(done_matches[0])
+        if done_metadata is None:
+            raise RuntimeError("done task routing evidence disappeared")
+        print(f"{root}\t{done_matches[0].relative_to(root)}\t{done_metadata['runat']}\t{evidence_json()}")
+        raise SystemExit(0)
+    if len(done_matches) > 1:
+        choices = ", ".join(str(path.relative_to(root)) for path in done_matches)
+        print(f"multiple done task files match tmux target {current}: {choices}", file=sys.stderr)
         raise SystemExit(2)
 print(f"could not infer task file for tmux target {current}", file=sys.stderr)
 raise SystemExit(2)
@@ -746,6 +800,7 @@ exec env "${receiver_environment[@]}" python3 -I -S - "$receiver_path" "$pending
   --manager-frontmatter-sha256 "$manager_frontmatter_sha256" \
   --route-local-date "$route_local_date" \
   --status "$status" \
+  --recover-moved "$recover_moved" \
   --message-file "$message_file" \
   --agent "$agent" \
   --producer-target "$producer_target" \

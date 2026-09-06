@@ -174,6 +174,159 @@ class ReportHelperTests(unittest.TestCase):
             self.assertTrue(report_file.name.startswith("legacy."))
             report_file.unlink()
 
+    def test_omo_report_done_fallback_rejects_a_fresh_submission(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "logs"
+            root.mkdir()
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            write_fake_tmux(bin_dir)
+            local_env = tmp_path / "local.env"
+            local_env.write_text(f"OMO_WORK_LOGS_ROOT={root}\n", encoding="utf-8")
+            (root / "TODO.md").write_text("previous:\ndone.md cfg:7\n", encoding="utf-8")
+            (root / "done.md").write_text(task_frontmatter(status="done"), encoding="utf-8")
+            result = subprocess.run(
+                [str(OMO_DIR / "omo_report.sh"), "--alloc-message-file"],
+                cwd=tmp,
+                env={
+                    **os.environ,
+                    "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "TMUX_PANE": "%1701",
+                    "XDG_STATE_HOME": str(tmp_path / "state"),
+                },
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            report_file = Path(result.stdout.strip())
+            self.assertTrue(report_file.name.startswith("done."))
+            report_file.write_text("terminal close evidence\n", encoding="utf-8")
+            submit = subprocess.run(
+                [str(OMO_DIR / "omo_report.sh"), "--status", "done", "--message-file", str(report_file)],
+                cwd=tmp,
+                env={
+                    **os.environ,
+                    "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "TMUX_PANE": "%1701",
+                    "XDG_STATE_HOME": str(tmp_path / "state"),
+                },
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(2, submit.returncode)
+            self.assertIn("authenticated committed report allocation", submit.stderr)
+
+    def test_omo_report_rejects_ambiguous_done_previous_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "logs"
+            root.mkdir()
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            write_fake_tmux(bin_dir)
+            local_env = tmp_path / "local.env"
+            local_env.write_text(f"OMO_WORK_LOGS_ROOT={root}\n", encoding="utf-8")
+            (root / "TODO.md").write_text("previous:\none.md cfg:7\ntwo.md cfg:7\n", encoding="utf-8")
+            (root / "one.md").write_text(task_frontmatter(status="done"), encoding="utf-8")
+            (root / "two.md").write_text(task_frontmatter(status="done"), encoding="utf-8")
+            result = subprocess.run(
+                [str(OMO_DIR / "omo_report.sh"), "--alloc-message-file"],
+                cwd=tmp,
+                env={
+                    **os.environ,
+                    "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "TMUX_PANE": "%1701",
+                    "XDG_STATE_HOME": str(tmp_path / "state"),
+                },
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(2, result.returncode)
+            self.assertIn("multiple done task files match tmux target", result.stderr)
+
+    def test_omo_report_rejects_noncanonical_done_custody(self) -> None:
+        malformed_rows = (
+            "previous:\ndone.md\n",
+            "previous:\ndone.md cfg:7 extra\n",
+            "previous:\n`done.md` cfg:7\n",
+            "previous:\ndone.md cfg:7 cfg:8\n",
+            "previous:\ndone.md cfg:7\ndone.md cfg:7\n",
+            "previous:\ndone.md cfg:7\ncurrent:\ndone.md cfg:7\n",
+            "previous:\ndone.md cfg:7\nprevious:\n",
+        )
+        for todo_text in malformed_rows:
+            with self.subTest(todo_text=todo_text), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                root = tmp_path / "logs"
+                root.mkdir()
+                bin_dir = tmp_path / "bin"
+                bin_dir.mkdir()
+                write_fake_tmux(bin_dir)
+                local_env = tmp_path / "local.env"
+                local_env.write_text(f"OMO_WORK_LOGS_ROOT={root}\n", encoding="utf-8")
+                (root / "TODO.md").write_text(todo_text, encoding="utf-8")
+                (root / "done.md").write_text(task_frontmatter(status="done"), encoding="utf-8")
+                result = subprocess.run(
+                    [str(OMO_DIR / "omo_report.sh"), "--alloc-message-file"],
+                    cwd=tmp,
+                    env={
+                        **os.environ,
+                        "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                        "TMUX_PANE": "%1701",
+                        "XDG_STATE_HOME": str(tmp_path / "state"),
+                    },
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual(2, result.returncode)
+                self.assertIn("done task TODO custody is not exact", result.stderr)
+
+    def test_omo_report_prefers_active_task_over_done_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "logs"
+            root.mkdir()
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            write_fake_tmux(bin_dir)
+            local_env = tmp_path / "local.env"
+            local_env.write_text(f"OMO_WORK_LOGS_ROOT={root}\n", encoding="utf-8")
+            (root / "TODO.md").write_text("current:\nactive.md cfg:7\nprevious:\ndone.md cfg:7\n", encoding="utf-8")
+            (root / "active.md").write_text(task_frontmatter(), encoding="utf-8")
+            (root / "done.md").write_text(task_frontmatter(status="done"), encoding="utf-8")
+            result = subprocess.run(
+                [str(OMO_DIR / "omo_report.sh"), "--alloc-message-file"],
+                cwd=tmp,
+                env={
+                    **os.environ,
+                    "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "TMUX_PANE": "%1701",
+                    "XDG_STATE_HOME": str(tmp_path / "state"),
+                },
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            report_file = Path(result.stdout.strip())
+            self.assertTrue(report_file.name.startswith("active."))
+            report_file.unlink()
+
     def test_omo_report_prefers_single_current_task_over_stale_human_pending_collision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

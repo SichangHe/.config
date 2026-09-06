@@ -111,6 +111,7 @@ class Arguments:
     manager_frontmatter_sha256: str
     route_local_date: str
     status: str
+    recovery_replay_id: str
     message_file: Path
     agent: str
     producer_target: str
@@ -133,6 +134,8 @@ class Plan:
     message_identity: tuple[int, int]
     message_fd: int
     message: bytes
+    authenticated_recovery: bool
+    recovery_replay_id: str
     status: str
     input_info: dict[str, object]
     report_context: dict[str, object]
@@ -169,6 +172,124 @@ class Plan:
     receipt_publication_final: Path
 
 
+# 🧑 "Do not use `--task-file`, `--root`, `--manager-target`, or other manual route flags."
+def report_envelope_path(plan: Plan, *, agent: str, status: str, route_note: str) -> Path:
+    parts = [
+        plan.message,
+        agent.encode(),
+        status.encode(),
+        safe_label(str(plan.routing["producer_target"])).encode(),
+        str(plan.task).encode(),
+    ]
+    if route_note:
+        parts.append(route_note.encode())
+    report_key = hashlib.sha256(b"\0".join(parts)).hexdigest()
+    return plan.envelope_directory / f"{safe_part(agent)}_{safe_part(status)}_{report_key}.md"
+
+
+def predecessor_envelope_identity(plan: Plan, envelope: Path) -> tuple[str, str, str]:
+    payload = regular_file_bytes(envelope, maximum=MAX_ENVELOPE_BYTES, field="private envelope")
+    header, separator, _ = payload.partition(b"message:\n")
+    try:
+        lines = header.decode("utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise ReceiptError("private envelope is not UTF-8") from exc
+    sent = SENT_LINE_RE.fullmatch(lines[0]) if lines else None
+    if not separator or sent is None or len(lines) not in {4, 6}:
+        raise ReceiptError("private envelope identity is invalid")
+    route_note = ""
+    if len(lines) == 6:
+        if lines[4] != "route-warning:":
+            raise ReceiptError("private envelope identity is invalid")
+        route_note = lines[5]
+    agent = sent.group(1)
+    statuses = []
+    for status in ("blocked", "in-progress", "done"):
+        base = report_envelope_path(plan, agent=agent, status=status, route_note=route_note)
+        if envelope == base or (
+            envelope.parent == base.parent
+            and envelope.name.startswith(f"{base.stem}.transfer-")
+            and envelope.suffix == ".md"
+        ):
+            statuses.append(status)
+    if len(statuses) != 1:
+        raise ReceiptError("private envelope agent/status identity is invalid")
+    return agent, statuses[0], route_note
+
+
+def manager_preserves_owner_prefix(manager: Path, payload: bytes, binding: OwnerPrefixBinding) -> bool:
+    owner = payload[: binding.size_bytes]
+    expected_separator = 1 if not owner or owner.endswith(b"\n") else 2
+    return (
+        binding.manager_path_sha256 == hashlib.sha256(str(manager).encode()).hexdigest()
+        and len(owner) == binding.size_bytes
+        and hashlib.sha256(owner).hexdigest() == binding.sha256
+        and binding.separator_bytes == expected_separator
+    )
+
+
+def recovery_commitment_record(candidate: Path, replay_id: str, payload: bytes) -> dict[str, object]:
+    """Parse the fields needed to construct a plan for strict validation."""
+    try:
+        parsed = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReceiptError("recovery transaction commitment is not valid JSON") from exc
+    expected_keys = {
+        "allocation",
+        "commitment",
+        "commitment_id",
+        "preflight",
+        "replay_id",
+        "schema",
+        "transfer",
+    }
+    unsigned = dict(parsed) if isinstance(parsed, dict) else {}
+    commitment_id = unsigned.pop("commitment_id", None)
+    preflight = parsed.get("preflight") if isinstance(parsed, dict) else None
+    records = preflight.get("records") if isinstance(preflight, dict) else None
+    owner = preflight.get("owner_prefix") if isinstance(preflight, dict) else None
+    routing_sources = preflight.get("routing_sources") if isinstance(preflight, dict) else None
+    temporary_files = preflight.get("temporary_files") if isinstance(preflight, dict) else None
+    allocation = parsed.get("allocation") if isinstance(parsed, dict) else None
+    submitted = allocation.get("file_at_submission") if isinstance(allocation, dict) else None
+    transfer = parsed.get("transfer") if isinstance(parsed, dict) else None
+    authority = transfer.get("authority") if isinstance(transfer, dict) else None
+    required_records = {
+        "manager",
+        "private_envelope",
+        "private_receipt",
+        "producer",
+        "receipt_publication",
+    }
+    required_owner = {"manager_path_sha256", "separator_bytes", "sha256", "size_bytes"}
+    if (
+        not isinstance(parsed, dict)
+        or canonical_json(parsed) != payload
+        or set(parsed) != expected_keys
+        or parsed.get("schema") != TRANSACTION_COMMITMENT_SCHEMA
+        or parsed.get("replay_id") != replay_id
+        or HASH_RE.fullmatch(replay_id) is None
+        or not isinstance(commitment_id, str)
+        or commitment_id != bound_receipt_id(unsigned)
+        or not isinstance(preflight, dict)
+        or not isinstance(records, dict)
+        or not required_records.issubset(records)
+        or not isinstance(owner, dict)
+        or not required_owner.issubset(owner)
+        or not isinstance(routing_sources, list)
+        or not all(isinstance(item, dict) for item in routing_sources)
+        or not all(isinstance(item.get("path"), str) for item in routing_sources)
+        or not isinstance(temporary_files, list)
+        or not all(isinstance(item, str) for item in temporary_files)
+        or not isinstance(allocation, dict)
+        or not isinstance(submitted, dict)
+        or not isinstance(transfer, dict)
+        or not isinstance(authority, dict)
+    ):
+        raise ReceiptError(f"recovery transaction commitment is malformed: {candidate}")
+    return parsed
+
+
 def orphan_transfer_plan(plan: Plan) -> Plan:
     """Create a fresh namespace for one exact, unreachable pending transaction.
 
@@ -176,10 +297,14 @@ def orphan_transfer_plan(plan: Plan) -> Plan:
     new transaction to the complete predecessor identity only when the old
     envelope was never linked, acknowledged, receipted, or published.
     """
-    if not os.path.lexists(plan.envelope_final):
+    if plan.recovery_replay_id:
+        candidates = [plan.receipt_directory / f"{plan.recovery_replay_id}.commitment"]
+    elif not os.path.lexists(plan.envelope_final):
         return plan
+    else:
+        candidates = sorted(plan.receipt_directory.glob("*.commitment"))
     matches: list[dict[str, object]] = []
-    for candidate in sorted(plan.receipt_directory.glob("*.commitment")):
+    for candidate in candidates:
         replay_id = candidate.name.removesuffix(".commitment")
         if HASH_RE.fullmatch(replay_id) is None:
             continue
@@ -187,13 +312,14 @@ def orphan_transfer_plan(plan: Plan) -> Plan:
             continue
         payload = regular_file_bytes(candidate, maximum=MAX_RECEIPT_BYTES, field="historical transaction commitment")
         try:
-            parsed = json.loads(payload)
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        if not isinstance(parsed, dict) or canonical_json(parsed) != payload:
+            parsed = recovery_commitment_record(candidate, replay_id, payload)
+        except ReceiptError:
+            if plan.recovery_replay_id:
+                raise
             continue
         unsigned = dict(parsed)
-        commitment_id = unsigned.pop("commitment_id", None)
+        _ = unsigned.pop("commitment_id")
+        commitment_id = parsed["commitment_id"]
         preflight = parsed.get("preflight")
         records = preflight.get("records") if isinstance(preflight, dict) else None
         recorded_envelope = Path(str(records.get("private_envelope"))) if isinstance(records, dict) else None
@@ -207,6 +333,35 @@ def orphan_transfer_plan(plan: Plan) -> Plan:
         submitted = allocation.get("file_at_submission") if isinstance(allocation, dict) else None
         transfer = parsed.get("transfer")
         authority = transfer.get("authority") if isinstance(transfer, dict) else None
+        same_inode = (
+            isinstance(submitted, dict)
+            and submitted.get("dev") == plan.message_identity[0]
+            and submitted.get("inode") == plan.message_identity[1]
+        )
+        same_object = (
+            same_inode
+            and isinstance(records, dict)
+            and records.get("manager") == str(plan.manager)
+            and records.get("producer") == str(plan.task)
+        )
+        committed_allocation = allocation.get("file") if isinstance(allocation, dict) else None
+        if same_object and committed_allocation != str(plan.message_path) and not plan.recovery_replay_id:
+            raise ReceiptError(f"moved committed report requires --recover-moved {replay_id}")
+        if plan.recovery_replay_id and not same_object:
+            raise ReceiptError("moved recovery draft is not the exact committed object")
+        if same_inode and not same_object:
+            raise ReceiptError("pending report transaction is already bound to a different allocation")
+        if same_object:
+            matches.append(
+                {
+                    "commitment": candidate,
+                    "commitment_id": commitment_id,
+                    "parsed": parsed,
+                    "replay_id": replay_id,
+                    "same_object": True,
+                }
+            )
+            continue
         if (
             parsed.get("schema") != TRANSACTION_COMMITMENT_SCHEMA
             or parsed.get("replay_id") != replay_id
@@ -218,17 +373,36 @@ def orphan_transfer_plan(plan: Plan) -> Plan:
             or not isinstance(authority, dict)
             or authority.get("producer_target") != plan.routing["producer_target"]
             or authority.get("source_task") != str(plan.task)
+            or not isinstance(transfer, dict)
             or transfer.get("routing") != public_routing(plan)
             or not isinstance(submitted, dict)
             or submitted.get("sha256") != plan.input_info["sha256"]
             or submitted.get("size") != plan.input_info["size_bytes"]
         ):
             continue
-        matches.append({"commitment": candidate, "commitment_id": commitment_id, "parsed": parsed, "replay_id": replay_id})
+        matches.append(
+            {
+                "commitment": candidate,
+                "commitment_id": commitment_id,
+                "parsed": parsed,
+                "replay_id": replay_id,
+                "same_object": False,
+            }
+        )
     if not matches:
+        if plan.recovery_replay_id:
+            raise ReceiptError("moved recovery transaction is missing or inconsistent")
         return plan
     if len(matches) != 1:
-        raise ReceiptError("multiple pending predecessor transactions match the exact report")
+        current_path_matches = []
+        for candidate_match in matches:
+            candidate_parsed = candidate_match["parsed"]
+            candidate_allocation = candidate_parsed.get("allocation") if isinstance(candidate_parsed, dict) else None
+            if isinstance(candidate_allocation, dict) and candidate_allocation.get("file") == str(plan.message_path):
+                current_path_matches.append(candidate_match)
+        if len(current_path_matches) != 1:
+            raise ReceiptError("multiple pending predecessor transactions match the exact report")
+        matches = current_path_matches
 
     match = matches[0]
     parsed = match["parsed"]
@@ -242,13 +416,15 @@ def orphan_transfer_plan(plan: Plan) -> Plan:
     submitted = allocation["file_at_submission"]
     assert isinstance(submitted, dict)
     old_allocation = Path(str(allocation.get("file")))
+    old_envelope = Path(str(records["private_envelope"]))
     if (
         old_allocation == plan.message_path
         and submitted.get("dev") == plan.message_identity[0]
         and submitted.get("inode") == plan.message_identity[1]
+        and old_envelope == plan.envelope_final
+        and not plan.recovery_replay_id
     ):
-        return plan
-    old_envelope = Path(str(records["private_envelope"]))
+        return replace(plan, authenticated_recovery=bool(plan.recovery_replay_id))
     old_receipt = Path(str(records["private_receipt"]))
     old_publication = Path(str(records["receipt_publication"]))
     old_commitment = Path(str(match["commitment"]))
@@ -267,8 +443,21 @@ def orphan_transfer_plan(plan: Plan) -> Plan:
     old_pointer = f"(from agent {plan.routing['producer_target']} {old_envelope})"
     old_ack_key = manager_acknowledgment_key(plan.root, old_envelope, str(plan.input_info["sha256"]))
     old_authority_lock = plan.acknowledgment_state.parent / "pending-watch-authority" / f"{hashlib.sha256(old_ack_key.encode()).hexdigest()}.lock"
+    old_authority_completion = old_authority_lock.with_name(f"{old_authority_lock.name}.complete")
+    if match["same_object"] is not True:
+        if not os.path.lexists(plan.envelope_final):
+            return plan
+        if any(os.path.lexists(path) for path in (old_receipt, old_publication, old_authority_completion)):
+            return plan
+        if manager_transaction_state(manager_bytes(plan.manager), old_owner, old_pointer) in {"restored", "active"}:
+            return plan
+    agent, status, route_note = predecessor_envelope_identity(plan, old_envelope)
+    old_routing = {key: value for key, value in plan.routing.items() if key != "orphan_predecessor"}
+    old_routing.update({"agent": agent, "route_note": route_note})
     old_plan = replace(
         plan,
+        status=status,
+        routing=old_routing,
         replay_id=replay_id,
         owner_prefix=old_owner,
         envelope_final=old_envelope,
@@ -278,7 +467,7 @@ def orphan_transfer_plan(plan: Plan) -> Plan:
         manager_watcher_temporary=watcher_report_manager_temporary(plan.manager, old_ack_key),
         acknowledgment_temporary=watcher_report_state_temporary(plan.acknowledgment_state, old_ack_key),
         acknowledgment_authority_lock=old_authority_lock,
-        acknowledgment_authority_completion=old_authority_lock.with_name(f"{old_authority_lock.name}.complete"),
+        acknowledgment_authority_completion=old_authority_completion,
         transaction_commitment_final=old_commitment,
         transaction_commitment_temporary=plan.receipt_directory / f".{replay_id}.commitment.tmp",
         receipt_final=old_receipt,
@@ -287,20 +476,17 @@ def orphan_transfer_plan(plan: Plan) -> Plan:
         receipt_publication_temporary=plan.receipt_directory / f".{replay_id}.publication.tmp",
         manager_temporary=plan.manager.parent / f".{plan.manager.name}.omo-report-{replay_id}.tmp",
     )
-    if any(os.path.lexists(path) for path in (old_receipt, old_publication, old_plan.acknowledgment_authority_completion)):
-        return plan
-    old_manager_state = manager_transaction_state(manager_bytes(plan.manager), old_owner, old_pointer)
-    if old_manager_state in {"restored", "active"}:
-        return plan
-    if read_manager_acknowledgment(old_plan, require_live_authority=False) is not None:
-        raise ReceiptError(
-            "watcher-acknowledged predecessor requires --verify-consumed with its original committed allocation"
-        )
-    for temporary in preflight.get("temporary_files", []):
-        if not isinstance(temporary, str) or os.path.lexists(temporary):
-            raise ReceiptError("pending predecessor has ambiguous temporary residue")
-    old_payload = regular_file_bytes(old_allocation, maximum=MAX_ENVELOPE_BYTES, field="predecessor report allocation")
-    old_info = old_allocation.lstat()
+    actual_allocation = old_allocation
+    if not os.path.lexists(old_allocation):
+        if match["same_object"] is not True:
+            raise ReceiptError("predecessor report allocation is missing")
+        actual_allocation = plan.message_path
+    old_payload, identity, snapshot_fd = open_regular_file_snapshot(
+        actual_allocation,
+        maximum=MAX_ENVELOPE_BYTES,
+        field="predecessor report allocation",
+    )
+    old_info = os.fstat(snapshot_fd)
     if (
         not stat.S_ISREG(old_info.st_mode)
         or old_info.st_uid != os.getuid()
@@ -310,32 +496,33 @@ def orphan_transfer_plan(plan: Plan) -> Plan:
         or old_info.st_ino != submitted.get("inode")
         or old_payload != plan.message
     ):
+        os.close(snapshot_fd)
         raise ReceiptError("pending predecessor allocation identity is inconsistent")
     routing_sources = preflight.get("routing_sources")
     if not isinstance(routing_sources, list) or not all(isinstance(item, dict) for item in routing_sources):
         raise ReceiptError("pending predecessor route evidence is malformed")
     old_route_evidence = tuple(dict(item) for item in routing_sources)
-    old_route_locks = tuple(
-        sorted(
-            ((Path(str(item["path"])), task_file_lock_path(Path(str(item["path"])))) for item in old_route_evidence),
-            key=lambda pair: str(pair[0]),
+    try:
+        old_route_locks = tuple(
+            sorted(
+                ((Path(str(item["path"])), task_file_lock_path(Path(str(item["path"])))) for item in old_route_evidence),
+                key=lambda pair: str(pair[0]),
+            )
         )
-    )
-    snapshot, identity, snapshot_fd = open_regular_file_snapshot(
-        old_allocation,
-        maximum=MAX_ENVELOPE_BYTES,
-        field="predecessor report allocation",
-    )
+        old_task_lock = next(lock for target, lock in old_route_locks if target == plan.manager)
+    except (KeyError, StopIteration) as exc:
+        os.close(snapshot_fd)
+        raise ReceiptError("pending predecessor route evidence is malformed") from exc
     try:
         old_plan = replace(
             old_plan,
             message_path=old_allocation,
             message_identity=identity,
             message_fd=snapshot_fd,
-            message=snapshot,
+            message=old_payload,
             route_evidence=old_route_evidence,
             route_locks=old_route_locks,
-            task_lock=next(lock for target, lock in old_route_locks if target == plan.manager),
+            task_lock=old_task_lock,
         )
         try:
             _ = validate_transaction_commitment_bytes(
@@ -349,21 +536,104 @@ def orphan_transfer_plan(plan: Plan) -> Plan:
             raise ReceiptError(f"orphan predecessor validation failed: {exc}") from exc
     finally:
         os.close(snapshot_fd)
+    if agent != plan.routing["agent"] or status != plan.status:
+        raise ReceiptError("moved committed report requires its original --agent and --status")
+    if old_allocation == plan.message_path and not plan.recovery_replay_id:
+        return replace(old_plan, authenticated_recovery=bool(plan.recovery_replay_id), message_fd=plan.message_fd)
+    if any(os.path.lexists(path) for path in (old_receipt, old_publication, old_plan.acknowledgment_authority_completion)):
+        if plan.recovery_replay_id:
+            raise ReceiptError("moved predecessor already has terminal transaction evidence")
+        return plan
+    if read_manager_acknowledgment(old_plan, require_live_authority=False) is not None:
+        raise ReceiptError(
+            "watcher-acknowledged predecessor requires --verify-consumed with its original committed allocation"
+        )
+    old_manager_state = manager_transaction_state(manager_bytes(plan.manager), old_owner, old_pointer)
+    if old_manager_state in {"restored", "active"}:
+        if plan.recovery_replay_id:
+            raise ReceiptError("moved predecessor is still reachable from its committed manager state")
+        return plan
+    if not manager_preserves_owner_prefix(plan.manager, manager_bytes(plan.manager), old_owner):
+        raise ReceiptError("moved predecessor manager no longer preserves its authenticated owner prefix")
+    for temporary in preflight.get("temporary_files", []):
+        if not isinstance(temporary, str) or os.path.lexists(temporary):
+            raise ReceiptError("pending predecessor has ambiguous temporary residue")
 
     predecessor = {
         "allocation_dev": old_info.st_dev,
         "allocation_inode": old_info.st_ino,
-        "allocation_path": str(old_allocation),
+        "allocation_path": str(actual_allocation),
         "allocation_sha256": hashlib.sha256(old_payload).hexdigest(),
+        "committed_allocation_path": str(old_allocation),
         "commitment_id": match["commitment_id"],
         "commitment_path": str(old_commitment),
         "commitment_sha256": hashlib.sha256(regular_file_bytes(old_commitment, maximum=MAX_RECEIPT_BYTES, field="historical transaction commitment")).hexdigest(),
         "envelope_path": str(old_envelope),
         "envelope_sha256": hashlib.sha256(regular_file_bytes(old_envelope, maximum=MAX_ENVELOPE_BYTES, field="private envelope")).hexdigest(),
+        "owner_prefix": owner_prefix_record(old_owner),
         "replay_id": replay_id,
         "schema": "omo-report-orphan-predecessor/v1",
     }
     routing = {**plan.routing, "orphan_predecessor": predecessor}
+    new_envelope = plan.envelope_final.with_name(f"{plan.envelope_final.stem}.transfer-{replay_id[:16]}.md")
+    new_pointer = f"(from agent {plan.routing['producer_target']} {new_envelope})"
+    new_ack_key = manager_acknowledgment_key(plan.root, new_envelope, str(plan.input_info["sha256"]))
+    new_authority_lock = plan.acknowledgment_state.parent / "pending-watch-authority" / f"{hashlib.sha256(new_ack_key.encode()).hexdigest()}.lock"
+    if os.path.lexists(new_envelope):
+        existing_owner = parse_envelope_owner_prefix(new_envelope)
+        existing_binding = {
+            "helper": plan.helper,
+            "input": plan.input_info,
+            "owner_prefix": owner_prefix_record(existing_owner),
+            "report_context": plan.report_context,
+            "routing": replay_routing_identity(routing),
+            "schema": BINDING_SCHEMA,
+            "status": plan.status,
+        }
+        existing_replay = hashlib.sha256(canonical_json(existing_binding).rstrip(b"\n")).hexdigest()
+        existing_plan = replace(
+            plan,
+            authenticated_recovery=True,
+            routing=routing,
+            replay_id=existing_replay,
+            owner_prefix=existing_owner,
+            envelope_final=new_envelope,
+            envelope_temporary=plan.envelope_directory / f".{new_envelope.name}.{existing_replay}.tmp",
+            pointer=new_pointer,
+            acknowledgment_key=new_ack_key,
+            manager_watcher_temporary=watcher_report_manager_temporary(plan.manager, new_ack_key),
+            acknowledgment_temporary=watcher_report_state_temporary(plan.acknowledgment_state, new_ack_key),
+            acknowledgment_authority_lock=new_authority_lock,
+            acknowledgment_authority_completion=new_authority_lock.with_name(f"{new_authority_lock.name}.complete"),
+            manager_temporary=plan.manager.parent / f".{plan.manager.name}.omo-report-{existing_replay}.tmp",
+            transaction_commitment_temporary=plan.receipt_directory / f".{existing_replay}.commitment.tmp",
+            transaction_commitment_final=plan.receipt_directory / f"{existing_replay}.commitment",
+            receipt_temporary=plan.receipt_directory / f".{existing_replay}.tmp",
+            receipt_final=plan.receipt_directory / f"{existing_replay}.json",
+            receipt_publication_temporary=plan.receipt_directory / f".{existing_replay}.publication.tmp",
+            receipt_publication_final=plan.receipt_directory / f"{existing_replay}.publication.json",
+        )
+        if not validate_optional_regular(
+            existing_plan.transaction_commitment_final,
+            "recovered transfer transaction commitment",
+            exact_mode=0o600,
+        ):
+            raise ReceiptError("recovered transfer envelope has no authenticated transaction commitment")
+        try:
+            _ = validate_transaction_commitment_bytes(
+                existing_plan,
+                regular_file_bytes(
+                    existing_plan.transaction_commitment_final,
+                    maximum=MAX_RECEIPT_BYTES,
+                    field="recovered transfer transaction commitment",
+                ),
+                require_current_allocation_identity=True,
+                require_current_route_evidence=False,
+            )
+            _ = validate_envelope(existing_plan)
+        except ReceiptError as exc:
+            raise ReceiptError(f"recovered transfer validation failed: {exc}") from exc
+        return existing_plan
     current_manager = manager_bytes(plan.manager)
     owner = OwnerPrefixBinding(
         hashlib.sha256(str(plan.manager).encode()).hexdigest(),
@@ -381,12 +651,9 @@ def orphan_transfer_plan(plan: Plan) -> Plan:
         "status": plan.status,
     }
     new_replay = hashlib.sha256(canonical_json(binding).rstrip(b"\n")).hexdigest()
-    new_envelope = plan.envelope_final.with_name(f"{plan.envelope_final.stem}.transfer-{replay_id[:16]}.md")
-    new_pointer = f"(from agent {plan.routing['producer_target']} {new_envelope})"
-    new_ack_key = manager_acknowledgment_key(plan.root, new_envelope, str(plan.input_info["sha256"]))
-    new_authority_lock = plan.acknowledgment_state.parent / "pending-watch-authority" / f"{hashlib.sha256(new_ack_key.encode()).hexdigest()}.lock"
     return replace(
         plan,
+        authenticated_recovery=bool(plan.recovery_replay_id),
         routing=routing,
         replay_id=new_replay,
         owner_prefix=owner,
@@ -429,6 +696,18 @@ def validate_orphan_transfer_predecessor(plan: Plan) -> None:
     envelope_bytes_value = regular_file_bytes(envelope, maximum=MAX_ENVELOPE_BYTES, field="private envelope")
     allocation_bytes = regular_file_bytes(allocation, maximum=MAX_ENVELOPE_BYTES, field="predecessor report allocation")
     allocation_info = allocation.lstat()
+    owner_raw = predecessor.get("owner_prefix")
+    if not isinstance(owner_raw, dict):
+        raise ReceiptError("orphan predecessor owner binding is malformed")
+    try:
+        owner = OwnerPrefixBinding(
+            str(owner_raw["manager_path_sha256"]),
+            str(owner_raw["sha256"]),
+            int(owner_raw["size_bytes"]),
+            int(owner_raw["separator_bytes"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ReceiptError("orphan predecessor owner binding is malformed") from exc
     if (
         hashlib.sha256(commitment_bytes).hexdigest() != predecessor.get("commitment_sha256")
         or hashlib.sha256(envelope_bytes_value).hexdigest() != predecessor.get("envelope_sha256")
@@ -454,7 +733,10 @@ def validate_orphan_transfer_predecessor(plan: Plan) -> None:
     authority_lock = plan.acknowledgment_state.parent / "pending-watch-authority" / f"{hashlib.sha256(old_key.encode()).hexdigest()}.lock"
     if any(os.path.lexists(path) for path in (receipt, publication, authority_lock.with_name(f"{authority_lock.name}.complete"))):
         raise ReceiptError("orphan predecessor gained terminal transaction evidence")
-    if old_pointer.encode() in manager_bytes(plan.manager):
+    current_manager = manager_bytes(plan.manager)
+    if not manager_preserves_owner_prefix(plan.manager, current_manager, owner):
+        raise ReceiptError("orphan predecessor manager no longer preserves its authenticated owner prefix")
+    if old_pointer.encode() in current_manager:
         raise ReceiptError("orphan predecessor regained an active manager pointer")
     if validate_optional_regular(plan.acknowledgment_state, "manager acknowledgment state", exact_mode=0o600):
         ledger = regular_file_tail(plan.acknowledgment_state, maximum=MAX_ACK_STATE_BYTES, field="manager acknowledgment state")
@@ -481,6 +763,7 @@ def parse_args(argv: list[str] | None = None) -> Arguments:
     _ = parser.add_argument("--manager-frontmatter-sha256", required=True)
     _ = parser.add_argument("--route-local-date", required=True)
     _ = parser.add_argument("--status", required=True)
+    _ = parser.add_argument("--recover-moved", default="")
     _ = parser.add_argument("--message-file", required=True, type=Path)
     _ = parser.add_argument("--agent", required=True)
     _ = parser.add_argument("--producer-target", required=True)
@@ -506,6 +789,7 @@ def parse_args(argv: list[str] | None = None) -> Arguments:
         parsed.manager_frontmatter_sha256,
         parsed.route_local_date,
         parsed.status,
+        parsed.recover_moved,
         parsed.message_file,
         parsed.agent,
         parsed.producer_target,
@@ -1139,6 +1423,8 @@ def _build_plan_from_message(
         raise ReceiptError("manager is invalid")
 
     status = normalize_status(args.status)
+    if args.recovery_replay_id and HASH_RE.fullmatch(args.recovery_replay_id) is None:
+        raise ReceiptError("moved recovery replay id is invalid")
     if AGENT_RE.fullmatch(args.agent) is None or args.agent in {".", ".."}:
         raise ReceiptError("agent is invalid")
     producer_target = canonical_target(args.producer_target, required=True, field="producer target")
@@ -1284,6 +1570,8 @@ def _build_plan_from_message(
         message_identity=message_identity,
         message_fd=message_fd,
         message=message,
+        authenticated_recovery=False,
+        recovery_replay_id=args.recovery_replay_id,
         status=status,
         input_info=input_info,
         report_context=report_context,
@@ -1320,6 +1608,9 @@ def _build_plan_from_message(
         receipt_publication_final=receipt_publication_final,
     )
     plan = orphan_transfer_plan(plan)
+    task_snapshot = frontmatter_snapshot(regular_file_bytes(task, maximum=MAX_ROUTE_FILE_BYTES, field="task"))
+    if task_snapshot is not None and task_snapshot[0].get("status") == "done" and not plan.authenticated_recovery:
+        raise ReceiptError("done task routing requires an authenticated committed report allocation")
     transfer_size_probe = {**transfer_contract(plan), "commitment_id": "0" * 64, "transfer_id": "0" * 64}
     sample_envelope = envelope_bytes(
         args.agent,
@@ -1624,7 +1915,7 @@ def validate_envelope(plan: Plan) -> bytes:
     contract = commitment.get("transfer")
     if not isinstance(contract, dict):
         raise ReceiptError("private envelope transfer binding is inconsistent")
-    expected_record = {**contract, "commitment_id": str(commitment.get("commitment_id"))}
+    expected_record: dict[str, object] = {**contract, "commitment_id": str(commitment.get("commitment_id"))}
     expected_transfer = {**expected_record, "transfer_id": bound_receipt_id(expected_record)}
     if attached_transfer != expected_transfer:
         raise ReceiptError("private envelope transfer binding is inconsistent")
@@ -3171,6 +3462,13 @@ def recover_transaction_commitment_temporary(plan: Plan) -> None:
 
 
 def reject_pending_allocation_rebind(plan: Plan) -> None:
+    predecessor = plan.routing.get("orphan_predecessor")
+    predecessor_commitment = (
+        Path(str(predecessor.get("commitment_path")))
+        if isinstance(predecessor, dict)
+        and predecessor.get("schema") == "omo-report-orphan-predecessor/v1"
+        else None
+    )
     for candidate in sorted(plan.receipt_directory.glob("*.commitment")):
         if candidate == plan.transaction_commitment_final:
             continue
@@ -3182,12 +3480,24 @@ def reject_pending_allocation_rebind(plan: Plan) -> None:
             record = json.loads(payload)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ReceiptError("transaction commitment is malformed") from exc
-        allocation = record.get("allocation") if isinstance(record, dict) else None
-        allocation_file = allocation.get("file") if isinstance(allocation, dict) else None
-        if allocation_file != str(plan.message_path):
-            continue
         receipt = plan.receipt_directory / f"{replay_id}.json"
         if receipt.exists():
+            continue
+        allocation = record.get("allocation") if isinstance(record, dict) else None
+        allocation_file = allocation.get("file") if isinstance(allocation, dict) else None
+        submitted = allocation.get("file_at_submission") if isinstance(allocation, dict) else None
+        if (
+            isinstance(submitted, dict)
+            and submitted.get("dev") == plan.message_identity[0]
+            and submitted.get("inode") == plan.message_identity[1]
+            and allocation_file != str(plan.message_path)
+        ):
+            if candidate == predecessor_commitment:
+                continue
+            raise ReceiptError(f"pending report draft object requires --recover-moved {replay_id}")
+        if allocation_file != str(plan.message_path):
+            continue
+        if candidate == predecessor_commitment:
             continue
         raise ReceiptError("pending report transaction is already bound to a different allocation")
 
@@ -3199,6 +3509,7 @@ def allocation_lock_path(plan: Plan, allocation_file: Path | None = None) -> Pat
 
 
 def create_or_reuse_transaction_commitment(plan: Plan) -> dict[str, object]:
+    reject_pending_allocation_rebind(plan)
     lock_path = allocation_lock_path(plan)
     lock_before = path_state(lock_path)
     lock_directory_before = path_state(lock_path.parent)

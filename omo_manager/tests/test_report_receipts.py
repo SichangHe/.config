@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
-from omo_manager.omo_report_receipt import OwnerPrefixBinding, ReceiptError, regular_file_tail, validate_committed_route_evidence
+from omo_manager.omo_report_receipt import OwnerPrefixBinding, ReceiptError, canonical_json, regular_file_tail, validate_committed_route_evidence
 
 
 OMO_DIR = Path(__file__).resolve().parents[1]
@@ -40,13 +40,17 @@ class ReportFixture:
         describe: bool = False,
         verify_consumed: bool = False,
         status: str = "done",
+        recover_moved: str = "",
     ) -> list[str]:
         command = [str(REPORT)]
         if describe:
             command.append("--describe")
         if verify_consumed:
             command.append("--verify-consumed")
-        return command + ["--status", status, "--message-file", str(self.message), "--agent", "receipt-worker"]
+        command += ["--status", status, "--message-file", str(self.message), "--agent", "receipt-worker"]
+        if recover_moved:
+            command += ["--recover-moved", recover_moved]
+        return command
 
 
 def frontmatter(*, runat: str, managerat: str, is_manager: bool = False) -> str:
@@ -168,14 +172,18 @@ def run_report_from(
     describe: bool = False,
     verify_consumed: bool = False,
     status: str = "done",
+    agent: str = "receipt-worker",
+    recover_moved: str = "",
     report: Path = REPORT,
 ) -> subprocess.CompletedProcess[str]:
     command = replace(case, message=message).command(
         describe=describe,
         verify_consumed=verify_consumed,
         status=status,
+        recover_moved=recover_moved,
     )
     command[0] = str(report)
+    command[command.index("--agent") + 1] = agent
     return subprocess.run(
         command,
         cwd=case.root.parent,
@@ -1191,6 +1199,325 @@ class ReportReceiptTests(unittest.TestCase):
             self.assertNotEqual(description["receipt"]["replay_id"], churned_description["receipt"]["replay_id"])
             self.assertFalse(transfer_envelope.exists())
 
+    def moved_committed_report(
+        self,
+        tmp_path: Path,
+    ) -> tuple[ReportFixture, Path, bytes, Path, dict[str, object]]:
+        case, manager, owner = active_manager_fixture(tmp_path, body=b"unused\n")
+        draft = allocate_report_draft(case, b"moved committed report\n")
+        case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+        description = json.loads(run_report_from(case, draft, describe=True, status="blocked").stdout)
+        pending = run_report_from(case, draft, status="blocked")
+        self.assertEqual(0, pending.returncode, pending.stderr)
+        self.assertFalse(json.loads(pending.stdout)["accepted"])
+        manager.write_bytes(owner + b"concurrent manager lifecycle update\n")
+        moved = draft.with_name(f"{draft.stem}.moved.md")
+        draft.replace(moved)
+        self.addCleanup(moved.unlink, missing_ok=True)
+        return case, manager, owner, moved, description
+
+    def test_moved_committed_report_recovers_to_one_accepted_transfer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, manager, owner, moved, original = self.moved_committed_report(Path(tmp))
+            recovery_id = str(original["receipt"]["replay_id"])
+            transferred = run_report_from(case, moved, status="blocked", recover_moved=recovery_id)
+            self.assertEqual(0, transferred.returncode, transferred.stderr)
+            transfer_output = json.loads(transferred.stdout)
+            self.assertFalse(transfer_output["accepted"])
+            transfer = transfer_output["transfer_receipt"]
+            self.assertIsInstance(transfer, dict)
+            transfer_queue = transfer["queue_item"]
+            self.assertIsInstance(transfer_queue, dict)
+            transfer_envelope = Path(str(transfer_queue["pointer"]).rsplit(" ", 1)[1][:-1])
+            self.assertIn(".transfer-", transfer_envelope.name)
+            original_files = original["files"]
+            self.assertIsInstance(original_files, dict)
+            self.assertTrue(Path(str(original_files["private_envelope"])).is_file())
+            watched = run_manager_watcher_once(case, manager)
+            self.assertEqual(0, watched.returncode, watched.stderr)
+            accepted = run_report_from(case, moved, status="blocked", recover_moved=recovery_id)
+            self.assertEqual(0, accepted.returncode, accepted.stderr)
+            accepted_output = json.loads(accepted.stdout)
+            self.assertTrue(accepted_output["accepted"])
+            self.assertEqual(transfer_output["replay_id"], accepted_output["replay_id"])
+            self.assertEqual(owner + b"concurrent manager lifecycle update\n", manager.read_bytes())
+            self.assertTrue(moved.is_file())
+            commitment = json.loads(transaction_commitment_path(original).read_bytes())
+            self.assertFalse(Path(str(commitment["allocation"]["file"])).exists())
+
+    def test_moved_recovery_retry_before_watcher_reuses_the_pending_transfer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, manager, _owner, moved, original = self.moved_committed_report(Path(tmp))
+            recovery_id = str(original["receipt"]["replay_id"])
+            first = run_report_from(case, moved, status="blocked", recover_moved=recovery_id)
+            self.assertEqual(0, first.returncode, first.stderr)
+            manager_after_first = manager.read_bytes()
+
+            retried = run_report_from(case, moved, status="blocked", recover_moved=recovery_id)
+
+            self.assertEqual(0, retried.returncode, retried.stderr)
+            first_output = json.loads(first.stdout)
+            retried_output = json.loads(retried.stdout)
+            self.assertFalse(first_output["accepted"])
+            self.assertFalse(retried_output["accepted"])
+            self.assertTrue(retried_output["retry_required"])
+            self.assertEqual(first_output["replay_id"], retried_output["replay_id"])
+            self.assertEqual(first_output["transfer_receipt"], retried_output["transfer_receipt"])
+            self.assertEqual(manager_after_first, manager.read_bytes())
+
+    def test_moved_committed_object_cannot_be_resubmitted_without_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, manager, _owner, moved, original = self.moved_committed_report(Path(tmp))
+            receipt_directory = transaction_commitment_path(original).parent
+            before = {path.name: path.read_bytes() for path in receipt_directory.iterdir()}
+            manager_before = manager.read_bytes()
+
+            rejected = run_report_from(case, moved, status="done", agent="other-agent")
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("requires --recover-moved", rejected.stderr)
+            self.assertEqual(manager_before, manager.read_bytes())
+            self.assertEqual(before, {path.name: path.read_bytes() for path in receipt_directory.iterdir()})
+
+    def test_moved_recovery_requires_explicit_agent_and_valid_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, manager, _owner, moved, original = self.moved_committed_report(Path(tmp))
+            recovery_id = str(original["receipt"]["replay_id"])
+            command = replace(case, message=moved).command(status="blocked", recover_moved=recovery_id)
+            agent_index = command.index("--agent")
+            del command[agent_index : agent_index + 2]
+            manager_before = manager.read_bytes()
+
+            missing_agent = subprocess.run(
+                command,
+                cwd=case.root.parent,
+                env=case.env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            wrong_replay = run_report_from(case, moved, status="blocked", recover_moved="0" * 64)
+
+            self.assertEqual(2, missing_agent.returncode)
+            self.assertIn("requires explicit --agent", missing_agent.stderr)
+            self.assertEqual(2, wrong_replay.returncode)
+            self.assertIn("missing or inconsistent", wrong_replay.stderr)
+            self.assertEqual(manager_before, manager.read_bytes())
+
+    def test_moved_recovery_rejects_a_different_object(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, manager, _owner, _moved, original = self.moved_committed_report(Path(tmp))
+            recovery_id = str(original["receipt"]["replay_id"])
+            other = allocate_report_draft(case, b"moved committed report\n")
+            self.addCleanup(other.unlink, missing_ok=True)
+            manager_before = manager.read_bytes()
+
+            rejected = run_report_from(case, other, status="blocked", recover_moved=recovery_id)
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("not the exact committed object", rejected.stderr)
+            self.assertEqual(manager_before, manager.read_bytes())
+
+    def test_moved_recovery_rejects_a_changed_manager_owner_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, manager, _owner, moved, original = self.moved_committed_report(Path(tmp))
+            recovery_id = str(original["receipt"]["replay_id"])
+            manager.write_bytes(manager.read_bytes().replace(b"pending_task_items: []", b"pending_task_items: {}", 1))
+            receipt_directory = transaction_commitment_path(original).parent
+            before = {path.name: path.read_bytes() for path in receipt_directory.iterdir()}
+            manager_before = manager.read_bytes()
+
+            rejected = run_report_from(case, moved, status="blocked", recover_moved=recovery_id)
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("authenticated owner prefix", rejected.stderr)
+            self.assertEqual(manager_before, manager.read_bytes())
+            self.assertEqual(before, {path.name: path.read_bytes() for path in receipt_directory.iterdir()})
+
+    def test_recovery_accepts_the_restored_name_of_the_exact_committed_object(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, _manager, _owner, moved, original = self.moved_committed_report(Path(tmp))
+            recovery_id = str(original["receipt"]["replay_id"])
+            commitment = json.loads(transaction_commitment_path(original).read_bytes())
+            original_path = Path(str(commitment["allocation"]["file"]))
+            moved.replace(original_path)
+            self.addCleanup(original_path.unlink, missing_ok=True)
+
+            transferred = run_report_from(
+                case,
+                original_path,
+                status="blocked",
+                recover_moved=recovery_id,
+            )
+
+            self.assertEqual(0, transferred.returncode, transferred.stderr)
+            output = json.loads(transferred.stdout)
+            self.assertFalse(output["accepted"])
+            self.assertIn(".transfer-", output["transfer_receipt"]["queue_item"]["pointer"])
+
+    def test_moved_committed_report_rejects_wrong_status_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, manager, _owner, moved, original = self.moved_committed_report(Path(tmp))
+            recovery_id = str(original["receipt"]["replay_id"])
+            receipt_directory = transaction_commitment_path(original).parent
+            before = {path.name: path.read_bytes() for path in receipt_directory.iterdir()}
+            manager_before = manager.read_bytes()
+            rejected = run_report_from(case, moved, status="done", recover_moved=recovery_id)
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("original --agent and --status", rejected.stderr)
+            self.assertEqual(manager_before, manager.read_bytes())
+            self.assertEqual(before, {path.name: path.read_bytes() for path in receipt_directory.iterdir()})
+
+    def test_moved_committed_report_rejects_wrong_agent_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, manager, _owner, moved, original = self.moved_committed_report(Path(tmp))
+            recovery_id = str(original["receipt"]["replay_id"])
+            receipt_directory = transaction_commitment_path(original).parent
+            before = {path.name: path.read_bytes() for path in receipt_directory.iterdir()}
+            manager_before = manager.read_bytes()
+            rejected = run_report_from(
+                case,
+                moved,
+                status="blocked",
+                agent="other-agent",
+                recover_moved=recovery_id,
+            )
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("original --agent and --status", rejected.stderr)
+            self.assertEqual(manager_before, manager.read_bytes())
+            self.assertEqual(before, {path.name: path.read_bytes() for path in receipt_directory.iterdir()})
+
+    def test_moved_committed_report_requires_the_strict_transaction_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, manager, _owner, moved, original = self.moved_committed_report(Path(tmp))
+            recovery_id = str(original["receipt"]["replay_id"])
+            commitment_path = transaction_commitment_path(original)
+            commitment = json.loads(commitment_path.read_bytes())
+            commitment["preflight"]["records"]["private_receipt"] = str(
+                commitment_path.with_suffix(".forged.json")
+            )
+            unsigned = dict(commitment)
+            unsigned.pop("commitment_id")
+            commitment["commitment_id"] = hashlib.sha256(canonical_json(unsigned).rstrip(b"\n")).hexdigest()
+            commitment_path.write_bytes(canonical_json(commitment))
+            manager_before = manager.read_bytes()
+
+            rejected = run_report_from(case, moved, status="blocked", recover_moved=recovery_id)
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("orphan predecessor validation failed", rejected.stderr)
+            self.assertEqual(manager_before, manager.read_bytes())
+            self.assertFalse(commitment_path.with_suffix(".forged.json").exists())
+
+    def test_moved_recovery_rejects_an_incomplete_commitment_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, manager, _owner, moved, original = self.moved_committed_report(Path(tmp))
+            recovery_id = str(original["receipt"]["replay_id"])
+            commitment_path = transaction_commitment_path(original)
+            commitment = json.loads(commitment_path.read_bytes())
+            del commitment["preflight"]["records"]["private_receipt"]
+            unsigned = dict(commitment)
+            unsigned.pop("commitment_id")
+            commitment["commitment_id"] = hashlib.sha256(canonical_json(unsigned).rstrip(b"\n")).hexdigest()
+            commitment_path.write_bytes(canonical_json(commitment))
+            manager_before = manager.read_bytes()
+
+            rejected = run_report_from(case, moved, status="blocked", recover_moved=recovery_id)
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("recovery transaction commitment is malformed", rejected.stderr)
+            self.assertNotIn("Traceback", rejected.stderr)
+            self.assertEqual(manager_before, manager.read_bytes())
+
+    def test_moved_recovery_rejects_an_already_accepted_predecessor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, manager, _owner = active_manager_fixture(Path(tmp), body=b"unused\n")
+            draft = allocate_report_draft(case, b"accepted predecessor\n")
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            original = json.loads(run_report_from(case, draft, describe=True, status="blocked").stdout)
+            pending = run_report_from(case, draft, status="blocked")
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+            accepted = run_report_from(case, draft, status="blocked")
+            self.assertEqual(0, accepted.returncode, accepted.stderr)
+            self.assertTrue(json.loads(accepted.stdout)["accepted"])
+            moved = draft.with_name(f"{draft.stem}.moved.md")
+            draft.replace(moved)
+            self.addCleanup(moved.unlink, missing_ok=True)
+            recovery_id = str(original["receipt"]["replay_id"])
+            receipt_directory = transaction_commitment_path(original).parent
+            before = {path.name: path.read_bytes() for path in receipt_directory.iterdir()}
+            manager_before = manager.read_bytes()
+
+            rejected = run_report_from(case, moved, status="blocked", recover_moved=recovery_id)
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("terminal transaction evidence", rejected.stderr)
+            self.assertEqual(manager_before, manager.read_bytes())
+            self.assertEqual(before, {path.name: path.read_bytes() for path in receipt_directory.iterdir()})
+
+    def test_moved_recovery_rejects_a_watcher_acknowledged_predecessor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, manager, _owner = active_manager_fixture(Path(tmp), body=b"unused\n")
+            draft = allocate_report_draft(case, b"acknowledged predecessor\n")
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            original = json.loads(run_report_from(case, draft, describe=True, status="blocked").stdout)
+            pending = run_report_from(case, draft, status="blocked")
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+            moved = draft.with_name(f"{draft.stem}.moved.md")
+            draft.replace(moved)
+            self.addCleanup(moved.unlink, missing_ok=True)
+            recovery_id = str(original["receipt"]["replay_id"])
+            receipt_directory = transaction_commitment_path(original).parent
+            before = {path.name: path.read_bytes() for path in receipt_directory.iterdir()}
+            manager_before = manager.read_bytes()
+
+            rejected = run_report_from(case, moved, status="blocked", recover_moved=recovery_id)
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("watcher-acknowledged predecessor", rejected.stderr)
+            self.assertEqual(manager_before, manager.read_bytes())
+            self.assertEqual(before, {path.name: path.read_bytes() for path in receipt_directory.iterdir()})
+
+    def test_done_task_fallback_allows_authenticated_moved_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, _manager, _owner, moved, original = self.moved_committed_report(Path(tmp))
+            recovery_id = str(original["receipt"]["replay_id"])
+            task = case.root / "worker.md"
+            task.write_text(
+                task.read_text(encoding="utf-8").replace("status: running", "status: done", 1),
+                encoding="utf-8",
+            )
+            (case.root / "TODO.md").write_text(
+                "current:\nmanager.md vl:2\nprevious:\nworker.md cfg:7\n",
+                encoding="utf-8",
+            )
+
+            recovered = run_report_from(case, moved, status="blocked", recover_moved=recovery_id)
+
+            self.assertEqual(0, recovered.returncode, recovered.stderr)
+            output = json.loads(recovered.stdout)
+            self.assertFalse(output["accepted"])
+            self.assertIn(".transfer-", output["transfer_receipt"]["queue_item"]["pointer"])
+
+    def test_done_task_fallback_requires_an_authenticated_committed_object(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case = fixture(Path(tmp), body=b"fresh done-task report\n")
+            task = case.root / "worker.md"
+            task.write_text(
+                task.read_text(encoding="utf-8").replace("status: running", "status: done", 1),
+                encoding="utf-8",
+            )
+            (case.root / "TODO.md").write_text("current:\nprevious:\nworker.md cfg:7\n", encoding="utf-8")
+            rejected = run_report(case, status="done")
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("authenticated committed report allocation", rejected.stderr)
+            self.assertFalse(case.manager.exists())
+            receipt_directory = Path(case.env["XDG_STATE_HOME"]) / "omo-manager" / "report-receipts"
+            self.assertFalse(receipt_directory.exists())
+
     def test_orphan_transfer_reconstructs_predecessor_temporaries_across_helper_upgrade(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1236,7 +1563,7 @@ class ReportReceiptTests(unittest.TestCase):
             transaction_commitment_path(first_description).unlink()
             receiver = report.parent / "omo_report_receipt.py"
             receiver.write_text(receiver.read_text(encoding="utf-8") + "\n# second reviewed helper upgrade\n", encoding="utf-8")
-            manager.write_bytes(owner + b"second lifecycle update\n")
+            manager.write_bytes(owner + b"first lifecycle update\nsecond lifecycle update\n")
 
             described = run_report_from(case, drafts[2], describe=True, report=report)
 
