@@ -67,6 +67,10 @@ SOURCE_1140_APPROVAL_SHA256 = "a80ed239e1acbd07750c2f55202ec2d5a68e6bd53068ae9c1
 SOURCE_1179_APPROVAL_FILE = "85c5dff58359-1179.txt"
 SOURCE_1179_APPROVAL_QUOTE = "Trash the emails that I no longer need to read that are not read yet."
 SOURCE_1179_APPROVAL_SHA256 = "0c470c290d70d8cf66a95ba8fabce3d2881b4ca0edb866267f28eabc529ce6db"
+# 🧑 “You need to aggressively trash any email the human no longer needs to read and replace any partially unnecessary emails with new emails.”
+SOURCE_1438_APPROVAL_FILE = "85c5dff58359-1438.txt"
+SOURCE_1438_APPROVAL_QUOTE = "You need to aggressively trash any email the human no longer needs to read and replace any partially unnecessary emails with new emails."
+SOURCE_1438_APPROVAL_SHA256 = "461ff49a0e4b8d901e9708553827f01623d3efdaddf730192cb2497f30fa3b96"
 REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION = "v1.2.0"
 LEGACY_REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION = "v1.1.0"
 GMAIL_IDENTITY_UID_BATCH = 40
@@ -2633,15 +2637,23 @@ def require_source_1140_direct_removal(
     approvals = {
         SOURCE_1140_APPROVAL_FILE: (SOURCE_1140_APPROVAL_QUOTE, SOURCE_1140_APPROVAL_SHA256),
         SOURCE_1179_APPROVAL_FILE: (SOURCE_1179_APPROVAL_QUOTE, SOURCE_1179_APPROVAL_SHA256),
+        SOURCE_1438_APPROVAL_FILE: (SOURCE_1438_APPROVAL_QUOTE, SOURCE_1438_APPROVAL_SHA256),
     }
     approval_name = approval_file.name if approval_file is not None else ""
     expected_quote, expected_sha256 = approvals.get(approval_name, ("", ""))
     if approval_file is None or approval_quote != expected_quote:
         raise RuntimeError("replacement-free removal requires an exact supported Human approval")
     approval_arg = approval_file.expanduser()
-    work_logs_root_arg = configured_work_logs_root()
+    try:
+        work_logs_root_arg = configured_work_logs_root().resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError("replacement-free removal work-log root is unreadable") from exc
     mail_root_arg = work_logs_root_arg / "manager_mail"
-    if not approval_arg.is_absolute() or approval_arg.parent != mail_root_arg or approval_arg.name not in approvals:
+    if (
+        not approval_arg.is_absolute()
+        or approval_arg.parent.resolve(strict=False) != mail_root_arg
+        or approval_arg.name not in approvals
+    ):
         raise RuntimeError("replacement-free removal requires trusted manager mail")
     try:
         work_logs_root_stat = work_logs_root_arg.lstat()
@@ -2678,6 +2690,9 @@ def require_source_1140_direct_removal(
         values.setdefault(row["kind"], []).append(row["value"])
     review_versions = values.get("version", [])
     review_version = review_versions[0] if len(review_versions) == 1 else ""
+    allowed_review_versions = {LEGACY_REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION, REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION}
+    if approval_arg.name == SOURCE_1438_APPROVAL_FILE:
+        allowed_review_versions = {REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION}
     expected_single = {
         "version": [review_version],
         "approval_sha256": [expected_sha256],
@@ -2694,7 +2709,7 @@ def require_source_1140_direct_removal(
     expected_sources = sorted(f"{source.uid}:{source.gmail_msgid}:{source.gmail_thrid}:{source.raw_sha256}:{source.read_state}" for source in sources)
     expected_contexts = sorted(f"{context.gmail_msgid}:{context.gmail_thrid}:{context.raw_sha256}" for context in contexts)
     if (
-        review_version not in {LEGACY_REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION, REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION}
+        review_version not in allowed_review_versions
         or set(values) != {*expected_single, "source", "context"}
         or any(values.get(kind) != expected for kind, expected in expected_single.items())
         or sorted(values.get("source", [])) != expected_sources
