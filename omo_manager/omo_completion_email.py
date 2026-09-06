@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import imaplib
 import os
 import re
 import shlex
@@ -12,8 +13,13 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from contextlib import ExitStack
 from dataclasses import dataclass
+from email import policy
+from email.message import EmailMessage, Message
+from email.parser import BytesParser
+from email.utils import getaddresses
 from pathlib import Path
 
 if __package__ in {None, ""}:
@@ -21,7 +27,7 @@ if __package__ in {None, ""}:
 
 from omo_manager.omo_agent_status import TaskFrontmatterError
 from omo_manager.omo_agent_status import parse_task_metadata
-from omo_manager.omo_email_config import guest_hees_target
+from omo_manager.omo_email_config import GMAIL_IMAP_HOST, configured_agent_mail, guest_hees_target
 from omo_manager.omo_email_subject import canonical_tmux_target
 from omo_manager.omo_task_context import current_active_task
 from omo_manager.omo_task_lock import task_file_lock
@@ -86,6 +92,68 @@ class CompletionEmail:
     notice_key: str
     semantic_key: str
     contact_policy: ContactPolicyBinding | None = None
+
+
+def ordinary_sent_text(message: Message) -> str:
+    if not isinstance(message, EmailMessage):
+        return ""
+    body = message.get_body(preferencelist=("plain",))
+    return body.get_content() if body is not None else ""
+
+
+def verify_ordinary_completion_in_sent(
+    message_id: str,
+    subject_sha256: str,
+    body_sha256: str,
+) -> bool:
+    """Verify one exact ordinary agent-to-Human message in Sent Mail."""
+
+    settings = configured_agent_mail()
+    if settings is None:
+        raise OSError("ordinary completion reconciliation requires split email configuration")
+    try:
+        timeout_s = max(float(os.environ.get("OMO_COMPLETION_SENT_VERIFY_TIMEOUT_S", "20")), 0)
+    except ValueError:
+        timeout_s = 20
+    deadline_s = time.monotonic() + timeout_s
+    while True:
+        client: imaplib.IMAP4_SSL | None = None
+        try:
+            client = imaplib.IMAP4_SSL(GMAIL_IMAP_HOST, timeout=min(max(timeout_s, 1), 30))
+            client.login(settings.agent_address, settings.app_password)
+            kind, _ = client.select('"[Gmail]/Sent Mail"', readonly=True)
+            if kind != "OK":
+                raise imaplib.IMAP4.error("cannot select Sent Mail")
+            kind, found = client.uid("search", None, "HEADER", "Message-ID", message_id)  # pyright: ignore[reportArgumentType]
+            uids = b" ".join(value for value in found or [] if isinstance(value, bytes)).split() if kind == "OK" else []
+            if len(uids) == 1:
+                kind, fetched = client.uid("fetch", uids[0].decode("ascii"), "(BODY.PEEK[])")
+                payloads = [value[1] for value in fetched or [] if isinstance(value, tuple) and isinstance(value[1], bytes)]
+                if kind == "OK" and len(payloads) == 1:
+                    candidate = BytesParser(policy=policy.default).parsebytes(payloads[0])
+                    senders = [address.casefold() for _name, address in getaddresses(candidate.get_all("From", []))]
+                    recipients = [address.casefold() for _name, address in getaddresses(candidate.get_all("To", []))]
+                    if (
+                        str(candidate.get("Message-ID", "")) == message_id
+                        and senders == [settings.agent_address.casefold()]
+                        and recipients == [settings.human_address.casefold()]
+                        and not candidate.get_all("Cc", [])
+                        and not candidate.get_all("Bcc", [])
+                        and hashlib.sha256(str(candidate.get("Subject", "")).encode()).hexdigest() == subject_sha256
+                        and hashlib.sha256(ordinary_sent_text(candidate).encode()).hexdigest() == body_sha256
+                    ):
+                        return True
+        except (OSError, ValueError, imaplib.IMAP4.error):
+            pass
+        finally:
+            if client is not None:
+                try:
+                    client.logout()
+                except (OSError, imaplib.IMAP4.error):
+                    pass
+        if time.monotonic() >= deadline_s:
+            return False
+        time.sleep(min(0.5, max(0, deadline_s - time.monotonic())))
 
 
 def completion_notice_key(
@@ -493,6 +561,223 @@ def reconciled_completion_is_delivered(plan: CompletionEmail) -> bool:
     return True
 
 
+def ordinary_completion_record(
+    plan: CompletionEmail,
+    message_id: str,
+    subject_sha256: str,
+    body_sha256: str,
+) -> str:
+    values = (
+        ("version", "v1"),
+        ("semantic_key", plan.semantic_key),
+        ("canonical_key", plan.key),
+        ("notice_key", plan.notice_key),
+        ("root", str(plan.root)),
+        ("task", plan.task.relative_to(plan.root).as_posix()),
+        ("owner", plan.target),
+        ("manager_owner", plan.manager_target),
+        ("task_sha256", plan.task_sha256),
+        ("outcome_sha256", hashlib.sha256(plan.outcome.encode()).hexdigest()),
+        ("message_id", message_id),
+        ("sent_subject_sha256", subject_sha256),
+        ("sent_body_sha256", body_sha256),
+    )
+    if any(any(character in value for character in "\r\n") for _name, value in values):
+        raise ValueError("ordinary completion evidence must be single-line")
+    return "".join(f"{name}={value}\n" for name, value in values)
+
+
+def ordinary_completion_is_reconciled(plan: CompletionEmail) -> bool:
+    marker = completion_email_state_dir() / "ordinary-completion-by-notice" / plan.notice_key
+    try:
+        payload = owned_private_file(marker, "ordinary completion reconciliation", 16_384).decode()
+    except FileNotFoundError:
+        return False
+    try:
+        values = dict(line.split("=", 1) for line in payload.splitlines())
+    except ValueError as exc:
+        raise OSError("ordinary completion reconciliation is malformed") from exc
+    expected_fields = {
+        "version",
+        "semantic_key",
+        "canonical_key",
+        "notice_key",
+        "root",
+        "task",
+        "owner",
+        "manager_owner",
+        "task_sha256",
+        "outcome_sha256",
+        "message_id",
+        "sent_subject_sha256",
+        "sent_body_sha256",
+    }
+    if (
+        len(values) != len(payload.splitlines())
+        or set(values) != expected_fields
+        or values["version"] != "v1"
+        or values["semantic_key"] != plan.semantic_key
+        or values["notice_key"] != plan.notice_key
+        or values["root"] != str(plan.root)
+        or values["task"] != plan.task.relative_to(plan.root).as_posix()
+        or canonical_tmux_target(values["owner"]) != canonical_tmux_target(plan.target)
+        or canonical_tmux_target(values["manager_owner"]) != canonical_tmux_target(plan.manager_target)
+        or SHA256_RE.fullmatch(values["canonical_key"]) is None
+        or SHA256_RE.fullmatch(values["task_sha256"]) is None
+        or SHA256_RE.fullmatch(values["outcome_sha256"]) is None
+        or re.fullmatch(r"<[^<>\s]+>", values["message_id"]) is None
+        or SHA256_RE.fullmatch(values["sent_subject_sha256"]) is None
+        or SHA256_RE.fullmatch(values["sent_body_sha256"]) is None
+    ):
+        raise OSError("ordinary completion reconciliation does not match the current task")
+    message_marker = completion_email_state_dir() / "ordinary-completion-by-message" / hashlib.sha256(
+        values["message_id"].encode()
+    ).hexdigest()
+    if owned_private_file(message_marker, "ordinary completion message evidence", 16_384).decode() != payload:
+        raise OSError("ordinary completion message evidence is missing or ambiguous")
+    return True
+
+
+# 🧑 Human: "Add a supported reconciliation path that binds an already-sent ordinary direct Human completion email Message-ID and exact evidence to a new lifecycle completion key without sending a duplicate"
+def reconcile_ordinary_sent_completion(
+    root: Path,
+    task: Path,
+    outcome: str,
+    message_id: str,
+    subject_sha256: str,
+    body_sha256: str,
+    *,
+    items: tuple[str, ...] = (),
+    evidence: str = "",
+    semantic_key: str,
+) -> None:
+    """Bind exact Sent-Mail evidence to one owner task without sending mail."""
+
+    if re.fullmatch(r"<[^<>\s]+>", message_id) is None:
+        raise ValueError("ordinary completion Message-ID is invalid")
+    if SHA256_RE.fullmatch(subject_sha256) is None or SHA256_RE.fullmatch(body_sha256) is None:
+        raise ValueError("ordinary completion subject and body digests must be lowercase SHA-256 values")
+    root = root.resolve()
+    task = task.resolve()
+    with task_file_lock(task):
+        text = task.read_text(encoding="utf-8")
+        plan = plan_completion_email(
+            root,
+            task,
+            text,
+            outcome,
+            items=items,
+            evidence=evidence,
+            semantic_key=semantic_key,
+        )
+        if plan is None:
+            raise OSError("ordinary completion reconciliation requires the exact active task owner")
+        if not verify_ordinary_completion_in_sent(message_id, subject_sha256, body_sha256):
+            raise OSError("ordinary completion message is not exact verified Sent-Mail evidence")
+        record = ordinary_completion_record(plan, message_id, subject_sha256, body_sha256)
+        state = completion_email_state_dir()
+        state.mkdir(mode=0o700, parents=True, exist_ok=True)
+        state.chmod(0o700)
+        notice_dir = state / "ordinary-completion-by-notice"
+        message_dir = state / "ordinary-completion-by-message"
+        notice_dir.mkdir(mode=0o700, exist_ok=True)
+        message_dir.mkdir(mode=0o700, exist_ok=True)
+        notice_marker = notice_dir / plan.notice_key
+        message_marker = message_dir / hashlib.sha256(message_id.encode()).hexdigest()
+        lock_paths = sorted(
+            (state / "completion-email-claims.lock", state / "ordinary-completion-reconcile.lock"),
+            key=str,
+        )
+        with ExitStack() as locks:
+            for lock_path in lock_paths:
+                _ = locks.enter_context(task_file_lock_at_path(lock_path))
+            for directory, label in (
+                (state, "completion state"),
+                (notice_dir, "ordinary completion notice directory"),
+                (message_dir, "ordinary completion message directory"),
+            ):
+                require_private_directory(directory, label)
+            structured_paths = (
+                state / "completion-email-delivered" / plan.key,
+                state / "completion-notice-delivered" / plan.notice_key,
+                state / "completion-email-requests" / plan.key,
+                state / "completion-email-authorizations" / plan.key,
+                state / "completion-email-authorization-used" / plan.key,
+            )
+            try:
+                claims = owned_private_file(
+                    state / "completion-email-claims.tsv", "completion claims ledger", 8_000_000
+                ).decode().splitlines()
+            except FileNotFoundError:
+                claims = []
+            if any(len(line.split("\t")) not in {3, 5, 6, 7} for line in claims):
+                raise OSError("completion claims ledger is malformed")
+            matching_claims = [
+                fields
+                for fields in (line.split("\t") for line in claims)
+                if fields
+                and (
+                    fields[0] == plan.key
+                    or len(fields) >= 6
+                    and fields[5] == plan.notice_key
+                )
+            ]
+            authorization_dir = state / "completion-email-authorizations"
+            matching_authorizations: list[Path] = []
+            authorizations: set[str] = set()
+            if authorization_dir.exists():
+                require_private_directory(authorization_dir, "completion email authorization directory")
+                for authorization in authorization_dir.iterdir():
+                    if SHA256_RE.fullmatch(authorization.name) is None:
+                        raise OSError("completion email authorization entry is malformed")
+                    payload = owned_private_file(authorization, "completion email authorization", 4096).decode()
+                    try:
+                        values = dict(line.split("=", 1) for line in payload.splitlines())
+                    except ValueError as exc:
+                        raise OSError("completion email authorization is malformed") from exc
+                    expected_fields = {
+                        "version",
+                        "target",
+                        "root",
+                        "task",
+                        "task_sha256",
+                        "notice_key",
+                        "semantic_key",
+                        "subject_sha256",
+                        "body_sha256",
+                    }
+                    if len(values) != len(payload.splitlines()) or set(values) != expected_fields or values["version"] != "1":
+                        raise OSError("completion email authorization is malformed")
+                    authorizations.add(authorization.name)
+                    if values["notice_key"] == plan.notice_key and values["semantic_key"] == plan.semantic_key:
+                        matching_authorizations.append(authorization)
+            used_dir = state / "completion-email-authorization-used"
+            if used_dir.exists():
+                require_private_directory(used_dir, "completion authorization use directory")
+                for used in used_dir.iterdir():
+                    if SHA256_RE.fullmatch(used.name) is None or used.name not in authorizations:
+                        raise OSError("completion authorization use has no exact authorization")
+                    _ = owned_private_file(used, "completion authorization use", 4096)
+            if matching_claims or matching_authorizations or any(path.exists() for path in structured_paths):
+                raise OSError("ordinary completion cannot replace existing structured completion state")
+            markers = (
+                (notice_marker, "ordinary completion reconciliation"),
+                (message_marker, "ordinary completion message evidence"),
+            )
+            existing: dict[Path, str] = {}
+            for marker, label in markers:
+                try:
+                    recorded = owned_private_file(marker, label, 16_384).decode()
+                except FileNotFoundError:
+                    continue
+                if recorded != record:
+                    raise OSError(f"{label} is already bound to different evidence")
+                existing[marker] = recorded
+            for marker, _label in markers:
+                if marker not in existing:
+                    exclusive_record(marker, record)
+
+
 def claimed_completion_notice(plan: CompletionEmail) -> tuple[str, str, str, str] | None:
     """Find the single atomic claim for this semantic notice."""
 
@@ -601,6 +886,8 @@ def completion_email_is_delivered(plan: CompletionEmail) -> bool:
             # byte transition without weakening either exact keyed receipt.
             return True
         mark_completion_email_delivered(plan)
+        return True
+    if ordinary_completion_is_reconciled(plan):
         return True
     claimed_receipt = claimed_completion_receipt(plan)
     if claimed_receipt is not None:
@@ -896,6 +1183,11 @@ def claim_completion_email(plan: CompletionEmail, *, recover_existing: bool = Fa
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     with os.fdopen(fd, "r+", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        ordinary_marker = state_dir / "ordinary-completion-by-notice" / plan.notice_key
+        if ordinary_marker.exists():
+            if not ordinary_completion_is_reconciled(plan):
+                raise OSError("ordinary completion reconciliation is invalid")
+            return False
         try:
             previous = ledger.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -1052,10 +1344,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Consume one exact delivered receipt from another owner-private completion state.",
     )
+    _ = parser.add_argument(
+        "--reconcile-ordinary-sent",
+        action="store_true",
+        help="Bind one exact ordinary agent-to-Human Sent-Mail message to this completion without sending again.",
+    )
     _ = parser.add_argument("--owner", default="", help="Exact task owner required by --reconcile-delivered.")
     _ = parser.add_argument("--task-sha256", default="", help="Exact current task digest required by --reconcile-delivered.")
     _ = parser.add_argument("--receipt", type=Path, help="Exact delivered marker required by --reconcile-delivered.")
     _ = parser.add_argument("--receipt-sha256", default="", help="Exact delivered-marker digest required by --reconcile-delivered.")
+    _ = parser.add_argument("--message-id", default="", help="Exact RFC Message-ID required by --reconcile-ordinary-sent.")
+    _ = parser.add_argument("--sent-subject-sha256", default="", help="Exact decoded Sent-Mail subject digest.")
+    _ = parser.add_argument("--sent-body-sha256", default="", help="Exact decoded plain-text Sent-Mail body digest.")
     parsed = parser.parse_args(argv)
     root = parsed.root.resolve()
     task = parsed.task if parsed.task.is_absolute() else root / parsed.task
@@ -1063,9 +1363,14 @@ def main(argv: list[str] | None = None) -> int:
         reconciliation_values = (parsed.owner, parsed.task_sha256, parsed.receipt, parsed.receipt_sha256)
         if not parsed.semantic_key:
             parser.error("--semantic-key is required for a completion notice.")
+        if parsed.reconcile_delivered and parsed.reconcile_ordinary_sent:
+            parser.error("completion reconciliation modes are mutually exclusive.")
+        ordinary_values = (parsed.message_id, parsed.sent_subject_sha256, parsed.sent_body_sha256)
         if parsed.reconcile_delivered:
             if not all(reconciliation_values):
                 parser.error("--reconcile-delivered requires owner, task digest, receipt, and receipt digest.")
+            if any(ordinary_values):
+                parser.error("ordinary Sent-Mail evidence requires --reconcile-ordinary-sent.")
             reconcile_delivered_completion(
                 root,
                 task,
@@ -1080,8 +1385,28 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"Reconciled delivered completion receipt for {task.name} into {completion_email_state_dir()}.")
             return 0
+        if parsed.reconcile_ordinary_sent:
+            if not all(ordinary_values):
+                parser.error("--reconcile-ordinary-sent requires Message-ID, subject digest, and body digest.")
+            if any(reconciliation_values):
+                parser.error("delivery receipt options require --reconcile-delivered.")
+            reconcile_ordinary_sent_completion(
+                root,
+                task,
+                parsed.outcome,
+                parsed.message_id,
+                parsed.sent_subject_sha256,
+                parsed.sent_body_sha256,
+                items=tuple(parsed.item),
+                evidence=parsed.evidence,
+                semantic_key=parsed.semantic_key,
+            )
+            print(f"Reconciled ordinary Sent-Mail completion for {task.name} without sending email.")
+            return 0
         if any(reconciliation_values):
             parser.error("owner, task digest, and receipt options require --reconcile-delivered.")
+        if any(ordinary_values):
+            parser.error("Message-ID and Sent-Mail digests require --reconcile-ordinary-sent.")
         text = task.read_text(encoding="utf-8")
         plan = plan_completion_email(
             root,

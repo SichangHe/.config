@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import tempfile
 import unittest
+from email.message import EmailMessage
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,12 +12,14 @@ from omo_manager.omo_completion_email import claim_completion_email
 from omo_manager.omo_completion_email import completion_email_is_delivered
 from omo_manager.omo_completion_email import plan_completion_email
 from omo_manager.omo_completion_email import reconcile_delivered_completion
+from omo_manager.omo_completion_email import reconcile_ordinary_sent_completion
 from omo_manager.omo_completion_email import require_completion_entrypoint
 from omo_manager.omo_completion_email import require_owner_completion
 from omo_manager.omo_completion_email import main
 from omo_manager.omo_completion_email import mark_completion_email_delivered
 from omo_manager.omo_completion_email import mark_completion_email_request_queued
 from omo_manager.omo_completion_email import send_completion_email
+from omo_manager.omo_completion_email import verify_ordinary_completion_in_sent
 from omo_manager.omo_completion_email import SOURCE1241_ENVELOPE
 from omo_manager.omo_completion_email import SOURCE1241_CONTEXT
 from omo_manager.omo_completion_email import SOURCE1241_HUMAN
@@ -51,6 +54,46 @@ def source1241_task(root: Path, *, body_suffix: str = "", source_text: str = SOU
 
 
 class CompletionEmailTest(unittest.TestCase):
+    def test_ordinary_sent_verification_binds_message_participants_and_content(self) -> None:
+        message = EmailMessage()
+        message["From"] = "agent@example.test"
+        message["To"] = "human@example.test"
+        message["Subject"] = "Exact subject"
+        message["Message-ID"] = "<sent@example.test>"
+        message.set_content("Exact body\n")
+
+        class FakeImap:
+            def login(self, _address: str, _password: str) -> None:
+                return None
+
+            def select(self, _mailbox: str, *, readonly: bool) -> tuple[str, list[bytes]]:
+                self.assert_readonly = readonly
+                return "OK", []
+
+            def uid(self, command: str, *_args: str) -> tuple[str, list[bytes | tuple[bytes, bytes]]]:
+                if command == "search":
+                    return "OK", [b"1"]
+                return "OK", [(b"1", message.as_bytes())]
+
+            def logout(self) -> None:
+                return None
+
+        settings = type(
+            "Settings",
+            (),
+            {"agent_address": "agent@example.test", "human_address": "human@example.test", "app_password": "secret"},
+        )()
+        with patch("omo_manager.omo_completion_email.configured_agent_mail", return_value=settings), patch(
+            "omo_manager.omo_completion_email.imaplib.IMAP4_SSL", return_value=FakeImap()
+        ):
+            self.assertTrue(
+                verify_ordinary_completion_in_sent(
+                    "<sent@example.test>",
+                    hashlib.sha256(b"Exact subject").hexdigest(),
+                    hashlib.sha256(b"Exact body\n").hexdigest(),
+                )
+            )
+
     def delivered_receipt(
         self,
         state: Path,
@@ -69,6 +112,180 @@ class CompletionEmailTest(unittest.TestCase):
             mark_completion_email_delivered(plan)
         receipt = state / "completion-email-delivered" / plan.key
         return receipt, hashlib.sha256(receipt.read_bytes()).hexdigest()
+
+    def test_legacy_no_email_removal_can_reconcile_exact_ordinary_sent_message(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            before = task_text()
+            after = before.replace("pending_task_items:\n  - finish review", "pending_task_items: []")
+            task.write_text(after, encoding="utf-8")
+            message_id = "<already-sent@example.test>"
+            subject_sha256 = hashlib.sha256(b"Exact completion subject").hexdigest()
+            body_sha256 = hashlib.sha256(b"Exact completion body\n").hexdigest()
+            semantic_key = "a" * 64
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_completion_email.current_active_task", return_value=task
+            ), patch(
+                "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True
+            ) as verify, patch(
+                "omo_manager.omo_completion_email.subprocess.run", side_effect=AssertionError("must not send email")
+            ):
+                reconcile_ordinary_sent_completion(
+                    root,
+                    task,
+                    "legacy pending items removed without email",
+                    message_id,
+                    subject_sha256,
+                    body_sha256,
+                    semantic_key=semantic_key,
+                )
+                final = after + "(verified repair item completed)\n"
+                task.write_text(final, encoding="utf-8")
+                plan = plan_completion_email(root, task, final, "task done", semantic_key=semantic_key)
+                assert plan is not None
+                self.assertTrue(completion_email_is_delivered(plan))
+                self.assertFalse(send_completion_email(plan))
+                task.write_text(after, encoding="utf-8")
+                reconcile_ordinary_sent_completion(
+                    root,
+                    task,
+                    "legacy pending items removed without email",
+                    message_id,
+                    subject_sha256,
+                    body_sha256,
+                    semantic_key=semantic_key,
+                )
+            self.assertEqual(2, verify.call_count)
+
+    def test_ordinary_sent_message_cannot_be_reused_for_another_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            first = root / "first.md"
+            second = root / "second.md"
+            text = task_text().replace("pending_task_items:\n  - finish review", "pending_task_items: []")
+            first.write_text(text, encoding="utf-8")
+            second.write_text(text, encoding="utf-8")
+            message_id = "<already-sent@example.test>"
+            digest = hashlib.sha256(b"exact").hexdigest()
+            active = first
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_completion_email.current_active_task", side_effect=lambda _root: active
+            ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+                reconcile_ordinary_sent_completion(
+                    root, first, "task done", message_id, digest, digest, semantic_key="a" * 64
+                )
+                active = second
+                with self.assertRaisesRegex(OSError, "different evidence"):
+                    reconcile_ordinary_sent_completion(
+                        root, second, "task done", message_id, digest, digest, semantic_key="a" * 64
+                    )
+
+    def test_unverified_ordinary_message_creates_no_completion_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            text = task_text().replace("pending_task_items:\n  - finish review", "pending_task_items: []")
+            task.write_text(text, encoding="utf-8")
+            digest = hashlib.sha256(b"exact").hexdigest()
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_completion_email.current_active_task", return_value=task
+            ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=False):
+                with self.assertRaisesRegex(OSError, "not exact verified"):
+                    reconcile_ordinary_sent_completion(
+                        root,
+                        task,
+                        "task done",
+                        "<missing@example.test>",
+                        digest,
+                        digest,
+                        semantic_key="a" * 64,
+                    )
+            self.assertFalse(state.exists())
+
+    def test_ordinary_reconciliation_rejects_existing_structured_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            text = task_text().replace("pending_task_items:\n  - finish review", "pending_task_items: []")
+            task.write_text(text, encoding="utf-8")
+            digest = hashlib.sha256(b"exact").hexdigest()
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_completion_email.current_active_task", return_value=task
+            ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+                plan = plan_completion_email(root, task, text, "task done", semantic_key="a" * 64)
+                assert plan is not None
+                self.assertTrue(claim_completion_email(plan))
+                with self.assertRaisesRegex(OSError, "structured completion state"):
+                    reconcile_ordinary_sent_completion(
+                        root,
+                        task,
+                        "task done",
+                        "<already-sent@example.test>",
+                        digest,
+                        digest,
+                        semantic_key="a" * 64,
+                    )
+            self.assertEqual((), tuple((state / "ordinary-completion-by-notice").iterdir()))
+
+    def test_ordinary_reconciliation_rejects_pre_churn_orphan_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            before = task_text()
+            task.write_text(before, encoding="utf-8")
+            semantic_key = "a" * 64
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_completion_email.current_active_task", return_value=task
+            ):
+                old_plan = plan_completion_email(root, task, before, "pending item completed", semantic_key=semantic_key)
+                assert old_plan is not None
+                with patch("omo_manager.omo_completion_email.os.replace", side_effect=OSError("crash before claim")):
+                    with self.assertRaisesRegex(OSError, "crash before claim"):
+                        claim_completion_email(old_plan)
+                self.assertTrue((state / "completion-email-authorizations" / old_plan.key).is_file())
+                after = before.replace("pending_task_items:\n  - finish review", "pending_task_items: []")
+                task.write_text(after, encoding="utf-8")
+                with patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+                    with self.assertRaisesRegex(OSError, "structured completion state"):
+                        reconcile_ordinary_sent_completion(
+                            root,
+                            task,
+                            "legacy pending items removed without email",
+                            "<already-sent@example.test>",
+                            "b" * 64,
+                            "c" * 64,
+                            semantic_key=semantic_key,
+                        )
+
+    def test_structured_claim_cannot_race_past_ordinary_reconciliation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            text = task_text().replace("pending_task_items:\n  - finish review", "pending_task_items: []")
+            task.write_text(text, encoding="utf-8")
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_completion_email.current_active_task", return_value=task
+            ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+                reconcile_ordinary_sent_completion(
+                    root,
+                    task,
+                    "task done",
+                    "<already-sent@example.test>",
+                    "b" * 64,
+                    "c" * 64,
+                    semantic_key="a" * 64,
+                )
+                plan = plan_completion_email(root, task, text, "task done", semantic_key="a" * 64)
+                assert plan is not None
+                self.assertFalse(claim_completion_email(plan))
+            self.assertFalse((state / "completion-email-claims.tsv").exists())
 
     def test_v1_pending_to_done_transition_reuses_one_semantic_delivery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

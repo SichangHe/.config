@@ -104,6 +104,7 @@ class PendingQueueTests(unittest.TestCase):
     def test_legacy_remove_no_email_preserves_evidence_without_mail_calls(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            state = root / "state"
             path = root / "task.md"
             path.write_text(task_text(items=("finish review",)), encoding="utf-8")
             with patch("omo_manager.omo_pending.current_active_task", return_value=path), patch(
@@ -127,6 +128,42 @@ class PendingQueueTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertIn("pending_task_items: []", text)
             self.assertIn("verified removed pending item: review passed", text)
+
+            from omo_manager.omo_completion_email import reconcile_ordinary_sent_completion
+            from omo_manager.omo_completion_email import require_owner_completion as actual_require
+            from omo_manager.omo_task_status import Args as StatusArgs
+            from omo_manager.omo_task_status import StopArgs
+            from omo_manager.omo_task_status import run as status_run
+
+            message_id = "<legacy-completion@example.test>"
+            digest = "b" * 64
+            semantic_key = "a" * 64
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_completion_email.current_active_task", return_value=path
+            ), patch(
+                "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True
+            ), patch(
+                "omo_manager.omo_task_status.require_owner_completion", side_effect=actual_require
+            ), patch(
+                "omo_manager.omo_task_status.stop_done_agent",
+                return_value=(StopArgs("cfg:2", 10.0, 2000, False, False, root, "task.md", True, 0.0), "session-1"),
+            ), patch("omo_manager.omo_task_status.record_close"), patch(
+                "omo_manager.omo_tmux_send.send_system_to_codex"
+            ) as queue, patch(
+                "omo_manager.omo_completion_email.subprocess.run", side_effect=AssertionError("must not send email")
+            ):
+                reconcile_ordinary_sent_completion(
+                    root,
+                    path,
+                    "legacy pending items removed without email",
+                    message_id,
+                    digest,
+                    digest,
+                    semantic_key=semantic_key,
+                )
+                self.assertEqual(0, status_run(StatusArgs(root, Path("task.md"), "done", "", completion_key=semantic_key)))
+            queue.assert_not_called()
+            self.assertIn("status: done\n", path.read_text(encoding="utf-8"))
 
     def test_legacy_remove_matches_displayed_text_from_quoted_colon_item(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

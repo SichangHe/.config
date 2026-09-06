@@ -84,6 +84,18 @@ Both normal email-capable commands require that same lowercase SHA-256 value at
 their CLI boundary. Explicit no-mail recovery and index-only reconciliation
 modes do not require it because they do not send completion mail.
 
+Legacy ordinary-mail reconciliation:
+- use `omo_completion_email.py --reconcile-ordinary-sent` only after a legacy
+  `omo_pending.py remove --no-email` transition and an already-sent ordinary
+  agent-to-Human completion message
+- pass one new shared semantic key, the exact RFC Message-ID, and SHA-256
+  digests of the decoded Sent-Mail subject and plain-text body
+- the exact active task owner verifies the unique message, sender, recipient,
+  subject, and body in Sent Mail before recording completion; this path never
+  invokes the email sender
+- one Message-ID and one semantic notice can each bind only one task/owner
+  reconciliation; conflicting or partial state fails closed and can be retried
+
 Cross-state completion reconciliation:
 - an owner and manager can intentionally use different
   `OMO_MANAGER_STATE_DIR` values, leaving the request and delivered markers in
