@@ -177,7 +177,6 @@ DEFAULT_AGENT_PROBLEM_TIMEOUT_S = float(
 )
 DEFAULT_POLL_BACKSTOP_INTERVAL_S = float(os.environ.get("OMO_MANAGER_POLL_BACKSTOP_INTERVAL_S", "30"))
 BLOCKING_QUEUE_INTERVAL_S = 30.0
-DEFAULT_HUMAN_EMAIL_HELPER = Path(__file__).resolve().parents[1] / "helper.sh" / "email_me.py"
 PENDING_MARKERS = {"(pending)"}
 FOR_MANAGER_MARKERS = ("for manager", "for a manager")
 POINTER_WRAPPER_PAIRS = {"`": "`", "'": "'", '"': '"', "(": ")", "[": "]", "<": ">", "{": "}"}
@@ -194,7 +193,6 @@ LIST_POINTER_PREFIX_RE = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
 CHECKBOX_POINTER_PREFIX_RE = re.compile(r"^\[[ xX]\]\s+")
 MARKDOWN_POINTER_LINK_RE = re.compile(r"^\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^)]*\)))?\s*\)$")
 STATUS_DETAIL_RE = re.compile(r"^\((pending|running|long_running|done|blocked)(?::\s*([^)]*))?\)(?:\s+\(([^)]*)\))?$")
-TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 AGENT_POINTER_WITH_TARGET_RE = re.compile(
     rf"^\(from agent ([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) (/tmp/omo-agent-messages-{os.getuid()}/[A-Za-z0-9_.-]+\.md)\)$"
 )
@@ -2745,11 +2743,11 @@ def manager_pending_instruction(marker: Marker, after_recording: str = "Then dis
     if marker.origin == "human":
         quote_note = "Choose `--item` values by quoting the human's words as much as possible."
         flag_note = "Use `--ack-human` so the script emails the human after recording."
-        fallback_note = "If no new pending task item should be added, use `omo_task_edit.py pending-marker-clear` with `--comment`, `--clear-kind report-only|duplicate|cancelled|superseded`, `--ack-human`, and the same `--email-file` when shown above; if an active owner task already tracks it, use `--clear-kind existing-owner-item --owner-task-file TASK.md --owner-item ITEM`. Existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove --evidence TEXT`."
+        fallback_note = "If no new pending task item should be added, use `omo_task_edit.py pending-marker-clear` with `--comment`, `--clear-kind report-only|duplicate|cancelled|superseded`, `--ack-human`, and the same `--email-file` when shown above; if an active owner task already tracks it, use `--clear-kind existing-owner-item --owner-task-file TASK.md --owner-item ITEM`. Existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove --evidence TEXT --completion-key SHA256`, sharing that exact key with any parent or child route for the same Human completion notice."
     else:
         quote_note = "Choose `--item` values by quoting the request's words as much as possible."
         flag_note = "Do not pass `--ack-human`; agent-origin reports do not need a human acknowledgement."
-        fallback_note = "If there is no pending task item to add, use `omo_task_edit.py pending-marker-clear` with `--comment`; for existing pending-item edits, use `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove --evidence TEXT`."
+        fallback_note = "If there is no pending task item to add, use `omo_task_edit.py pending-marker-clear` with `--comment`; for existing pending-item edits, use `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove --evidence TEXT --completion-key SHA256`, sharing that exact key with any parent or child route for the same Human completion notice."
     return (
         f"{PENDING_CONSUMPTION_INSTRUCTION} Normally record pending items and remove the consumed `(pending)` marker by running:\n"
         f"`{command}`\n"
@@ -4880,7 +4878,7 @@ def route_capacity_main_manager_alert(
     if guard is not None and not agent_problem_guard_current(guard):
         print("omo_pending_watch: stale main-manager capacity alert cancelled before email", file=sys.stderr)
         return False
-    return email_human_manager_problem(args, text)
+    return log_manager_problem(args, text)
 
 
 def push_capacity_owner_alert(
@@ -6371,18 +6369,18 @@ def manager_problem_seen_key(args: Args, output: str) -> str:
     return f"manager-self-problem:{digest}"
 
 
-def email_human_manager_problem_once(args: Args, seen: dict[str, float], output: str, key: str, now_wall_s: float) -> bool:
+def log_manager_problem_once(args: Args, seen: dict[str, float], output: str, key: str, now_wall_s: float) -> bool:
     human_attempt_key = manager_problem_human_attempt_key(args)
     if seen_contains(seen, human_attempt_key, now_wall_s) and now_wall_s - seen_get(seen, human_attempt_key, now_s=now_wall_s) < args.agent_problem_repeat_s:
         return False
-    sent = email_human_manager_problem(args, output)
+    sent = log_manager_problem(args, output)
     if sent:
         remember_seen(seen, key, now_wall_s)
         remember_seen(seen, human_attempt_key, now_wall_s)
     return sent
 
 
-def route_or_email_manager_problem(args: Args, seen: dict[str, float], output: str, now_wall_s: float) -> bool:
+def route_or_log_manager_problem(args: Args, seen: dict[str, float], output: str, now_wall_s: float) -> bool:
     if not output:
         return False
     key = manager_problem_seen_key(args, output)
@@ -6393,7 +6391,7 @@ def route_or_email_manager_problem(args: Args, seen: dict[str, float], output: s
         return False
     targets = active_manager_problem_targets(args.root, output, args.manager_target)
     if not targets:
-        return email_human_manager_problem_once(args, seen, output, key, now_wall_s)
+        return log_manager_problem_once(args, seen, output, key, now_wall_s)
     route_target = args.reminder_choice(targets)
     targets = [route_target, *(target for target in targets if target != route_target)]
     text = manager_problem_route_text(args, output)
@@ -6421,10 +6419,10 @@ def route_or_email_manager_problem(args: Args, seen: dict[str, float], output: s
             if result.status == 0:
                 remember_seen(seen, key, now_wall_s)
             return True
-    return email_human_manager_problem_once(args, seen, output, key, now_wall_s)
+    return log_manager_problem_once(args, seen, output, key, now_wall_s)
 
 
-def email_human_manager_problem(args: Args, output: str) -> bool:
+def log_manager_problem(args: Args, output: str) -> bool:
     if not output:
         return False
     subject = "manager watcher detected manager error"
@@ -6435,42 +6433,10 @@ def email_human_manager_problem(args: Args, output: str) -> bool:
         f"{output}\n"
     )
     if args.dry_run:
-        print(f"manager human email due: {subject}\n{body}", flush=True)
+        print(f"manager problem log due: {subject}\n{body}", flush=True)
         return True
-    try:
-        tmp_path = Path(tempfile.mkdtemp(prefix="omo-manager-problem-email."))
-        tmp_path.chmod(0o700)
-        subject_file = tmp_path / "subject.txt"
-        body_file = tmp_path / "body.md"
-        subject_file.write_text(subject + "\n", encoding="utf-8")
-        body_file.write_text(body, encoding="utf-8")
-        command = [str(DEFAULT_HUMAN_EMAIL_HELPER), "--manager-human", "--subject-file", str(subject_file), "--message-file", str(body_file)]
-        if args.manager_target:
-            command.extend(("--sender-tmux-target", args.manager_target))
-        _ = subprocess.Popen(
-            cleanup_after_email_command(tmp_path, command),
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except OSError as exc:
-        print(f"omo_pending_watch: manager problem human email launch failed: {exc}", file=sys.stderr)
-        return False
+    print(f"omo_pending_watch: {subject}\n{body}", file=sys.stderr)
     return True
-
-
-def cleanup_after_email_command(tmp_path: Path, command: list[str]) -> list[str]:
-    cleanup_code = (
-        "import shutil, subprocess, sys\n"
-        "tmp = sys.argv[1]\n"
-        "command = sys.argv[2:]\n"
-        "rc = 1\n"
-        "try:\n"
-        "    rc = subprocess.call(command)\n"
-        "finally:\n"
-        "    shutil.rmtree(tmp, ignore_errors=True)\n"
-        "raise SystemExit(rc)\n"
-    )
-    return [sys.executable, "-c", cleanup_code, str(tmp_path), *command]
 
 
 def maybe_push_agent_problems(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
@@ -6820,7 +6786,7 @@ def handle_agent_problem_result(
     if not output:
         return capacity_changed or compaction_changed or dependency_changed or reminders_changed
     manager_problem_output = manager_human_email_problem_output(output, args.manager_target)
-    manager_problem_sent = route_or_email_manager_problem(args, seen, manager_problem_output, now_wall_s)
+    manager_problem_sent = route_or_log_manager_problem(args, seen, manager_problem_output, now_wall_s)
     output = filter_manager_self_problem_output(output, args.manager_target) or ""
     if not output:
         return capacity_changed or manager_problem_sent or compaction_changed or dependency_changed or reminders_changed
@@ -7221,40 +7187,14 @@ def main(argv: list[str]) -> int:
             actor_controller.close()
 
 
-def crash_email_sender_target(argv: list[str]) -> str:
-    del argv
-    return DEFAULT_MANAGER_TARGET if TMUX_TARGET_RE.fullmatch(DEFAULT_MANAGER_TARGET) else ""
-
-
-def email_human_watcher_crash(argv: list[str], exc: BaseException) -> None:
+def log_watcher_crash(argv: list[str], exc: BaseException) -> None:
     subject = "pending watcher crashed"
     body = (
         "The pending watcher crashed unexpectedly.\n\n"
         f"argv: {' '.join(argv) or '(none)'}\n\n"
         f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))}"
     )
-    try:
-        with tempfile.TemporaryDirectory(prefix="omo-pending-watch-crash-email.") as tmp:
-            tmp_path = Path(tmp)
-            subject_file = tmp_path / "subject.txt"
-            body_file = tmp_path / "body.md"
-            subject_file.write_text(subject + "\n", encoding="utf-8")
-            body_file.write_text(body, encoding="utf-8")
-            command = [str(DEFAULT_HUMAN_EMAIL_HELPER), "--manager-human", "--subject-file", str(subject_file), "--message-file", str(body_file)]
-            if sender_target := crash_email_sender_target(argv):
-                command.extend(("--sender-tmux-target", sender_target))
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-    except (OSError, subprocess.SubprocessError) as email_exc:
-        print(f"omo_pending_watch: crash human email failed: {email_exc}", file=sys.stderr)
-        return
-    if result.returncode != 0:
-        print(f"omo_pending_watch: crash human email exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
+    print(f"omo_pending_watch: {subject}\n{body}", file=sys.stderr)
 
 
 def cli(argv: list[str]) -> int:
@@ -7277,7 +7217,7 @@ def cli(argv: list[str]) -> int:
             os.close(devnull_fd)
         return 0
     except Exception as exc:
-        email_human_watcher_crash(argv, exc)
+        log_watcher_crash(argv, exc)
         raise
 
 

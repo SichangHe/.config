@@ -1828,6 +1828,8 @@ class TaskStatusTests(unittest.TestCase):
                 "manager_mail/authority.txt",
                 "--human-close-authorization-sha256",
                 "a" * 64,
+                "--completion-key",
+                "b" * 64,
                 "task.md",
                 "done",
             ]
@@ -5014,18 +5016,25 @@ resolved_task_items: []
     def test_manager_done_queues_once_and_waits_for_exact_owner_delivery(self) -> None:
         from omo_manager.omo_task_status import require_owner_done_email
 
-        args = StatusArgs(Path("/work"), Path("task.md"), "done", "")
+        args = StatusArgs(Path("/work"), Path("task.md"), "done", "", completion_key="f" * 64)
         with patch("omo_manager.omo_task_status.require_owner_completion", return_value=False) as require:
             self.assertFalse(require_owner_done_email(args, Path("/work/task.md"), "task"))
-        require.assert_called_once_with(Path("/work"), Path("/work/task.md"), "task", "task done")
+        require.assert_called_once_with(Path("/work"), Path("/work/task.md"), "task", "task done", semantic_key="f" * 64)
 
     def test_manager_done_proceeds_only_after_delivery_marker(self) -> None:
         from omo_manager.omo_task_status import require_owner_done_email
 
         with patch("omo_manager.omo_task_status.require_owner_completion", return_value=True):
-            self.assertTrue(require_owner_done_email(StatusArgs(Path("/work"), Path("task.md"), "done", ""), Path("/work/task.md"), "task"))
+            self.assertTrue(
+                require_owner_done_email(
+                    StatusArgs(Path("/work"), Path("task.md"), "done", "", completion_key="f" * 64),
+                    Path("/work/task.md"),
+                    "task",
+                )
+            )
 
     def test_manager_done_owner_callback_then_retry_closes_with_one_email(self) -> None:
+        from omo_manager.omo_completion_email import build_completion_email
         from omo_manager.omo_completion_email import main as completion_main
         from omo_manager.omo_completion_email import require_owner_completion as actual_require
 
@@ -5038,7 +5047,7 @@ resolved_task_items: []
             task.write_text(original, encoding="utf-8")
             manager.write_text(task_frontmatter(runat="wl:1", managerat="main:0", is_manager=True), encoding="utf-8")
             close_args = StopArgs("wl:2", 10.0, 2000, False, False, root, "task.md", True, 0.0)
-            status_args = StatusArgs(root, Path("task.md"), "done", "")
+            status_args = StatusArgs(root, Path("task.md"), "done", "", completion_key="f" * 64)
             with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
                 "omo_manager.omo_task_status.require_owner_completion", side_effect=actual_require
             ), patch("omo_manager.omo_completion_email.current_active_task", return_value=manager), patch(
@@ -5054,7 +5063,23 @@ resolved_task_items: []
                 with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch(
                     "omo_manager.omo_completion_email.subprocess.run"
                 ) as email:
-                    self.assertEqual(0, completion_main(["--root", str(root), "--task", str(task), "--outcome", "task done"]))
+                    plan = build_completion_email(root, task, original, "task done", semantic_key="f" * 64)
+                    assert plan is not None
+                    self.assertEqual(
+                        0,
+                        completion_main(
+                            [
+                                "--root",
+                                str(root),
+                                "--task",
+                                str(task),
+                                "--outcome",
+                                "task done",
+                                "--semantic-key",
+                                "f" * 64,
+                            ]
+                        ),
+                    )
                     self.assertEqual(0, run(status_args))
                 email.assert_called_once()
             queue.assert_called_once()
@@ -5078,7 +5103,7 @@ resolved_task_items: []
             task.write_text(original, encoding="utf-8")
             manager_state.mkdir(mode=0o700)
             manager.write_text(task_frontmatter(runat="wl:1", managerat="main:0", is_manager=True), encoding="utf-8")
-            plan = build_completion_email(root, task, original, "task done")
+            plan = build_completion_email(root, task, original, "task done", semantic_key="f" * 64)
             assert plan is not None
             with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(owner_state)}):
                 self.assertTrue(claim_completion_email(plan))
@@ -5093,6 +5118,7 @@ resolved_task_items: []
                     hashlib.sha256(original.encode()).hexdigest(),
                     receipt,
                     hashlib.sha256(receipt.read_bytes()).hexdigest(),
+                    semantic_key="f" * 64,
                 )
                 close_args = StopArgs("wl:2", 10.0, 2000, False, False, root, "task.md", True, 0.0)
                 with patch("omo_manager.omo_task_status.require_owner_completion", side_effect=actual_require), patch(
@@ -5100,7 +5126,7 @@ resolved_task_items: []
                 ), patch("omo_manager.omo_tmux_send.send_system_to_codex") as queue, patch(
                     "omo_manager.omo_task_status.stop_done_agent", return_value=(close_args, "session-1")
                 ), patch("omo_manager.omo_task_status.record_close"):
-                    self.assertEqual(0, run(StatusArgs(root, Path("task.md"), "done", "")))
+                    self.assertEqual(0, run(StatusArgs(root, Path("task.md"), "done", "", completion_key="f" * 64)))
             queue.assert_not_called()
             self.assertIn("status: done\n", task.read_text(encoding="utf-8"))
 
@@ -5636,6 +5662,19 @@ resolved_task_items: []
         )
         self.assertTrue(args.recover_exited_shell_done)
         self.assertEqual("%42", args.pane_id)
+
+    def test_normal_done_requires_valid_completion_key_at_parse_boundary(self) -> None:
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args(["task.md", "done"])
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args(["--completion-key", "ABC", "task.md", "done"])
+        args = parse_args(["--completion-key", "a" * 64, "task.md", "done"])
+        self.assertEqual("a" * 64, args.completion_key)
+
+    def test_index_reconciliation_mode_does_not_require_completion_key(self) -> None:
+        args = parse_args(["--reconcile-long-running-human-index", "task.md"])
+        self.assertTrue(args.reconcile_long_running_human_index)
+        self.assertEqual("", args.completion_key)
 
     def test_cli_finish_closed_done_failure_stays_blocked_retryable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

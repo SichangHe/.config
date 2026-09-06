@@ -337,6 +337,7 @@ class TaskEditTests(unittest.TestCase):
             send.assert_called_once_with(email)
 
     def test_manager_pending_remove_owner_callback_then_retry_mutates_once(self) -> None:
+        from omo_manager.omo_completion_email import build_completion_email
         from omo_manager.omo_completion_email import main as completion_main
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -346,7 +347,14 @@ class TaskEditTests(unittest.TestCase):
             manager = root / "manager.md"
             original = task_frontmatter(pending_items=("finish review",)) + "body\n"
             task.write_text(original, encoding="utf-8")
-            args = Args(root, Path("task.md"), "pending-remove", items=("finish review",), evidence="review passed")
+            args = Args(
+                root,
+                Path("task.md"),
+                "pending-remove",
+                items=("finish review",),
+                evidence="review passed",
+                completion_key="e" * 64,
+            )
             with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
                 "omo_manager.omo_completion_email.current_active_task", return_value=manager
             ), patch("omo_manager.omo_tmux_send.send_system_to_codex") as queue, redirect_stderr(io.StringIO()):
@@ -355,6 +363,16 @@ class TaskEditTests(unittest.TestCase):
                 with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch(
                     "omo_manager.omo_completion_email.subprocess.run"
                 ) as email:
+                    plan = build_completion_email(
+                        root,
+                        task,
+                        original,
+                        "pending item removed after verification",
+                        items=("finish review",),
+                        evidence="review passed",
+                        semantic_key="e" * 64,
+                    )
+                    assert plan is not None
                     self.assertEqual(
                         0,
                         completion_main(
@@ -369,6 +387,8 @@ class TaskEditTests(unittest.TestCase):
                                 "finish review",
                                 "--evidence",
                                 "review passed",
+                                "--semantic-key",
+                                "e" * 64,
                             ]
                         ),
                     )
@@ -1075,7 +1095,12 @@ class TaskEditTests(unittest.TestCase):
     def test_aliases_parse_to_canonical_commands(self) -> None:
         self.assertEqual("pending-list", parse_args(["list", "task.md"]).command)
         self.assertEqual("pending-add", parse_args(["add", "task.md", "--item", "new"]).command)
-        self.assertEqual("pending-remove", parse_args(["remove", "task.md", "--item", "old", "--evidence", "done"]).command)
+        self.assertEqual(
+            "pending-remove",
+            parse_args(
+                ["remove", "task.md", "--item", "old", "--evidence", "done", "--completion-key", "a" * 64]
+            ).command,
+        )
         args = parse_args(["update", "task.md", "--old-item", "old", "--new-item", "new"])
 
         self.assertEqual("pending-replace", args.command)
@@ -1084,6 +1109,14 @@ class TaskEditTests(unittest.TestCase):
         comment = parse_args(["comment", "task.md", "noted"])
         self.assertEqual("comment-add", comment.command)
         self.assertEqual("noted", comment.comment)
+
+    def test_pending_remove_requires_valid_completion_key_at_parse_boundary(self) -> None:
+        base = ["remove", "task.md", "--item", "old", "--evidence", "done"]
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args(base)
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args([*base, "--completion-key", "ABC"])
+        self.assertEqual("a" * 64, parse_args([*base, "--completion-key", "a" * 64]).completion_key)
 
 
 if __name__ == "__main__":

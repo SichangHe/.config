@@ -322,7 +322,7 @@ with exclusive_watcher_root(root):
                         break
                     time.sleep(0.01)
                 self.assertTrue(ready.exists())
-                with patch.object(watcher, "email_human_watcher_crash") as email_crash:
+                with patch.object(watcher, "log_watcher_crash") as email_crash:
                     self.assertEqual(75, watcher.cli(["--root", str(root), "--once"]))
                 email_crash.assert_not_called()
             finally:
@@ -343,7 +343,7 @@ with exclusive_watcher_root(root):
         from omo_manager import omo_pending_watch as watcher
 
         with patch.object(watcher, "main", side_effect=watcher.WatcherAlreadyRunning("duplicate")), patch.object(
-            watcher, "email_human_watcher_crash"
+            watcher, "log_watcher_crash"
         ) as email_crash:
             self.assertEqual(75, watcher.cli([]))
         email_crash.assert_not_called()
@@ -1758,6 +1758,7 @@ with exclusive_watcher_root(root):
 
             self.assertEqual("wl:2", calls[0][calls[0].index("--manager-target") + 1])
             self.assertEqual(
+                f"{pending_watcher.PENDING_CONSUMPTION_INSTRUCTION}\n"
                 "Immediately record every pending task with `omo_pending.py add`:\n"
                 "<human_instruction>\nPlease inspect the failing shard.\n\n"
                 "(record and delegate manager_mail/42.txt)\n</human_instruction>",
@@ -1781,25 +1782,15 @@ with exclusive_watcher_root(root):
                 self.assertEqual(root / "work_manager_today.md", route.manager_file)
                 self.assertEqual("main:0.0", route.manager_target)
 
-    def test_recovery_email_human_passes_sender_tmux_target(self) -> None:
+    def test_recovery_failure_does_not_invoke_human_email_helper(self) -> None:
         from omo_manager import email_idle_watcher as watcher
-
-        calls: list[list[str]] = []
-
-        def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-            calls.append(capture_delivery_call(command))
-            return subprocess.CompletedProcess(command, 0)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             args = watcher.Args(root, "", root / "manager_mail", root / "state", root / "work_manager_today.md", True, "self@example.test", 900, Path("/bin/false"), manager_target="wl:16.0")
-            old_run = watcher.subprocess.run
-            watcher.subprocess.run = run
-            try:
-                watcher.email_human(args, "[a] Recovery action needed", "body\n")
-            finally:
-                watcher.subprocess.run = old_run
-        self.assertEqual("wl:16.0", calls[0][calls[0].index("--sender-tmux-target") + 1])
+            with patch.object(watcher.subprocess, "run", side_effect=AssertionError("unexpected Human email helper")), self.assertLogs(level="ERROR") as logs:
+                watcher.log_recovery_failure(args, "[a] Recovery action needed", "body\n")
+        self.assertIn("Recovery action needed", "\n".join(logs.output))
 
 
 
@@ -3767,14 +3758,13 @@ with exclusive_watcher_root(root):
 
         self.assertTrue(watcher.manager_authored_message(msg, "me@example.com"))
 
-    def test_email_me_manager_human_echo_is_ignored_without_mail_or_pending(self) -> None:
+    def test_email_me_manager_human_split_mail_uses_separate_sender_without_legacy_footer(self) -> None:
         from omo_manager import email_idle_watcher as watcher
 
         email_me = email_me_module()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "logs"
             root.mkdir()
-            state = Path(tmp) / "state"
             env_file = Path(tmp) / "email.env"
             message_file = Path(tmp) / "message.md"
             env_file.write_text("EMAIL_ME_GMAIL_ADDRESS=me@example.com\nEMAIL_ME_GMAIL_APP_PASSWORD=password\n", encoding="utf-8")
@@ -3795,12 +3785,18 @@ with exclusive_watcher_root(root):
                 def send_message(self, msg: EmailMessage) -> None:
                     self.message = msg
 
+            class Settings:
+                agent_address = "agent@example.test"
+                human_address = "me@example.com"
+                app_password = "password"
+
             smtp = Smtp()
             email_me.ENV_FILE_PATH = env_file
             with (
                 patch.dict(email_me.os.environ, {"EMAIL_ME_FAKE_SEND_LOG": ""}),
                 patch.object(email_me, "prepare_subject_and_headers", return_value=("Re: [wl:1] duplicate-mail prevention", {})),
-                patch.object(email_me, "configured_agent_mail", return_value=None),
+                patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(email_me, "validate_non_completion_owner", return_value=None),
                 patch.object(email_me, "should_send_manager_email_key", return_value=True),
                 patch.object(email_me, "log_manager_email"),
                 patch.object(email_me.smtplib, "SMTP_SSL", return_value=smtp),
@@ -3811,6 +3807,7 @@ with exclusive_watcher_root(root):
                     email_me.main(
                         [
                             "--manager-human",
+                            "--non-completion",
                             "--no-pwd-footer",
                             "--tmux-target",
                             "wl:1",
@@ -3825,49 +3822,10 @@ with exclusive_watcher_root(root):
             message_bytes = smtp.message.as_bytes()
             captured_message = BytesParser().parsebytes(message_bytes)
             self.assertNotIn("X-OMO-Manager-Email", captured_message)
-            self.assertTrue(watcher.has_agent_footer(watcher.message_text(captured_message)))
-            self.assertRegex(watcher.message_text(captured_message), r"\nPWD: [^\n]+\n\Z")
+            self.assertEqual("agent@example.test", captured_message["From"])
+            self.assertFalse(watcher.has_agent_footer(watcher.message_text(captured_message)))
+            self.assertNotRegex(watcher.message_text(captured_message), r"\nPWD: [^\n]+\n\Z")
             self.assertNotIn("tmux: wl:1\n", watcher.message_text(captured_message))
-            human_message = EmailMessage()
-            human_message["From"] = "Human <me@example.com>"
-            human_message["Subject"] = "Re: [wl:1] duplicate-mail prevention"
-            human_message.set_content("Please continue.")
-
-            class Client:
-                stores: list[tuple[object, ...]] = []
-
-                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
-                    if command == "search":
-                        if "SINCE" in args:
-                            return "OK", [b""]
-                        return "OK", [b"57 58"]
-                    if command == "fetch":
-                        message = message_bytes if args[0] == "57" else human_message.as_bytes()
-                        return "OK", [(b"RFC822", message)]
-                    if command == "store":
-                        self.stores.append(args)
-                        return "OK", [b""]
-                    raise AssertionError(command)
-
-            manager_file = root / "work_manager_today.md"
-            args = watcher.Args(
-                root,
-                "",
-                root / "manager_mail",
-                state,
-                manager_file,
-                True,
-                "me@example.com",
-                0,
-                Path("/bin/false"),
-                manager_target="wl:1.0",
-                recent_cleanup_threshold=999,
-            )
-            watcher.handle_unseen(Client(), args)
-            self.assertFalse((root / "manager_mail" / "57.txt").exists())
-            self.assertTrue((root / "manager_mail" / "58.txt").exists())
-            self.assertIn("(pending)", manager_file.read_text(encoding="utf-8"))
-            self.assertIn("57\t", (state / "email-ignored-uids.tsv").read_text(encoding="utf-8"))
 
     def test_email_watcher_keeps_human_reply_without_footer(self) -> None:
         from omo_manager import email_idle_watcher as watcher
@@ -7401,9 +7359,9 @@ with exclusive_watcher_root(root):
         seen: dict[str, float] = {}
         with patch.object(watcher, "active_manager_problem_targets", return_value=["wl:2", "wl:3"]), patch.object(
             watcher, "inspect_codex", return_value=MagicMock(status="running")
-        ), patch.object(watcher, "email_human_manager_problem", return_value=True) as email:
-            self.assertTrue(watcher.route_or_email_manager_problem(args, seen, output, 1000.0))
-            self.assertFalse(watcher.route_or_email_manager_problem(args, seen, output + " changed", 1001.0))
+        ), patch.object(watcher, "log_manager_problem", return_value=True) as email:
+            self.assertTrue(watcher.route_or_log_manager_problem(args, seen, output, 1000.0))
+            self.assertFalse(watcher.route_or_log_manager_problem(args, seen, output + " changed", 1001.0))
             self.assertEqual(1, email.call_count)
 
     def test_missing_recovery_managers_send_one_throttled_human_fallback(self) -> None:
@@ -7413,11 +7371,20 @@ with exclusive_watcher_root(root):
         output = "agent-problems: error=1\nerror: task=manager evidence=target=wl:1 role=manager output=fatal"
         seen: dict[str, float] = {}
         with patch.object(watcher, "active_manager_problem_targets", return_value=[]), patch.object(
-            watcher, "email_human_manager_problem", return_value=True
+            watcher, "log_manager_problem", return_value=True
         ) as email:
-            self.assertTrue(watcher.route_or_email_manager_problem(args, seen, output, 1000.0))
-            self.assertFalse(watcher.route_or_email_manager_problem(args, seen, output + " changed", 1001.0))
+            self.assertTrue(watcher.route_or_log_manager_problem(args, seen, output, 1000.0))
+            self.assertFalse(watcher.route_or_log_manager_problem(args, seen, output + " changed", 1001.0))
             self.assertEqual(1, email.call_count)
+
+    def test_background_manager_problem_does_not_invoke_human_email_helper(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+        err = StringIO()
+        with patch("omo_manager.omo_pending_watch.subprocess.Popen", side_effect=AssertionError("unexpected Human email helper")), redirect_stderr(err):
+            self.assertTrue(watcher.log_manager_problem(args, "fatal manager state"))
+        self.assertIn("fatal manager state", err.getvalue())
 
     def test_agent_problem_check_formats_untracked_agent_group(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -7494,7 +7461,7 @@ with exclusive_watcher_root(root):
 
         with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch(
             "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
-        ), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")):
+        ), patch.object(watcher, "log_manager_problem", side_effect=AssertionError("unexpected human email")):
             self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
         self.assertEqual(1, len(calls))
         self.assertEqual("vl:15", calls[0][calls[0].index("--manager-target") + 1])
@@ -9287,7 +9254,7 @@ resolved_task_items: []
 
             with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch(
                 "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
-            ), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")):
+            ), patch.object(watcher, "log_manager_problem", side_effect=AssertionError("unexpected human email")):
                 self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
             self.assertEqual(1, len(calls))
             self.assertEqual("wl:2", calls[0][calls[0].index("--manager-target") + 1])
@@ -9319,7 +9286,7 @@ resolved_task_items: []
 
             with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch(
                 "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
-            ), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")):
+            ), patch.object(watcher, "log_manager_problem", side_effect=AssertionError("unexpected human email")):
                 self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
             self.assertEqual(1, len(calls))
             self.assertEqual("wl:2", calls[0][calls[0].index("--manager-target") + 1])
@@ -9348,7 +9315,7 @@ resolved_task_items: []
 
             with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch(
                 "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
-            ), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")):
+            ), patch.object(watcher, "log_manager_problem", side_effect=AssertionError("unexpected human email")):
                 self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
             self.assertEqual(["wl:2"], [call[call.index("--manager-target") + 1] for call in calls])
 
@@ -9377,7 +9344,7 @@ resolved_task_items: []
 
             with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch(
                 "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
-            ), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")):
+            ), patch.object(watcher, "log_manager_problem", side_effect=AssertionError("unexpected human email")):
                 self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
             self.assertEqual(["wl:2", "wl:3"], [call[call.index("--manager-target") + 1] for call in calls])
             self.assertIn("manager (this is the main manager) wl:1.0 <output>Selected model is at capacity</output>", calls[0][1])
@@ -9397,7 +9364,7 @@ resolved_task_items: []
         with redirect_stdout(out):
             self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
         text = out.getvalue()
-        self.assertIn("manager human email due: manager watcher detected manager error", text)
+        self.assertIn("manager problem log due: manager watcher detected manager error", text)
         self.assertIn("agent-problems: stuck_input=1", text)
         self.assertIn("stuck_input: task=manager evidence=target=wl:1.0 role=manager", text)
         self.assertIn("not_safe:plan_prompt", text)
@@ -9419,7 +9386,7 @@ resolved_task_items: []
             self.assertFalse(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
         text = out.getvalue()
         self.assertIn("suppressed manager self-problem report", text)
-        self.assertNotIn("manager human email due: manager watcher detected manager error", text)
+        self.assertNotIn("manager problem log due: manager watcher detected manager error", text)
         self.assertNotIn("manager agent problem: running task marker needs attention.", text)
 
     def test_agent_problem_check_routes_worker_alias_prompt_to_manager(self) -> None:
@@ -9438,7 +9405,7 @@ resolved_task_items: []
         text = out.getvalue()
         self.assertIn("Handle ALL omo_pending_watch agent problems below; only email human if you cannot handle them:", text)
         self.assertIn("active.md wl:1 <input>Create a plan? shift + tab use Plan mode esc dismiss</input>", text)
-        self.assertNotIn("manager human email due: manager watcher detected manager error", text)
+        self.assertNotIn("manager problem log due: manager watcher detected manager error", text)
         self.assertNotIn("suppressed manager self-problem report", text)
         self.assertNotIn("manager agent problem: running task marker needs attention.", text)
 
@@ -9518,7 +9485,7 @@ resolved_task_items: []
         with redirect_stdout(out):
             self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
         text = out.getvalue()
-        self.assertIn("manager human email due: manager watcher detected manager error", text)
+        self.assertIn("manager problem log due: manager watcher detected manager error", text)
         self.assertIn("agent-problems: error=1", text)
         self.assertIn("error: task=manager evidence=target=wl:1.0 role=manager", text)
         self.assertIn("suppressed manager self-problem report", text)
@@ -9535,7 +9502,7 @@ resolved_task_items: []
             "",
         )
         out = StringIO()
-        with redirect_stdout(out), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")), patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=AssertionError("unexpected manager send")):
+        with redirect_stdout(out), patch.object(watcher, "log_manager_problem", side_effect=AssertionError("unexpected human email")), patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=AssertionError("unexpected manager send")):
             self.assertFalse(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
         text = out.getvalue()
         self.assertIn("suppressed manager self-problem report", text)
@@ -9555,16 +9522,14 @@ resolved_task_items: []
         with redirect_stdout(out):
             self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
         text = out.getvalue()
-        self.assertIn("manager human email due: manager watcher detected manager error", text)
+        self.assertIn("manager problem log due: manager watcher detected manager error", text)
         self.assertIn("not_codex: task=manager evidence=target=wl:1.0 role=manager", text)
 
-    def test_agent_problem_check_invokes_human_email_helper_for_manager_error(self) -> None:
+    def test_agent_problem_check_logs_without_human_email_helper_for_manager_error(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            helper = root / "fake-email.sh"
-            helper.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
             args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, root / "status.py", False, False, manager_target="wl:1.0", agent_problem_repeat_s=300.0)
             result = watcher.CommandOutput(
                 "agent-problems",
@@ -9572,36 +9537,12 @@ resolved_task_items: []
                 "agent-problems: error=1\nerror: task=manager evidence=target=wl:1.0 role=manager output=Selected model is at capacity\n",
                 "",
             )
-            launched: dict[str, object] = {}
-
-            def fake_popen(command: list[str], **kwargs: object) -> object:
-                launched["command"] = command
-                launched["kwargs"] = kwargs
-                launched["subject"] = Path(command[command.index("--subject-file") + 1]).read_text(encoding="utf-8")
-                launched["body"] = Path(command[command.index("--message-file") + 1]).read_text(encoding="utf-8")
-
-                class Process:
-                    pid = 4002
-
-                return Process()
-
-            with patch.object(watcher, "DEFAULT_HUMAN_EMAIL_HELPER", helper), patch("omo_manager.omo_pending_watch.subprocess.Popen", side_effect=fake_popen):
+            err = StringIO()
+            with patch("omo_manager.omo_pending_watch.subprocess.Popen", side_effect=AssertionError("unexpected Human email helper")), redirect_stderr(err):
                 self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
-            command = launched["command"]
-            self.assertIsInstance(command, list)
-            assert isinstance(command, list)
-            self.assertEqual(sys.executable, command[0])
-            self.assertEqual("-c", command[1])
-            self.assertIn(str(helper), command)
-            self.assertIn("--manager-human", command)
-            self.assertEqual("wl:1.0", command[command.index("--sender-tmux-target") + 1])
-            self.assertEqual("manager watcher detected manager error\n", launched["subject"])
-            body = launched["body"]
-            self.assertIsInstance(body, str)
-            assert isinstance(body, str)
-            self.assertIn("The manager watcher detected a manager pane problem", body)
-            self.assertIn("agent-problems: error=1", body)
-            self.assertIn("error: task=manager evidence=target=wl:1.0 role=manager", body)
+            self.assertIn("The manager watcher detected a manager pane problem", err.getvalue())
+            self.assertIn("agent-problems: error=1", err.getvalue())
+            self.assertIn("error: task=manager evidence=target=wl:1.0 role=manager", err.getvalue())
 
     def test_agent_problem_check_reserves_unchanged_manager_error_while_peer_send_runs(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -10287,31 +10228,18 @@ resolved_task_items: []
             self.assertEqual({}, seen)
             self.assertIn("manager delivery failed: exec failed", err.getvalue())
 
-    def test_cli_emails_human_when_watcher_crashes(self) -> None:
+    def test_cli_logs_watcher_crash_without_invoking_human_email_helper(self) -> None:
         from omo_manager import omo_pending_watch as watcher
-
-        sent: dict[str, str] = {}
-
-        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-            sent["helper"] = command[0]
-            sent["sender_target"] = command[command.index("--sender-tmux-target") + 1]
-            sent["subject"] = Path(command[command.index("--subject-file") + 1]).read_text(encoding="utf-8")
-            sent["body"] = Path(command[command.index("--message-file") + 1]).read_text(encoding="utf-8")
-            return subprocess.CompletedProcess(command, 0, "", "")
 
         with (
             patch.object(watcher, "main", side_effect=RuntimeError("boom")),
-            patch.object(watcher, "DEFAULT_HUMAN_EMAIL_HELPER", Path("/fake/email_me.py")),
-            patch.object(watcher, "DEFAULT_MANAGER_TARGET", "wl:1"),
-            patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run),
+            patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=AssertionError("unexpected Human email helper")),
+            redirect_stderr(StringIO()) as err,
             self.assertRaises(RuntimeError),
         ):
             watcher.cli(["--root", "/tmp/work_logs"])
-        self.assertEqual("/fake/email_me.py", sent["helper"])
-        self.assertEqual("wl:1", sent["sender_target"])
-        self.assertEqual("pending watcher crashed\n", sent["subject"])
-        self.assertIn("The pending watcher crashed unexpectedly.", sent["body"])
-        self.assertIn("RuntimeError: boom", sent["body"])
+        self.assertIn("pending watcher crashed", err.getvalue())
+        self.assertIn("RuntimeError: boom", err.getvalue())
 
     def test_once_dry_run_treats_closed_stdout_pipe_as_clean_exit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -10321,7 +10249,7 @@ resolved_task_items: []
 import sys
 from omo_manager import omo_pending_watch as watcher
 
-watcher.email_human_watcher_crash = lambda *_: None
+watcher.log_watcher_crash = lambda *_: None
 raise SystemExit(watcher.cli(sys.argv[1:]))
 """
             read_fd, write_fd = os.pipe()
@@ -11464,7 +11392,7 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
         row = watcher.ProblemRow("error", "manager", "wl:1", watcher.CAPACITY_ERROR_TEXT, owner_target="wl:1", main_manager=True)
         with patch.object(watcher, "active_manager_problem_targets", return_value=["wl:2"]), patch.object(
             watcher, "try_send_delivery_text", return_value=watcher.DeliveryResult(watcher.ASYNC_DELIVERY_STARTED)
-        ) as push, patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected email")):
+        ) as push, patch.object(watcher, "log_manager_problem", side_effect=AssertionError("unexpected email")):
             self.assertTrue(watcher.push_capacity_owner_alert(args, {}, row, 3, "persistent.", 1000.0))
 
         self.assertEqual("wl:2", push.call_args.args[2])
@@ -11488,7 +11416,7 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
         args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
         row = watcher.ProblemRow("error", "manager", "wl:1", watcher.CAPACITY_ERROR_TEXT, owner_target="wl:1", main_manager=True)
         with patch.object(watcher, "active_manager_problem_targets", return_value=[]), patch.object(
-            watcher, "email_human_manager_problem", return_value=True
+            watcher, "log_manager_problem", return_value=True
         ) as email:
             self.assertTrue(watcher.push_capacity_owner_alert(args, {}, row, 1, "send failed.", 1000.0))
 
@@ -11502,7 +11430,7 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
         guard = watcher.AgentProblemGuard(("status",), ("capacity generation",), root=args.root)
         with patch.object(watcher, "active_manager_problem_targets", return_value=[]), patch.object(
             watcher, "agent_problem_guard_current", return_value=False
-        ), patch.object(watcher, "email_human_manager_problem") as email:
+        ), patch.object(watcher, "log_manager_problem") as email:
             self.assertFalse(watcher.route_capacity_main_manager_alert(args, row, "alert", guard))
 
         email.assert_not_called()

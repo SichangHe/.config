@@ -193,12 +193,14 @@ class Args:
     close_done_live_no_mail: bool = False
     manager_consumed_report_receipt: Path | None = None
     manager_consumed_report_receipt_sha256: str = ""
+    completion_key: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
     root: Path = DEFAULT_ROOT
     task_file: Path
     status: str = ""
+    completion_key: str = ""
     blocked_on: str = ""
     finish_closed_done: bool = False
     session_id: str = ""
@@ -290,6 +292,7 @@ Use the `done` status for normal task closure: it owns TODO movement and worker
 shutdown.""",
     )
     _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    _ = parser.add_argument("--completion-key", default="", help="Exact shared lowercase SHA-256 identity required by a normal done completion email.")
     _ = parser.add_argument("--finish-closed-done", action="store_true", help="Finish done bookkeeping after the agent was already closed by a failed prior run.")
     _ = parser.add_argument("--finish-replaced-done", action="store_true", help="Finish a stopped stale record without signaling its pane after proving an explicit live replacement.")
     _ = parser.add_argument("--recover-exited-shell-done", action="store_true", help="Close and finish one blocked worker whose completed Codex session exited to an unchanged shell.")
@@ -953,6 +956,10 @@ shutdown.""",
         return Args(parsed.root.resolve(), parsed.task_file, "done", parsed.blocked_on.strip(), True, parsed.session_id.strip())
     if not parsed.status:
         parser.error("status is required unless a finish or recovery mode is used.")
+    if parsed.status == "done" and not parsed.completion_key.strip():
+        parser.error("normal done requires --completion-key with a lowercase SHA-256 digest.")
+    if parsed.completion_key and SHA256_RE.fullmatch(parsed.completion_key.strip()) is None:
+        parser.error("--completion-key must be a lowercase SHA-256 digest.")
     if parsed.session_id:
         parser.error("--session-id is only valid with --finish-closed-done.")
     if any((parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output)):
@@ -968,6 +975,7 @@ shutdown.""",
         dirty_path_handoff=parsed.dirty_path_handoff.expanduser().resolve(strict=False) if parsed.dirty_path_handoff is not None else None,
         human_close_authorization_source=human_close_authority[0],
         human_close_authorization_sha256=human_close_authority[1],
+        completion_key=parsed.completion_key.strip(),
     )
 
 
@@ -5473,7 +5481,7 @@ def automatic_done_email_eligible(args: Args, initial_status: str | None) -> boo
 
 def require_owner_done_email(args: Args, path: Path, text: str) -> bool:
     """Deliver as the owner or queue an owner callback before manager closure."""
-    return require_owner_completion(args.root, path, text, "task done")
+    return require_owner_completion(args.root, path, text, "task done", semantic_key=args.completion_key)
 
 
 def run(args: Args) -> int:

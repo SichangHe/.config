@@ -32,6 +32,7 @@ ENV_FILE_PATH = Path.home() / ".config" / ".env"
 MANAGER_DIR = Path(__file__).resolve().parents[1] / "omo_manager"
 if MANAGER_DIR.is_dir():
     sys.path.insert(0, str(MANAGER_DIR))
+    sys.path.insert(0, str(MANAGER_DIR.parent))
 from omo_email_config import (  # noqa: E402
     GMAIL_IMAP_HOST,
     GUEST_HEES_ADDRESS,
@@ -85,6 +86,8 @@ class CliArgs:
     supersedes_message_ids: tuple[str, ...]
     guest_hees: bool
     guest_image_references: tuple[str, ...]
+    non_completion: bool
+    completion_authorization: str
 
 
 class ParsedArgs(argparse.Namespace):
@@ -100,6 +103,8 @@ class ParsedArgs(argparse.Namespace):
     supersedes_message_id: list[str]
     guest_hees: bool = False
     guest_image_reference: list[str]
+    non_completion: bool = False
+    completion_authorization: str = ""
 
 
 def parse_args(argv: list[str]) -> CliArgs:
@@ -125,6 +130,9 @@ def parse_args(argv: list[str]) -> CliArgs:
     _ = parser.add_argument("--sender-tmux-target", dest="sender_tmux_target", help="Alias for --tmux-target; use only when forwarding or compressing mail while preserving a different verified producer identity.")
     _ = parser.add_argument("--supersedes-message-id", action="append", default=[], help="Exact Message-ID from agent-unread that this replacement supersedes; repeat for multiple messages.")
     _ = parser.add_argument("--manager-human", action="store_true", help=argparse.SUPPRESS)
+    classification = parser.add_mutually_exclusive_group()
+    _ = classification.add_argument("--non-completion", action="store_true", help=argparse.SUPPRESS)
+    _ = classification.add_argument("--completion-authorization", default="", help=argparse.SUPPRESS)
     _ = parser.add_argument("--guest-hees", action="store_true", help=argparse.SUPPRESS)
     _ = parser.add_argument("--guest-image-reference", action="append", default=[], help=argparse.SUPPRESS)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
@@ -170,6 +178,10 @@ def parse_args(argv: list[str]) -> CliArgs:
         parser.error("--guest-hees requires --manager-human.")
     if guest_hees and not guest_hees_tmux_target(tmux_target):
         parser.error("--guest-hees requires a --tmux-target in the guest_hees session.")
+    if (parsed.non_completion or parsed.completion_authorization) and not parsed.manager_human:
+        parser.error("mail classification options require --manager-human.")
+    if parsed.completion_authorization and re.fullmatch(r"[0-9a-f]{64}", parsed.completion_authorization) is None:
+        parser.error("--completion-authorization must be a lowercase SHA-256 digest.")
     if any(re.fullmatch(r"<[^<>\s]+>", value) is None for value in parsed.supersedes_message_id):
         parser.error("--supersedes-message-id must be an exact RFC Message-ID enclosed in angle brackets.")
     if len(set(parsed.supersedes_message_id)) != len(parsed.supersedes_message_id):
@@ -184,6 +196,8 @@ def parse_args(argv: list[str]) -> CliArgs:
         supersedes_message_ids=tuple(parsed.supersedes_message_id),
         guest_hees=guest_hees,
         guest_image_references=tuple(parsed.guest_image_reference),
+        non_completion=parsed.non_completion,
+        completion_authorization=parsed.completion_authorization,
     )
 
 
@@ -835,6 +849,240 @@ def manager_state_dir() -> Path:
     return Path(os.environ.get("OMO_MANAGER_STATE_DIR", Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omo-manager"))
 
 
+def read_owner_private_file(path: Path, label: str, maximum_bytes: int) -> bytes:
+    """Read one stable owner-private regular file without following symlinks."""
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_mode & 0o077:
+            raise ValueError(f"{label} must be an owner-private regular file")
+        payload = b""
+        while chunk := os.read(fd, min(65_536, maximum_bytes + 1 - len(payload))):
+            payload += chunk
+            if len(payload) > maximum_bytes:
+                break
+        after = os.fstat(fd)
+    finally:
+        os.close(fd)
+    if len(payload) > maximum_bytes:
+        raise ValueError(f"{label} is too large")
+    bound = path.lstat()
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    ) or (bound.st_dev, bound.st_ino) != (before.st_dev, before.st_ino):
+        raise ValueError(f"{label} changed while read")
+    return payload
+
+
+def fsync_directory(directory: Path) -> None:
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def validate_non_completion_owner(producer_target: str) -> None:
+    """Permit operational Human mail only from an exact active manager owner."""
+
+    from omo_agent_status import read_task_metadata
+    from omo_task_context import infer_active_task
+
+    validate_invoking_owner_target(producer_target, "non-completion Human mail")
+    root = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs")).expanduser().resolve()
+    try:
+        task = infer_active_task(root, producer_target)
+        metadata = read_task_metadata(task, root)
+    except (OSError, ValueError) as exc:
+        raise ValueError("non-completion Human mail requires an exact active manager owner") from exc
+    if (
+        metadata is None
+        or not metadata.is_manager
+        or canonical_email_tmux_target(metadata.runat) != canonical_email_tmux_target(producer_target)
+    ):
+        raise ValueError("non-completion Human mail requires an exact active manager owner")
+
+
+def validate_invoking_owner_target(producer_target: str, purpose: str) -> None:
+    """Bind a Human-mail route to the exact live pane process presenting it."""
+
+    if not os.environ.get("TMUX_PANE", "").strip():
+        raise ValueError(f"{purpose} requires the exact invoking owner pane")
+    actual_target = current_tmux_window()
+    if actual_target is None or canonical_email_tmux_target(actual_target) != canonical_email_tmux_target(producer_target):
+        raise ValueError(f"{purpose} target does not match the invoking pane")
+    if not invoking_process_belongs_to_pane(os.environ["TMUX_PANE"]):
+        raise ValueError(f"{purpose} requires an authenticated invoking pane process")
+
+
+def validate_completion_owner(producer_target: str, root: Path, relative_task: str) -> None:
+    """Require the live process and active task presenting a completion claim to own it."""
+
+    validate_invoking_owner_target(producer_target, "completion Human mail")
+    from omo_task_context import infer_active_task
+
+    resolved_root = root.resolve()
+    if not root.is_absolute() or root != resolved_root:
+        raise ValueError("completion email authorization has an invalid task root")
+    authorized_task = (resolved_root / relative_task).resolve()
+    try:
+        authorized_task.relative_to(resolved_root)
+        active_task = infer_active_task(resolved_root, producer_target).resolve()
+    except (OSError, ValueError) as exc:
+        raise ValueError("completion email authorization has no exact active owner task") from exc
+    if active_task != authorized_task:
+        raise ValueError("completion email authorization belongs to a different active task")
+
+
+def process_ancestor_pids(pid: int) -> set[int]:
+    """Return the current process lineage, failing closed on unreadable identity."""
+
+    ancestors: set[int] = set()
+    current = pid
+    while current > 1 and current not in ancestors:
+        ancestors.add(current)
+        try:
+            suffix = Path(f"/proc/{current}/stat").read_text(encoding="ascii").rsplit(")", 1)[1].split()
+            current = int(suffix[1])
+            continue
+        except (OSError, IndexError, ValueError):
+            pass
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(current), "-o", "ppid="], capture_output=True, text=True, timeout=2, check=False
+            )
+            current = int(result.stdout.strip()) if result.returncode == 0 else 0
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return set()
+    return ancestors
+
+
+def invoking_process_belongs_to_pane(pane: str) -> bool:
+    """Prove the email helper process descends from the selected tmux pane shell."""
+
+    try:
+        result = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", pane, "#{pane_pid}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    pane_pid = result.stdout.strip()
+    return result.returncode == 0 and pane_pid.isdigit() and int(pane_pid) in process_ancestor_pids(os.getpid())
+
+
+def validate_completion_authorization(args: CliArgs, producer_target: str) -> dict[str, str]:
+    """Bind completion content to one owner-created durable semantic claim."""
+
+    key = args.completion_authorization
+    if not key:
+        return {}
+    state_dir = manager_state_dir()
+    authorization_directory = state_dir / "completion-email-authorizations"
+    for directory, label in ((state_dir, "manager state directory"), (authorization_directory, "completion authorization directory")):
+        try:
+            directory_state = directory.lstat()
+        except FileNotFoundError as exc:
+            raise ValueError(f"{label} is missing") from exc
+        if (
+            not stat.S_ISDIR(directory_state.st_mode)
+            or directory_state.st_uid != os.getuid()
+            or stat.S_IMODE(directory_state.st_mode) != 0o700
+        ):
+            raise ValueError(f"{label} is not owner-private")
+    authorization = authorization_directory / key
+    try:
+        payload = read_owner_private_file(authorization, "completion email authorization", 4096).decode()
+        values = dict(line.split("=", 1) for line in payload.splitlines())
+    except (FileNotFoundError, UnicodeDecodeError, ValueError) as exc:
+        raise ValueError("completion email authorization is missing or malformed") from exc
+    expected_fields = {
+        "version",
+        "target",
+        "root",
+        "task",
+        "task_sha256",
+        "notice_key",
+        "semantic_key",
+        "subject_sha256",
+        "body_sha256",
+    }
+    if len(payload.splitlines()) != len(values) or set(values) != expected_fields or values["version"] != "1":
+        raise ValueError("completion email authorization is missing or malformed")
+    if canonical_email_tmux_target(values["target"]) != canonical_email_tmux_target(producer_target):
+        raise ValueError("completion email authorization belongs to a different owner")
+    validate_completion_owner(producer_target, Path(values["root"]), values["task"])
+    task = (Path(values["root"]) / values["task"]).resolve()
+    if values["task_sha256"] != hashlib.sha256(task.read_bytes()).hexdigest():
+        raise ValueError("completion email authorization task bytes changed")
+    if values["subject_sha256"] != hashlib.sha256((args.title or "").encode()).hexdigest() or values[
+        "body_sha256"
+    ] != hashlib.sha256(args.content.encode()).hexdigest():
+        raise ValueError("completion email content does not match its owner authorization")
+    try:
+        claims = read_owner_private_file(state_dir / "completion-email-claims.tsv", "completion claims ledger", 8_000_000).decode()
+    except (FileNotFoundError, UnicodeDecodeError, ValueError) as exc:
+        raise ValueError("completion email authorization has no durable claim") from exc
+    matches = [
+        fields
+        for fields in (line.split("\t") for line in claims.splitlines())
+        if len(fields) == 7
+        and fields[0] == key
+        and canonical_email_tmux_target(fields[1]) == canonical_email_tmux_target(values["target"])
+        and fields[2] == Path(values["task"]).name
+        and fields[4] == values["task_sha256"]
+        and fields[5] == values["notice_key"]
+        and fields[6] == values["semantic_key"]
+    ]
+    if len(matches) != 1:
+        raise ValueError("completion email authorization has no unique durable claim")
+    return values
+
+
+def consume_completion_authorization(key: str, values: dict[str, str]) -> None:
+    """Consume a validated completion capability at the outbound boundary."""
+
+    state_dir = manager_state_dir()
+    used_directory = state_dir / "completion-email-authorization-used"
+    try:
+        used_directory.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    used_state = used_directory.lstat()
+    if not stat.S_ISDIR(used_state.st_mode) or used_state.st_uid != os.getuid() or stat.S_IMODE(used_state.st_mode) != 0o700:
+        raise ValueError("completion authorization use directory is not owner-private")
+    used = used_directory / key
+    try:
+        fd = os.open(used, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except FileExistsError as exc:
+        raise ValueError("completion email authorization was already used") from exc
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        _ = handle.write(f"{values['target']}\t{values['task']}\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    fsync_directory(used_directory)
+
+
+def release_completion_authorization(key: str, values: dict[str, str]) -> None:
+    """Release a capability only when SMTP was provably never attempted."""
+
+    used_directory = manager_state_dir() / "completion-email-authorization-used"
+    used = used_directory / key
+    expected = f"{values['target']}\t{values['task']}\n"
+    if read_owner_private_file(used, "completion authorization use", 4096).decode() != expected:
+        raise ValueError("completion authorization use does not match its capability")
+    used.unlink()
+    fsync_directory(used_directory)
+
+
 def should_send_manager_email(subject: str, content: str) -> bool:
     return should_send_manager_email_key(subject, subject, content)
 
@@ -923,6 +1171,7 @@ def maybe_print_thread_reminder() -> None:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     guest_reply_source = ""
+    completion_authorization: dict[str, str] = {}
     try:
         subject_tmux_target = footer_tmux_target(args.tmux_target, args.manager_human)
         if args.manager_human and subject_tmux_target is not None:
@@ -931,6 +1180,10 @@ def main(argv: list[str]) -> int:
             args = dataclass_replace(args, guest_hees=True)
         if args.manager_human and subject_tmux_target is None:
             raise ValueError("manager-human email requires a tmux target.")
+        if args.manager_human and not args.guest_hees and not (args.non_completion or args.completion_authorization):
+            raise ValueError("primary manager-human mail requires --non-completion or an owner completion authorization")
+        if args.non_completion and fake_send_log_path() is None:
+            validate_non_completion_owner(subject_tmux_target)
         if args.guest_image_references and not args.guest_hees:
             raise ValueError("--guest-image-reference requires a guest_hees producer target.")
         try:
@@ -957,6 +1210,8 @@ def main(argv: list[str]) -> int:
                 route_kind="guest-hees" if args.guest_hees else "primary",
                 parent_message_ids=open_guest_hees_reply_message_ids(manager_state_dir()) if args.guest_hees else None,
             )
+        if args.completion_authorization:
+            completion_authorization = validate_completion_authorization(args, subject_tmux_target)
         if args.title is None:
             if subject_tmux_target is None:
                 raise ValueError("email without a subject requires an inferred tmux target.")
@@ -1026,13 +1281,22 @@ def main(argv: list[str]) -> int:
             print("EMAIL_ME_FAKE_SEND_LOG cannot verify a guest reply", file=sys.stderr)
             return 2
         fake_log.parent.mkdir(parents=True, exist_ok=True)
-        if not should_send_manager_email_key(dedupe_subject, subject, dedupe_content, state_scope):
+        if args.completion_authorization:
+            try:
+                consume_completion_authorization(args.completion_authorization, completion_authorization)
+            except (OSError, ValueError) as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+        elif not should_send_manager_email_key(dedupe_subject, subject, dedupe_content, state_scope):
             print("Skipped duplicate human email")
             return 0
         try:
             fake_log.write_text(f"{subject}\n{args.content}", encoding="utf-8")
         except OSError:
-            release_manager_email_key(dedupe_subject, subject, dedupe_content, state_scope)
+            if args.completion_authorization:
+                release_completion_authorization(args.completion_authorization, completion_authorization)
+            else:
+                release_manager_email_key(dedupe_subject, subject, dedupe_content, state_scope)
             raise
         if args.manager_human:
             log_manager_email(subject, state_scope)
@@ -1125,7 +1389,13 @@ def main(argv: list[str]) -> int:
         print(f"Email send failed before SMTP: {exc}", file=sys.stderr)
         return 1
     email_claimed = False
-    if not args.guest_hees:
+    if args.completion_authorization:
+        try:
+            consume_completion_authorization(args.completion_authorization, completion_authorization)
+        except (OSError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+    elif not args.guest_hees:
         if not should_send_manager_email_key(dedupe_subject, subject, dedupe_content, state_scope):
             print("Skipped duplicate human email")
             return 0
@@ -1144,6 +1414,8 @@ def main(argv: list[str]) -> int:
     except smtplib.SMTPAuthenticationError:
         if email_claimed:
             release_manager_email_key(dedupe_subject, subject, dedupe_content, state_scope)
+        elif args.completion_authorization:
+            release_completion_authorization(args.completion_authorization, completion_authorization)
         if args.guest_hees:
             guest_claim.close()
         print(
@@ -1152,8 +1424,11 @@ def main(argv: list[str]) -> int:
         )
         return 1
     except (OSError, smtplib.SMTPException) as exc:
-        if email_claimed and not smtp_delivery_attempted:
-            release_manager_email_key(dedupe_subject, subject, dedupe_content, state_scope)
+        if not smtp_delivery_attempted:
+            if email_claimed:
+                release_manager_email_key(dedupe_subject, subject, dedupe_content, state_scope)
+            elif args.completion_authorization:
+                release_completion_authorization(args.completion_authorization, completion_authorization)
             print(f"Email send failed before delivery: {exc}", file=sys.stderr)
             return 1
         print(f"Email send failed: {exc}", file=sys.stderr)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -77,6 +78,7 @@ class Args:
     task_files: tuple[Path, ...] = ()
     source_ref: str = ""
     preserve_live_source: bool = False
+    completion_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -110,6 +112,7 @@ class ParsedArgs(argparse.Namespace):
     on_item_id: str = ""
     source_ref: str = ""
     preserve_live_source: bool = False
+    completion_key: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -141,6 +144,9 @@ def parse_args(argv: list[str]) -> Args:
     _ = remove_parser.add_argument("task_file", type=Path)
     _ = remove_parser.add_argument("--item", action="append", required=True, help="Pending task item to remove. Pass once per item.")
     _ = remove_parser.add_argument("--evidence", required=True, help="One-line evidence that the removed item is complete or cancelled.")
+    _ = remove_parser.add_argument(
+        "--completion-key", required=True, help="Exact shared lowercase SHA-256 identity required before completion email."
+    )
 
     move_parser = subparsers.add_parser(
         "pending-move",
@@ -243,8 +249,17 @@ def parse_args(argv: list[str]) -> Args:
         if command == "pending-replace":
             return Args(root, parsed.task_file, command, old_item=normalized_item(parsed.old_item), new_item=normalized_item(parsed.new_item))
         if command == "pending-remove":
+            if re.fullmatch(r"[0-9a-f]{64}", parsed.completion_key) is None:
+                parser.error("--completion-key must be a lowercase SHA-256 digest.")
             items = normalized_items(tuple(parsed.item or ()))
-            return Args(root, parsed.task_file, command, items=items, evidence=normalized_comment_message(parsed.evidence))
+            return Args(
+                root,
+                parsed.task_file,
+                command,
+                items=items,
+                evidence=normalized_comment_message(parsed.evidence),
+                completion_key=parsed.completion_key,
+            )
         if command == "pending-move":
             if parsed.from_file is None or parsed.to_file is None:
                 parser.error("pending-move requires --from and --to.")
@@ -386,7 +401,10 @@ def send_marker_clear_ack(comment: str, email_path: Path | None, clear_kind: str
         body_path = Path(tmp) / "body.md"
         subject_path.write_text(marker_clear_ack_subject(email_path) + "\n", encoding="utf-8")
         body_path.write_text(marker_clear_ack_body(comment, clear_kind), encoding="utf-8")
-        subprocess.run([str(EMAIL_HELPER), "--manager-human", "--subject-file", str(subject_path), "--message-file", str(body_path)], check=True)
+        subprocess.run(
+            [str(EMAIL_HELPER), "--manager-human", "--non-completion", "--subject-file", str(subject_path), "--message-file", str(body_path)],
+            check=True,
+        )
 
 
 def require_metadata(text: str, work_log_root: Path | None = None) -> TaskMetadata:
@@ -924,10 +942,24 @@ def run(args: Args) -> int:
             updated, count = remove_pending_items(text, args.items)
             updated = append_comment(updated, pending_remove_evidence_comment(count, evidence))
             if not require_owner_completion(
-                args.root, path, text, "pending item removed after verification", items=args.items, evidence=evidence
+                args.root,
+                path,
+                text,
+                "pending item removed after verification",
+                items=args.items,
+                evidence=evidence,
+                semantic_key=args.completion_key,
             ):
                 raise BlockingError("responsible-owner completion email requested; retry removal after owner delivery")
-            email = plan_completion_email(args.root, path, text, "pending item removed after verification", items=args.items, evidence=evidence)
+            email = plan_completion_email(
+                args.root,
+                path,
+                text,
+                "pending item removed after verification",
+                items=args.items,
+                evidence=evidence,
+                semantic_key=args.completion_key,
+            )
             write_if_changed(path, text, updated, before)
             sent = send_completion_email(email)
             print(f"removed {count} pending item(s) from {path.name}; {REMOVE_REMINDER}")

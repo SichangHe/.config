@@ -48,11 +48,13 @@ unchanged since it was read.
 - reject missing or ambiguous old item
 - reject done tasks
 
-`pending-remove TASK.md --item TEXT [--item TEXT ...] --evidence TEXT`
+`pending-remove TASK.md --item TEXT [--item TEXT ...] --evidence TEXT --completion-key SHA256`
 - remove one or more existing pending items
 - append the evidence as a task comment
 - send one durable completion email containing the exact task, items, outcome,
   and evidence only when the caller is the exact responsible task owner
+- require one explicit semantic key and reuse that exact key across every
+  parent or child route for the same Human completion notice
 - when answering a Human question, accept paired subject/body files and combine
   the answer with the same immutable completion context in that one email
 - require the owner-authenticated completion entry point to be a regular,
@@ -69,6 +71,18 @@ unchanged since it was read.
   every other no-contact or manager-only match still suppresses delivery
 - print a reminder that the manager must verify the item is actually done or
   cancelled, possibly by using evaluator agents
+
+Use one generated completion key for the whole lifecycle transition:
+
+```sh
+completion_key=<64-lowercase-hex-digest>
+omo_task_edit.py pending-remove TASK.md --item TEXT --evidence TEXT --completion-key "$completion_key"
+omo_task_status.py --completion-key "$completion_key" TASK.md done
+```
+
+Both normal email-capable commands require that same lowercase SHA-256 value at
+their CLI boundary. Explicit no-mail recovery and index-only reconciliation
+modes do not require it because they do not send completion mail.
 
 Cross-state completion reconciliation:
 - an owner and manager can intentionally use different

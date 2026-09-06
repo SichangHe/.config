@@ -84,6 +84,7 @@ class CompletionEmail:
     body: str
     key: str
     notice_key: str
+    semantic_key: str
     contact_policy: ContactPolicyBinding | None = None
 
 
@@ -97,9 +98,26 @@ def completion_notice_key(
     evidence: str,
     subject: str,
     body: str,
+    task_sha256: str,
     contact_policy: ContactPolicyBinding | None,
+    semantic_key: str = "",
 ) -> str:
-    """Identify one Human notice independently of task-record bookkeeping churn."""
+    """Identify one task lifecycle notice while exact keys bind message bytes."""
+
+    if semantic_key:
+        if SHA256_RE.fullmatch(semantic_key) is None:
+            raise ValueError("semantic completion key must be a lowercase SHA-256 digest")
+        return hashlib.sha256(
+            "\0".join(
+                (
+                    str(root.resolve()),
+                    relative,
+                    canonical_tmux_target(target),
+                    canonical_tmux_target(manager_target),
+                    semantic_key,
+                )
+            ).encode()
+        ).hexdigest()
 
     identity_parts = (
         str(root.resolve()),
@@ -111,6 +129,7 @@ def completion_notice_key(
         evidence,
         subject,
         body,
+        task_sha256,
     )
     if contact_policy is not None:
         identity_parts += (str(contact_policy.source), contact_policy.source_sha256)
@@ -242,7 +261,16 @@ def source1241_contact_clarification(root: Path, task: Path, text: str) -> Conta
     return ContactPolicyBinding(hashlib.sha256(task_payload).hexdigest(), source, hashlib.sha256(source_payload).hexdigest())
 
 
-def build_completion_email(root: Path, task: Path, text: str, outcome: str, *, items: tuple[str, ...] = (), evidence: str = "") -> CompletionEmail | None:
+def build_completion_email(
+    root: Path,
+    task: Path,
+    text: str,
+    outcome: str,
+    *,
+    items: tuple[str, ...] = (),
+    evidence: str = "",
+    semantic_key: str = "",
+) -> CompletionEmail | None:
     """Build the canonical notice without assigning reporter authority."""
 
     metadata = parse_task_metadata(text, root)
@@ -288,6 +316,20 @@ def build_completion_email(root: Path, task: Path, text: str, outcome: str, *, i
     if contact_policy is not None:
         identity_parts += (contact_policy.task_sha256, str(contact_policy.source), contact_policy.source_sha256)
     identity = "\0".join(identity_parts)
+    notice_key = completion_notice_key(
+        root,
+        relative,
+        metadata.runat,
+        metadata.managerat,
+        outcome,
+        items,
+        evidence,
+        subject,
+        body,
+        task_sha256,
+        contact_policy,
+        semantic_key,
+    )
     return CompletionEmail(
         root.resolve(),
         task.resolve(),
@@ -298,18 +340,8 @@ def build_completion_email(root: Path, task: Path, text: str, outcome: str, *, i
         subject,
         body,
         hashlib.sha256(identity.encode()).hexdigest(),
-        completion_notice_key(
-            root,
-            relative,
-            metadata.runat,
-            metadata.managerat,
-            outcome,
-            items,
-            evidence,
-            subject,
-            body,
-            contact_policy,
-        ),
+        notice_key,
+        semantic_key,
         contact_policy,
     )
 
@@ -325,10 +357,11 @@ def plan_completion_email(
     evidence: str = "",
     human_subject: str = "",
     human_body: str = "",
+    semantic_key: str = "",
 ) -> CompletionEmail | None:
     """Return mail only when the caller is the exact task owner and contact is allowed."""
 
-    canonical = build_completion_email(root, task, text, outcome, items=items, evidence=evidence)
+    canonical = build_completion_email(root, task, text, outcome, items=items, evidence=evidence, semantic_key=semantic_key)
     if canonical is None:
         return None
     try:
@@ -383,8 +416,11 @@ def plan_completion_email(
             evidence,
             subject,
             body,
+            canonical.task_sha256,
             canonical.contact_policy,
+            canonical.semantic_key,
         ),
+        canonical.semantic_key,
         canonical.contact_policy,
     )
 
@@ -457,32 +493,75 @@ def reconciled_completion_is_delivered(plan: CompletionEmail) -> bool:
     return True
 
 
-def claimed_completion_receipt(plan: CompletionEmail) -> tuple[str, str] | None:
-    """Find the exact receipt key atomically bound to this stable notice."""
+def claimed_completion_notice(plan: CompletionEmail) -> tuple[str, str, str, str] | None:
+    """Find the single atomic claim for this semantic notice."""
 
     ledger = completion_email_state_dir() / "completion-email-claims.tsv"
     try:
         claims = owned_private_file(ledger, "completion claims ledger", 8_000_000).decode().splitlines()
     except FileNotFoundError:
         return None
-    matches: list[tuple[str, str]] = []
+    matches: list[tuple[str, str, str, str]] = []
     for line in claims:
         fields = line.split("\t")
-        if len(fields) not in {5, 6}:
+        if len(fields) not in {3, 5, 6, 7}:
             raise OSError("completion claims ledger is malformed")
-        if len(fields) == 6 and fields[5] == plan.notice_key:
-            key, target, task, manager_target, _task_sha256, _notice_key = fields
-            if (
-                canonical_tmux_target(target) != canonical_tmux_target(plan.target)
-                or task != plan.task.name
-                or canonical_tmux_target(manager_target) != canonical_tmux_target(plan.manager_target)
-                or SHA256_RE.fullmatch(key) is None
-            ):
-                raise OSError("completion notice claim does not match the task")
-            matches.append((key, target))
+        if len(fields) == 7 and fields[5] == plan.notice_key and fields[6] == plan.semantic_key:
+            key, target, task, manager_target, _task_sha256, _notice_key, _semantic_key = fields
+            if SHA256_RE.fullmatch(key) is None:
+                raise OSError("completion notice claim is malformed")
+            matches.append((key, target, task, manager_target))
     if len(matches) > 1:
         raise OSError("completion notice claim is ambiguous")
     return matches[0] if matches else None
+
+
+def claimed_completion_receipt(plan: CompletionEmail) -> tuple[str, str] | None:
+    """Find an exact-task receipt claim without rejecting a semantic sibling."""
+
+    claim = claimed_completion_notice(plan)
+    if claim is None:
+        return None
+    key, target, task, manager_target = claim
+    if (
+        canonical_tmux_target(target) != canonical_tmux_target(plan.target)
+        or task != plan.task.name
+        or canonical_tmux_target(manager_target) != canonical_tmux_target(plan.manager_target)
+    ):
+        return None
+    return key, target
+
+
+def has_exact_completion_claim(plan: CompletionEmail, key: str, target: str) -> bool:
+    """Accept historical exact claims without treating them as semantic claims."""
+
+    ledger = completion_email_state_dir() / "completion-email-claims.tsv"
+    claims = owned_private_file(ledger, "completion claims ledger", 8_000_000).decode().splitlines()
+    matches = []
+    for line in claims:
+        fields = line.split("\t")
+        if len(fields) not in {3, 5, 6, 7}:
+            raise OSError("completion claims ledger is malformed")
+        if (
+            fields[0] == key
+            and canonical_tmux_target(fields[1]) == canonical_tmux_target(target)
+            and fields[2] == plan.task.name
+        ):
+            matches.append(fields)
+    return len(matches) == 1
+
+
+def exact_completion_claim_sha(plan: CompletionEmail, key: str, target: str) -> str | None:
+    ledger = completion_email_state_dir() / "completion-email-claims.tsv"
+    claims = owned_private_file(ledger, "completion claims ledger", 8_000_000).decode().splitlines()
+    matches = []
+    for line in claims:
+        fields = line.split("\t")
+        if len(fields) not in {3, 5, 6, 7}:
+            raise OSError("completion claims ledger is malformed")
+        if fields[0] == key and canonical_tmux_target(fields[1]) == canonical_tmux_target(target) and fields[2] == plan.task.name:
+            matches.append(fields[4] if len(fields) >= 5 else "")
+    return matches[0] if len(matches) == 1 else None
 
 
 def completion_email_is_delivered(plan: CompletionEmail) -> bool:
@@ -493,12 +572,55 @@ def completion_email_is_delivered(plan: CompletionEmail) -> bool:
         mark_completion_email_delivered(plan, plan.key)
         return True
     if notice_marker.is_file():
+        recorded_notice = owned_private_file(notice_marker, "completion notice delivery", 4096).decode()
+        try:
+            recorded_key, recorded_target, recorded_task, recorded_task_sha256 = recorded_notice.rstrip("\n").split("\t")
+        except ValueError as exc:
+            raise OSError("completion notice delivery is malformed") from exc
+        ledger = owned_private_file(state_dir / "completion-email-claims.tsv", "completion claims ledger", 8_000_000).decode()
+        matching_claims = [
+            row
+            for row in (line.split("\t") for line in ledger.splitlines())
+            if len(row) == 7
+            and row[0] == recorded_key
+            and canonical_tmux_target(row[1]) == canonical_tmux_target(recorded_target)
+            and row[2] == recorded_task
+            and row[4] == recorded_task_sha256
+            and row[5] == plan.notice_key
+            and row[6] == plan.semantic_key
+        ]
+        if len(matching_claims) != 1:
+            raise OSError("completion notice semantic key has no atomic claim")
+        if (
+            recorded_task != plan.task.name
+            or canonical_tmux_target(recorded_target) != canonical_tmux_target(plan.target)
+        ):
+            raise OSError("completion notice delivery does not match the current task")
+        if recorded_task_sha256 != plan.task_sha256:
+            # A stable task id in notice_key permits the expected pending-to-done
+            # byte transition without weakening either exact keyed receipt.
+            return True
         mark_completion_email_delivered(plan)
         return True
     claimed_receipt = claimed_completion_receipt(plan)
-    if claimed_receipt is not None and (state_dir / "completion-email-delivered" / claimed_receipt[0]).is_file():
-        mark_completion_email_delivered(plan, *claimed_receipt)
-        return True
+    if claimed_receipt is not None:
+        receipt = state_dir / "completion-email-delivered" / claimed_receipt[0]
+        if receipt.is_file():
+            payload = owned_private_file(receipt, "completion delivery", 4096).decode()
+            current = f"{claimed_receipt[1]}\t{plan.task.name}\t{plan.task_sha256}\n"
+            legacy = f"{claimed_receipt[1]}\t{plan.task.name}\n"
+            claim_sha = exact_completion_claim_sha(plan, *claimed_receipt)
+            claimed = f"{claimed_receipt[1]}\t{plan.task.name}\t{claim_sha}\n" if claim_sha else ""
+            if payload not in (current, legacy, claimed):
+                raise OSError("completion delivery does not match the task")
+            if payload in (current, legacy):
+                mark_completion_email_delivered(plan, *claimed_receipt)
+            return True
+    # A sibling owner may have claimed the shared semantic notice but not yet
+    # reached SMTP.  It owns the in-flight attempt; this route must not raise or
+    # create a second claim.
+    if claimed_completion_notice(plan) is not None:
+        return False
     return reconciled_completion_is_delivered(plan)
 
 
@@ -590,6 +712,7 @@ def reconcile_delivered_completion(
     *,
     items: tuple[str, ...] = (),
     evidence: str = "",
+    semantic_key: str = "",
 ) -> None:
     """Consume one exact cross-state delivery receipt into the caller's state."""
 
@@ -612,7 +735,7 @@ def reconcile_delivered_completion(
         if hashlib.sha256(task_payload).hexdigest() != task_sha256:
             raise OSError("task bytes do not match --task-sha256")
         text = task_payload.decode()
-        plan = build_completion_email(root, task, text, outcome, items=items, evidence=evidence)
+        plan = build_completion_email(root, task, text, outcome, items=items, evidence=evidence, semantic_key=semantic_key)
         if plan is None or plan.target != owner or plan.task_sha256 != task_sha256:
             raise OSError("task, owner, or completion outcome does not match the receipt")
         if receipt.name != plan.key:
@@ -637,13 +760,18 @@ def reconcile_delivered_completion(
             receipt_payload = owned_private_file(receipt, "completion receipt", 4096)
             if hashlib.sha256(receipt_payload).hexdigest() != receipt_sha256:
                 raise OSError("completion receipt does not match --receipt-sha256")
-            if receipt_payload.decode() != f"{owner}\t{task.name}\n":
+            if receipt_payload.decode() not in (
+                f"{owner}\t{task.name}\n",
+                f"{owner}\t{task.name}\t{task_sha256}\n",
+            ):
                 raise OSError("completion receipt task or owner is wrong")
             claims = owned_private_file(source_state / "completion-email-claims.tsv", "completion claims ledger", 8_000_000).decode()
             matching_claims = [line for line in claims.splitlines() if line.split("\t", 1)[0] == plan.key]
-            legacy_claim = f"{plan.key}\t{owner}\t{task.name}\t{plan.manager_target}\t{task_sha256}"
-            current_claim = f"{legacy_claim}\t{plan.notice_key}"
-            if matching_claims not in ([legacy_claim], [current_claim]):
+            legacy_claim = f"{plan.key}\t{owner}\t{task.name}"
+            detailed_claim = f"{legacy_claim}\t{plan.manager_target}\t{task_sha256}"
+            current_claim = f"{detailed_claim}\t{plan.notice_key}"
+            purpose_claim = f"{current_claim}\t{plan.semantic_key}"
+            if matching_claims not in ([legacy_claim], [detailed_claim], [current_claim], [purpose_claim]):
                 raise OSError("completion receipt has missing or ambiguous claim evidence")
             if hashlib.sha256(task.read_bytes()).hexdigest() != task_sha256:
                 raise OSError("task bytes changed during completion reconciliation")
@@ -690,28 +818,36 @@ def mark_completion_email_request_queued(plan: CompletionEmail) -> None:
 def mark_completion_email_delivered(plan: CompletionEmail, receipt_key: str | None = None, receipt_target: str | None = None) -> None:
     if receipt_key is not None and SHA256_RE.fullmatch(receipt_key) is None:
         raise OSError("completion receipt key is malformed")
-    receipt_payload = f"{receipt_target or plan.target}\t{plan.task.name}\n"
+    receipt_payload = f"{receipt_target or plan.target}\t{plan.task.name}\t{plan.task_sha256}\n"
     if receipt_key is not None:
         existing_receipt = completion_email_state_dir() / "completion-email-delivered" / receipt_key
-        if existing_receipt.is_file() and owned_private_file(existing_receipt, "completion delivery", 4096).decode() != receipt_payload:
-            raise OSError("completion delivery does not match the task")
+        if existing_receipt.is_file():
+            recorded_receipt = owned_private_file(existing_receipt, "completion delivery", 4096).decode()
+            legacy_receipt = f"{receipt_target or plan.target}\t{plan.task.name}\n"
+            if recorded_receipt == legacy_receipt and has_exact_completion_claim(
+                plan, receipt_key, receipt_target or plan.target
+            ):
+                receipt_payload = recorded_receipt
+            elif recorded_receipt != receipt_payload:
+                raise OSError("completion delivery does not match the task")
     notice_directory = completion_email_state_dir() / "completion-notice-delivered"
     notice_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     require_private_directory(notice_directory, "completion notice delivery directory")
     notice_marker = notice_directory / plan.notice_key
-    notice_payload = f"{receipt_key or plan.key}\t{receipt_target or plan.target}\t{plan.task.name}\n"
+    notice_payload = f"{receipt_key or plan.key}\t{receipt_target or plan.target}\t{plan.task.name}\t{plan.task_sha256}\n"
     try:
         exclusive_record(notice_marker, notice_payload)
     except FileExistsError:
         recorded_notice = owned_private_file(notice_marker, "completion notice delivery", 4096).decode()
         try:
-            recorded_key, recorded_target, recorded_task = recorded_notice.rstrip("\n").split("\t")
+            recorded_key, recorded_target, recorded_task, recorded_task_sha256 = recorded_notice.rstrip("\n").split("\t")
         except ValueError as exc:
             raise OSError("completion notice delivery is malformed") from exc
         if (
             SHA256_RE.fullmatch(recorded_key) is None
             or canonical_tmux_target(recorded_target) != canonical_tmux_target(plan.target)
             or recorded_task != plan.task.name
+            or recorded_task_sha256 != plan.task_sha256
         ):
             raise OSError("completion notice delivery does not match the task")
         claimed_receipt = claimed_completion_receipt(plan)
@@ -719,7 +855,7 @@ def mark_completion_email_delivered(plan: CompletionEmail, receipt_key: str | No
         legacy_exact = receipt_key == plan.key == recorded_key and existing_receipt.is_file()
         if recorded_key != claimed_key and not legacy_exact:
             raise OSError("completion notice delivery does not match its atomic claim")
-        receipt_payload = f"{recorded_target}\t{plan.task.name}\n"
+        receipt_payload = f"{recorded_target}\t{plan.task.name}\t{plan.task_sha256}\n"
     else:
         recorded_key = receipt_key or plan.key
     directory = completion_email_state_dir() / "completion-email-delivered"
@@ -733,13 +869,29 @@ def mark_completion_email_delivered(plan: CompletionEmail, receipt_key: str | No
             raise OSError("completion delivery does not match the task")
 
 
-def claim_completion_email(plan: CompletionEmail) -> bool:
-    """Durably reserve one exact task receipt and its stable Human notice."""
+def claim_completion_email(plan: CompletionEmail, *, recover_existing: bool = False) -> bool:
+    """Prepare the exact capability before reserving its Human notice."""
 
     state_dir = completion_email_state_dir()
     state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     state_dir.chmod(0o700)
     ledger = state_dir / "completion-email-claims.tsv"
+    authorization_directory = state_dir / "completion-email-authorizations"
+    authorization_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    require_private_directory(authorization_directory, "completion email authorization directory")
+    authorization = authorization_directory / plan.key
+    relative_task = plan.task.resolve().relative_to(plan.root.resolve()).as_posix()
+    authorization_payload = (
+        f"version=1\n"
+        f"target={plan.target}\n"
+        f"root={plan.root.resolve()}\n"
+        f"task={relative_task}\n"
+        f"task_sha256={plan.task_sha256}\n"
+        f"notice_key={plan.notice_key}\n"
+        f"semantic_key={plan.semantic_key}\n"
+        f"subject_sha256={hashlib.sha256(plan.subject.encode()).hexdigest()}\n"
+        f"body_sha256={hashlib.sha256(plan.body.encode()).hexdigest()}\n"
+    )
     lock_path = state_dir / "completion-email-claims.lock"
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     with os.fdopen(fd, "r+", encoding="utf-8") as lock:
@@ -749,18 +901,34 @@ def claim_completion_email(plan: CompletionEmail) -> bool:
         except FileNotFoundError:
             previous = ""
         fields = [line.split("\t") for line in previous.splitlines()]
-        if any(len(row) not in {5, 6} for row in fields):
+        if any(len(row) not in {3, 5, 6, 7} for row in fields):
             raise OSError("completion claims ledger is malformed")
-        keys = {row[0] for row in fields}
-        notice_keys = {row[5] for row in fields if len(row) == 6}
-        if plan.key in keys or plan.notice_key in notice_keys:
-            return False
+        expected = [plan.key, plan.target, plan.task.name, plan.manager_target, plan.task_sha256, plan.notice_key, plan.semantic_key]
+        matching_keys = [row for row in fields if row[0] == plan.key]
+        matching_notices = [row for row in fields if len(row) >= 6 and row[5] == plan.notice_key]
+        matching_semantic_keys = [row for row in fields if len(row) == 7 and row[6] == plan.semantic_key]
+        if matching_keys or matching_notices or matching_semantic_keys:
+            if matching_keys != [expected] or matching_notices != [expected] or matching_semantic_keys != [expected]:
+                return False
+            try:
+                recorded = owned_private_file(authorization, "completion email authorization", 4096).decode()
+            except FileNotFoundError:
+                raise OSError("completion email claim has no authorization")
+            if recorded != authorization_payload:
+                raise OSError("completion email authorization is ambiguous")
+            used = state_dir / "completion-email-authorization-used" / plan.key
+            return recover_existing and not used.exists()
+        try:
+            exclusive_record(authorization, authorization_payload)
+        except FileExistsError:
+            if owned_private_file(authorization, "completion email authorization", 4096).decode() != authorization_payload:
+                raise OSError("completion email authorization is ambiguous")
         temporary = ledger.with_name(f".{ledger.name}.{os.getpid()}.tmp")
         try:
             temporary_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(temporary_fd, "w", encoding="utf-8") as handle:
                 _ = handle.write(
-                    f"{previous}{plan.key}\t{plan.target}\t{plan.task.name}\t{plan.manager_target}\t{plan.task_sha256}\t{plan.notice_key}\n"
+                    f"{previous}{plan.key}\t{plan.target}\t{plan.task.name}\t{plan.manager_target}\t{plan.task_sha256}\t{plan.notice_key}\t{plan.semantic_key}\n"
                 )
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -776,6 +944,10 @@ def send_completion_email(plan: CompletionEmail | None) -> bool:
 
     if plan is None:
         return False
+    if not plan.semantic_key:
+        raise ValueError("semantic completion key is required before email delivery")
+    if completion_email_is_delivered(plan):
+        return False
     try:
         require_completion_entrypoint()
         task_payload = stable_owned_file(plan.task, 8_000_000)
@@ -790,14 +962,14 @@ def send_completion_email(plan: CompletionEmail | None) -> bool:
     except OSError as exc:
         print(f"automatic completion email blocked before claim: {exc}", file=sys.stderr)
         return False
-    if not claim_completion_email(plan):
+    if not claim_completion_email(plan, recover_existing=True):
         return False
     with tempfile.TemporaryDirectory(prefix="omo-completion-email-") as tmp:
         subject = Path(tmp) / "subject.txt"
         body = Path(tmp) / "body.txt"
         subject.write_text(plan.subject + "\n", encoding="utf-8")
         body.write_text(plan.body, encoding="utf-8")
-        command = [str(EMAIL_HELPER), "--manager-human"]
+        command = [str(EMAIL_HELPER), "--manager-human", "--completion-authorization", plan.key]
         command.extend(("--subject-file", str(subject), "--message-file", str(body)))
         try:
             subprocess.run(command, check=True)
@@ -819,10 +991,13 @@ def require_owner_completion(
     human_subject: str = "",
     human_body: str = "",
     owner_may_mutate_after_delivery: bool = False,
+    semantic_key: str = "",
 ) -> bool:
     """Require exact-owner delivery before a manager-driven mutation proceeds."""
 
-    canonical = build_completion_email(root, task, text, outcome, items=items, evidence=evidence)
+    if not semantic_key:
+        raise ValueError("semantic completion key is required")
+    canonical = build_completion_email(root, task, text, outcome, items=items, evidence=evidence, semantic_key=semantic_key)
     if canonical is None:
         return True
     owner_plan = plan_completion_email(
@@ -834,6 +1009,7 @@ def require_owner_completion(
         evidence=evidence,
         human_subject=human_subject,
         human_body=human_body,
+        semantic_key=canonical.semantic_key if canonical is not None else semantic_key,
     )
     effective = owner_plan or canonical
     require_completion_entrypoint()
@@ -846,6 +1022,7 @@ def require_owner_completion(
     if completion_email_request_is_queued(canonical):
         return False
     command = [str(COMPLETION_ENTRYPOINT), "--root", str(root), "--task", str(task), "--outcome", outcome]
+    command.extend(("--semantic-key", canonical.semantic_key))
     for item in items:
         command.extend(("--item", item))
     if evidence:
@@ -869,6 +1046,7 @@ def main(argv: list[str] | None = None) -> int:
     _ = parser.add_argument("--outcome", required=True)
     _ = parser.add_argument("--item", action="append", default=[])
     _ = parser.add_argument("--evidence", default="")
+    _ = parser.add_argument("--semantic-key", default="", help="Exact shared SHA-256 identity for this semantic Human completion notice.")
     _ = parser.add_argument(
         "--reconcile-delivered",
         action="store_true",
@@ -883,6 +1061,8 @@ def main(argv: list[str] | None = None) -> int:
     task = parsed.task if parsed.task.is_absolute() else root / parsed.task
     try:
         reconciliation_values = (parsed.owner, parsed.task_sha256, parsed.receipt, parsed.receipt_sha256)
+        if not parsed.semantic_key:
+            parser.error("--semantic-key is required for a completion notice.")
         if parsed.reconcile_delivered:
             if not all(reconciliation_values):
                 parser.error("--reconcile-delivered requires owner, task digest, receipt, and receipt digest.")
@@ -896,13 +1076,22 @@ def main(argv: list[str] | None = None) -> int:
                 parsed.receipt_sha256,
                 items=tuple(parsed.item),
                 evidence=parsed.evidence,
+                semantic_key=parsed.semantic_key,
             )
             print(f"Reconciled delivered completion receipt for {task.name} into {completion_email_state_dir()}.")
             return 0
         if any(reconciliation_values):
             parser.error("owner, task digest, and receipt options require --reconcile-delivered.")
         text = task.read_text(encoding="utf-8")
-        plan = plan_completion_email(root, task, text, parsed.outcome, items=tuple(parsed.item), evidence=parsed.evidence)
+        plan = plan_completion_email(
+            root,
+            task,
+            text,
+            parsed.outcome,
+            items=tuple(parsed.item),
+            evidence=parsed.evidence,
+            semantic_key=parsed.semantic_key,
+        )
     except (OSError, TaskFrontmatterError, ValueError) as exc:
         print(f"omo_completion_email.py: {exc}", file=sys.stderr)
         return 2

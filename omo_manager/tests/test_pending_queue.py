@@ -63,7 +63,7 @@ class PendingQueueTests(unittest.TestCase):
             path = root / "task.md"
             original = task_text(items=("finish review",))
             path.write_text(original, encoding="utf-8")
-            args = Args("remove", ("finish review",), evidence="review passed")
+            args = Args("remove", ("finish review",), evidence="review passed", completion_key="a" * 64)
             with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
                 "omo_manager.omo_pending.current_active_task", return_value=path
             ), patch("omo_manager.omo_completion_email.current_active_task", return_value=path), patch(
@@ -73,7 +73,7 @@ class PendingQueueTests(unittest.TestCase):
                     with self.assertRaisesRegex(OSError, "not confirmed delivered"):
                         run(args, root)
             self.assertEqual(original, path.read_text(encoding="utf-8"))
-            email.assert_called_once()
+            self.assertEqual(2, email.call_count)
 
     def test_remove_with_missing_completion_entrypoint_does_not_mutate_or_email(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -91,7 +91,7 @@ class PendingQueueTests(unittest.TestCase):
                 "omo_manager.omo_completion_email.EMAIL_HELPER", root / "must-not-run-email-helper"
             ), patch("omo_manager.omo_completion_email.subprocess.run", side_effect=AssertionError("must not email")):
                 with self.assertRaisesRegex(OSError, "not safely executable"):
-                    run(Args("remove", ("finish review",), evidence="review passed"), root)
+                    run(Args("remove", ("finish review",), evidence="review passed", completion_key="a" * 64), root)
             self.assertEqual(original, path.read_text(encoding="utf-8"))
             self.assertFalse((state / "completion-email-claims.tsv").exists())
 
@@ -187,6 +187,8 @@ class PendingQueueTests(unittest.TestCase):
                 "review passed",
                 "--outcome",
                 "completed",
+                "--completion-key",
+                "a" * 64,
             ]
         )
         self.assertEqual("completed", args.outcome)

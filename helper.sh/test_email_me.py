@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import os
 import subprocess
@@ -43,8 +44,14 @@ class EmailMeTests(unittest.TestCase):
             },
         )
         self.env_patch.start()
+        self.non_completion_caller_patch = patch.object(email_me, "validate_non_completion_owner", return_value=None)
+        self.non_completion_caller_patch.start()
+        self.completion_caller_patch = patch.object(email_me, "validate_completion_owner", return_value=None)
+        self.completion_caller_patch.start()
 
     def tearDown(self) -> None:
+        self.completion_caller_patch.stop()
+        self.non_completion_caller_patch.stop()
         self.env_patch.stop()
         self.state_tmp.cleanup()
 
@@ -520,13 +527,13 @@ class EmailMeTests(unittest.TestCase):
             patch.object(sys, "stdin", StringIO("body\n")),
             patch("sys.stderr", new_callable=StringIO) as stderr,
         ):
-            result = email_me.main(["--manager-human", "--guest-image-reference", reference, "--subject", "hi"])
+            result = email_me.main(["--manager-human", "--non-completion", "--guest-image-reference", reference, "--subject", "hi"])
         self.assertEqual(2, result)
         self.assertIn("requires a guest_hees producer target", stderr.getvalue())
 
     def test_guest_manager_target_implies_pinned_guest_recipient(self) -> None:
         with patch.object(sys, "stdin", StringIO("body\n")):
-            args = email_me.parse_args(["--manager-human", "--tmux-target", "guest_hees:0", "--subject", "hi"])
+            args = email_me.parse_args(["--manager-human", "--non-completion", "--tmux-target", "guest_hees:0", "--subject", "hi"])
         self.assertTrue(args.guest_hees)
 
     def test_guest_dedupe_includes_image_references_and_uses_separate_state(self) -> None:
@@ -627,7 +634,7 @@ class EmailMeTests(unittest.TestCase):
                 patch.object(email_me.ssl, "create_default_context", return_value=None),
                 patch.object(email_me, "maybe_print_thread_reminder"),
             ):
-                result = email_me.main(["--manager-human", "--subject", "Re: Topic"])
+                result = email_me.main(["--manager-human", "--non-completion", "--subject", "Re: Topic"])
         self.assertEqual(0, result)
         self.assertEqual("46496337@qq.com", sent_messages[0]["To"])
         self.assertIn("[guest_hees:2]", sent_messages[0]["Subject"])
@@ -1077,7 +1084,7 @@ class EmailMeTests(unittest.TestCase):
                 patch.object(email_me, "prepare_latest_thread_for_tmux_target", return_value=prepared) as prepare,
                 patch.object(email_me, "maybe_print_thread_reminder"),
             ):
-                result = email_me.main(["--manager-human", "--message-file", str(body)])
+                result = email_me.main(["--manager-human", "--non-completion", "--message-file", str(body)])
             self.assertEqual(0, result)
             self.assertEqual(("wl:1",), prepare.call_args.args)
             self.assertEqual("primary", prepare.call_args.kwargs["route_profile"].route_kind)
@@ -1094,7 +1101,7 @@ class EmailMeTests(unittest.TestCase):
             ),
             patch("sys.stderr", new_callable=StringIO) as stderr,
         ):
-            result = email_me.main(["--manager-human"])
+            result = email_me.main(["--manager-human", "--non-completion"])
         self.assertEqual(2, result)
         self.assertIn("no recent email thread", stderr.getvalue())
 
@@ -1136,7 +1143,7 @@ class EmailMeTests(unittest.TestCase):
                 patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp),
                 patch.object(email_me.ssl, "create_default_context", return_value=None),
             ):
-                self.assertEqual(0, email_me.main(["--manager-human", "--tmux-target", "wl:1"]))
+                self.assertEqual(0, email_me.main(["--manager-human", "--non-completion", "--tmux-target", "wl:1"]))
         self.assertEqual("Re: [wl:1] Existing topic", sent_messages[0]["Subject"])
         self.assertEqual("<prior@example.test>", sent_messages[0]["In-Reply-To"])
         self.assertEqual("<root@example.test> <prior@example.test>", sent_messages[0]["References"])
@@ -1505,7 +1512,7 @@ class EmailMeTests(unittest.TestCase):
             patch.object(email_me.smtplib, "SMTP_SSL") as smtp,
             patch("sys.stderr", new_callable=StringIO) as stderr,
         ):
-            result = email_me.main(["--manager-human", "--tmux-target", "wl:1", "--subject", "Re: Topic"])
+            result = email_me.main(["--manager-human", "--non-completion", "--tmux-target", "wl:1", "--subject", "Re: Topic"])
         self.assertEqual(2, result)
         self.assertIn("ambiguous route thread", stderr.getvalue())
         smtp.assert_not_called()
@@ -1539,7 +1546,7 @@ class EmailMeTests(unittest.TestCase):
             patch.object(email_me.smtplib, "SMTP_SSL") as smtp,
             patch("sys.stderr", new_callable=StringIO) as stderr,
         ):
-            result = email_me.main(["--manager-human", "--tmux-target", "wl:1", "--subject", "Topic"])
+            result = email_me.main(["--manager-human", "--non-completion", "--tmux-target", "wl:1", "--subject", "Topic"])
         self.assertEqual(2, result)
         self.assertIn("conflicts with verified producer route", stderr.getvalue())
         smtp.assert_not_called()
@@ -1557,7 +1564,7 @@ class EmailMeTests(unittest.TestCase):
             patch.object(email_me.smtplib, "SMTP_SSL") as smtp,
             patch("sys.stderr", new_callable=StringIO) as stderr,
         ):
-            result = email_me.main(["--manager-human", "--tmux-target", "wl:1", "--subject", "Topic"])
+            result = email_me.main(["--manager-human", "--non-completion", "--tmux-target", "wl:1", "--subject", "Topic"])
         self.assertEqual(2, result)
         self.assertIn("primary email route must not use the pinned guest recipient", stderr.getvalue())
         prepare.assert_not_called()
@@ -1598,7 +1605,9 @@ class EmailMeTests(unittest.TestCase):
 
     def test_manager_dry_run_rejects_missing_split_configuration(self) -> None:
         with patch.object(sys, "stdin", StringIO("body\n")), patch.object(email_me, "configured_agent_mail", return_value=None), patch.object(email_me, "prepare_subject_and_headers") as prepare, patch.object(email_me, "append_pwd_footer") as append_footer, patch("sys.stderr", new_callable=StringIO) as stderr:
-            result = email_me.main(["--dry-run", "--manager-human", "--no-pwd-footer", "--tmux-target", "wl:1", "--subject", "hi"])
+            result = email_me.main(
+                ["--dry-run", "--manager-human", "--non-completion", "--no-pwd-footer", "--tmux-target", "wl:1", "--subject", "hi"]
+            )
         self.assertEqual(2, result)
         self.assertIn("requires split email configuration", stderr.getvalue())
         prepare.assert_not_called()
@@ -1620,8 +1629,8 @@ class EmailMeTests(unittest.TestCase):
                 "OMO_MANAGER_TMUX_TARGET": "wl:1.0",
             }
             with patch.dict(os.environ, env, clear=False), patch("sys.stdout", new_callable=StringIO) as stdout:
-                first = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
-                second = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
+                first = email_me.main(["--manager-human", "--non-completion", "--subject-file", str(subject), "--message-file", str(body)])
+                second = email_me.main(["--manager-human", "--non-completion", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, first)
             self.assertEqual(0, second)
             self.assertIn("Emailed the human", stdout.getvalue())
@@ -1629,7 +1638,170 @@ class EmailMeTests(unittest.TestCase):
             self.assertEqual("[wl:1] Manager update\nbody\n", send_log.read_text(encoding="utf-8"))
             self.assertIn("[wl:1] Manager update", (state_dir / "human-email-sent.tsv").read_text(encoding="utf-8"))
 
-    def test_ordinary_human_mode_dedupes_exact_system_spam_report(self) -> None:
+    def test_completion_mail_requires_exact_owner_claim_and_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            authorization_dir = state_dir / "completion-email-authorizations"
+            state_dir.mkdir(mode=0o700)
+            authorization_dir.mkdir(mode=0o700)
+            key = "a" * 64
+            notice_key = "b" * 64
+            semantic_key = "d" * 64
+            subject = "task.md: task done"
+            body = "Task: task.md\nOutcome: task done\n"
+            root = Path(tmp) / "work_logs"
+            root.mkdir()
+            task = root / "task.md"
+            task.write_text("task bytes\n", encoding="utf-8")
+            task_sha256 = hashlib.sha256(task.read_bytes()).hexdigest()
+            authorization = authorization_dir / key
+            authorization.write_text(
+                "version=1\n"
+                "target=wl:1\n"
+                f"root={root}\n"
+                "task=task.md\n"
+                f"task_sha256={task_sha256}\n"
+                f"notice_key={notice_key}\n"
+                f"semantic_key={semantic_key}\n"
+                f"subject_sha256={hashlib.sha256(subject.encode()).hexdigest()}\n"
+                f"body_sha256={hashlib.sha256(body.encode()).hexdigest()}\n",
+                encoding="utf-8",
+            )
+            authorization.chmod(0o600)
+            claims = state_dir / "completion-email-claims.tsv"
+            claims.write_text(
+                f"{key}\twl:1\ttask.md\twl:0\t{task_sha256}\t{notice_key}\t{semantic_key}\n",
+                encoding="utf-8",
+            )
+            claims.chmod(0o600)
+            message = Path(tmp) / "body.md"
+            message.write_text(body, encoding="utf-8")
+            env = {
+                "EMAIL_ME_FAKE_SEND_LOG": str(Path(tmp) / "sent.txt"),
+                "OMO_MANAGER_STATE_DIR": str(state_dir),
+                "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
+                "OMO_MANAGER_TMUX_TARGET": "wl:1",
+            }
+            argv = [
+                "--manager-human",
+                "--completion-authorization",
+                key,
+                "--tmux-target",
+                "wl:1",
+                "--subject",
+                subject,
+                "--message-file",
+                str(message),
+            ]
+            self.completion_caller_patch.stop()
+            try:
+                with patch.dict(os.environ, {**env, "TMUX_PANE": "%2"}, clear=False), patch.object(
+                    email_me, "current_tmux_window", return_value="wl:2"
+                ), patch("sys.stderr", new_callable=StringIO) as stderr:
+                    self.assertEqual(2, email_me.main(["--dry-run", *argv]))
+                self.assertIn("target does not match the invoking pane", stderr.getvalue())
+                active = root / "replacement.md"
+                active.write_text(
+                    "---\nversion: v1.0.0\nstatus: running\nrunat: wl:1\ntool: codex\nmanagerat: wl:0\n"
+                    "is_manager: false\npending_task_items: []\n---\n",
+                    encoding="utf-8",
+                )
+                (root / "TODO.md").write_text(
+                    "current:\nreplacement.md wl:1\n\nlow priority:\n\nhuman pending:\n\nprevious:\n",
+                    encoding="utf-8",
+                )
+                with patch.dict(os.environ, {**env, "TMUX_PANE": "%1"}, clear=False), patch.object(
+                    email_me, "current_tmux_window", return_value="wl:1"
+                ), patch.object(email_me, "invoking_process_belongs_to_pane", return_value=True), patch(
+                    "sys.stderr", new_callable=StringIO
+                ) as stderr:
+                    self.assertEqual(2, email_me.main(["--dry-run", *argv]))
+                self.assertIn("different active task", stderr.getvalue())
+            finally:
+                self.completion_caller_patch.start()
+            with patch.dict(os.environ, env, clear=False):
+                self.assertEqual(0, email_me.main(["--dry-run", *argv]))
+                self.assertFalse((state_dir / "completion-email-authorization-used" / key).exists())
+                with patch.object(email_me, "should_send_manager_email_key") as generic_dedupe, patch.object(
+                    email_me, "fsync_directory", wraps=email_me.fsync_directory
+                ) as fsync_dir:
+                    self.assertEqual(0, email_me.main(argv))
+                generic_dedupe.assert_not_called()
+                fsync_dir.assert_called_once_with(state_dir / "completion-email-authorization-used")
+            message.write_text(body + "changed\n", encoding="utf-8")
+            with patch.dict(os.environ, env, clear=False), patch("sys.stderr", new_callable=StringIO) as stderr:
+                self.assertEqual(2, email_me.main(argv))
+            self.assertIn("content does not match", stderr.getvalue())
+
+    def test_manager_completion_like_route_rejects_unclassified_send(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            body = Path(tmp) / "body.md"
+            body.write_text("done\n", encoding="utf-8")
+            env = {"OMO_MANAGER_TMUX_TARGET": "wl:1"}
+            with patch.dict(os.environ, env, clear=False), patch("sys.stderr", new_callable=StringIO) as stderr:
+                self.assertEqual(2, email_me.main(["--manager-human", "--subject", "task done", "--message-file", str(body)]))
+            self.assertIn("requires --non-completion", stderr.getvalue())
+
+    def test_worker_cannot_relabel_completion_as_privileged_non_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            body = Path(tmp) / "body.md"
+            body.write_text("All assigned work is complete.\n", encoding="utf-8")
+            env = {"OMO_MANAGER_TMUX_TARGET": "wl:1"}
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(
+                    email_me,
+                    "validate_non_completion_owner",
+                    side_effect=ValueError("non-completion Human mail requires an exact active manager owner"),
+                ),
+                patch("sys.stderr", new_callable=StringIO) as stderr,
+            ):
+                self.assertEqual(
+                    2,
+                    email_me.main(
+                        ["--manager-human", "--non-completion", "--subject", "operational", "--message-file", str(body)]
+                    ),
+                )
+            self.assertIn("exact active manager owner", stderr.getvalue())
+
+    def test_non_completion_owner_binding_requires_active_manager_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "manager.md"
+            task.write_text(
+                "---\nversion: v1.0.0\nstatus: running\nrunat: wl:1\ntool: codex\nmanagerat: main:0\n"
+                "is_manager: true\npending_task_items: []\n---\n",
+                encoding="utf-8",
+            )
+            (root / "TODO.md").write_text("current:\nmanager.md wl:1\n\nlow priority:\n\nhuman pending:\n\nprevious:\n", encoding="utf-8")
+            self.non_completion_caller_patch.stop()
+            try:
+                with patch.dict(os.environ, {"OMO_WORK_LOGS_ROOT": str(root), "TMUX_PANE": "%1"}, clear=False), patch.object(
+                    email_me, "current_tmux_window", return_value="wl:1"
+                ), patch.object(
+                    email_me, "invoking_process_belongs_to_pane", return_value=True
+                ):
+                    email_me.validate_non_completion_owner("wl:1")
+                    with self.assertRaisesRegex(ValueError, "does not match"):
+                        email_me.validate_non_completion_owner("wl:2")
+                    task.write_text(task.read_text(encoding="utf-8").replace("is_manager: true", "is_manager: false"), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "exact active manager owner"):
+                        email_me.validate_non_completion_owner("wl:1")
+            finally:
+                self.non_completion_caller_patch.start()
+
+    def test_invoking_process_must_descend_from_tmux_pane_shell(self) -> None:
+        process = Mock(returncode=0, stdout="4242\n")
+        with patch.object(email_me.subprocess, "run", return_value=process), patch.object(
+            email_me, "process_ancestor_pids", return_value={1, 4242, os.getpid()}
+        ):
+            self.assertTrue(email_me.invoking_process_belongs_to_pane("%1"))
+        with patch.object(email_me.subprocess, "run", return_value=process), patch.object(
+            email_me, "process_ancestor_pids", return_value={1, os.getpid()}
+        ):
+            self.assertFalse(email_me.invoking_process_belongs_to_pane("%1"))
+
+    def test_ordinary_verified_direct_human_send_agrees_between_dry_run_and_live(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp) / "state"
             send_log = Path(tmp) / "sent.txt"
@@ -1642,18 +1814,13 @@ class EmailMeTests(unittest.TestCase):
                 "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
             }
             argv = ["--subject", "Duplicate manager directive", "--message-file", str(body)]
-            with patch.dict(os.environ, env, clear=False), patch("sys.stdout", new_callable=StringIO) as stdout:
-                first = email_me.main(argv)
-                second = email_me.main(argv)
+            with patch.dict(os.environ, env, clear=False):
+                dry_run = email_me.main(["--dry-run", *argv])
+                live = email_me.main(argv)
 
-            self.assertEqual(0, first)
-            self.assertEqual(0, second)
-            self.assertEqual(1, stdout.getvalue().count("Email sent."))
-            self.assertIn("Skipped duplicate human email", stdout.getvalue())
-            self.assertEqual(
-                "Duplicate manager directive\nThe same manager directive was delivered twice.\n",
-                send_log.read_text(encoding="utf-8"),
-            )
+            self.assertEqual(0, dry_run)
+            self.assertEqual(0, live)
+            self.assertEqual("Duplicate manager directive\nThe same manager directive was delivered twice.\n", send_log.read_text(encoding="utf-8"))
 
     def test_ordinary_human_mode_does_not_claim_before_credential_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1706,6 +1873,46 @@ class EmailMeTests(unittest.TestCase):
             self.assertEqual(0, second)
             self.assertEqual("Duplicate manager directive\nsame report\n", send_log.read_text(encoding="utf-8"))
 
+    def test_completion_authorization_is_recoverable_before_smtp_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            state_dir.mkdir(mode=0o700)
+            body = Path(tmp) / "body.md"
+            body.write_text("done\n", encoding="utf-8")
+            key = "a" * 64
+            values = {"target": "wl:1", "task": "task.md"}
+            settings = type(
+                "Settings",
+                (),
+                {"agent_address": "agent@example.test", "human_address": "human@example.test", "app_password": "secret"},
+            )()
+            env = {"OMO_MANAGER_STATE_DIR": str(state_dir), "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0"}
+            argv = [
+                "--manager-human",
+                "--completion-authorization",
+                key,
+                "--tmux-target",
+                "wl:1",
+                "--subject",
+                "task done",
+                "--message-file",
+                str(body),
+            ]
+            with patch.dict(os.environ, env, clear=False), patch.object(
+                email_me, "validate_completion_authorization", return_value=values
+            ), patch.object(email_me, "configured_agent_mail", return_value=settings), patch.object(
+                email_me.smtplib, "SMTP_SSL", side_effect=OSError("connection refused")
+            ), patch("sys.stderr", new_callable=StringIO):
+                self.assertEqual(1, email_me.main(argv))
+            self.assertFalse((state_dir / "completion-email-authorization-used" / key).exists())
+
+            send_log = Path(tmp) / "sent.txt"
+            with patch.dict(os.environ, {**env, "EMAIL_ME_FAKE_SEND_LOG": str(send_log)}, clear=False), patch.object(
+                email_me, "validate_completion_authorization", return_value=values
+            ):
+                self.assertEqual(0, email_me.main(argv))
+            self.assertTrue((state_dir / "completion-email-authorization-used" / key).is_file())
+
     def test_manager_human_mode_rejects_missing_tmux_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             body = Path(tmp) / "body.md"
@@ -1718,7 +1925,7 @@ class EmailMeTests(unittest.TestCase):
                 "OMO_AGENT_TMUX_TARGET": "",
             }
             with patch.dict(os.environ, env, clear=False), patch.dict(os.environ, {"TMUX": ""}, clear=False), patch("sys.stderr", new_callable=StringIO) as stderr:
-                self.assertEqual(2, email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)]))
+                self.assertEqual(2, email_me.main(["--manager-human", "--non-completion", "--subject-file", str(subject), "--message-file", str(body)]))
             self.assertIn("requires a tmux target", stderr.getvalue())
 
     def test_manager_human_mode_reuses_prepared_thread_subject(self) -> None:
@@ -1737,7 +1944,7 @@ class EmailMeTests(unittest.TestCase):
             }
             prepared = ("Re: [wl:1] manager_status_email_unification_followup_7872.md status answer", {"In-Reply-To": "<prior@example.test>", "References": "<prior@example.test>"})
             with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", return_value=prepared) as prepare, patch.object(email_me, "reply_headers_for_subject") as headers:
-                result = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
+                result = email_me.main(["--manager-human", "--non-completion", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, result)
             self.assertEqual(("manager_status_email_unification_followup_7872.md status answer", "wl:1"), prepare.call_args.args)
             self.assertEqual("primary", prepare.call_args.kwargs["route_profile"].route_kind)
@@ -1760,7 +1967,7 @@ class EmailMeTests(unittest.TestCase):
             }
             prepared = ("[wl:7] Topic", {})
             with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", return_value=prepared) as prepare:
-                result = email_me.main(["--manager-human", "--tmux-target", "wl:7", "--subject-file", str(subject), "--message-file", str(body)])
+                result = email_me.main(["--manager-human", "--non-completion", "--tmux-target", "wl:7", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, result)
             self.assertEqual(("Topic", "wl:7"), prepare.call_args.args)
             self.assertEqual("primary", prepare.call_args.kwargs["route_profile"].route_kind)
@@ -1785,7 +1992,7 @@ class EmailMeTests(unittest.TestCase):
             }
             current = subprocess.CompletedProcess(["tmux"], 0, stdout="vl:3.0\n", stderr="")
             with patch.dict(os.environ, env, clear=False), patch.object(email_me.subprocess, "run", return_value=current) as run, patch.object(email_me, "prepare_subject_and_headers", return_value=("Re: [vl:3] Topic", {})):
-                result = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
+                result = email_me.main(["--manager-human", "--non-completion", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, result)
             self.assertEqual("Re: [vl:3] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
             run.assert_called_once_with(
@@ -1810,7 +2017,7 @@ class EmailMeTests(unittest.TestCase):
                 "OMO_MANAGER_TMUX_TARGET": "wl:1.0",
             }
             with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", return_value=("Re: Untagged source subject", {})):
-                result = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
+                result = email_me.main(["--manager-human", "--non-completion", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, result)
             self.assertEqual("Re: [wl:1] Untagged source subject\nbody\n", send_log.read_text(encoding="utf-8"))
 
@@ -1825,7 +2032,7 @@ class EmailMeTests(unittest.TestCase):
                 "OMO_MANAGER_TMUX_TARGET": "wl:1.0",
             }
             with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", return_value=("Re: [a] [wl:1] [vl:2] Topic", {})), patch("sys.stderr", new_callable=StringIO) as stderr:
-                result = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
+                result = email_me.main(["--manager-human", "--non-completion", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(2, result)
             self.assertIn("exactly one bracketed tmux tag", stderr.getvalue())
 
@@ -1842,9 +2049,9 @@ class EmailMeTests(unittest.TestCase):
             }
             prepared = ("[wl:7] Topic", {})
             with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", return_value=prepared) as prepare:
-                result = email_me.main(["--tmux-target", "wl:7", "--subject-file", str(subject), "--message-file", str(body)])
+                result = email_me.main(["--manager-human", "--non-completion", "--tmux-target", "wl:7", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, result)
-            prepare.assert_called_once_with("Topic", "wl:7")
+            self.assertEqual(("Topic", "wl:7"), prepare.call_args.args)
             self.assertEqual("[wl:7] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
 
     def test_sender_tmux_target_preserves_source_tag_for_forwarded_mail(self) -> None:
@@ -1863,7 +2070,7 @@ class EmailMeTests(unittest.TestCase):
                 "OMO_AGENT_TMUX_TARGET": "pb:99",
             }
             with patch.dict(os.environ, env, clear=False), patch.object(email_me.subprocess, "run") as run, patch.object(email_me, "prepare_subject_and_headers", return_value=("Re: [vl:15] Topic", {})):
-                result = email_me.main(["--manager-human", "--sender-tmux-target", "vl:15", "--subject-file", str(subject), "--message-file", str(body)])
+                result = email_me.main(["--manager-human", "--non-completion", "--sender-tmux-target", "vl:15", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, result)
             self.assertEqual("Re: [vl:15] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
             run.assert_not_called()
@@ -1881,9 +2088,9 @@ class EmailMeTests(unittest.TestCase):
             }
             prepared = ("[wl:7] Topic", {})
             with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", return_value=prepared) as prepare:
-                result = email_me.main(["--no-pwd-footer", "--tmux-target", "wl:7", "--subject-file", str(subject), "--message-file", str(body)])
+                result = email_me.main(["--manager-human", "--non-completion", "--no-pwd-footer", "--tmux-target", "wl:7", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, result)
-            prepare.assert_called_once_with("Topic", "wl:7")
+            self.assertEqual(("Topic", "wl:7"), prepare.call_args.args)
             self.assertEqual("[wl:7] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
 
     def test_manager_human_dedupe_survives_thread_subject_transition(self) -> None:
@@ -1903,8 +2110,8 @@ class EmailMeTests(unittest.TestCase):
             }
             prepared = [("[wl:1] Topic", {}), ("Re: [wl:1] Topic", {"In-Reply-To": "<prior@example.test>", "References": "<prior@example.test>"})]
             with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", side_effect=prepared):
-                first = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
-                second = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
+                first = email_me.main(["--manager-human", "--non-completion", "--subject-file", str(subject), "--message-file", str(body)])
+                second = email_me.main(["--manager-human", "--non-completion", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, first)
             self.assertEqual(0, second)
             self.assertEqual("[wl:1] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
@@ -1942,7 +2149,7 @@ class EmailMeTests(unittest.TestCase):
                 "OMO_MANAGER_TMUX_TARGET": "wl:1.0",
             }
             with patch.dict(os.environ, env, clear=False), patch.object(email_me, "ENV_FILE_PATH", env_file), patch.object(email_me, "configured_agent_mail", return_value=None), patch.object(email_me, "prepare_subject_and_headers") as prepare, patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp), patch.object(email_me.ssl, "create_default_context", return_value=None), patch("sys.stderr", new_callable=StringIO) as stderr:
-                self.assertEqual(2, email_me.main(["--manager-human", "--no-pwd-footer", "--subject-file", str(subject), "--message-file", str(body)]))
+                self.assertEqual(2, email_me.main(["--manager-human", "--non-completion", "--no-pwd-footer", "--subject-file", str(subject), "--message-file", str(body)]))
         self.assertEqual([], sent_messages)
         prepare.assert_not_called()
         self.assertIn("requires split email configuration", stderr.getvalue())
@@ -1983,7 +2190,7 @@ class EmailMeTests(unittest.TestCase):
                 patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp),
                 patch.object(email_me.ssl, "create_default_context", return_value=None),
             ):
-                self.assertEqual(0, email_me.main(["--manager-human", "--tmux-target", "wl:1", "--subject", "Topic", "--message-file", str(body)]))
+                self.assertEqual(0, email_me.main(["--manager-human", "--non-completion", "--tmux-target", "wl:1", "--subject", "Topic", "--message-file", str(body)]))
         self.assertEqual("agent@example.test", sent_messages[0]["From"])
         self.assertEqual("human@example.test", sent_messages[0]["To"])
         self.assertNotIn("PWD:", sent_messages[0].get_body(preferencelist=("plain",)).get_content())
@@ -2020,7 +2227,7 @@ class EmailMeTests(unittest.TestCase):
             patch.object(sys, "stdin", StringIO("body\n")),
             patch("sys.stderr", new_callable=StringIO) as stderr,
         ):
-            result = email_me.main(["--manager-human", "--tmux-target", "wl:1", "--subject", "Topic"],)
+            result = email_me.main(["--manager-human", "--non-completion", "--tmux-target", "wl:1", "--subject", "Topic"],)
         self.assertEqual(1, result)
         self.assertRegex(stderr.getvalue(), r"Delivery-uncertain Message-ID: <[^<>\s]+@example\.test>")
 
