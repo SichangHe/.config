@@ -21,6 +21,14 @@ from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+HELPER_DIR = Path(__file__).resolve().parent
+HELPER_ENV = HELPER_DIR / ".venv"
+
+if Path(sys.prefix).resolve() != HELPER_ENV.resolve():
+    project_python = HELPER_ENV / "bin" / "python"
+    if project_python.is_file():
+        os.execv(project_python, [project_python, __file__, *sys.argv[1:]])
+
 try:
     from omo_manager.omo_codex_status import current_block, exact_pane_id, status, tail
     from omo_manager.omo_agent_status import DEFAULT_ROOT, TaskFrontmatterError, parse_task_metadata
@@ -36,7 +44,6 @@ except ModuleNotFoundError:
     from omo_task_metadata import TASK_FRONTMATTER_V1, TASK_FRONTMATTER_V2, first_version, frontmatter_text
     from omo_task_lock import process_start_ticks, task_file_lock, task_target_lock
 
-HELPER_DIR = Path(__file__).resolve().parent
 DEFAULT_WORKER_INSTRUCTIONS = HELPER_DIR / "WORKER_DEFAULTS.md"
 VL_WORKER_INSTRUCTIONS = HELPER_DIR / "VL_WORKER_DEFAULTS.md"
 PCODX_WRAPPER = HELPER_DIR / "pcodx"

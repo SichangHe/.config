@@ -108,6 +108,20 @@ CAPTURED_TRUST_POPUP = (
 
 
 class OmoTaskTests(unittest.TestCase):
+    def test_deployed_entrypoint_reexecutes_project_environment(self) -> None:
+        config_root = Path(__file__).resolve().parents[2]
+        entrypoint = config_root / "bin" / "omo_task.py"
+        result = subprocess.run(
+            ["uv", "run", "--no-project", "--python", "3.13", "python", str(entrypoint), "--help"],
+            cwd="/tmp",
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("Create/link a markdown task", result.stdout)
+
     def make_prepared_successor(
         self,
         base: Path,
