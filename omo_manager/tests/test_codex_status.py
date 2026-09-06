@@ -27,6 +27,18 @@ def cursor_agent_status_lines(prompt: str = 'Add a follow-up', *, running: bool 
     return lines
 
 
+def cursor_retained_composer_lines(*, prompt: str = 'Read and execute PB watcher wake prompt from /tmp/wake (sha256 abc)\n</agent_message>', running: bool = False, completed: bool = True) -> list[str]:
+    lines = [
+        '<agent_message from="pb-watch-loop:0">',
+        'Read and execute PB watcher wake prompt from /tmp/wake (sha256 abc)',
+        '</agent_message>',
+    ]
+    if completed:
+        lines.extend(['Handled the watcher wake.', 'Waiting for a new wake.'])
+    lines.extend(cursor_agent_status_lines(prompt, running=running)[1:])
+    return lines
+
+
 class CodexStatusTests(unittest.TestCase):
     def test_extracts_last_output_from_current_block(self) -> None:
         lines = ['old', '────', ' kept  ', '', '─ Worked for 1m 2s ─', '  gpt-5.5']
@@ -214,6 +226,47 @@ class CodexStatusTests(unittest.TestCase):
         quoted = ['quoted:   Cursor Grok 4.6 Low · 51.3%', '› Use /skills to list available skills', '  gpt-5.5']
         self.assertEqual('ready', report_from_lines(quoted).status)
         self.assertNotEqual((), error_signature(['■ Error: 429', *quoted]))
+
+    def test_cursor_retained_submitted_composer_is_ready_and_not_submit_safe(self) -> None:
+        report = report_from_lines(cursor_retained_composer_lines())
+        self.assertEqual('ready', report.status)
+        self.assertFalse(report.can_submit_input)
+
+    def test_cursor_matching_composer_without_completed_exchange_stays_stuck_and_submit_safe(self) -> None:
+        report = report_from_lines(cursor_retained_composer_lines(completed=False))
+        self.assertEqual('stuck_input', report.status)
+        self.assertTrue(report.can_submit_input)
+
+    def test_cursor_changed_composer_after_completed_exchange_stays_stuck(self) -> None:
+        report = report_from_lines(cursor_retained_composer_lines(prompt='Read and execute a different wake\n</agent_message>'))
+        self.assertEqual('stuck_input', report.status)
+        self.assertTrue(report.can_submit_input)
+
+    def test_cursor_retained_submitted_composer_preserves_genuine_running(self) -> None:
+        report = report_from_lines(cursor_retained_composer_lines(running=True))
+        self.assertEqual('running', report.status)
+        self.assertFalse(report.can_submit_input)
+
+    def test_cursor_long_retained_composer_preserves_stop_hint_running_state(self) -> None:
+        prompt = 'Read and execute PB watcher wake prompt from /tmp/wake (sha256 abc)'
+        historical = [
+            '<agent_message from="pb-watch-loop:0">',
+            prompt,
+            *[f'payload line {number}' for number in range(15)],
+            '</agent_message>',
+            'Handled the watcher wake.',
+            'Waiting for a new wake.',
+            ' ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄',
+            f'  → {prompt}  ctrl+c to stop',
+            *[f'payload line {number}' for number in range(15)],
+            '  </agent_message>',
+            ' ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀',
+            '  Cursor Grok 4.6 Low · 13% · 9 files edited  Run Everything',
+            '  /ssd1/sichangheagent/work_logs · main',
+        ]
+        report = report_from_lines(historical)
+        self.assertEqual('running', report.status)
+        self.assertFalse(report.can_submit_input)
 
     def test_status_classifies_cursor_usage_limit_as_error(self) -> None:
         lines = cursor_agent_status_lines()
@@ -1345,6 +1398,14 @@ class CodexStatusTests(unittest.TestCase):
         with patch('omo_manager.omo_codex_status.tail', return_value=['› Continue task', '  gpt-5.5']), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
             self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
         run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+
+    def test_submit_stuck_input_does_not_resubmit_retained_cursor_composer(self) -> None:
+        report = Report('stuck_input', ['stale'], 'stale', True)
+        with patch('omo_manager.omo_codex_status.tail', return_value=cursor_retained_composer_lines()), patch(
+            'omo_manager.omo_codex_status.subprocess.run'
+        ) as run:
+            self.assertEqual('not_stuck', submit_stuck_input_if_present('cfg:1.0', report))
+        run.assert_not_called()
 
     def test_submit_stuck_input_recovers_exact_search_overlay_then_submits_prompt(self) -> None:
         overlay = [

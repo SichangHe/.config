@@ -80,6 +80,8 @@ CURSOR_AGENT_INPUT_PREFIX_RE = re.compile(r"^\s*→ ")
 CURSOR_AGENT_STOP_HINT_RE = re.compile(r"[ \t]+ctrl\+c to stop\s*$")
 CURSOR_AGENT_COMPOSER_BOTTOM_RE = re.compile(r"^\s*▀+\s*$")
 CURSOR_AGENT_TASK_COUNT_RE = re.compile(r"^\s*[1-9]\d* tasks?\s*$")
+CURSOR_AGENT_MESSAGE_START_RE = re.compile(r'^\s*<agent_message from="[^"]+">\s*$')
+CURSOR_AGENT_MESSAGE_END_RE = re.compile(r"^\s*</agent_message>\s*$")
 CURSOR_FOLLOWUPS_HEADER_RE = re.compile(r"┌─ follow-ups")
 CURSOR_FOLLOWUPS_SEND_NOW_RE = re.compile(r"enter send now", re.IGNORECASE)
 TMUX_TARGET_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):(\d+)(?:\.(\d+))?$")
@@ -404,10 +406,16 @@ def is_cursor_agent_capture(lines: list[str]) -> bool:
 def has_cursor_agent_running_indicator(lines: list[str]) -> bool:
     if not has_cursor_agent_footer(lines):
         return False
-    if any(
-        CURSOR_AGENT_INPUT_PREFIX_RE.match(line) is not None and CURSOR_AGENT_STOP_HINT_RE.search(line) is not None
-        for line in lines[-12:]
-    ):
+    composer_line = next(
+        (
+            line
+            for idx in range(len(lines) - 1, -1, -1)
+            if CURSOR_AGENT_INPUT_PREFIX_RE.match(line := lines[idx]) is not None
+            and any(CURSOR_AGENT_FOOTER_RE.search(after) is not None for after in lines[idx + 1 :])
+        ),
+        "",
+    )
+    if CURSOR_AGENT_STOP_HINT_RE.search(composer_line) is not None:
         return True
     footer_idx = next((idx for idx in range(len(lines) - 1, -1, -1) if CURSOR_AGENT_FOOTER_RE.search(lines[idx]) is not None), -1)
     bottom_idx = next((idx for idx in range(footer_idx - 1, -1, -1) if CURSOR_AGENT_COMPOSER_BOTTOM_RE.match(lines[idx]) is not None), -1) if footer_idx > 0 else -1
@@ -444,6 +452,49 @@ def cursor_agent_input_text(lines: list[str]) -> str:
     while chunks and not chunks[-1].strip():
         chunks.pop()
     return "\n".join(chunks).strip()
+
+
+def is_cursor_retained_submitted_composer(lines: list[str]) -> bool:
+    """Recognize an exact submitted agent message left in Cursor's composer."""
+
+    if not is_cursor_agent_capture(lines):
+        return False
+    composer_idx = next(
+        (
+            idx
+            for idx in range(len(lines) - 1, -1, -1)
+            if CURSOR_AGENT_INPUT_PREFIX_RE.match(lines[idx]) is not None
+            and any(CURSOR_AGENT_FOOTER_RE.search(after) is not None for after in lines[idx + 1 :])
+        ),
+        -1,
+    )
+    if composer_idx < 0:
+        return False
+    current = cursor_agent_input_text(lines)
+    if not current:
+        return False
+    message_start = next((idx for idx in range(composer_idx - 1, -1, -1) if CURSOR_AGENT_MESSAGE_START_RE.fullmatch(lines[idx]) is not None), -1)
+    if message_start < 0:
+        return False
+    message_end = next(
+        (idx for idx in range(message_start + 1, composer_idx) if CURSOR_AGENT_MESSAGE_END_RE.fullmatch(lines[idx]) is not None),
+        -1,
+    )
+    if message_end < 0:
+        return False
+    historical = "\n".join(lines[message_start + 1 : message_end + 1])
+    def normalize(value: str) -> str:
+        return re.sub(r"\s+", " ", value).strip()
+
+    if normalize(current) != normalize(historical):
+        return False
+    response = lines[message_end + 1 : composer_idx]
+    return any(
+        line.strip()
+        and re.fullmatch(r"\s*[▄▀]+\s*", line) is None
+        and CURSOR_AGENT_MESSAGE_START_RE.fullmatch(line) is None
+        for line in response
+    )
 
 
 def has_cursor_followups_overlay(lines: list[str]) -> bool:
@@ -698,6 +749,8 @@ def can_submit_stuck_input(lines: list[str]) -> bool:
         return False
     if has_cursor_followups_overlay(lines):
         return True
+    if is_cursor_retained_submitted_composer(lines):
+        return False
     input_text = current_input_text(lines)
     return bool(
         (has_codex_model_footer(lines) or has_cursor_agent_footer(lines) or has_idle_queued_input(lines, input_text))
@@ -898,6 +951,8 @@ def status(lines: list[str], block: Block, *, detect_waiting_subagent: bool = Fa
         if has_cursor_followups_overlay(lines[-40:]):
             return "stuck_input"
         input_text = current_input_text(lines)
+        if is_cursor_retained_submitted_composer(lines):
+            return "running" if has_cursor_agent_running_indicator(lines) else "ready"
         if input_text and not is_stock_placeholder_input_text(input_text):
             return "stuck_input"
         if has_cursor_agent_running_indicator(lines):

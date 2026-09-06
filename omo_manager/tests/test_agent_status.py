@@ -722,6 +722,38 @@ resolved_task_items: []
             unstick.assert_not_called()
             self.assertEqual("", out.getvalue())
 
+    def test_problems_only_does_not_report_or_unstick_retained_cursor_composer(self) -> None:
+        pane = [
+            '<agent_message from="pb-watch-loop:0">',
+            'Read and execute PB watcher wake prompt from /tmp/wake (sha256 abc)',
+            '</agent_message>',
+            'Handled the watcher wake.',
+            'Waiting for a new wake.',
+            ' ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄',
+            '  → Read and execute PB watcher wake prompt from /tmp/wake (sha256 abc)',
+            '  </agent_message>',
+            ' ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀',
+            '  1 task',
+            '  Cursor Grok 4.6 Low · 13% · 9 files edited  Run Everything',
+            '  /ssd1/sichangheagent/work_logs · main',
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
+            process = subprocess.CompletedProcess(['tmux'], 0, '%9\tagent\t"exec agent --force"\n', '')
+            out = StringIO()
+            with patch("omo_manager.omo_codex_status.exact_tail", return_value=(True, pane)), patch(
+                "omo_manager.omo_codex_status.exact_pane_id", return_value="%9"
+            ), patch("omo_manager.omo_codex_status.subprocess.run", return_value=process), patch(
+                "omo_manager.omo_agent_status.submit_stuck_input_if_present"
+            ) as unstick, redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            unstick.assert_not_called()
+            self.assertEqual("", out.getvalue())
+
     def test_problems_only_stays_quiet_for_explain_placeholder_during_work(self) -> None:
         pane = ['• Working (4m 34s • esc to interrupt)', '', '› Explain this codebase', '  gpt-5.5']
         with tempfile.TemporaryDirectory() as tmp:
