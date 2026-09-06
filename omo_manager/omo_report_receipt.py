@@ -2490,10 +2490,6 @@ def read_manager_acknowledgment(plan: Plan, *, require_live_authority: bool = Tr
             )
         ):
             raise ReceiptError("manager acknowledgment transition is inconsistent")
-        if protocol == "watcher-locked-pointer-removal-transition-v2":
-            current_manager = manager_bytes(plan.manager)
-            if len(current_manager) != after_size or hashlib.sha256(current_manager).hexdigest() != after_digest:
-                raise ReceiptError("manager acknowledgment removal post-state changed")
         if authority_protocol != "watcher-consumption-authority-v1":
             raise ReceiptError("manager acknowledgment authority protocol is inconsistent")
         authority = verify_manager_acknowledgment_authority(

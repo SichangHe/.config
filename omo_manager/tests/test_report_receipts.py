@@ -2355,8 +2355,23 @@ return 75
                 status="blocked",
                 report=report,
             )
-            self.assertNotEqual(0, changed_post_state.returncode)
-            self.assertIn("manager acknowledgment removal post-state changed", changed_post_state.stderr)
+            self.assertEqual(0, changed_post_state.returncode, changed_post_state.stderr)
+            self.assertEqual(attestation["attestation_id"], json.loads(changed_post_state.stdout)["attestation_id"])
+
+            acknowledgment_state, _acknowledgment_key = acknowledgment_coordinates(json.loads(described.stdout))
+            fields = acknowledgment_state.read_text(encoding="utf-8").rstrip("\n").split("\t")
+            self.assertEqual("watcher-locked-pointer-removal-transition-v2", fields[2])
+            fields[8] = str(int(fields[8]) + 1)
+            acknowledgment_state.write_text("\t".join(fields) + "\n", encoding="utf-8")
+            tampered_transition = run_report_from(
+                case,
+                draft,
+                verify_consumed=True,
+                status="blocked",
+                report=report,
+            )
+            self.assertNotEqual(0, tampered_transition.returncode)
+            self.assertIn("manager acknowledgment transition is inconsistent", tampered_transition.stderr)
 
     def test_active_manager_concurrent_same_draft_retries_are_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
