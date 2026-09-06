@@ -83,6 +83,13 @@ SOURCE1289_TREE_LINES = (3, 10)
 SOURCE1292_FILE = "manager_mail/85c5dff58359-1292.txt"
 SOURCE1292_SHA256 = "508a7f94ec934e3dda36712201d9d3260a1fe673efc51b24c6c1d51fc34e6669"
 SOURCE1292_LINES = (1, 4)
+SOURCE1443_FILE = "manager_mail/85c5dff58359-1443.txt"
+SOURCE1443_TASK = "personal_browser_mgr.md"
+SOURCE1443_OLD_TARGET = "wl:8"
+SOURCE1443_NEW_SESSION = "pb"
+SOURCE1443_SHA256 = "71b17a8828fcbdf7e26e60c1960b81a51e570858a68c730f34d32379e84b1bca"
+SOURCE1443_CARRIER_LINES = (1, 3)
+SOURCE1443_SUCCESSOR_LINES = (3, 3)
 PCODX_REPLACE_EVIDENCE_RE = re.compile(
     r"(?m)^Replace the failed PCODX manager (?P<task>[A-Za-z0-9_./-]+\.md) at "
     r"(?P<target>[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) with one fresh plain-Codex manager "
@@ -303,6 +310,19 @@ def is_source1289_semantic_exception(args: Args) -> bool:
         and args.authority_sha256 == SOURCE1289_SHA256
         and args.authority_lines == LineRange(*SOURCE1289_CARRIER_LINES)
         and args.successor_item_lines == (LineRange(*SOURCE1289_TREE_LINES),)
+    )
+
+
+# 🧑 Source `manager_mail/85c5dff58359-1443.txt:3`: "close this agent and replace them with correct setup"
+def is_source1443_semantic_exception(args: Args) -> bool:
+    return (
+        args.old_task == SOURCE1443_TASK
+        and canonical_target(args.old_target) == canonical_target(SOURCE1443_OLD_TARGET)
+        and target_session(args.new_target) == SOURCE1443_NEW_SESSION
+        and args.authority_file == SOURCE1443_FILE
+        and args.authority_sha256 == SOURCE1443_SHA256
+        and args.authority_lines == LineRange(*SOURCE1443_CARRIER_LINES)
+        and args.successor_item_lines == (LineRange(*SOURCE1443_SUCCESSOR_LINES),)
     )
 
 
@@ -872,6 +892,7 @@ def authority_material(args: Args, snapshot: Snapshot, envelope: Snapshot) -> tu
         and not exact_guest1269_replacement
         and not exact_pcodx_replacement
         and not is_source1289_semantic_exception(args)
+        and not is_source1443_semantic_exception(args)
     ):
         raise ReplaceError("authenticated authority does not explicitly prove failure, non-execution, and replacement")
     if is_pcodx_replacement(args) and not all(value in selected_evidence for value in (args.old_task, args.old_target)):

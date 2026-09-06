@@ -149,7 +149,16 @@ def selected_candidates(root: Path, allowed_human_targets: set[str], task: str |
     task_ref = PurePosixPath(task)
     if not task or task_ref.is_absolute() or task_ref.as_posix() != task or any(part in {".", ".."} for part in task_ref.parts):
         raise ValueError("--task must be one normalized root-relative POSIX task path")
-    selected = [path for path in task_paths(root) if path.relative_to(root).as_posix() == task]
+    selected: list[Path] = []
+    for path in task_paths(root):
+        try:
+            relative = path.relative_to(root)
+        except ValueError:
+            # A malformed or concurrently stale TODO entry must not make an
+            # exact, digest-bound selection inspect files outside this root.
+            continue
+        if relative.as_posix() == task:
+            selected.append(path)
     if len(selected) != 1 or not task_sha256:
         raise ValueError("selected task is not exactly one eligible live Codex task")
     if hashlib.sha256(selected[0].read_bytes()).hexdigest() != task_sha256:

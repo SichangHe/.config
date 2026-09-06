@@ -1284,6 +1284,34 @@ class ManagerReplaceTests(unittest.TestCase):
                     replace_manager(variant)
                 self.assertEqual([], stopped_targets)
 
+    def test_source1443_semantic_exception_is_exact_and_non_reusable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _files = self.fixture(Path(tmp))
+            exact = replace(
+                args,
+                old_task=manager_replace.SOURCE1443_TASK,
+                old_target=manager_replace.SOURCE1443_OLD_TARGET,
+                new_target="pb:13",
+                authority_file=manager_replace.SOURCE1443_FILE,
+                authority_sha256=manager_replace.SOURCE1443_SHA256,
+                authority_lines=LineRange(*manager_replace.SOURCE1443_CARRIER_LINES),
+                successor_item_lines=(LineRange(*manager_replace.SOURCE1443_SUCCESSOR_LINES),),
+            )
+            self.assertTrue(manager_replace.is_source1443_semantic_exception(exact))
+            variants = (
+                {"old_task": "other.md"},
+                {"old_target": "wl:9"},
+                {"new_target": "wl:9"},
+                {"authority_file": "manager_mail/other.txt"},
+                {"authority_sha256": "0" * 64},
+                {"authority_lines": LineRange(1, 2)},
+                {"successor_item_lines": (LineRange(2, 2),)},
+                {"successor_item_lines": (LineRange(3, 3), LineRange(3, 3))},
+            )
+            for changes in variants:
+                with self.subTest(changes=changes):
+                    self.assertFalse(manager_replace.is_source1443_semantic_exception(replace(exact, **changes)))
+
     def test_other_authority_cannot_request_descendant_closure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _root, args, _files = self.whole_tree_fixture(Path(tmp))

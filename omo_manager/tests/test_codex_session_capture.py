@@ -112,6 +112,39 @@ class CodexSessionCaptureTests(unittest.TestCase):
                 self.assertEqual([paths[1]], selected_candidates(root, set(), "nested/two.md", task_sha256))
             candidate_scan.assert_called_once_with(root, set(), (paths[1],))
 
+    def test_exact_task_selector_ignores_unrelated_markdown_outside_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "work_logs"
+            root.mkdir()
+            task = root / "selected.md"
+            task.write_text(
+                "---\nversion: v1.0.0\nstatus: running\nrunat: w:2\ntool: codex\nmanagerat: mgr:1\nis_manager: false\npending_task_items: []\n---\n"
+            )
+            outside = base / "unrelated.md"
+            outside.write_text(
+                "---\nversion: v1.0.0\nstatus: running\nrunat: other:9\ntool: codex\nmanagerat: mgr:1\nis_manager: false\npending_task_items: []\n---\n"
+            )
+            task_sha256 = __import__("hashlib").sha256(task.read_bytes()).hexdigest()
+            with patch("omo_manager.omo_codex_session_migrate.task_paths", return_value=(outside, task)), patch("omo_manager.omo_codex_session_migrate.candidates", return_value=[task]) as candidate_scan:
+                self.assertEqual([task], selected_candidates(root, set(), "selected.md", task_sha256))
+            candidate_scan.assert_called_once_with(root, set(), (task,))
+
+    def test_exact_task_selector_rejects_external_same_target_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "work_logs"
+            root.mkdir()
+            text = "---\nversion: v1.0.0\nstatus: running\nrunat: w:2\ntool: codex\nmanagerat: mgr:1\nis_manager: false\npending_task_items: []\n---\n"
+            task = root / "selected.md"
+            task.write_text(text)
+            outside = base / "other-owner.md"
+            outside.write_text(text)
+            task_sha256 = __import__("hashlib").sha256(task.read_bytes()).hexdigest()
+            with patch("omo_manager.omo_codex_session_migrate.task_paths", return_value=(outside, task)):
+                with self.assertRaisesRegex(ValueError, "exactly one active owner"):
+                    selected_candidates(root, set(), "selected.md", task_sha256)
+
     def test_exact_task_selector_rejects_missing_or_non_normalized_task(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
