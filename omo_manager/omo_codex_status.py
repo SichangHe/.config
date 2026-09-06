@@ -82,7 +82,10 @@ CURSOR_AGENT_COMPOSER_BOTTOM_RE = re.compile(r"^\s*▀+\s*$")
 CURSOR_AGENT_TASK_COUNT_RE = re.compile(r"^\s*[1-9]\d* tasks?\s*$")
 CURSOR_AGENT_MESSAGE_START_RE = re.compile(r'^\s*<agent_message from="[^"]+">\s*$')
 CURSOR_AGENT_MESSAGE_END_RE = re.compile(r"^\s*</agent_message>\s*$")
-CURSOR_AGENT_WAKE_PAYLOAD_RE = re.compile(r"^Read and execute PB watcher wake prompt from(?:\s|$)")
+CURSOR_AGENT_WAKE_PAYLOAD_RE = re.compile(
+    r"^Read and execute PB watcher wake prompt from\s+(?P<path>/.*?)\s+\(SHA-256:\s*(?P<sha256>[a-f0-9]{64})\)\s*$",
+    re.DOTALL,
+)
 CURSOR_FOLLOWUPS_HEADER_RE = re.compile(r"┌─ follow-ups")
 CURSOR_FOLLOWUPS_SEND_NOW_RE = re.compile(r"enter send now", re.IGNORECASE)
 TMUX_TARGET_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):(\d+)(?:\.(\d+))?$")
@@ -491,12 +494,19 @@ def is_cursor_retained_submitted_composer(lines: list[str]) -> bool:
     has_transport_suffix = re.search(r"\s*</agent_message>\s*$", current) is not None
     current_without_transport_suffix = re.sub(r"\s*</agent_message>\s*$", "", current).rstrip()
     blank_indices = [idx for idx in range(message_start + 1, message_end) if not lines[idx].strip()]
-    historical_payload = "\n".join(lines[blank_indices[-1] + 1 : message_end]) if blank_indices else ""
+    historical_payload_start = blank_indices[-1] + 1 if blank_indices else message_start + 1
+    historical_payload = "\n".join(lines[historical_payload_start:message_end])
+    current_wake = CURSOR_AGENT_WAKE_PAYLOAD_RE.fullmatch(current_without_transport_suffix.lstrip())
+    historical_wake = CURSOR_AGENT_WAKE_PAYLOAD_RE.fullmatch(historical_payload.lstrip())
+    def normalize_wrapped_path(path: str) -> str:
+        return re.sub(r"\n[ \t]*", "", path)
+
     transport_match = bool(
         has_transport_suffix
-        and historical_payload
-        and CURSOR_AGENT_WAKE_PAYLOAD_RE.match(normalize(historical_payload)) is not None
-        and normalize(current_without_transport_suffix) == normalize(historical_payload)
+        and current_wake is not None
+        and historical_wake is not None
+        and normalize_wrapped_path(current_wake.group("path")) == normalize_wrapped_path(historical_wake.group("path"))
+        and current_wake.group("sha256") == historical_wake.group("sha256")
     )
     if not exact_match and not transport_match:
         return False
