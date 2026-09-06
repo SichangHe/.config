@@ -921,10 +921,24 @@ def capture_complete_existing_input(target: str, *, allow_codex_footer_spacer: b
     pane_id = exact_pane_id(target)
     if not pane_id:
         raise RuntimeError(f"target cannot be resolved as an exact tmux pane: {target}")
-    return ExistingInputCapture(
-        pane_id,
-        exact_existing_input_text(capture_complete_input_lines(pane_id), allow_codex_footer_spacer=allow_codex_footer_spacer),
-    )
+    lines = capture_complete_input_lines(pane_id)
+    try:
+        text = exact_existing_input_text(lines, allow_codex_footer_spacer=allow_codex_footer_spacer)
+    except RuntimeError as exc:
+        if not allow_codex_footer_spacer or str(exc) != "target existing input has an ambiguous trailing blank line":
+            raise
+        end = len(lines)
+        while end and not lines[end - 1].strip():
+            end -= 1
+        spacer_index = end - 2
+        if spacer_index < 0 or not lines[spacer_index] or lines[spacer_index].strip(" "):
+            raise
+        candidate_lines = lines.copy()
+        candidate_lines[spacer_index] = ""
+        text = exact_existing_input_text(candidate_lines, allow_codex_footer_spacer=True)
+        if not has_recent_tmux_delivery(target, text):
+            raise exc
+    return ExistingInputCapture(pane_id, text)
 
 
 def require_authorized_existing_input_text(text: str, authorization: ExistingInputAuthorization) -> None:

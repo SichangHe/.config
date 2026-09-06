@@ -31,6 +31,7 @@ from omo_manager.omo_tmux_send import (
     parse_args,
     query_async_result,
     read_message,
+    require_authorized_existing_input,
     require_no_existing_input,
     require_sendable_codex_target,
     run_async_worker,
@@ -1136,6 +1137,53 @@ class TmuxSendTests(unittest.TestCase):
             self.assertEqual("target only", capture_complete_existing_input("cfg:1.0").text)
 
         self.assertEqual([["tmux", "capture-pane", "-p", "-J", "-N", "-t", "%42", "-S", "-2000"]], calls)
+
+    def test_existing_input_accepts_space_padded_renderer_spacer_only_for_recent_exact_delivery(self) -> None:
+        result = subprocess.CompletedProcess(
+            ["tmux"],
+            0,
+            stdout="• Working\n› approved prompt\n                                                                                \n  gpt-5.5\n",
+        )
+        authorizations = (
+            ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt"),
+            ExistingInputAuthorization(text_sha256("approved prompt")),
+        )
+        for authorization in authorizations:
+            with tempfile.TemporaryDirectory() as tmp, self.subTest(file_authorized=authorization.text is not None), patch.dict(
+                os.environ,
+                {"OMO_MANAGER_STATE_DIR": tmp, "OMO_MANAGER_TMUX_DELIVERY_DEDUPE_S": "300"},
+            ), patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
+                "omo_manager.omo_tmux_send.subprocess.run", return_value=result
+            ):
+                self.assertTrue(claim_recent_tmux_delivery("cfg:1", "approved prompt"))
+                capture = require_authorized_existing_input("cfg:1.0", authorization, allow_codex_footer_spacer=True)
+
+            self.assertEqual(ExistingInputCapture("%42", "approved prompt"), capture)
+
+    def test_existing_input_rejects_space_padded_renderer_spacer_without_recent_exact_delivery(self) -> None:
+        result = subprocess.CompletedProcess(["tmux"], 0, stdout="› approved prompt\n          \n  gpt-5.5\n")
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"OMO_MANAGER_STATE_DIR": tmp, "OMO_MANAGER_TMUX_DELIVERY_DEDUPE_S": "300"},
+        ), patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
+            "omo_manager.omo_tmux_send.subprocess.run", return_value=result
+        ):
+            self.assertTrue(claim_recent_tmux_delivery("other:1.0", "approved prompt"))
+            with self.assertRaisesRegex(RuntimeError, "ambiguous trailing blank"):
+                require_authorized_existing_input("cfg:1.0", authorization, allow_codex_footer_spacer=True)
+
+    def test_existing_input_does_not_treat_non_ascii_whitespace_as_rendered_spacer(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
+        for spacer in ("\t", "\N{NO-BREAK SPACE}"):
+            result = subprocess.CompletedProcess(["tmux"], 0, stdout=f"› approved prompt\n{spacer}\n  gpt-5.5\n")
+            with self.subTest(spacer=spacer), patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
+                "omo_manager.omo_tmux_send.subprocess.run", return_value=result
+            ), patch("omo_manager.omo_tmux_send.has_recent_tmux_delivery", return_value=True) as recent, self.assertRaisesRegex(
+                RuntimeError, "ambiguous trailing blank"
+            ):
+                require_authorized_existing_input("cfg:1.0", authorization, allow_codex_footer_spacer=True)
+            recent.assert_not_called()
 
     def test_submit_existing_digest_sends_exact_authorized_input(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("approved prompt"))

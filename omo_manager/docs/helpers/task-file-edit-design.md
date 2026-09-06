@@ -60,6 +60,9 @@ unchanged since it was read.
   mail helper directly when that contract is absent
 - let the mail helper infer the verified producer identity; suppress human-owned
   task targets, explicit no-contact rules, and duplicate retries
+- bind the exact task-version receipt separately from the stable Human-notice
+  identity, so closure-note churn cannot authorize the same task/outcome/body
+  again and an uncertain first attempt remains permanently claimed
 - treat the exact Source-1241 safeguard phrase as meta text only when the exact
   supported manager-delegation record, intended task, Human envelope, source
   excerpt, whole task, and source file remain bound;

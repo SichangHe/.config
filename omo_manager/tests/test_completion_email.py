@@ -194,8 +194,10 @@ class CompletionEmailTest(unittest.TestCase):
             manager_state.mkdir(mode=0o700)
             receipt, receipt_sha256 = self.delivered_receipt(source_state, root, task, text)
             original_sha256 = hashlib.sha256(text.encode()).hexdigest()
+            original_plan = build_completion_email(root, task, text, "task done")
+            assert original_plan is not None
             claim = (source_state / "completion-email-claims.tsv").read_text(encoding="utf-8")
-            self.assertEqual(f"{receipt.name}\tcfg:2\t{task.name}\tcfg:1\t{original_sha256}\n", claim)
+            self.assertEqual(f"{receipt.name}\tcfg:2\t{task.name}\tcfg:1\t{original_sha256}\t{original_plan.notice_key}\n", claim)
             changed = text.replace("managerat: cfg:1", "managerat: cfg:1.0") + "blocked_on: physical Mac evidence\n"
             task.write_text(changed, encoding="utf-8")
             changed_plan = build_completion_email(root, task, changed, "task done")
@@ -462,6 +464,169 @@ class CompletionEmailTest(unittest.TestCase):
                 self.assertFalse(send_completion_email(plan))
                 self.assertFalse(send_completion_email(plan))
             run.assert_called_once()
+
+    def test_surviving_notice_marker_repairs_exact_receipt_without_resending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            text = task_text()
+            task.write_text(text, encoding="utf-8")
+            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
+                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
+            ), patch("omo_manager.omo_completion_email.subprocess.run") as run:
+                plan = plan_completion_email(root, task, text, "task done")
+                assert plan is not None
+                self.assertTrue(send_completion_email(plan))
+                receipt = state / "completion-email-delivered" / plan.key
+                receipt.unlink()
+
+                self.assertTrue(completion_email_is_delivered(plan))
+                self.assertEqual(f"{plan.target}\t{plan.task.name}\n", receipt.read_text(encoding="utf-8"))
+
+            run.assert_called_once()
+
+    def test_notice_marker_with_wrong_valid_receipt_key_cannot_fabricate_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            text = task_text()
+            task.write_text(text, encoding="utf-8")
+            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
+                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
+            ), patch("omo_manager.omo_completion_email.subprocess.run"):
+                plan = plan_completion_email(root, task, text, "task done")
+                assert plan is not None
+                self.assertTrue(send_completion_email(plan))
+                notice = state / "completion-notice-delivered" / plan.notice_key
+                wrong_key = "0" * 64
+                notice.write_text(f"{wrong_key}\t{plan.target}\t{plan.task.name}\n", encoding="utf-8")
+                (state / "completion-email-delivered" / plan.key).unlink()
+
+                with self.assertRaisesRegex(OSError, "atomic claim"):
+                    completion_email_is_delivered(plan)
+
+            self.assertFalse((state / "completion-email-delivered" / wrong_key).exists())
+
+    def test_surviving_exact_receipt_repairs_notice_marker_after_churn_without_resending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            text = task_text()
+            task.write_text(text, encoding="utf-8")
+            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
+                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
+            ), patch("omo_manager.omo_completion_email.subprocess.run") as run:
+                plan = plan_completion_email(root, task, text, "task done")
+                assert plan is not None
+                self.assertTrue(send_completion_email(plan))
+                notice = state / "completion-notice-delivered" / plan.notice_key
+                notice.unlink()
+
+                changed = text + "(verified removed pending item: report sent.)\n"
+                task.write_text(changed, encoding="utf-8")
+                changed_plan = plan_completion_email(root, task, changed, "task done")
+                assert changed_plan is not None
+                self.assertNotEqual(plan.key, changed_plan.key)
+                self.assertEqual(plan.notice_key, changed_plan.notice_key)
+                self.assertTrue(completion_email_is_delivered(changed_plan))
+                self.assertEqual(f"{plan.key}\t{plan.target}\t{plan.task.name}\n", notice.read_text(encoding="utf-8"))
+
+            run.assert_called_once()
+
+    def test_task_record_churn_cannot_duplicate_the_same_delivered_notice(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            initial = task_text()
+            task.write_text(initial, encoding="utf-8")
+            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
+                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
+            ), patch("omo_manager.omo_completion_email.subprocess.run") as run:
+                first = plan_completion_email(root, task, initial, "task done")
+                assert first is not None
+                self.assertTrue(send_completion_email(first))
+                changed = initial + "(verified removed pending item: private manager report sent.)\n"
+                task.write_text(changed, encoding="utf-8")
+                second = plan_completion_email(root, task, changed, "task done")
+                assert second is not None
+
+                self.assertNotEqual(first.key, second.key)
+                self.assertEqual(first.notice_key, second.notice_key)
+                self.assertTrue(completion_email_is_delivered(second))
+
+            run.assert_called_once()
+
+    def test_canonical_target_spelling_churn_cannot_duplicate_notice(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            initial = task_text()
+            task.write_text(initial, encoding="utf-8")
+            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
+                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
+            ), patch("omo_manager.omo_completion_email.subprocess.run") as run:
+                first = plan_completion_email(root, task, initial, "task done")
+                assert first is not None
+                self.assertTrue(send_completion_email(first))
+                changed = initial.replace("runat: cfg:2", "runat: cfg:2.0").replace("managerat: cfg:1", "managerat: cfg:1.0")
+                task.write_text(changed, encoding="utf-8")
+                second = plan_completion_email(root, task, changed, "task done")
+                assert second is not None
+
+                self.assertNotEqual(first.key, second.key)
+                self.assertEqual(first.notice_key, second.notice_key)
+                self.assertTrue(completion_email_is_delivered(second))
+
+            run.assert_called_once()
+
+    def test_task_record_churn_cannot_replay_an_uncertain_notice(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            initial = task_text()
+            task.write_text(initial, encoding="utf-8")
+            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
+                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
+            ), patch("omo_manager.omo_completion_email.subprocess.run", side_effect=OSError("uncertain")) as run:
+                first = plan_completion_email(root, task, initial, "task done")
+                assert first is not None
+                self.assertFalse(send_completion_email(first))
+                changed = initial + "(verified removed pending item: private manager report sent.)\n"
+                task.write_text(changed, encoding="utf-8")
+                second = plan_completion_email(root, task, changed, "task done")
+                assert second is not None
+
+                self.assertNotEqual(first.key, second.key)
+                self.assertEqual(first.notice_key, second.notice_key)
+                self.assertFalse(send_completion_email(second))
+
+            run.assert_called_once()
+
+    def test_exact_and_notice_claims_are_one_atomic_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            text = task_text()
+            task.write_text(text, encoding="utf-8")
+            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
+                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
+            ):
+                plan = plan_completion_email(root, task, text, "task done")
+                assert plan is not None
+                with patch("omo_manager.omo_completion_email.os.replace", side_effect=OSError("injected claim failure")), self.assertRaisesRegex(
+                    OSError, "injected claim failure"
+                ):
+                    claim_completion_email(plan)
+
+            self.assertFalse((state / "completion-email-claims.tsv").exists())
+            self.assertFalse((state / "completion-notice-claims.tsv").exists())
 
     def test_direct_manager_cannot_fallback_for_owner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
