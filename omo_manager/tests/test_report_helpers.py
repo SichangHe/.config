@@ -254,6 +254,130 @@ class ReportHelperTests(unittest.TestCase):
             self.assertEqual(2, result.returncode)
             self.assertIn("multiple done task files match tmux target", result.stderr)
 
+    def test_omo_report_done_fallback_ignores_exact_closed_historical_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "logs"
+            root.mkdir()
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            write_fake_tmux(bin_dir)
+            local_env = tmp_path / "local.env"
+            local_env.write_text(f"OMO_WORK_LOGS_ROOT={root}\n", encoding="utf-8")
+            (root / "TODO.md").write_text(
+                "previous:\nlive.md cfg:7\narchive/closed.md cfg:7\n",
+                encoding="utf-8",
+            )
+            (root / "live.md").write_text(task_frontmatter(status="done"), encoding="utf-8")
+            archive = root / "archive"
+            archive.mkdir()
+            (archive / "closed.md").write_text(
+                task_frontmatter(status="done")
+                + "\n(manager closed Codex agent 08-14 14:03 PDT; tmux target `cfg:7`; "
+                "session_id: `01a00151-a414-7ac3-8c3f-4f69403725cd`.)\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [str(OMO_DIR / "omo_report.sh"), "--alloc-message-file"],
+                cwd=tmp,
+                env={
+                    **os.environ,
+                    "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "TMUX_PANE": "%1701",
+                    "XDG_STATE_HOME": str(tmp_path / "state"),
+                },
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            report_file = Path(result.stdout.strip())
+            self.assertTrue(report_file.name.startswith("live."))
+            report_file.unlink()
+
+    def test_omo_report_done_fallback_does_not_ignore_malformed_close_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "logs"
+            root.mkdir()
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            write_fake_tmux(bin_dir)
+            local_env = tmp_path / "local.env"
+            local_env.write_text(f"OMO_WORK_LOGS_ROOT={root}\n", encoding="utf-8")
+            (root / "TODO.md").write_text("previous:\nlive.md cfg:7\nclosed.md cfg:7\n", encoding="utf-8")
+            (root / "live.md").write_text(task_frontmatter(status="done"), encoding="utf-8")
+            (root / "closed.md").write_text(
+                task_frontmatter(status="done")
+                + "\n(manager closed Codex agent sometime; tmux target `cfg:7`; "
+                "session_id: `01a00151-a414-7ac3-8c3f-4f69403725cd`.)\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [str(OMO_DIR / "omo_report.sh"), "--alloc-message-file"],
+                cwd=tmp,
+                env={
+                    **os.environ,
+                    "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "TMUX_PANE": "%1701",
+                    "XDG_STATE_HOME": str(tmp_path / "state"),
+                },
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual(2, result.returncode)
+            self.assertIn("multiple done task files match tmux target", result.stderr)
+
+    def test_omo_report_closed_historical_owner_still_requires_exact_custody(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "logs"
+            root.mkdir()
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            write_fake_tmux(bin_dir)
+            local_env = tmp_path / "local.env"
+            local_env.write_text(f"OMO_WORK_LOGS_ROOT={root}\n", encoding="utf-8")
+            (root / "TODO.md").write_text(
+                "current:\nclosed.md cfg:7\nprevious:\nlive.md cfg:7\nclosed.md cfg:7\n",
+                encoding="utf-8",
+            )
+            (root / "live.md").write_text(task_frontmatter(status="done"), encoding="utf-8")
+            (root / "closed.md").write_text(
+                task_frontmatter(status="done")
+                + "\n(manager closed Codex agent 08-14 14:03 PDT; tmux target `cfg:7`; "
+                "session_id: `01a00151-a414-7ac3-8c3f-4f69403725cd`.)\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [str(OMO_DIR / "omo_report.sh"), "--alloc-message-file"],
+                cwd=tmp,
+                env={
+                    **os.environ,
+                    "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "TMUX_PANE": "%1701",
+                    "XDG_STATE_HOME": str(tmp_path / "state"),
+                },
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual(2, result.returncode)
+            self.assertIn("done task TODO custody is not exact", result.stderr)
+
     def test_omo_report_rejects_noncanonical_done_custody(self) -> None:
         malformed_rows = (
             "previous:\ndone.md\n",

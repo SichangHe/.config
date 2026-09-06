@@ -261,6 +261,12 @@ ACTIVE_TASK_STATUSES = {"running", "long_running", "blocked"}
 RUNNING_TASK_STATUSES = {"running", "long_running"}
 TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 TARGET_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?![A-Za-z0-9_.-])")
+CLOSE_NOTE_RE = re.compile(
+    r"^\(manager closed Codex agent \d{2}-\d{2} \d{2}:\d{2} [A-Za-z0-9_+\-]+; "
+    r"tmux target `([^`\r\n]+)`; "
+    r"session_id: `[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}`\.\)$",
+    re.MULTILINE,
+)
 MAX_ROUTE_FILE_BYTES = 64 * 1024 * 1024
 route_evidence: dict[str, dict[str, object]] = {}
 
@@ -421,10 +427,16 @@ def exact_done_previous_candidates(root: Path, current: str) -> tuple[list[Path]
             refs = re.findall(r"`?([A-Za-z0-9_./-]+\.md)`?", line)
             if any((root / ref).resolve(strict=False) == candidate for ref in refs):
                 occurrences.append((section, line))
-        if previous_headers == 1 and occurrences == [("previous", expected)]:
-            candidates.append(candidate)
-        else:
+        if previous_headers != 1 or occurrences != [("previous", expected)]:
             invalid.append(candidate)
+            continue
+        candidate_text = route_text(candidate)
+        if candidate_text is None:
+            invalid.append(candidate)
+            continue
+        if any(same_tmux_target(closed_target, runat) for closed_target in CLOSE_NOTE_RE.findall(candidate_text)):
+            continue
+        candidates.append(candidate)
     return candidates, invalid
 
 current = current_tmux_target()

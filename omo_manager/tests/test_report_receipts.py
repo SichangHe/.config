@@ -1526,6 +1526,42 @@ class ReportReceiptTests(unittest.TestCase):
             self.assertEqual(0, retried.returncode, retried.stderr)
             self.assertTrue(json.loads(retried.stdout)["accepted"])
 
+    def test_done_task_exact_retry_accepts_with_an_exact_closed_historical_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, manager, _owner = active_manager_fixture(Path(tmp), body=b"unused\n")
+            draft = allocate_report_draft(case, b"terminal report\n")
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            pending = run_report_from(case, draft, status="done")
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            self.assertFalse(json.loads(pending.stdout)["accepted"])
+            self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+            task = case.root / "worker.md"
+            task.write_text(
+                task.read_text(encoding="utf-8").replace("status: running", "status: done", 1),
+                encoding="utf-8",
+            )
+            archive = case.root / "archive"
+            archive.mkdir()
+            (archive / "closed.md").write_text(
+                frontmatter(runat="cfg:7", managerat="vl:2").replace("status: running", "status: done", 1)
+                + "\n(manager closed Codex agent 08-14 14:03 PDT; tmux target `cfg:7`; "
+                "session_id: `01a00151-a414-7ac3-8c3f-4f69403725cd`.)\n",
+                encoding="utf-8",
+            )
+            (case.root / "TODO.md").write_text(
+                "current:\nmanager.md vl:2\nprevious:\nworker.md cfg:7\narchive/closed.md cfg:7\n",
+                encoding="utf-8",
+            )
+
+            retried = run_report_from(case, draft, status="done")
+
+            self.assertEqual(0, retried.returncode, retried.stderr)
+            output = json.loads(retried.stdout)
+            self.assertTrue(output["accepted"])
+            receipt = json.loads(Path(output["receipt_path"]).read_text(encoding="utf-8"))
+            locked_sources = {item["source"] for item in receipt["side_effects"]["locks"]["route_evidence"]}
+            self.assertIn(str(archive / "closed.md"), locked_sources)
+
     def test_done_task_exact_retry_rejects_wrong_identity_and_changed_custody(self) -> None:
         for variation in ("agent", "status", "custody"):
             with self.subTest(variation=variation), tempfile.TemporaryDirectory() as tmp:

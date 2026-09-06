@@ -143,6 +143,7 @@ class Plan:
     routing: dict[str, object]
     route_evidence: tuple[dict[str, object], ...]
     done_retry_evidence: tuple[dict[str, object], ...]
+    done_retry_commitment_route_locks: tuple[tuple[Path, Path], ...]
     manager_route_selection: str
     manager_frontmatter_sha256: str
     description_manager_snapshot: bytes | None
@@ -564,13 +565,18 @@ def orphan_transfer_plan(plan: Plan) -> Plan:
     if old_allocation == plan.message_path and not plan.recovery_replay_id:
         current_sources = {Path(str(item["path"])) for item in plan.route_evidence}
         historical_sources = {Path(str(item["path"])) for item in old_route_evidence}
-        done_retry = exact_done_previous_custody(plan) and current_sources == historical_sources
+        done_retry = exact_done_previous_custody(plan) and historical_sources <= current_sources
+        retry_route_locks = tuple(
+            sorted({*old_plan.route_locks, *plan.route_locks}, key=lambda pair: str(pair[0]))
+        ) if done_retry else old_plan.route_locks
         return replace(
             old_plan,
             authenticated_recovery=done_retry,
             authenticated_done_retry=done_retry,
             message_fd=plan.message_fd,
             done_retry_evidence=plan.route_evidence if done_retry else (),
+            done_retry_commitment_route_locks=old_plan.route_locks if done_retry else (),
+            route_locks=retry_route_locks,
         )
     if any(os.path.lexists(path) for path in (old_receipt, old_publication, old_plan.acknowledgment_authority_completion)):
         if plan.recovery_replay_id:
@@ -1618,6 +1624,7 @@ def _build_plan_from_message(
         routing=routing,
         route_evidence=route_evidence,
         done_retry_evidence=(),
+        done_retry_commitment_route_locks=(),
         manager_route_selection=args.manager_route_selection,
         manager_frontmatter_sha256=args.manager_frontmatter_sha256,
         description_manager_snapshot=None,
@@ -3307,7 +3314,9 @@ def validate_transaction_commitment_bytes(
         or not Path(realized_allocation_file).is_absolute()
         or preflight
         != preflight_transaction_set(
-            plan,
+            replace(plan, route_locks=plan.done_retry_commitment_route_locks)
+            if plan.authenticated_done_retry
+            else plan,
             allocation_file=Path(realized_allocation_file),
             routing_sources=routing_sources,
         )
