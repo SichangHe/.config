@@ -135,12 +135,14 @@ class Plan:
     message_fd: int
     message: bytes
     authenticated_recovery: bool
+    authenticated_done_retry: bool
     recovery_replay_id: str
     status: str
     input_info: dict[str, object]
     report_context: dict[str, object]
     routing: dict[str, object]
     route_evidence: tuple[dict[str, object], ...]
+    done_retry_evidence: tuple[dict[str, object], ...]
     manager_route_selection: str
     manager_frontmatter_sha256: str
     description_manager_snapshot: bytes | None
@@ -226,6 +228,26 @@ def manager_preserves_owner_prefix(manager: Path, payload: bytes, binding: Owner
         and hashlib.sha256(owner).hexdigest() == binding.sha256
         and binding.separator_bytes == expected_separator
     )
+
+
+def exact_done_previous_custody(plan: Plan) -> bool:
+    task_snapshot = frontmatter_snapshot(regular_file_bytes(plan.task, maximum=MAX_ROUTE_FILE_BYTES, field="task"))
+    if task_snapshot is None or task_snapshot[0].get("status") != "done":
+        return False
+    todo = regular_file_bytes(plan.root / "TODO.md", maximum=MAX_ROUTE_FILE_BYTES, field="TODO").decode("utf-8")
+    section = ""
+    matches = 0
+    for raw in todo.splitlines():
+        line = raw.strip()
+        if line.endswith(":") and not line.startswith(("-", "*")):
+            section = line[:-1].strip().casefold()
+            continue
+        fields = line.strip("- *").split()
+        if len(fields) == 2 and fields[0].strip("`") == plan.task.name and fields[1] == plan.routing["producer_target"]:
+            if section != "previous":
+                return False
+            matches += 1
+    return matches == 1
 
 
 def recovery_commitment_record(candidate: Path, replay_id: str, payload: bytes) -> dict[str, object]:
@@ -423,8 +445,9 @@ def orphan_transfer_plan(plan: Plan) -> Plan:
         and submitted.get("inode") == plan.message_identity[1]
         and old_envelope == plan.envelope_final
         and not plan.recovery_replay_id
+        and not exact_done_previous_custody(plan)
     ):
-        return replace(plan, authenticated_recovery=bool(plan.recovery_replay_id))
+        return plan
     old_receipt = Path(str(records["private_receipt"]))
     old_publication = Path(str(records["receipt_publication"]))
     old_commitment = Path(str(match["commitment"]))
@@ -539,7 +562,16 @@ def orphan_transfer_plan(plan: Plan) -> Plan:
     if agent != plan.routing["agent"] or status != plan.status:
         raise ReceiptError("moved committed report requires its original --agent and --status")
     if old_allocation == plan.message_path and not plan.recovery_replay_id:
-        return replace(old_plan, authenticated_recovery=bool(plan.recovery_replay_id), message_fd=plan.message_fd)
+        current_sources = {Path(str(item["path"])) for item in plan.route_evidence}
+        historical_sources = {Path(str(item["path"])) for item in old_route_evidence}
+        done_retry = exact_done_previous_custody(plan) and current_sources == historical_sources
+        return replace(
+            old_plan,
+            authenticated_recovery=done_retry,
+            authenticated_done_retry=done_retry,
+            message_fd=plan.message_fd,
+            done_retry_evidence=plan.route_evidence if done_retry else (),
+        )
     if any(os.path.lexists(path) for path in (old_receipt, old_publication, old_plan.acknowledgment_authority_completion)):
         if plan.recovery_replay_id:
             raise ReceiptError("moved predecessor already has terminal transaction evidence")
@@ -1193,6 +1225,13 @@ def manager_route_selection_matches(
 
 
 def validate_route_snapshot(plan: Plan, *, ignore: frozenset[Path] = frozenset()) -> None:
+    if plan.authenticated_done_retry:
+        if not exact_done_previous_custody(plan):
+            raise ReceiptError("done-task retry custody changed before acceptance")
+        for expected in plan.done_retry_evidence:
+            if route_evidence_state(Path(str(expected["path"]))) != expected:
+                raise ReceiptError("done-task retry route evidence changed before acceptance")
+        return
     if datetime.now().astimezone().strftime("%Y-%m-%d") != plan.routing["route_local_date"]:
         raise ReceiptError("route date changed during submission")
     for expected in plan.route_evidence:
@@ -1571,12 +1610,14 @@ def _build_plan_from_message(
         message_fd=message_fd,
         message=message,
         authenticated_recovery=False,
+        authenticated_done_retry=False,
         recovery_replay_id=args.recovery_replay_id,
         status=status,
         input_info=input_info,
         report_context=report_context,
         routing=routing,
         route_evidence=route_evidence,
+        done_retry_evidence=(),
         manager_route_selection=args.manager_route_selection,
         manager_frontmatter_sha256=args.manager_frontmatter_sha256,
         description_manager_snapshot=None,
@@ -4165,7 +4206,11 @@ def submit(plan: Plan) -> tuple[bytes, bytes] | None:
                     )
                 signal_manager_acknowledgment_publication(plan, receipt_payload)
                 return receipt_payload, publication_payload
-            commitment = read_transaction_commitment(plan, require_current_allocation_identity=True)
+            commitment = read_transaction_commitment(
+                plan,
+                require_current_allocation_identity=True,
+                require_current_route_evidence=not plan.authenticated_done_retry,
+            )
             if commitment is None:
                 if pointer != "absent" or (
                     acknowledgment is not None

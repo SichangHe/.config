@@ -1502,6 +1502,69 @@ class ReportReceiptTests(unittest.TestCase):
             self.assertFalse(output["accepted"])
             self.assertIn(".transfer-", output["transfer_receipt"]["queue_item"]["pointer"])
 
+    def test_done_task_fallback_allows_strict_retry_of_its_exact_committed_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, manager, _owner = active_manager_fixture(Path(tmp), body=b"unused\n")
+            draft = allocate_report_draft(case, b"terminal report\n")
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            pending = run_report_from(case, draft, status="done")
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            self.assertFalse(json.loads(pending.stdout)["accepted"])
+            self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+            task = case.root / "worker.md"
+            task.write_text(
+                task.read_text(encoding="utf-8").replace("status: running", "status: done", 1),
+                encoding="utf-8",
+            )
+            (case.root / "TODO.md").write_text(
+                "current:\nmanager.md vl:2\nprevious:\nworker.md cfg:7\n",
+                encoding="utf-8",
+            )
+
+            retried = run_report_from(case, draft, status="done")
+
+            self.assertEqual(0, retried.returncode, retried.stderr)
+            self.assertTrue(json.loads(retried.stdout)["accepted"])
+
+    def test_done_task_exact_retry_rejects_wrong_identity_and_changed_custody(self) -> None:
+        for variation in ("agent", "status", "custody"):
+            with self.subTest(variation=variation), tempfile.TemporaryDirectory() as tmp:
+                case, manager, _owner = active_manager_fixture(Path(tmp), body=b"unused\n")
+                draft = allocate_report_draft(case, b"terminal report\n")
+                case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+                pending = run_report_from(case, draft, status="done")
+                self.assertEqual(0, pending.returncode, pending.stderr)
+                self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+                task = case.root / "worker.md"
+                task.write_text(
+                    task.read_text(encoding="utf-8").replace("status: running", "status: done", 1),
+                    encoding="utf-8",
+                )
+                (case.root / "TODO.md").write_text(
+                    "current:\nmanager.md vl:2\nprevious:\nworker.md cfg:7\n",
+                    encoding="utf-8",
+                )
+                agent = "receipt-worker"
+                status = "done"
+                if variation == "agent":
+                    agent = "other-agent"
+                elif variation == "status":
+                    status = "blocked"
+                else:
+                    (case.root / "TODO.md").write_text(
+                        "current:\nmanager.md vl:2\nworker.md cfg:7\nprevious:\n",
+                        encoding="utf-8",
+                    )
+                receipt_directory = Path(case.env["XDG_STATE_HOME"]) / "omo-manager" / "report-receipts"
+                before = {path.name: path.read_bytes() for path in receipt_directory.iterdir()}
+                manager_before = manager.read_bytes()
+
+                rejected = run_report_from(case, draft, status=status, agent=agent)
+
+                self.assertEqual(2, rejected.returncode)
+                self.assertEqual(manager_before, manager.read_bytes())
+                self.assertEqual(before, {path.name: path.read_bytes() for path in receipt_directory.iterdir()})
+
     def test_done_task_fallback_requires_an_authenticated_committed_object(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             case = fixture(Path(tmp), body=b"fresh done-task report\n")
