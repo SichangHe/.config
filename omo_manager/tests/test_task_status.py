@@ -9,6 +9,7 @@ import tempfile
 import unittest
 import yaml
 from contextlib import nullcontext
+from contextlib import contextmanager
 from contextlib import redirect_stderr
 from contextlib import redirect_stdout
 from dataclasses import replace
@@ -26,6 +27,7 @@ from omo_manager.omo_task_status import active_task_tree_todo_replacement
 from omo_manager.omo_task_status import ensure_repository_closure_custody
 from omo_manager.omo_task_status import close_active_task_tree_no_mail
 from omo_manager.omo_task_status import close_done_live_no_mail
+from omo_manager.omo_task_status import describe_done_live_no_mail
 from omo_manager.omo_task_status import close_retired_done
 from omo_manager.omo_task_status import close_missing_target
 from omo_manager.omo_task_status import cancel_shared_target_done
@@ -63,6 +65,7 @@ from omo_manager.omo_codex_stop import write_bound_close_proof
 from omo_manager.omo_codex_stop import write_done_live_close_started
 from omo_manager.omo_codex_stop import promote_done_live_close_started
 from omo_manager.omo_codex_stop import close_note
+from omo_manager.omo_report_receipt import ReceiptError
 from omo_manager.omo_task_metadata import frontmatter_parts
 from omo_manager.omo_blocking import ENABLE_FILE, load_yaml_mapping, render_task, split_task_text, sync_generated_blocker
 from omo_manager.tests.test_task_metadata_v2 import v2_task
@@ -1872,6 +1875,7 @@ class TaskStatusTests(unittest.TestCase):
         target: str,
         body: bytes,
         label: str,
+        manager: Path | None = None,
     ) -> dict[str, str]:
         report = private / f"{label}.md"
         report.write_bytes(body)
@@ -1880,16 +1884,43 @@ class TaskStatusTests(unittest.TestCase):
         replay_id = hashlib.sha256(f"{label}-replay".encode()).hexdigest()
         commitment = private / f"{replay_id}.commitment"
         envelope = private / f"{label}-envelope.md"
+        manager = task.parent / "manager.md" if manager is None else manager
         transfer = {
-            "authority": {"source_task": str(task), "producer_target": target},
-            "routing": {"task": str(task)},
+            "authority": {"kind": "agent-originated", "source_task": str(task), "producer_target": target},
+            "commitment_path": str(commitment),
+            "queue_item": {
+                "input_sha256": report_sha256,
+                "manager": str(manager),
+                "pointer": f"(from agent {target} {envelope})",
+                "producer": str(task),
+                "replay_id": replay_id,
+            },
+            "receiver": str(manager),
+            "routing": {
+                "manager": str(manager),
+                "producer_target": target,
+                "requested_manager_target": "wl:1",
+                "resolved_manager_target": "wl:1",
+                "route_kind": "active-manager-task",
+                "task": str(task),
+            },
+            "schema": "omo-report-transfer-receipt/v1",
         }
         record: dict[str, object] = {
             "allocation": {
                 "file": str(report),
                 "file_at_submission": {"sha256": report_sha256, "size": len(body)},
             },
-            "preflight": {"records": {"private_envelope": str(envelope), "producer": str(task)}},
+            "preflight": {
+                "records": {
+                    "manager": str(manager),
+                    "private_envelope": str(envelope),
+                    "private_receipt": str(private / f"{replay_id}.json"),
+                    "producer": str(task),
+                    "receipt_publication": str(private / f"{replay_id}.publication.json"),
+                },
+                "temporary_files": [str(private / f".{replay_id}.receipt.tmp")],
+            },
             "replay_id": replay_id,
             "schema": "omo-report-transaction-commitment/v2",
             "transfer": transfer,
@@ -1984,6 +2015,112 @@ class TaskStatusTests(unittest.TestCase):
             manager_consumed_report_receipt_sha256=hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
         )
 
+    def write_consumed_attestation(
+        self,
+        root: Path,
+        task: Path,
+        args: StatusArgs,
+        manager: Path | None = None,
+    ) -> StatusArgs:
+        private = args.audit_output.parent
+        manager = root / "manager.md" if manager is None else manager
+        manager.write_text(
+            task_frontmatter(status="long_running", runat="wl:1", managerat="wl:9", is_manager=True),
+            encoding="utf-8",
+        )
+        worker = self.write_report_transaction(
+            private,
+            task,
+            args.active_target,
+            b"terminal report\n",
+            "consumed-worker",
+            manager,
+        )
+        commitment = json.loads(Path(worker["commitment"]).read_text(encoding="utf-8"))
+        transfer = {**commitment["transfer"], "commitment_id": commitment["commitment_id"]}
+        transfer["transfer_id"] = hashlib.sha256(
+            json.dumps(transfer, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        state = private.parent / "pending-watch-consumed-reports.tsv"
+        envelope = Path(worker["envelope"])
+        report_sha256 = worker["report_sha256"]
+        key = f"{root}:agent-report:{hashlib.sha256(f'{envelope}\0{envelope}\0[message-sha256: {report_sha256}]'.encode()).hexdigest()}"
+        authority = {
+            "lock_dev": 1,
+            "lock_inode": 2,
+            "lock_path_sha256": "c" * 64,
+            "pid": 4242,
+            "process_start_ticks": 73,
+            "protocol": "watcher-consumption-authority-v1",
+            "role": "pending-watcher",
+            "source_path": str(private / "authority"),
+            "source_sha256": "d" * 64,
+            "token_sha256": "e" * 64,
+        }
+        pointer = transfer["queue_item"]["pointer"]
+        transition = {
+            "authority": authority,
+            "after_sha256": "2" * 64,
+            "after_size_bytes": 10,
+            "before_sha256": "1" * 64,
+            "before_size_bytes": 20,
+            "manager_path_sha256": hashlib.sha256(str(manager).encode()).hexdigest(),
+            "pointer_sha256": hashlib.sha256(pointer.encode()).hexdigest(),
+            "protocol": "locked-owner-restore-v1",
+        }
+        fields = [
+            "42.0", key, str(transition["protocol"]), str(transition["manager_path_sha256"]),
+            str(transition["pointer_sha256"]), str(transition["before_sha256"]),
+            str(transition["before_size_bytes"]), str(transition["after_sha256"]),
+            str(transition["after_size_bytes"]), str(authority["protocol"]), str(authority["role"]),
+            str(authority["pid"]), str(authority["process_start_ticks"]), str(authority["lock_path_sha256"]),
+            str(authority["lock_dev"]), str(authority["lock_inode"]), str(authority["source_path"]),
+            str(authority["source_sha256"]), str(authority["token_sha256"]),
+        ]
+        entry = "\t".join(fields)
+        state.write_text(entry + "\n", encoding="utf-8")
+        os.chmod(state, 0o600)
+        attestation: dict[str, object] = {
+            "accepted": False,
+            "consumed_at_unix_s": 42.0,
+            "consumption_evidence": {
+                "entry_sha256": hashlib.sha256(entry.encode()).hexdigest(),
+                "key": key,
+                "recorded_at_unix_s": 42.0,
+                "schema": "omo-pending-watch-consumed-report/v1",
+                "state": str(state),
+                "transition": transition,
+            },
+            "input": {"sha256": worker["report_sha256"], "size_bytes": len(b"terminal report\n")},
+            "reason": "manager watcher consumed report; acceptance receipt unavailable",
+            "recovery_residue": [],
+            "replay_id": commitment["replay_id"],
+            "schema": "omo-report-consumed-closure/v1",
+            "status": "done",
+            "terminal": True,
+            "transfer_receipt": transfer,
+        }
+        attestation["attestation_id"] = hashlib.sha256(
+            json.dumps(attestation, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        bundle: dict[str, object] = {
+            "attestation": attestation,
+            "schema": "omo-report-consumed-export/v1",
+            "verification": {},
+        }
+        bundle["export_id"] = hashlib.sha256(
+            json.dumps(bundle, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        evidence = private / "consumed-attestation.json"
+        evidence.write_text(json.dumps(bundle, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        os.chmod(evidence, 0o600)
+        return replace(
+            args,
+            terminal_evidence=str(attestation["attestation_id"]),
+            manager_consumed_report_receipt=evidence,
+            manager_consumed_report_receipt_sha256=hashlib.sha256(evidence.read_bytes()).hexdigest(),
+        )
+
     def test_done_live_no_mail_parser_requires_bound_close_evidence(self) -> None:
         complete = [
             "--root", "/tmp/work_logs", "--close-done-live-no-mail",
@@ -2026,6 +2163,97 @@ class TaskStatusTests(unittest.TestCase):
         del missing_digest[index : index + 2]
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
             parse_args(missing_digest)
+
+    def test_done_live_evidence_parser_requires_export_and_no_close_assertions(self) -> None:
+        complete = [
+            "--root", "/tmp/work_logs", "--describe-done-live-no-mail",
+            "--active-target", "wl:2", "--manager-target", "wl:1",
+            "--manager-consumed-report-receipt", "/tmp/consumed.json",
+            "--manager-consumed-report-receipt-sha256", "c" * 64,
+            "task.md",
+        ]
+        args = parse_args(complete)
+        self.assertTrue(args.describe_done_live_no_mail)
+        self.assertEqual("", args.status)
+        for option in (
+            "--active-target",
+            "--manager-target",
+            "--manager-consumed-report-receipt",
+            "--manager-consumed-report-receipt-sha256",
+        ):
+            candidate = complete.copy()
+            index = candidate.index(option)
+            del candidate[index : index + 2]
+            with self.subTest(option=option), self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                parse_args(candidate)
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args([*complete[:-1], "--expected-pane-id", "%42", complete[-1]])
+
+    def test_done_live_evidence_collects_guarded_current_close_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, _todo, _todo_text, args = self.write_done_live_close_case(root)
+            args = self.write_consumed_attestation(root, task, args)
+            evidence_path = args.manager_consumed_report_receipt
+            assert evidence_path is not None
+            attestation = json.loads(evidence_path.read_text(encoding="utf-8"))["attestation"]
+            described = replace(
+                args,
+                status="",
+                close_done_live_no_mail=False,
+                describe_done_live_no_mail=True,
+                expected_task_sha256="",
+                expected_todo_sha256="",
+                expected_pane_id="",
+                expected_pane_pid=0,
+                expected_pane_start_ticks=0,
+                expected_session_id="",
+                terminal_evidence="",
+                audit_output=None,
+            )
+            session_id = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"
+            ready = type("Ready", (), {"status": "ready"})()
+            manager = Path(attestation["transfer_receipt"]["receiver"])
+            manager_lock = {"held": False}
+
+            @contextmanager
+            def record_lock(candidate: Path):
+                if candidate == manager:
+                    manager_lock["held"] = True
+                try:
+                    yield
+                finally:
+                    if candidate == manager:
+                        manager_lock["held"] = False
+
+            def guarded_capture_while_manager_locked(*_values: object) -> str:
+                self.assertTrue(manager_lock["held"])
+                return "ready capture\n"
+
+            with (
+                patch("omo_manager.omo_task_status.validate_consumed_closure_export_file", return_value=attestation),
+                patch("omo_manager.omo_task_status.task_file_lock", side_effect=record_lock),
+                patch("omo_manager.omo_task_status.park_target_pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.bound_guarded_read", return_value="%42\t4242\n"),
+                patch("omo_manager.omo_task_status.process_start_ticks", return_value=73),
+                patch("omo_manager.omo_task_status.guarded_capture", side_effect=guarded_capture_while_manager_locked),
+                patch("omo_manager.omo_task_status.report_from_lines", return_value=ready),
+                patch("omo_manager.omo_task_status.query_status_session_id", return_value=(session_id, "status")),
+            ):
+                record = describe_done_live_no_mail(described, task, text, task.stat())
+            self.assertFalse(manager_lock["held"])
+            self.assertEqual("omo-done-live-close-evidence/v1", record["schema"])
+            self.assertEqual("%42", record["pane_id"])
+            self.assertEqual(4242, record["pane_pid"])
+            self.assertEqual(73, record["pane_start_ticks"])
+            self.assertEqual(session_id, record["session_id"])
+            self.assertEqual(attestation["attestation_id"], record["terminal_evidence"])
+            unsigned = {key: value for key, value in record.items() if key != "evidence_id"}
+            self.assertEqual(
+                hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+                record["evidence_id"],
+            )
 
     def test_no_mail_close_helpers_reject_each_other_on_direct_calls(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2607,6 +2835,218 @@ class TaskStatusTests(unittest.TestCase):
             self.assertEqual(args.manager_consumed_report_receipt_sha256, audit["manager_consumed_receipt_sha256"])
             self.assertEqual(text, task.read_text(encoding="utf-8"))
             self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_done_live_close_accepts_exported_consumed_attestation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_done_live_close_case(root)
+            args = self.write_consumed_attestation(root, task, args)
+            evidence = args.manager_consumed_report_receipt
+            assert evidence is not None
+            exported_attestation = json.loads(evidence.read_text(encoding="utf-8"))["attestation"]
+
+            def terminalize(*values: object) -> ExitedCodexShell:
+                callback = values[6]
+                assert callable(callback)
+                callback()
+                return ExitedCodexShell("11111111-2222-3333-4444-555555555555", "c" * 64)
+
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.process_start_ticks", return_value=73),
+                patch(
+                    "omo_manager.omo_task_status.validate_consumed_closure_export_file",
+                    return_value=exported_attestation,
+                ),
+                patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell") as visible_terminalize,
+                patch(
+                    "omo_manager.omo_task_status.terminalize_bound_codex_to_shell_with_consumed_report",
+                    side_effect=terminalize,
+                ) as consumed_terminalize,
+                patch("omo_manager.omo_task_status.close_bound_tmux_target") as close,
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(2, run(args))
+            visible_terminalize.assert_not_called()
+            consumed_terminalize.assert_called_once()
+            close.assert_not_called()
+            audit = json.loads(args.audit_output.read_text(encoding="utf-8"))
+            self.assertEqual("prepared", audit["state"])
+            self.assertEqual(args.manager_consumed_report_receipt_sha256, audit["manager_consumed_receipt_sha256"])
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_done_live_close_rejects_pointer_appearing_before_authenticated_manager_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_done_live_close_case(root)
+            args = self.write_consumed_attestation(root, task, args)
+            evidence = args.manager_consumed_report_receipt
+            assert evidence is not None
+            attestation = json.loads(evidence.read_text(encoding="utf-8"))["attestation"]
+            transfer = attestation["transfer_receipt"]
+            manager = Path(transfer["receiver"])
+            pointer = transfer["queue_item"]["pointer"]
+
+            @contextmanager
+            def append_pointer_on_manager_lock(candidate: Path):
+                if candidate == manager:
+                    manager.write_text(manager.read_text(encoding="utf-8") + pointer + "\n", encoding="utf-8")
+                yield
+
+            with (
+                patch("omo_manager.omo_task_status.validate_consumed_closure_export_file", return_value=attestation),
+                patch("omo_manager.omo_task_status.root_membership_lock", return_value=nullcontext()),
+                patch("omo_manager.omo_task_status.task_target_lock", return_value=nullcontext()),
+                patch("omo_manager.omo_task_status.task_file_lock", side_effect=append_pointer_on_manager_lock),
+                patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell_with_consumed_report") as terminalize,
+                patch("omo_manager.omo_task_status.close_bound_tmux_target") as close,
+                self.assertRaisesRegex(TaskFrontmatterError, "attestation transaction is inconsistent"),
+            ):
+                close_done_live_no_mail(args, task, text, task.stat())
+            terminalize.assert_not_called()
+            close.assert_not_called()
+            self.assertFalse(args.audit_output.exists())
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_done_live_close_rejects_transaction_residue_appearing_before_manager_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_done_live_close_case(root)
+            args = self.write_consumed_attestation(root, task, args)
+            evidence = args.manager_consumed_report_receipt
+            assert evidence is not None
+            attestation = json.loads(evidence.read_text(encoding="utf-8"))["attestation"]
+            manager = Path(attestation["transfer_receipt"]["receiver"])
+            residue = args.audit_output.parent / "new-durable-receipt.json"
+
+            def strict_validation(*_values: object) -> dict[str, object]:
+                if residue.exists():
+                    raise ReceiptError("incomplete transaction residue exists for durable receipt")
+                return attestation
+
+            @contextmanager
+            def create_residue_on_manager_lock(candidate: Path):
+                if candidate == manager:
+                    residue.write_text("{}\n", encoding="utf-8")
+                yield
+
+            with (
+                patch(
+                    "omo_manager.omo_task_status.validate_consumed_closure_export_file",
+                    side_effect=strict_validation,
+                ),
+                patch("omo_manager.omo_task_status.root_membership_lock", return_value=nullcontext()),
+                patch("omo_manager.omo_task_status.task_target_lock", return_value=nullcontext()),
+                patch("omo_manager.omo_task_status.task_file_lock", side_effect=create_residue_on_manager_lock),
+                patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell_with_consumed_report") as terminalize,
+                patch("omo_manager.omo_task_status.close_bound_tmux_target") as close,
+                self.assertRaisesRegex(TaskFrontmatterError, "incomplete transaction residue"),
+            ):
+                close_done_live_no_mail(args, task, text, task.stat())
+            terminalize.assert_not_called()
+            close.assert_not_called()
+            self.assertFalse(args.audit_output.exists())
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_exported_consumed_attestation_rejects_wrong_status_and_task(self) -> None:
+        for defect in ("status", "task"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, _text, _todo, _todo_text, args = self.write_done_live_close_case(root)
+                args = self.write_consumed_attestation(root, task, args)
+                evidence = args.manager_consumed_report_receipt
+                assert evidence is not None
+                attestation = json.loads(evidence.read_text(encoding="utf-8"))["attestation"]
+                if defect == "status":
+                    attestation["status"] = "blocked"
+                else:
+                    attestation["transfer_receipt"]["authority"]["source_task"] = str(root / "other.md")
+                unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
+                attestation["attestation_id"] = hashlib.sha256(
+                    json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+                args = replace(
+                    args,
+                    terminal_evidence=str(attestation["attestation_id"]),
+                )
+                with (
+                    patch(
+                        "omo_manager.omo_task_status.validate_consumed_closure_export_file",
+                        return_value=attestation,
+                    ),
+                    self.assertRaisesRegex(TaskFrontmatterError, "binding is inconsistent"),
+                ):
+                    validate_manager_consumed_report(args, task)
+
+    def test_exported_consumed_attestation_rejects_intermediate_manager_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            root.mkdir()
+            outside = base / "outside"
+            outside.mkdir()
+            (root / "linked").symlink_to(outside, target_is_directory=True)
+            task, _text, _todo, _todo_text, args = self.write_done_live_close_case(root)
+            args = self.write_consumed_attestation(root, task, args, root / "linked" / "manager.md")
+            evidence = args.manager_consumed_report_receipt
+            assert evidence is not None
+            attestation = json.loads(evidence.read_text(encoding="utf-8"))["attestation"]
+            with (
+                patch(
+                    "omo_manager.omo_task_status.validate_consumed_closure_export_file",
+                    return_value=attestation,
+                ),
+                self.assertRaisesRegex(TaskFrontmatterError, "manager route is unavailable"),
+            ):
+                validate_manager_consumed_report(args, task)
+
+    def test_exported_consumed_attestation_rejects_intermediate_manager_swap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            root.mkdir()
+            route_directory = root / "route"
+            route_directory.mkdir()
+            outside = base / "outside"
+            outside.mkdir()
+            task, _text, _todo, _todo_text, args = self.write_done_live_close_case(root)
+            manager = route_directory / "manager.md"
+            args = self.write_consumed_attestation(root, task, args, manager)
+            evidence = args.manager_consumed_report_receipt
+            assert evidence is not None
+            attestation = json.loads(evidence.read_text(encoding="utf-8"))["attestation"]
+            real_stat = os.stat
+            swapped = False
+
+            def swap_parent_before_post_read_check(
+                path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+                *,
+                dir_fd: int | None = None,
+                follow_symlinks: bool = True,
+            ) -> os.stat_result:
+                nonlocal swapped
+                if Path(path) == manager and dir_fd is None and not swapped:
+                    swapped = True
+                    original = root / "original-route"
+                    route_directory.rename(original)
+                    route_directory.symlink_to(outside, target_is_directory=True)
+                    os.link(original / "manager.md", outside / "manager.md")
+                return real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+            with (
+                patch(
+                    "omo_manager.omo_task_status.validate_consumed_closure_export_file",
+                    return_value=attestation,
+                ),
+                patch("omo_manager.omo_task_status.os.stat", side_effect=swap_parent_before_post_read_check),
+                self.assertRaisesRegex(TaskFrontmatterError, "manager route is unavailable"),
+            ):
+                validate_manager_consumed_report(args, task)
+            self.assertTrue(swapped)
 
     def test_manager_consumed_report_rejects_forgery_wrong_task_and_drift(self) -> None:
         for defect in ("forgery", "wrong task", "wrong manager", "drift", "replay"):

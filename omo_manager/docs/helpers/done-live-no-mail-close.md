@@ -6,13 +6,16 @@ purpose
 
 command
 
+- for a consumed report whose pane output was lost, first run `omo_task_status.py --describe-done-live-no-mail TASK.md`
+  - bind `--active-target`, `--manager-target`, the absolute exported `--manager-consumed-report-receipt`, and its SHA-256
+  - the helper requires a ready pane, revalidates the export and task/TODO ownership before every pane input, sends one guarded `/status`, and returns current pane id, process id/start ticks, session, report token, and task/TODO digests
 - run `omo_task_status.py --close-done-live-no-mail TASK.md`
   - bind `--active-target` and `--manager-target`
   - bind `--expected-task-sha256` and `--expected-todo-sha256`
   - bind `--expected-pane-id`, `--expected-pane-pid`, and `--expected-pane-start-ticks`
   - bind `--expected-session-id` and the accepted report receipt token with `--terminal-evidence`
   - reserve a new absolute owner-private `--audit-output`
-  - if the manager consumed the report before the pane recorded acceptance, also bind one reviewed owner-private `--manager-consumed-report-receipt` and its SHA-256
+  - if the manager consumed the report before the pane recorded acceptance, bind either the exported canonical `omo-report-consumed-closure/v1` attestation or the reviewed manager-acceptance bundle with `--manager-consumed-report-receipt` and its SHA-256; use its attestation/report ID as `--terminal-evidence`
 
 task custody
 
@@ -27,7 +30,7 @@ pane closure
 
 - require the exact symbolic target, numeric pane, pane process, process start ticks, and Codex session
 - require the accepted report token in the terminal before any input
-  - exception: an authenticated manager-consumed receipt may bind the exact worker allocation, report commitment and transfer, manager acceptance report and commitment, terminal receipt, task/TODO state, pane/process/session, and reserved audit
+  - exception: an exported consumed-closure attestation may bind the receipt module's exact historical watcher transition, worker allocation, commitment, envelope, transfer, and report; the older manager-acceptance bundle remains supported
   - the exception waives only the missing visible acceptance token; every pane, process, session, exit, capture, close-proof, and lifecycle check remains
 - exit Codex only after a fresh bound `/status` response identifies the expected session
 - authenticate one unchanged exited-shell capture

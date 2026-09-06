@@ -15,8 +15,11 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from omo_manager.omo_report_receipt import OwnerPrefixBinding, ReceiptError, canonical_json, regular_file_tail, validate_committed_route_evidence
+from omo_manager.omo_report_receipt import OwnerPrefixBinding, ReceiptError, canonical_json, persist_consumed_closure_attestation, regular_file_tail, validate_committed_route_evidence, validate_consumed_closure_export
+from omo_manager.omo_task_status import Args as TaskStatusArgs
+from omo_manager.omo_task_status import validate_manager_consumed_report
 
 
 OMO_DIR = Path(__file__).resolve().parents[1]
@@ -174,6 +177,7 @@ def run_report_from(
     status: str = "done",
     agent: str = "receipt-worker",
     recover_moved: str = "",
+    consumed_attestation_output: Path | None = None,
     report: Path = REPORT,
 ) -> subprocess.CompletedProcess[str]:
     command = replace(case, message=message).command(
@@ -184,6 +188,8 @@ def run_report_from(
     )
     command[0] = str(report)
     command[command.index("--agent") + 1] = agent
+    if consumed_attestation_output is not None:
+        command += ["--consumed-attestation-output", str(consumed_attestation_output)]
     return subprocess.run(
         command,
         cwd=case.root.parent,
@@ -191,6 +197,29 @@ def run_report_from(
         text=True,
         capture_output=True,
         timeout=10,
+        check=False,
+    )
+
+
+def validate_export_from(
+    case: ReportFixture,
+    exported: Path,
+    *,
+    report: Path = REPORT,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            str(report),
+            "--validate-consumed-export",
+            str(exported),
+            "--expected-sha256",
+            hashlib.sha256(exported.read_bytes()).hexdigest(),
+        ],
+        cwd=case.root.parent,
+        env=case.env,
+        text=True,
+        capture_output=True,
+        timeout=30,
         check=False,
     )
 
@@ -435,6 +464,117 @@ def side_effect_paths(effects: dict[str, object]) -> set[str]:
 
 
 class ReportReceiptTests(unittest.TestCase):
+    def test_consumed_export_recovery_rechecks_links_after_temporary_retirement(self) -> None:
+        for defect in ("hard link", "mode"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as tmp:
+                directory = Path(tmp)
+                directory.chmod(0o700)
+                output = directory / "consumed.json"
+                payload = canonical_json({"export_id": "a" * 64})
+                output.write_bytes(payload)
+                output.chmod(0o600)
+                temporary = directory / f".{output.name}.{'a' * 64}.tmp"
+                os.link(output, temporary)
+                external = directory / "external.json"
+                real_unlink = Path.unlink
+
+                def mutate_before_unlink(path: Path, *args: object, **kwargs: object) -> None:
+                    if path == temporary:
+                        if defect == "hard link":
+                            os.link(output, external)
+                        else:
+                            output.chmod(0o644)
+                    real_unlink(path, *args, **kwargs)
+
+                with (
+                    patch.object(Path, "unlink", mutate_before_unlink),
+                    self.assertRaisesRegex(ReceiptError, "exact owner-private artifact"),
+                ):
+                    persist_consumed_closure_attestation(output, payload)
+                self.assertTrue(output.exists())
+                self.assertFalse(temporary.exists())
+                if defect == "hard link":
+                    self.assertEqual(2, output.stat().st_nlink)
+                else:
+                    self.assertEqual(0o644, output.stat().st_mode & 0o777)
+
+    def test_consumed_export_failure_preserves_replaced_final(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            directory.chmod(0o700)
+            output = directory / "consumed.json"
+            payload = canonical_json({"export_id": "a" * 64})
+            real_link = os.link
+
+            def replace_after_link(
+                source: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+                destination: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+                *,
+                src_dir_fd: int | None = None,
+                dst_dir_fd: int | None = None,
+                follow_symlinks: bool = True,
+            ) -> None:
+                real_link(
+                    source,
+                    destination,
+                    src_dir_fd=src_dir_fd,
+                    dst_dir_fd=dst_dir_fd,
+                    follow_symlinks=follow_symlinks,
+                )
+                if Path(destination) == output:
+                    output.unlink()
+                    output.write_bytes(payload)
+                    output.chmod(0o600)
+
+            with (
+                patch("omo_manager.omo_report_receipt.os.link", side_effect=replace_after_link),
+                self.assertRaisesRegex(ReceiptError, "publication has unexpected hard links"),
+            ):
+                persist_consumed_closure_attestation(output, payload)
+            self.assertEqual(payload, output.read_bytes())
+            self.assertEqual(1, output.stat().st_nlink)
+
+    def test_validate_consumed_export_mode_rejects_partial_or_mixed_options(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, manager, _owner = active_manager_fixture(Path(tmp), body=b"must not submit\n")
+            manager_before = manager.read_bytes()
+            commands = (
+                [str(REPORT), "--validate-consumed-export", "", "--expected-sha256", "a" * 64],
+                [str(REPORT), "--validate-consumed-export", str(case.message)],
+                [*case.command(), "--expected-sha256", "a" * 64],
+                [
+                    str(REPORT),
+                    "--validate-consumed-export",
+                    str(case.message),
+                    "--validate-consumed-export",
+                    str(case.message),
+                    "--expected-sha256",
+                    "a" * 64,
+                ],
+                [
+                    str(REPORT),
+                    "--validate-consumed-export",
+                    str(case.message),
+                    "--expected-sha256",
+                    "a" * 64,
+                    "--expected-sha256",
+                    "a" * 64,
+                ],
+            )
+            for command in commands:
+                with self.subTest(command=command):
+                    rejected = subprocess.run(
+                        command,
+                        cwd=case.root.parent,
+                        env=case.env,
+                        text=True,
+                        capture_output=True,
+                        timeout=10,
+                        check=False,
+                    )
+                    self.assertEqual(2, rejected.returncode)
+                    self.assertEqual(manager_before, manager.read_bytes())
+
     def test_submit_rejects_explicitly_discarded_replay(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             case = fixture(Path(tmp), body=b"discarded replay\n")
@@ -2731,14 +2871,166 @@ return 75
                 ).hexdigest(),
                 attestation["attestation_id"],
             )
-            files = description["files"]
-            self.assertFalse(Path(str(files["private_receipt"])).exists())
-            self.assertFalse(Path(str(files["receipt_publication"])).exists())
-            self.assertEqual(manager_after, manager.read_bytes())
-            acknowledgment_state, acknowledgment_key = acknowledgment_coordinates(description)
-            self.assertEqual(1, acknowledgment_state.read_text(encoding="utf-8").count(acknowledgment_key))
-            self.assertNotIn(body.decode().strip(), verified.stdout + verified.stderr)
-            self.assertNotIn(str(draft), verified.stdout + verified.stderr)
+            exported = tmp_path / "consumed.json"
+            persisted = run_report_from(
+                case,
+                draft,
+                verify_consumed=True,
+                status="progressing",
+                consumed_attestation_output=exported,
+                report=report,
+            )
+            self.assertEqual(0, persisted.returncode, persisted.stderr)
+            export = json.loads(exported.read_text(encoding="utf-8"))
+            self.assertEqual(json.loads(verified.stdout), export["attestation"])
+            self.assertEqual(0o600, exported.stat().st_mode & 0o777)
+            linked_output = tmp_path / "linked-output.json"
+            linked_temporary = linked_output.with_name(f".{linked_output.name}.{export['export_id']}.tmp")
+            linked_temporary.write_bytes(exported.read_bytes())
+            linked_temporary.chmod(0o600)
+            external_temporary_link = tmp_path / "external-temporary-link.json"
+            os.link(linked_temporary, external_temporary_link)
+            linked_rejected = run_report_from(
+                case,
+                draft,
+                verify_consumed=True,
+                status="progressing",
+                consumed_attestation_output=linked_output,
+                report=report,
+            )
+            self.assertEqual(2, linked_rejected.returncode)
+            self.assertIn("temporary file has unexpected hard links", linked_rejected.stderr)
+            self.assertFalse(linked_output.exists())
+            repeated = run_report_from(
+                case,
+                draft,
+                verify_consumed=True,
+                status="progressing",
+                consumed_attestation_output=exported,
+                report=report,
+            )
+            self.assertEqual(0, repeated.returncode, repeated.stderr)
+            exported_attestation = json.loads(exported.read_text(encoding="utf-8"))
+            residue = exported.with_name(
+                f".{exported.name}.{exported_attestation['export_id']}.tmp"
+            )
+            os.link(exported, residue)
+            recovered = run_report_from(
+                case,
+                draft,
+                verify_consumed=True,
+                status="progressing",
+                consumed_attestation_output=exported,
+                report=report,
+            )
+            self.assertEqual(0, recovered.returncode, recovered.stderr)
+            self.assertFalse(residue.exists())
+            self.assertEqual(1, exported.stat().st_nlink)
+            external_link = tmp_path / "external-link.json"
+            os.link(exported, external_link)
+            linked = run_report_from(
+                case,
+                draft,
+                verify_consumed=True,
+                status="progressing",
+                consumed_attestation_output=exported,
+                report=report,
+            )
+            self.assertEqual(2, linked.returncode)
+            self.assertIn("unexpected hard links", linked.stderr)
+            external_link.unlink()
+            exported.write_text("{}\n", encoding="utf-8")
+            mismatched = run_report_from(
+                case,
+                draft,
+                verify_consumed=True,
+                status="progressing",
+                consumed_attestation_output=exported,
+                report=report,
+            )
+            self.assertEqual(2, mismatched.returncode)
+            self.assertIn("already contains different bytes", mismatched.stderr)
+
+    def test_consumed_closure_export_strictly_revalidates_with_current_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, _owner = active_manager_fixture(tmp_path)
+            draft = allocate_report_draft(case, b"consumed export\n")
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            pending = run_report_from(case, draft, status="done")
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+            exported = tmp_path / "consumed-export.json"
+
+            verified = run_report_from(
+                case,
+                draft,
+                verify_consumed=True,
+                status="done",
+                consumed_attestation_output=exported,
+            )
+
+            self.assertEqual(0, verified.returncode, verified.stderr)
+            with self.assertRaisesRegex(ReceiptError, "execution digest is unavailable"):
+                validate_consumed_closure_export(exported.read_bytes())
+            validated = validate_export_from(case, exported)
+            self.assertEqual(0, validated.returncode, validated.stderr)
+            self.assertEqual(json.loads(verified.stdout), json.loads(validated.stdout))
+            description = json.loads(run_report_from(case, draft, describe=True, status="done").stdout)
+            routing = description["routing"]
+            assert isinstance(routing, dict)
+            close_args = TaskStatusArgs(
+                case.root,
+                Path("worker.md"),
+                "done",
+                "",
+                close_done_live_no_mail=True,
+                active_target=str(routing["producer_target"]),
+                manager_target=str(routing["resolved_manager_target"]),
+                terminal_evidence=str(json.loads(verified.stdout)["attestation_id"]),
+                manager_consumed_report_receipt=exported,
+                manager_consumed_report_receipt_sha256=hashlib.sha256(exported.read_bytes()).hexdigest(),
+            )
+            self.assertTrue(validate_manager_consumed_report(close_args, case.root / "worker.md"))
+
+    def test_consumed_closure_export_rejects_changed_transaction_state(self) -> None:
+        for defect in ("active pointer", "missing acknowledgment", "recovery residue", "malformed commitment"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                case, manager, _owner = active_manager_fixture(tmp_path)
+                draft = allocate_report_draft(case, b"consumed export drift\n")
+                description = json.loads(run_report_from(case, draft, describe=True, status="done").stdout)
+                case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+                pending = run_report_from(case, draft, status="done")
+                self.assertEqual(0, pending.returncode, pending.stderr)
+                self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+                exported = tmp_path / "consumed-export.json"
+                verified = run_report_from(
+                    case,
+                    draft,
+                    verify_consumed=True,
+                    status="done",
+                    consumed_attestation_output=exported,
+                )
+                self.assertEqual(0, verified.returncode, verified.stderr)
+                bundle = json.loads(exported.read_text(encoding="utf-8"))
+                attestation = bundle["attestation"]
+                transfer = attestation["transfer_receipt"]
+                if defect == "active pointer":
+                    pointer = transfer["queue_item"]["pointer"]
+                    manager.write_bytes(manager.read_bytes() + f"\n{pointer}\n".encode())
+                elif defect == "missing acknowledgment":
+                    acknowledgment_state, _key = acknowledgment_coordinates(description)
+                    acknowledgment_state.unlink()
+                elif defect == "recovery residue":
+                    temporary = Path(str(description["temporary_files"][-2]))
+                    temporary.write_bytes(b"residue\n")
+                    temporary.chmod(0o600)
+                else:
+                    commitment = Path(str(transfer["commitment_path"]))
+                    commitment.write_text("{}\n", encoding="utf-8")
+                rejected = validate_export_from(case, exported)
+                self.assertEqual(2, rejected.returncode)
 
     def test_consumed_closure_accepts_authenticated_pointer_removal_after_manager_growth(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

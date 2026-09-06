@@ -11,6 +11,7 @@ import math
 import os
 import re
 import stat
+import subprocess
 import sys
 import time
 from collections.abc import Iterator
@@ -112,6 +113,7 @@ class Arguments:
     route_local_date: str
     status: str
     recovery_replay_id: str
+    consumed_attestation_output: Path | None
     message_file: Path
     agent: str
     producer_target: str
@@ -137,6 +139,7 @@ class Plan:
     authenticated_recovery: bool
     authenticated_done_retry: bool
     recovery_replay_id: str
+    consumed_attestation_output: Path | None
     status: str
     input_info: dict[str, object]
     report_context: dict[str, object]
@@ -802,6 +805,7 @@ def parse_args(argv: list[str] | None = None) -> Arguments:
     _ = parser.add_argument("--route-local-date", required=True)
     _ = parser.add_argument("--status", required=True)
     _ = parser.add_argument("--recover-moved", default="")
+    _ = parser.add_argument("--consumed-attestation-output", default="")
     _ = parser.add_argument("--message-file", required=True, type=Path)
     _ = parser.add_argument("--agent", required=True)
     _ = parser.add_argument("--producer-target", required=True)
@@ -828,6 +832,7 @@ def parse_args(argv: list[str] | None = None) -> Arguments:
         parsed.route_local_date,
         parsed.status,
         parsed.recover_moved,
+        Path(parsed.consumed_attestation_output) if parsed.consumed_attestation_output else None,
         parsed.message_file,
         parsed.agent,
         parsed.producer_target,
@@ -1618,6 +1623,7 @@ def _build_plan_from_message(
         authenticated_recovery=False,
         authenticated_done_retry=False,
         recovery_replay_id=args.recovery_replay_id,
+        consumed_attestation_output=args.consumed_attestation_output,
         status=status,
         input_info=input_info,
         report_context=report_context,
@@ -3899,6 +3905,7 @@ def consumed_closure_attestation(plan: Plan) -> dict[str, object]:
     ]
     record: dict[str, object] = {
         "accepted": False,
+        "consumption_evidence": acknowledgment,
         "consumed_at_unix_s": acknowledgment["recorded_at_unix_s"],
         "input": plan.input_info,
         "reason": "manager watcher consumed report; acceptance receipt unavailable",
@@ -3910,6 +3917,247 @@ def consumed_closure_attestation(plan: Plan) -> dict[str, object]:
         "transfer_receipt": transfer_receipt(plan, str(commitment["commitment_id"])),
     }
     return {**record, "attestation_id": bound_receipt_id(record)}
+
+
+def consumed_closure_export(plan: Plan, attestation: dict[str, object]) -> dict[str, object]:
+    """Bind a consumed attestation to the inputs needed for strict revalidation."""
+
+    tmux = plan.routing["tmux"]
+    assert isinstance(tmux, dict)
+    route_evidence = canonical_json(list(plan.route_evidence)).decode().strip()
+    verification = {
+        "agent": plan.routing["agent"],
+        "helper": str(plan.helper_path),
+        "manager": str(plan.manager),
+        "manager_frontmatter_sha256": plan.manager_frontmatter_sha256,
+        "manager_route_evidence": route_evidence,
+        "manager_route_selection": plan.manager_route_selection,
+        "message_file": str(plan.message_path),
+        "producer_target": plan.routing["producer_target"],
+        "requested_manager_target": plan.routing["requested_manager_target"],
+        "resolved_manager_target": plan.routing["resolved_manager_target"],
+        "root": str(plan.root),
+        "route_kind": plan.routing["route_kind"],
+        "route_local_date": plan.routing["route_local_date"],
+        "route_note": plan.routing["route_note"],
+        "state_home": str(plan.receipt_directory.parent.parent),
+        "status": plan.status,
+        "task": str(plan.task),
+        "task_route_evidence": route_evidence,
+        "tmux_pane_id": tmux.get("pane_id", ""),
+        "tmux_pane_index": tmux.get("pane_index", ""),
+        "tmux_session": tmux.get("session", ""),
+        "tmux_window_index": tmux.get("window_index", ""),
+        "tmux_window_name": tmux.get("window_name", ""),
+    }
+    record: dict[str, object] = {
+        "attestation": attestation,
+        "schema": "omo-report-consumed-export/v1",
+        "verification": verification,
+    }
+    return {**record, "export_id": bound_receipt_id(record)}
+
+
+def validate_consumed_closure_export(payload: bytes) -> dict[str, object]:
+    """Strictly rerun consumed verification from one canonical export bundle."""
+
+    try:
+        loaded = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReceiptError("consumed attestation export is not canonical JSON") from exc
+    if not isinstance(loaded, dict) or canonical_json(loaded) != payload or set(loaded) != {
+        "attestation", "export_id", "schema", "verification"
+    }:
+        raise ReceiptError("consumed attestation export is not canonical JSON")
+    unsigned = dict(loaded)
+    export_id = unsigned.pop("export_id")
+    verification = loaded.get("verification")
+    attestation = loaded.get("attestation")
+    expected_context = {
+        "agent", "helper", "manager", "manager_frontmatter_sha256", "manager_route_evidence",
+        "manager_route_selection", "message_file", "producer_target", "requested_manager_target",
+        "resolved_manager_target", "root", "route_kind", "route_local_date", "route_note", "status",
+        "state_home", "task", "task_route_evidence", "tmux_pane_id", "tmux_pane_index", "tmux_session",
+        "tmux_window_index", "tmux_window_name",
+    }
+    if (
+        loaded.get("schema") != "omo-report-consumed-export/v1"
+        or export_id != bound_receipt_id(unsigned)
+        or not isinstance(verification, dict)
+        or set(verification) != expected_context
+        or not isinstance(attestation, dict)
+    ):
+        raise ReceiptError("consumed attestation export binding is invalid")
+    receiver_path = Path(__file__).resolve(strict=True)
+    helper_path = receiver_path.with_name("omo_report.sh")
+    if verification["helper"] != str(helper_path):
+        raise ReceiptError("consumed attestation export helper path is invalid")
+    argv = ["--mode", "verify-consumed"]
+    for key in (
+        "helper", "root", "task", "manager", "requested_manager_target", "resolved_manager_target",
+        "route_kind", "route_note", "task_route_evidence", "manager_route_evidence",
+        "manager_route_selection", "manager_frontmatter_sha256", "route_local_date", "status",
+        "message_file", "agent", "producer_target", "tmux_session", "tmux_window_index",
+        "tmux_pane_index", "tmux_pane_id", "tmux_window_name",
+    ):
+        argv.extend((f"--{key.replace('_', '-')}", str(verification[key])))
+    state_home = Path(str(verification["state_home"]))
+    if not state_home.is_absolute():
+        raise ReceiptError("consumed attestation export state home is invalid")
+    previous_state_home = os.environ.get("XDG_STATE_HOME")
+    os.environ["XDG_STATE_HOME"] = str(state_home)
+    try:
+        verified = run(argv)
+    finally:
+        if previous_state_home is None:
+            del os.environ["XDG_STATE_HOME"]
+        else:
+            os.environ["XDG_STATE_HOME"] = previous_state_home
+    if canonical_json(attestation) != verified:
+        raise ReceiptError("consumed attestation export no longer matches strict verification")
+    return attestation
+
+
+def validate_consumed_closure_export_file(path: Path, expected_sha256: str) -> dict[str, object]:
+    """Validate one export through the report helper's immutable source bootstrap."""
+
+    if not path.is_absolute() or HASH_RE.fullmatch(expected_sha256) is None:
+        raise ReceiptError("consumed attestation export file identity is invalid")
+    helper_path = Path(__file__).resolve(strict=True).with_name("omo_report.sh")
+    try:
+        result = subprocess.run(
+            [str(helper_path), "--validate-consumed-export", str(path), "--expected-sha256", expected_sha256],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ReceiptError(f"consumed attestation export helper failed: {exc}") from exc
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise ReceiptError(f"consumed attestation export helper rejected the transaction: {detail}")
+    try:
+        attestation: object = json.loads(result.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReceiptError("consumed attestation export helper returned invalid JSON") from exc
+    if not isinstance(attestation, dict) or canonical_json(attestation) != result.stdout:
+        raise ReceiptError("consumed attestation export helper returned a noncanonical attestation")
+    return attestation
+
+
+def validate_consumed_closure_export_input(path: Path, expected_sha256: str) -> bytes:
+    """Read one immutable export input and validate it in this loaded receiver."""
+
+    if not path.is_absolute() or HASH_RE.fullmatch(expected_sha256) is None:
+        raise ReceiptError("consumed attestation export input identity is invalid")
+    payload = regular_file_bytes(path, maximum=MAX_RECEIPT_BYTES, field="consumed attestation export")
+    info = path.lstat()
+    if stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1 or hashlib.sha256(payload).hexdigest() != expected_sha256:
+        raise ReceiptError("consumed attestation export input is not the exact owner-private file")
+    return canonical_json(validate_consumed_closure_export(payload))
+
+
+def validate_persisted_consumed_export(path: Path, payload: bytes) -> None:
+    """Require one stable path to name exact owner-private export bytes."""
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+        try:
+            before = os.fstat(fd)
+            observed = os.read(fd, MAX_RECEIPT_BYTES + 1)
+            after = os.fstat(fd)
+            current = path.lstat()
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise ReceiptError(f"consumed attestation output is unavailable: {exc}") from exc
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) != 0o600
+        or before.st_nlink != 1
+        or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        or (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino)
+        or not stat.S_ISREG(current.st_mode)
+        or current.st_uid != os.getuid()
+        or stat.S_IMODE(current.st_mode) != 0o600
+        or current.st_nlink != 1
+        or observed != payload
+    ):
+        raise ReceiptError("consumed attestation output is not the exact owner-private artifact")
+
+
+def persist_consumed_closure_attestation(path: Path, payload: bytes) -> None:
+    """Publish one immutable owner-private consumed-closure attestation."""
+
+    if not path.is_absolute() or path.name in {"", ".", ".."}:
+        raise ReceiptError("consumed attestation output must be an absolute file path")
+    _ = validate_directory(path.parent, private=True, field="consumed attestation directory")
+    attestation = json.loads(payload)
+    temporary = path.with_name(f".{path.name}.{attestation['export_id']}.tmp")
+    if validate_optional_regular(path, "consumed attestation", exact_mode=0o600):
+        if regular_file_bytes(path, maximum=MAX_RECEIPT_BYTES, field="consumed attestation") != payload:
+            raise ReceiptError("consumed attestation output already contains different bytes")
+        final_info = path.lstat()
+        if validate_optional_regular(temporary, "consumed attestation temporary file", exact_mode=0o600):
+            if regular_file_bytes(temporary, maximum=MAX_RECEIPT_BYTES, field="consumed attestation temporary file") != payload:
+                raise ReceiptError("consumed attestation temporary file contains different bytes")
+            temporary_info = temporary.lstat()
+            if (
+                (final_info.st_dev, final_info.st_ino) != (temporary_info.st_dev, temporary_info.st_ino)
+                or final_info.st_nlink != 2
+            ):
+                raise ReceiptError("consumed attestation output has unexpected hard links")
+            temporary.unlink()
+            fsync_directory(path.parent)
+            validate_persisted_consumed_export(path, payload)
+        elif final_info.st_nlink != 1:
+            raise ReceiptError("consumed attestation output has unexpected hard links")
+        else:
+            validate_persisted_consumed_export(path, payload)
+        return
+    if validate_optional_regular(temporary, "consumed attestation temporary file", exact_mode=0o600):
+        if regular_file_bytes(temporary, maximum=MAX_RECEIPT_BYTES, field="consumed attestation temporary file") != payload:
+            raise ReceiptError("consumed attestation temporary file contains different bytes")
+        if temporary.lstat().st_nlink != 1:
+            raise ReceiptError("consumed attestation temporary file has unexpected hard links")
+    else:
+        try:
+            write_new_file(temporary, payload, 0o600)
+        except ReceiptError:
+            if (
+                not validate_optional_regular(temporary, "consumed attestation temporary file", exact_mode=0o600)
+                or regular_file_bytes(temporary, maximum=MAX_RECEIPT_BYTES, field="consumed attestation temporary file") != payload
+            ):
+                raise
+    try:
+        os.link(temporary, path, follow_symlinks=False)
+        temporary_info = temporary.lstat()
+        final_info = path.lstat()
+        if (
+            (temporary_info.st_dev, temporary_info.st_ino) != (final_info.st_dev, final_info.st_ino)
+            or temporary_info.st_nlink != 2
+        ):
+            raise ReceiptError("consumed attestation publication has unexpected hard links")
+        fsync_directory(path.parent)
+    except ReceiptError:
+        raise
+    except OSError as exc:
+        if (
+            not validate_optional_regular(path, "consumed attestation", exact_mode=0o600)
+            or regular_file_bytes(path, maximum=MAX_RECEIPT_BYTES, field="consumed attestation") != payload
+        ):
+            raise ReceiptError("cannot publish consumed attestation") from exc
+        temporary_info = temporary.lstat()
+        final_info = path.lstat()
+        same_inode = (temporary_info.st_dev, temporary_info.st_ino) == (final_info.st_dev, final_info.st_ino)
+        if (same_inode and final_info.st_nlink != 2) or (not same_inode and (temporary_info.st_nlink != 1 or final_info.st_nlink != 1)):
+            raise ReceiptError("consumed attestation publication has unexpected hard links") from exc
+    temporary.unlink(missing_ok=True)
+    fsync_directory(path.parent)
+    validate_persisted_consumed_export(path, payload)
 
 
 def utc_now() -> str:
@@ -4481,7 +4729,14 @@ def run(argv: list[str] | None = None) -> bytes:
             if plan.mode == "describe":
                 return canonical_json(description(plan))
             if plan.mode == "verify-consumed":
-                return canonical_json(consumed_closure_attestation(plan))
+                attestation = consumed_closure_attestation(plan)
+                output = canonical_json(attestation)
+                if plan.consumed_attestation_output is not None:
+                    persist_consumed_closure_attestation(
+                        plan.consumed_attestation_output,
+                        canonical_json(consumed_closure_export(plan, attestation)),
+                    )
+                return output
             try:
                 result = submit(plan)
             except ReceiptError as exc:
@@ -4527,7 +4782,12 @@ def run(argv: list[str] | None = None) -> bytes:
 
 def main() -> int:
     try:
-        output = run()
+        if len(sys.argv) == 4 and sys.argv[1] == "--validate-consumed-export":
+            output = validate_consumed_closure_export_input(Path(sys.argv[2]), sys.argv[3])
+        elif "--validate-consumed-export" in sys.argv:
+            raise ReceiptError("invalid consumed attestation export validation arguments")
+        else:
+            output = run()
     except RetryableDescriptionError:
         notify_description_route_retry()
         return 75

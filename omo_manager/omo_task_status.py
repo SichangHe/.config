@@ -39,17 +39,21 @@ from omo_manager.omo_blocking import split_task_text
 from omo_manager.omo_blocking import V2_VERSION
 from omo_manager.omo_blocking import v2_enabled
 from omo_manager.omo_codex_stop import Args as StopArgs
+from omo_manager.omo_codex_stop import bound_guarded_read
 from omo_manager.omo_codex_stop import bound_close_secret
 from omo_manager.omo_codex_stop import capture
 from omo_manager.omo_codex_stop import close_bound_tmux_target
 from omo_manager.omo_codex_stop import close_note
 from omo_manager.omo_codex_stop import close_exited_codex_shell
 from omo_manager.omo_codex_stop import done_live_close_started_path
+from omo_manager.omo_codex_stop import guarded_capture
 from omo_manager.omo_codex_stop import has_close_note
 from omo_manager.omo_codex_stop import has_bound_close_proof
 from omo_manager.omo_codex_stop import moved_todo_text
 from omo_manager.omo_codex_stop import pane_id
 from omo_manager.omo_codex_stop import promote_done_live_close_started
+from omo_manager.omo_codex_stop import query_status_session_id
+from omo_manager.omo_codex_stop import report_from_lines
 from omo_manager.omo_codex_stop import record_close
 from omo_manager.omo_codex_stop import stop
 from omo_manager.omo_codex_stop import terminalize_bound_codex_to_shell
@@ -72,6 +76,8 @@ from omo_manager.omo_task_metadata import TARGET_RE
 from omo_manager.omo_task_metadata import UniqueKeyLoader
 from omo_manager.omo_blocking_actor import request as blocking_request
 from omo_manager.omo_completion_email import require_owner_completion
+from omo_manager.omo_report_receipt import ReceiptError
+from omo_manager.omo_report_receipt import validate_consumed_closure_export_file
 
 PENDING_MARKER = "(pending)"
 DONE_REMINDER = "Status set to done."
@@ -191,6 +197,7 @@ class Args:
     expected_pane_start_ticks: int = 0
     expected_session_id: str = ""
     close_done_live_no_mail: bool = False
+    describe_done_live_no_mail: bool = False
     manager_consumed_report_receipt: Path | None = None
     manager_consumed_report_receipt_sha256: str = ""
     completion_key: str = ""
@@ -237,6 +244,7 @@ class ParsedArgs(argparse.Namespace):
     complete_live_no_mail: bool = False
     close_active_task_tree_no_mail: bool = False
     close_done_live_no_mail: bool = False
+    describe_done_live_no_mail: bool = False
     manager_consumed_report_receipt: Path | None = None
     manager_consumed_report_receipt_sha256: str = ""
     shared_target: str = ""
@@ -312,6 +320,7 @@ shutdown.""",
     _ = parser.add_argument("--complete-live-no-mail", action="store_true", help="Mark one exact queue-empty live non-manager done without email or pane mutation.")
     _ = parser.add_argument("--close-active-task-tree-no-mail", action="store_true", help="Close active_task_tree.md metadata/TODO on its shared target without email or pane mutation.")
     _ = parser.add_argument("--close-done-live-no-mail", action="store_true", help="Close one exact live Codex pane left by --complete-live-no-mail without email or task reopening.")
+    _ = parser.add_argument("--describe-done-live-no-mail", action="store_true", help="Authenticate and print current evidence for one exact close-done-live-no-mail invocation without closing the pane.")
     _ = parser.add_argument("--missing-target", default="", help="Exact absent target required with --reconcile-missing-target or --close-missing-target.")
     _ = parser.add_argument("--reconcile-long-running-human-index", action="store_true", help="Move one unchanged long_running task with exact human blocker from TODO current to human pending without changing task or pane state.")
     _ = parser.add_argument("--reconcile-blocked-index", action="store_true", help="Move one digest-bound v1 blocked worker with an open queue from TODO previous or low priority to human pending without changing task or pane state.")
@@ -374,8 +383,8 @@ shutdown.""",
         parsed.manager_consumed_report_receipt,
         parsed.manager_consumed_report_receipt_sha256.strip(),
     )
-    if any(consumed_receipt) and (not all(consumed_receipt) or not parsed.close_done_live_no_mail):
-        parser.error("manager-consumed report evidence requires both receipt arguments with --close-done-live-no-mail.")
+    if any(consumed_receipt) and (not all(consumed_receipt) or not (parsed.close_done_live_no_mail or parsed.describe_done_live_no_mail)):
+        parser.error("manager-consumed report evidence requires both receipt arguments with a done-live no-mail operation.")
     human_close_authority = (
         parsed.human_close_authorization_source.strip(),
         parsed.human_close_authorization_sha256.strip(),
@@ -388,13 +397,13 @@ shutdown.""",
         parser.error("--closure-repository must be an explicit absolute Git worktree root.")
     if parsed.dirty_path_handoff is not None and parsed.closure_repository is None:
         parser.error("--dirty-path-handoff requires --closure-repository.")
-    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.reattest_park_unlinked, parsed.retire_blocked_target, parsed.reconcile_missing_target, parsed.close_missing_target, parsed.complete_live_no_mail, parsed.close_active_task_tree_no_mail, parsed.close_done_live_no_mail, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.cancel_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current)) > 1:
+    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.reattest_park_unlinked, parsed.retire_blocked_target, parsed.reconcile_missing_target, parsed.close_missing_target, parsed.complete_live_no_mail, parsed.close_active_task_tree_no_mail, parsed.close_done_live_no_mail, parsed.describe_done_live_no_mail, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.cancel_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current)) > 1:
         parser.error("finish and recovery modes are mutually exclusive.")
     if any((parsed.protected_shared_task, parsed.protected_shared_sha256)) and not (parsed.cancel_shared_target or parsed.close_active_task_tree_no_mail):
         parser.error("protected shared-task assertions require --cancel-shared-target or --close-active-task-tree-no-mail.")
-    if parsed.active_target and not (parsed.normalize_low_priority_current or parsed.complete_live_no_mail or parsed.close_done_live_no_mail):
+    if parsed.active_target and not (parsed.normalize_low_priority_current or parsed.complete_live_no_mail or parsed.close_done_live_no_mail or parsed.describe_done_live_no_mail):
         parser.error("--active-target requires a live no-mail or low-priority normalization mode.")
-    if parsed.manager_target and not (parsed.normalize_low_priority_current or parsed.complete_live_no_mail or parsed.close_done_live_no_mail):
+    if parsed.manager_target and not (parsed.normalize_low_priority_current or parsed.complete_live_no_mail or parsed.close_done_live_no_mail or parsed.describe_done_live_no_mail):
         parser.error("--manager-target requires a live no-mail or low-priority normalization mode.")
     if parsed.no_mail_intent and not parsed.close_active_task_tree_no_mail:
         parser.error("--no-mail-intent is only valid with --close-active-task-tree-no-mail.")
@@ -681,6 +690,48 @@ shutdown.""",
         if active_target.partition(":")[0].startswith("h") or manager_target.partition(":")[0].startswith("h"):
             parser.error("--normalize-low-priority-current cannot modify a human-owned `h*` target.")
         return Args(parsed.root.resolve(), parsed.task_file, "", "", normalize_low_priority_current=True, active_target=active_target, manager_target=manager_target, source_sha256=parsed.source_sha256.strip())
+    if parsed.describe_done_live_no_mail:
+        unrelated = (
+            parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task,
+            parsed.stale_target, parsed.replacement_target, parsed.stale_sha256,
+            parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target,
+            parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output,
+            parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository,
+            parsed.dirty_path_handoff, parsed.historical_target, parsed.task_sha256,
+            parsed.historical_commit, parsed.shared_target, parsed.protected_shared_task,
+            parsed.protected_shared_sha256, parsed.source_sha256,
+            parsed.human_close_authorization_source, parsed.human_close_authorization_sha256,
+            parsed.expected_task_sha256, parsed.expected_todo_sha256,
+            parsed.expected_receipt_sha256, parsed.expected_pane_id,
+            parsed.expected_pane_pid, parsed.expected_pane_start_ticks,
+            parsed.expected_session_id, parsed.authority_file, parsed.authority_lines,
+            parsed.authority_sha256, parsed.authority_envelope,
+            parsed.authority_envelope_sha256, parsed.missing_target,
+        )
+        active_target = parsed.active_target.strip()
+        manager_target = parsed.manager_target.strip()
+        receipt_path = parsed.manager_consumed_report_receipt
+        receipt_sha256 = parsed.manager_consumed_report_receipt_sha256.strip()
+        if (
+            any(unrelated)
+            or TARGET_RE.fullmatch(active_target) is None
+            or TARGET_RE.fullmatch(manager_target) is None
+            or active_target.partition(":")[0].startswith("h")
+            or manager_target.partition(":")[0].startswith("h")
+            or same_tmux_target(active_target, manager_target)
+            or receipt_path is None
+            or not receipt_path.is_absolute()
+            or SHA256_RE.fullmatch(receipt_sha256) is None
+        ):
+            parser.error("--describe-done-live-no-mail requires exact non-human owner/manager and an exported manager-consumed report with its lowercase SHA-256.")
+        return Args(
+            parsed.root.resolve(), parsed.task_file, "", "",
+            describe_done_live_no_mail=True,
+            active_target=active_target,
+            manager_target=manager_target,
+            manager_consumed_report_receipt=receipt_path.resolve(),
+            manager_consumed_report_receipt_sha256=receipt_sha256,
+        )
     if parsed.close_done_live_no_mail:
         unrelated = (
             parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task,
@@ -4832,7 +4883,11 @@ def validate_report_transaction_evidence(record: object, *, expected_task: Path,
     return message
 
 
-def validate_manager_consumed_report(args: Args, path: Path) -> bool:
+def validate_manager_consumed_report(
+    args: Args,
+    path: Path,
+    prevalidated_attestation: dict[str, object] | None = None,
+) -> bool:
     """Validate the exceptional manager-consumed terminal-report compatibility receipt."""
 
     receipt_path = args.manager_consumed_report_receipt
@@ -4843,6 +4898,26 @@ def validate_manager_consumed_report(args: Args, path: Path) -> bool:
         loaded: object = json.loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise TaskFrontmatterError("manager-consumed report receipt is not canonical JSON.") from exc
+    if isinstance(loaded, dict) and loaded.get("schema") == "omo-report-consumed-export/v1":
+        if prevalidated_attestation is None:
+            try:
+                attestation = validate_consumed_closure_export_file(receipt_path, args.manager_consumed_report_receipt_sha256)
+            except ReceiptError as exc:
+                raise TaskFrontmatterError(f"manager-consumed report export is invalid: {exc}") from exc
+        elif loaded.get("attestation") != prevalidated_attestation:
+            raise TaskFrontmatterError("manager-consumed report export changed after strict validation.")
+        else:
+            try:
+                attestation = validate_consumed_closure_export_file(
+                    receipt_path,
+                    args.manager_consumed_report_receipt_sha256,
+                )
+            except ReceiptError as exc:
+                raise TaskFrontmatterError(f"manager-consumed report export is invalid: {exc}") from exc
+            if attestation != prevalidated_attestation:
+                raise TaskFrontmatterError("manager-consumed report transaction changed after strict validation.")
+        validate_consumed_closure_attestation(args, path, attestation)
+        return True
     if not isinstance(loaded, dict) or set(loaded) != DONE_LIVE_CONSUMED_RECEIPT_KEYS:
         raise TaskFrontmatterError("manager-consumed report receipt schema is invalid.")
     receipt = loaded
@@ -4925,6 +5000,317 @@ def validate_manager_consumed_report(args: Args, path: Path) -> bool:
     return True
 
 
+def validate_consumed_closure_attestation(
+    args: Args,
+    path: Path,
+    attestation: dict[str, object],
+) -> None:
+    """Bind a strictly revalidated consumed export to this exact close."""
+
+    _ = bound_json_id(attestation, "attestation_id")
+    transfer = attestation.get("transfer_receipt")
+    input_info = attestation.get("input")
+    if (
+        not isinstance(transfer, dict)
+        or not isinstance(input_info, dict)
+        or set(input_info) != {"sha256", "size_bytes"}
+    ):
+        raise TaskFrontmatterError("manager-consumed report attestation is malformed.")
+    authority = transfer.get("authority")
+    queue_item = transfer.get("queue_item")
+    routing = transfer.get("routing")
+    manager_path = Path(str(transfer.get("receiver", "")))
+    if (
+        attestation.get("accepted") is not False
+        or attestation.get("terminal") is not True
+        or attestation.get("status") != "done"
+        or attestation.get("reason") != "manager watcher consumed report; acceptance receipt unavailable"
+        or attestation.get("recovery_residue") != []
+        or args.terminal_evidence != attestation.get("attestation_id")
+        or not isinstance(authority, dict)
+        or not isinstance(queue_item, dict)
+        or authority.get("kind") != "agent-originated"
+        or authority.get("source_task") != str(path)
+        or authority.get("producer_target") != args.active_target
+        or not isinstance(routing, dict)
+        or routing.get("task") != str(path)
+        or routing.get("producer_target") != args.active_target
+        or routing.get("requested_manager_target") != args.manager_target
+        or routing.get("resolved_manager_target") != args.manager_target
+        or routing.get("manager") != str(manager_path)
+    ):
+        raise TaskFrontmatterError("manager-consumed report attestation binding is inconsistent.")
+    try:
+        manager_text = owned_regular_text_beneath(args.root, manager_path, "manager route")
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise TaskFrontmatterError("manager-consumed report manager route is unavailable.") from exc
+    manager_metadata = parse_task_metadata(manager_text, args.root)
+    pointer = queue_item.get("pointer")
+    if (
+        not isinstance(pointer, str)
+        or not pointer
+        or pointer in manager_text
+        or manager_metadata is None
+        or not manager_metadata.is_manager
+        or manager_metadata.runat != args.manager_target
+    ):
+        raise TaskFrontmatterError("manager-consumed report attestation transaction is inconsistent.")
+
+
+def consumed_attestation_manager_path(root: Path, attestation: dict[str, object]) -> Path:
+    """Return the exact root-contained manager path bound by a strict attestation."""
+
+    transfer = attestation.get("transfer_receipt")
+    manager_path = Path(str(transfer.get("receiver", ""))) if isinstance(transfer, dict) else Path("")
+    try:
+        manager_path.relative_to(root)
+    except ValueError as exc:
+        raise TaskFrontmatterError("manager-consumed report manager route escapes the task root.") from exc
+    if not manager_path.is_absolute() or manager_path == root:
+        raise TaskFrontmatterError("manager-consumed report manager route is invalid.")
+    return manager_path
+
+
+def prevalidate_manager_consumed_export(
+    args: Args,
+    path: Path,
+    *,
+    infer_terminal_evidence: bool = False,
+) -> tuple[dict[str, object] | None, Path | None]:
+    """Strictly validate an export before taking its authenticated manager lock."""
+
+    receipt_path = args.manager_consumed_report_receipt
+    if receipt_path is None:
+        return None, None
+    payload = private_evidence_bytes(receipt_path, args.manager_consumed_report_receipt_sha256, "receipt")
+    try:
+        loaded: object = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TaskFrontmatterError("manager-consumed report receipt is not canonical JSON.") from exc
+    if not isinstance(loaded, dict) or loaded.get("schema") != "omo-report-consumed-export/v1":
+        return None, None
+    try:
+        attestation = validate_consumed_closure_export_file(
+            receipt_path,
+            args.manager_consumed_report_receipt_sha256,
+        )
+    except ReceiptError as exc:
+        raise TaskFrontmatterError(f"manager-consumed report export is invalid: {exc}") from exc
+    bound_args = (
+        replace(args, terminal_evidence=bound_json_id(attestation, "attestation_id"))
+        if infer_terminal_evidence
+        else args
+    )
+    validate_consumed_closure_attestation(bound_args, path, attestation)
+    return attestation, consumed_attestation_manager_path(args.root, attestation)
+
+
+def owned_regular_text_beneath(root: Path, path: Path, field: str) -> str:
+    """Read one stable owned file through a no-symlink root-relative descriptor chain."""
+
+    if not root.is_absolute() or not path.is_absolute():
+        raise TaskFrontmatterError(f"manager-consumed report {field} path is not absolute.")
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise TaskFrontmatterError(f"manager-consumed report {field} escapes the task root.") from exc
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise TaskFrontmatterError(f"manager-consumed report {field} path is invalid.")
+    base_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_flags = base_flags | getattr(os, "O_DIRECTORY", 0)
+    descriptors: list[int] = []
+    directory_identities: list[tuple[Path, os.stat_result]] = []
+    try:
+        parent_fd = os.open(root, directory_flags)
+        descriptors.append(parent_fd)
+        root_info = os.fstat(parent_fd)
+        if not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != os.getuid():
+            raise TaskFrontmatterError(f"manager-consumed report {field} root is not a safe owned directory.")
+        directory_identities.append((root, root_info))
+        lexical_parent = root
+        for component in relative.parts[:-1]:
+            parent_fd = os.open(component, directory_flags, dir_fd=parent_fd)
+            descriptors.append(parent_fd)
+            directory_info = os.fstat(parent_fd)
+            if not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != os.getuid():
+                raise TaskFrontmatterError(f"manager-consumed report {field} parent is not a safe owned directory.")
+            lexical_parent /= component
+            directory_identities.append((lexical_parent, directory_info))
+        fd = os.open(relative.parts[-1], base_flags, dir_fd=parent_fd)
+        descriptors.append(fd)
+        before = os.fstat(fd)
+        result = os.read(fd, MAX_AUTHORITY_BYTES + 1)
+        after = os.fstat(fd)
+        current = os.stat(path, follow_symlinks=False)
+        current_directories = [
+            (opened, os.stat(lexical, follow_symlinks=False))
+            for lexical, opened in directory_identities
+        ]
+    except OSError as exc:
+        raise TaskFrontmatterError(f"manager-consumed report {field} is unavailable: {exc}") from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or before.st_nlink != 1
+        or not same_file_state(before, after)
+        or (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino)
+        or not stat.S_ISREG(current.st_mode)
+        or current.st_uid != os.getuid()
+        or current.st_nlink != 1
+        or any(
+            (opened.st_dev, opened.st_ino) != (observed.st_dev, observed.st_ino)
+            or not stat.S_ISDIR(observed.st_mode)
+            or observed.st_uid != os.getuid()
+            for opened, observed in current_directories
+        )
+        or len(result) != before.st_size
+        or len(result) > MAX_AUTHORITY_BYTES
+    ):
+        raise TaskFrontmatterError(f"manager-consumed report {field} changed or is not a safe owned regular file.")
+    try:
+        return result.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise TaskFrontmatterError(f"manager-consumed report {field} is not UTF-8.") from exc
+
+
+def describe_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_result) -> dict[str, object]:
+    """Collect one fresh, guarded close invocation without closing the pane."""
+
+    receipt_path = args.manager_consumed_report_receipt
+    if (
+        args.status
+        or not args.describe_done_live_no_mail
+        or args.close_done_live_no_mail
+        or TARGET_RE.fullmatch(args.active_target) is None
+        or TARGET_RE.fullmatch(args.manager_target) is None
+        or args.active_target.partition(":")[0].startswith("h")
+        or args.manager_target.partition(":")[0].startswith("h")
+        or same_tmux_target(args.active_target, args.manager_target)
+        or any(
+            (
+                args.expected_task_sha256,
+                args.expected_todo_sha256,
+                args.expected_pane_id,
+                args.expected_pane_pid,
+                args.expected_pane_start_ticks,
+                args.expected_session_id,
+                args.terminal_evidence,
+                args.audit_output,
+            )
+        )
+        or receipt_path is None
+        or SHA256_RE.fullmatch(args.manager_consumed_report_receipt_sha256) is None
+    ):
+        raise TaskFrontmatterError("done-live evidence arguments do not satisfy the exact no-mail recovery contract.")
+    todo = args.root / "TODO.md"
+    if path == todo or not todo.is_file():
+        raise TaskFrontmatterError("done-live evidence requires distinct task and TODO files.")
+    prevalidated_attestation, manager_path = prevalidate_manager_consumed_export(
+        replace(args, status="done"),
+        path,
+        infer_terminal_evidence=True,
+    )
+    if prevalidated_attestation is None or manager_path is None:
+        raise TaskFrontmatterError("done-live evidence requires one exported consumed-closure attestation.")
+    terminal_evidence = bound_json_id(prevalidated_attestation, "attestation_id")
+    with root_membership_lock(args.root), task_target_lock(args.root, args.active_target):
+        with ExitStack() as locks:
+            for locked_path in sorted({path, todo, manager_path}, key=str):
+                locks.enter_context(task_file_lock(locked_path))
+            current_before = path.stat()
+            current_text = path.read_text(encoding="utf-8")
+            todo_before = todo.stat()
+            todo_text = todo.read_text(encoding="utf-8")
+            if not same_file_state(before, current_before) or current_text != text:
+                raise TaskFrontmatterError("done-live evidence task changed while the operation was being prepared; retry.")
+            task_sha256 = hashlib.sha256(current_text.encode()).hexdigest()
+            todo_sha256 = hashlib.sha256(todo_text.encode()).hexdigest()
+            pane = park_target_pane_id(args.active_target)
+            if pane is None or re.fullmatch(r"%[0-9]+", pane) is None:
+                raise TaskFrontmatterError("done-live evidence could not obtain one exact live pane.")
+            try:
+                process_record = bound_guarded_read(
+                    args.active_target,
+                    pane,
+                    ["display-message", "-p", "-t", pane, "#{pane_id}\t#{pane_pid}"],
+                ).strip()
+                observed_pane, separator, raw_pid = process_record.partition("\t")
+                pane_pid = int(raw_pid) if separator and raw_pid.isdecimal() else 0
+            except (RuntimeError, ValueError) as exc:
+                raise TaskFrontmatterError(f"done-live evidence pane process is unavailable: {exc}") from exc
+            pane_start_ticks = process_start_ticks(pane_pid)
+            if observed_pane != pane or pane_pid <= 1 or pane_start_ticks is None:
+                raise TaskFrontmatterError("done-live evidence pane process identity is invalid.")
+            bound_args = replace(
+                args,
+                status="done",
+                expected_task_sha256=task_sha256,
+                expected_todo_sha256=todo_sha256,
+                expected_pane_id=pane,
+                expected_pane_pid=pane_pid,
+                expected_pane_start_ticks=pane_start_ticks,
+                terminal_evidence=terminal_evidence,
+            )
+
+            def evidence_is_current() -> None:
+                if (
+                    path.read_text(encoding="utf-8") != current_text
+                    or not same_file_state(current_before, path.stat())
+                    or todo.read_text(encoding="utf-8") != todo_text
+                    or not same_file_state(todo_before, todo.stat())
+                    or park_target_pane_id(args.active_target) != pane
+                    or pane_id(pane) != pane
+                    or process_start_ticks(pane_pid) != pane_start_ticks
+                ):
+                    raise TaskFrontmatterError("done-live evidence changed during guarded collection; retry.")
+                validate_done_live_task(bound_args, current_text, None)
+                validate_done_live_todo(args.root, path, todo_text, args.active_target)
+                validate_done_live_ownership(args.root, path, args.active_target)
+                _ = validate_manager_consumed_report(bound_args, path, prevalidated_attestation)
+
+            evidence_is_current()
+            try:
+                capture_text = guarded_capture(pane, 2000, (args.active_target, pane), pane_pid)
+                report = report_from_lines([line.rstrip() for line in capture_text.splitlines()])
+                if report.status != "ready":
+                    raise TaskFrontmatterError(f"done-live evidence requires a ready Codex pane, found {report.status}.")
+                session_id, _response = query_status_session_id(
+                    pane,
+                    2000,
+                    10.0,
+                    tmux_guard=(args.active_target, pane),
+                    strict_status_response=True,
+                    expected_pane_pid=pane_pid,
+                    pre_input_check=evidence_is_current,
+                )
+            except RuntimeError as exc:
+                raise TaskFrontmatterError(f"done-live evidence session query failed: {exc}") from exc
+            if CODEX_SESSION_RE.fullmatch(session_id) is None:
+                raise TaskFrontmatterError("done-live evidence did not receive one exact current Codex session.")
+            bound_args = replace(bound_args, expected_session_id=session_id.lower())
+            evidence_is_current()
+            record: dict[str, object] = {
+                "manager_consumed_report_receipt": str(receipt_path),
+                "manager_consumed_report_receipt_sha256": args.manager_consumed_report_receipt_sha256,
+                "manager_target": args.manager_target,
+                "pane_id": pane,
+                "pane_pid": pane_pid,
+                "pane_start_ticks": pane_start_ticks,
+                "schema": "omo-done-live-close-evidence/v1",
+                "session_id": session_id.lower(),
+                "target": args.active_target,
+                "task": relative_task_ref(args.root, path),
+                "task_sha256": task_sha256,
+                "terminal_evidence": terminal_evidence,
+                "todo_sha256": todo_sha256,
+            }
+            evidence_id = hashlib.sha256(json.dumps(record, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            return {**record, "evidence_id": evidence_id}
+
+
 def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_result) -> tuple[str, str]:
     """Close one already-done live worker without mail or lifecycle reopening."""
 
@@ -4937,6 +5323,7 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
         args.reconcile_blocked_index, args.restore_terminal_target,
         args.close_shared_target, args.cancel_shared_target, args.close_retired_done,
         args.normalize_retired_todo, args.normalize_low_priority_current,
+        args.describe_done_live_no_mail,
     )
     if (
         args.status != "done"
@@ -4969,9 +5356,13 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
         raise TaskFrontmatterError("done-live close requires distinct task, TODO, and private audit files.")
     proof_path = audit_path.with_name(f".{audit_path.name}.owner-stopped")
     started_path = done_live_close_started_path(audit_path)
+    prevalidated_attestation, manager_path = prevalidate_manager_consumed_export(args, path)
+    locked_paths = {path, todo}
+    if manager_path is not None:
+        locked_paths.add(manager_path)
     with root_membership_lock(args.root), task_target_lock(args.root, args.active_target):
         with ExitStack() as locks:
-            for locked_path in sorted({path, todo}, key=str):
+            for locked_path in sorted(locked_paths, key=str):
                 locks.enter_context(task_file_lock(locked_path))
             current_before = path.stat()
             current_text = path.read_text(encoding="utf-8")
@@ -4981,6 +5372,7 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                 raise TaskFrontmatterError("done-live close task changed while the operation was being prepared; retry.")
             if hashlib.sha256(todo_text.encode()).hexdigest() != args.expected_todo_sha256:
                 raise TaskFrontmatterError("done-live close TODO bytes do not match --expected-todo-sha256.")
+            manager_consumed = validate_manager_consumed_report(args, path, prevalidated_attestation)
             audit_text = read_private_audit(audit_path)
             audit = parse_done_live_close_audit(args, path, audit_text) if audit_text is not None else None
             validate_done_live_task(args, current_text, audit)
@@ -4996,7 +5388,6 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                 reserve_private_audit(audit_path, audit_text)
             assert audit is not None and audit_text is not None
             close_audit = audit
-            manager_consumed = validate_manager_consumed_report(args, path)
             if close_audit.manager_consumed_receipt_sha256 and (
                 not manager_consumed
                 or close_audit.manager_consumed_receipt_sha256 != args.manager_consumed_report_receipt_sha256
@@ -5036,7 +5427,7 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                 validate_done_live_todo(args.root, path, todo_text, args.active_target)
                 validate_done_live_ownership(args.root, path, args.active_target)
                 if manager_consumed:
-                    _ = validate_manager_consumed_report(args, path)
+                    _ = validate_manager_consumed_report(args, path, prevalidated_attestation)
                 if expected_capture_sha256:
                     observed = validate_terminal_shell(
                         args.active_target,
@@ -5474,6 +5865,7 @@ def automatic_done_email_eligible(args: Args, initial_status: str | None) -> boo
             args.complete_live_no_mail,
             args.close_active_task_tree_no_mail,
             args.close_done_live_no_mail,
+            args.describe_done_live_no_mail,
         )
     )
     return args.status == "done" and not special_done and initial_status is not None and initial_status != "done"
@@ -5495,6 +5887,7 @@ def run(args: Args) -> int:
     completed_live_no_mail = False
     closed_active_task_tree_no_mail = False
     closed_done_live_no_mail = False
+    described_done_live_no_mail = False
     try:
         path = task_path(args.root, args.task_file)
         before = path.stat()
@@ -5504,7 +5897,11 @@ def run(args: Args) -> int:
             raise BlockingError("v2 task writes are disabled until reviewed migration enablement")
         if initial_metadata is not None and initial_metadata.version != V2_VERSION and v2_enabled(args.root):
             raise BlockingError("v1 task writes are disabled after v2 enablement")
-        if args.close_done_live_no_mail:
+        if args.describe_done_live_no_mail:
+            evidence = describe_done_live_no_mail(args, path, text, before)
+            print(json.dumps(evidence, sort_keys=True, separators=(",", ":")))
+            described_done_live_no_mail = True
+        elif args.close_done_live_no_mail:
             target, session_id = close_done_live_no_mail(args, path, text, before)
             closed_done_live_no_mail = True
         elif args.complete_live_no_mail:
@@ -5625,6 +6022,8 @@ def run(args: Args) -> int:
     except Exception as exc:
         print(f"omo_task_status.py: failed to close done agent: {exc}", file=sys.stderr)
         return 2
+    if described_done_live_no_mail:
+        return 0
     if args.status == "done":
         if closed_done_live_no_mail:
             print(f"Closed completed live worker {target}; session_id: {session_id}; no email or task reopening.")
