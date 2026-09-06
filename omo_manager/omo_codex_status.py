@@ -82,6 +82,7 @@ CURSOR_AGENT_COMPOSER_BOTTOM_RE = re.compile(r"^\s*▀+\s*$")
 CURSOR_AGENT_TASK_COUNT_RE = re.compile(r"^\s*[1-9]\d* tasks?\s*$")
 CURSOR_AGENT_MESSAGE_START_RE = re.compile(r'^\s*<agent_message from="[^"]+">\s*$')
 CURSOR_AGENT_MESSAGE_END_RE = re.compile(r"^\s*</agent_message>\s*$")
+CURSOR_AGENT_WAKE_PAYLOAD_RE = re.compile(r"^Read and execute PB watcher wake prompt from(?:\s|$)")
 CURSOR_FOLLOWUPS_HEADER_RE = re.compile(r"┌─ follow-ups")
 CURSOR_FOLLOWUPS_SEND_NOW_RE = re.compile(r"enter send now", re.IGNORECASE)
 TMUX_TARGET_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):(\d+)(?:\.(\d+))?$")
@@ -486,7 +487,18 @@ def is_cursor_retained_submitted_composer(lines: list[str]) -> bool:
     def normalize(value: str) -> str:
         return re.sub(r"\s+", " ", value).strip()
 
-    if normalize(current) != normalize(historical):
+    exact_match = normalize(current) == normalize(historical)
+    has_transport_suffix = re.search(r"\s*</agent_message>\s*$", current) is not None
+    current_without_transport_suffix = re.sub(r"\s*</agent_message>\s*$", "", current).rstrip()
+    blank_indices = [idx for idx in range(message_start + 1, message_end) if not lines[idx].strip()]
+    historical_payload = "\n".join(lines[blank_indices[-1] + 1 : message_end]) if blank_indices else ""
+    transport_match = bool(
+        has_transport_suffix
+        and historical_payload
+        and CURSOR_AGENT_WAKE_PAYLOAD_RE.match(normalize(historical_payload)) is not None
+        and normalize(current_without_transport_suffix) == normalize(historical_payload)
+    )
+    if not exact_match and not transport_match:
         return False
     response = lines[message_end + 1 : composer_idx]
     return any(

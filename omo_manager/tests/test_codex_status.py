@@ -232,6 +232,39 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual('ready', report.status)
         self.assertFalse(report.can_submit_input)
 
+    def test_cursor_live_prefaced_wake_retained_composer_is_ready(self) -> None:
+        lines = [
+            '  <agent_message from="pb-watch-loop:0">',
+            '  Be skeptical. Verify the watcher evidence before taking action.',
+            '',
+            '  Read and execute PB watcher wake prompt from',
+            '  /tmp/pb-watcher/wake.md (sha256',
+            '  abcdef0123456789).',
+            '  </agent_message>',
+            '  Read tool completed.',
+            '  Same wake, hash matched. All eight items remain agent_handled. Waiting for',
+            '  a new wake.',
+            ' ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄',
+            '  → Read and execute PB watcher wake prompt from',
+            '    /tmp/pb-watcher/wake.md (sha256',
+            '    abcdef0123456789).',
+            '    </agent_message>',
+            ' ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀',
+            '  Cursor Grok 4.6 Low · 17.8% · 28 files edited  Run Everything',
+            '  /ssd1/sichangheagent/work_logs · main',
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual('ready', report.status)
+        self.assertFalse(report.can_submit_input)
+        changed = [line.replace('abcdef0123456789).', 'different-hash).') if line.startswith('    abcdef') else line for line in lines]
+        changed_report = report_from_lines(changed)
+        self.assertEqual('stuck_input', changed_report.status)
+        self.assertTrue(changed_report.can_submit_input)
+        no_suffix = [line for line in lines if line.strip() != '</agent_message>' or not line.startswith('    ')]
+        no_suffix_report = report_from_lines(no_suffix)
+        self.assertEqual('stuck_input', no_suffix_report.status)
+        self.assertTrue(no_suffix_report.can_submit_input)
+
     def test_cursor_matching_composer_without_completed_exchange_stays_stuck_and_submit_safe(self) -> None:
         report = report_from_lines(cursor_retained_composer_lines(completed=False))
         self.assertEqual('stuck_input', report.status)
