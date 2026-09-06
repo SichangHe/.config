@@ -121,6 +121,8 @@ Cross-state completion reconciliation:
 `delegate-message WORKER.md --message-file FILE`
 - append `(pending)`, a manager source marker, and the message file content to
   a non-done worker task
+- refuse a worker task that already has a live `(pending)` marker so watcher
+  snapshots cannot combine concurrent manager instructions
 - intended for managers to dispatch new worker work without hand-editing the
   worker task file
 - does not send directly to tmux; `omo_pending_watch.py` owns delivery

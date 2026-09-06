@@ -150,7 +150,7 @@ class PendingReportDeliveryTests(unittest.TestCase):
             self.assertFalse(args.state.exists())
             self.assertIn("(pending)", task.read_text(encoding="utf-8"))
 
-    def test_async_completion_refuses_owner_bytes_changed_after_append(self) -> None:
+    def test_async_completion_removes_only_authenticated_pointer_after_owner_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report = valid_report(self, "worker_done_move", "line movement is safe\n")
@@ -173,7 +173,7 @@ class PendingReportDeliveryTests(unittest.TestCase):
             self.assertTrue(watcher.drain_delivery_successes(args, {}, 101.0))
 
             self.assertTrue(task.read_text(encoding="utf-8").startswith("moved line\n"))
-            self.assertIn("(pending)", task.read_text(encoding="utf-8"))
+            self.assertNotIn("(pending)", task.read_text(encoding="utf-8"))
             self.assertTrue(args.state.read_text(encoding="utf-8").strip())
 
     def test_clear_race_does_not_redeliver_with_fresh_seen_cache(self) -> None:
@@ -398,6 +398,29 @@ class PendingReportDeliveryTests(unittest.TestCase):
             self.assertFalse(temporary.exists())
             self.assertEqual(b"unrelated bytes", unrelated.read_bytes())
 
+    def test_report_clear_preserves_manager_bytes_added_after_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = valid_report(self, "worker_done_later_manager_bytes", "preserve later work\n")
+            task = root / "worker.md"
+            write_report_pointer(task, report)
+            later = b"\nlater manager-owned work\n"
+            task.write_bytes(task.read_bytes() + later)
+            marker = watcher.find_markers(root, [task])[0]
+            args = args_for(root)
+            report_key = watcher.agent_report_seen_key(args, marker, watcher.marker_attachments(args, marker))
+            pointer = f"(from agent vl:2 {report})".encode()
+            expected = task.read_bytes().replace(b"(pending)\n" + pointer + b"\n", b"", 1)
+
+            self.assertTrue(watcher.clear_consumed_report_marker(args, marker, report_key))
+
+            self.assertEqual(expected, task.read_bytes())
+            self.assertTrue(task.read_bytes().endswith(later))
+            transition = watcher.consumed_report_transition(args.state, report_key)
+            self.assertIsNotNone(transition)
+            assert transition is not None
+            self.assertEqual("watcher-locked-pointer-removal-transition-v2", transition[0])
+
     def test_duplicate_report_suffix_is_stale_and_never_deletes_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -406,6 +429,23 @@ class PendingReportDeliveryTests(unittest.TestCase):
             write_report_pointer(task, report)
             suffix = task.read_bytes()[task.read_bytes().index(b"\n(pending)\n") :]
             task.write_bytes(task.read_bytes() + suffix)
+            marker = watcher.find_markers(root, [task])[0]
+            args = args_for(root)
+            report_key = watcher.agent_report_seen_key(args, marker, watcher.marker_attachments(args, marker))
+            before = task.read_bytes()
+
+            self.assertFalse(watcher.clear_consumed_report_marker(args, marker, report_key))
+            self.assertEqual(before, task.read_bytes())
+            self.assertFalse(watcher_report_manager_temporary(task, report_key).exists())
+
+    def test_report_pointer_copy_outside_live_block_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = valid_report(self, "worker_done_pointer_copy", "pointer copied elsewhere\n")
+            task = root / "worker.md"
+            write_report_pointer(task, report)
+            pointer = f"(from agent vl:2 {report})"
+            task.write_text(task.read_text(encoding="utf-8") + f"\nquoted copy: {pointer}\n", encoding="utf-8")
             marker = watcher.find_markers(root, [task])[0]
             args = args_for(root)
             report_key = watcher.agent_report_seen_key(args, marker, watcher.marker_attachments(args, marker))

@@ -1029,6 +1029,49 @@ class TaskEditTests(unittest.TestCase):
             self.assertEqual(2, exit_code)
             self.assertIn("requires a worker task file", stderr.getvalue())
 
+    def test_delegate_message_rejects_second_live_pending_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "worker.md"
+            message = root / "message.md"
+            original = task_frontmatter() + "(pending)\nfirst delegation\n"
+            task.write_text(original, encoding="utf-8")
+            message.write_text("second delegation\n", encoding="utf-8")
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = run(Args(root, Path("worker.md"), "delegate-message", message_file=message))
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual(original, task.read_text(encoding="utf-8"))
+            self.assertIn("existing live `(pending)` marker", stderr.getvalue())
+
+    def test_delegate_message_ignores_pending_example_in_markdown_fence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "worker.md"
+            message = root / "message.md"
+            task.write_text(task_frontmatter() + "```md\n(pending)\n```\n", encoding="utf-8")
+            message.write_text("real delegation\n", encoding="utf-8")
+
+            exit_code = run(Args(root, Path("worker.md"), "delegate-message", message_file=message))
+
+            self.assertEqual(0, exit_code)
+            self.assertTrue(task.read_text(encoding="utf-8").endswith("(pending)\n(from manager omo_task_edit delegate-message)\nreal delegation\n"))
+
+    def test_delegate_message_ignores_manager_handled_pending_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "worker.md"
+            message = root / "message.md"
+            task.write_text(task_frontmatter() + "(pending)\n(manager handled: prior delegation)\n", encoding="utf-8")
+            message.write_text("real delegation\n", encoding="utf-8")
+
+            exit_code = run(Args(root, Path("worker.md"), "delegate-message", message_file=message))
+
+            self.assertEqual(0, exit_code)
+            self.assertTrue(task.read_text(encoding="utf-8").endswith("(pending)\n(from manager omo_task_edit delegate-message)\nreal delegation\n"))
+
     def test_aliases_parse_to_canonical_commands(self) -> None:
         self.assertEqual("pending-list", parse_args(["list", "task.md"]).command)
         self.assertEqual("pending-add", parse_args(["add", "task.md", "--item", "new"]).command)

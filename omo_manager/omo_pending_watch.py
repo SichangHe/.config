@@ -2113,7 +2113,10 @@ def live_durable_report_authority(
     source_path = Path(authority_source_path).resolve(strict=False)
     expected_source_path = Path(__file__).resolve().with_name("omo_task_lock.py")
     if (
-        protocol != "watcher-locked-pointer-transition-v1"
+        protocol not in {
+            "watcher-locked-pointer-transition-v1",
+            "watcher-locked-pointer-removal-transition-v2",
+        }
         or any(re.fullmatch(r"[0-9a-f]{64}", digest) is None for digest in (manager_digest, pointer_digest, before_digest, after_digest))
         or before_digest == after_digest
         or before_size <= after_size
@@ -2360,6 +2363,7 @@ def remember_consumed_report_transition(
     after: bytes,
     now_s: float | None = None,
     authority: ReportAuthorityEvidence | None = None,
+    protocol: str = "watcher-locked-pointer-transition-v1",
 ) -> bool:
     """Persist watcher delivery and its exact locked pointer-removal transition."""
 
@@ -2370,7 +2374,7 @@ def remember_consumed_report_transition(
             print(f"omo_pending_watch: failed to establish report authority {key}: {exc}", file=sys.stderr)
             return False
     transition = (
-        "watcher-locked-pointer-transition-v1",
+        protocol,
         hashlib.sha256(str(manager.resolve(strict=False)).encode()).hexdigest(),
         hashlib.sha256(pointer.encode()).hexdigest(),
         hashlib.sha256(before).hexdigest(),
@@ -3196,21 +3200,29 @@ def clear_consumed_report_marker(
             finally:
                 os.close(fd)
             owner = payload[: binding.size_bytes]
-            if len(owner) != binding.size_bytes or hashlib.sha256(owner).hexdigest() != binding.owner_sha256:
-                return False
-            expected_separator_bytes = 1 if not owner or owner.endswith(b"\n") else 2
-            if binding.separator_bytes != expected_separator_bytes:
-                return False
             suffix = b"\n" * binding.separator_bytes + b"(pending)\n" + pointer.encode("utf-8") + b"\n"
-            if payload != owner + suffix:
-                return False
+            owner_is_bound = (
+                len(owner) == binding.size_bytes
+                and hashlib.sha256(owner).hexdigest() == binding.owner_sha256
+                and binding.separator_bytes == (1 if not owner or owner.endswith(b"\n") else 2)
+            )
+            if owner_is_bound and payload == owner + suffix:
+                replacement = owner
+                transition_protocol = "watcher-locked-pointer-transition-v1"
+            else:
+                pointer_bytes = pointer.encode("utf-8")
+                pointer_block = b"(pending)\n" + pointer_bytes + b"\n"
+                if payload.count(pointer_bytes) != 1 or payload.count(pointer_block) != 1:
+                    return False
+                replacement = payload.replace(pointer_block, b"", 1)
+                transition_protocol = "watcher-locked-pointer-removal-transition-v2"
 
             temporary_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
             temporary_fd = os.open(tmp_path, temporary_flags, 0o600)
             created_temporary = True
             try:
                 os.fchmod(temporary_fd, stat.S_IMODE(before.st_mode))
-                view = memoryview(owner)
+                view = memoryview(replacement)
                 while view:
                     written = os.write(temporary_fd, view)
                     if written <= 0:
@@ -3242,8 +3254,9 @@ def clear_consumed_report_marker(
                 path,
                 pointer,
                 payload,
-                owner,
+                replacement,
                 authority=authority,
+                protocol=transition_protocol,
             ):
                 return False
             current = path.lstat()
@@ -3264,7 +3277,7 @@ def clear_consumed_report_marker(
                 os.close(directory_fd)
             restored = path.lstat()
             if (
-                path.read_bytes() != owner
+                path.read_bytes() != replacement
                 or restored.st_uid != before.st_uid
                 or restored.st_gid != before.st_gid
                 or stat.S_IMODE(restored.st_mode) != stat.S_IMODE(before.st_mode)
@@ -5685,7 +5698,11 @@ def terminal_consumed_handoff_attestation(transition: tuple[str, ...]) -> bool:
     except ValueError:
         return False
     return (
-        protocol == "watcher-locked-pointer-transition-v1"
+        protocol
+        in {
+            "watcher-locked-pointer-transition-v1",
+            "watcher-locked-pointer-removal-transition-v2",
+        }
         and authority_protocol == "watcher-consumption-authority-v1"
         and authority_role == "bounded-watcher-lease"
         and all(re.fullmatch(r"[0-9a-f]{64}", digest) is not None for digest in digests)

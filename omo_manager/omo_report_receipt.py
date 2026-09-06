@@ -1763,6 +1763,26 @@ def appended_manager_size(plan: Plan) -> int:
     return plan.owner_prefix.size_bytes + plan.owner_prefix.separator_bytes + len(b"(pending)\n") + len(plan.pointer.encode("utf-8")) + 1
 
 
+def valid_manager_transition_shape(
+    plan: Plan,
+    *,
+    protocol: str,
+    before_size: int,
+    after_size: int,
+    after_digest: str,
+) -> bool:
+    if protocol == "watcher-locked-pointer-transition-v1":
+        return (
+            before_size == appended_manager_size(plan)
+            and after_size == plan.owner_prefix.size_bytes
+            and after_digest == plan.owner_prefix.sha256
+        )
+    if protocol == "watcher-locked-pointer-removal-transition-v2":
+        pointer_block_size = len(b"(pending)\n") + len(plan.pointer.encode("utf-8")) + 1
+        return after_size >= 0 and before_size == after_size + pointer_block_size
+    return False
+
+
 def replace_manager(plan: Plan, current: bytes, replacement: bytes) -> None:
     require_absent(plan.manager_temporary, "manager temporary file")
     if validate_optional_regular(plan.manager, "manager"):
@@ -2096,8 +2116,7 @@ def validate_receipt_bytes(
     before_size = transition.get("before_size_bytes")
     after_size = transition.get("after_size_bytes")
     if (
-        transition.get("protocol") != "watcher-locked-pointer-transition-v1"
-        or transition.get("manager_path_sha256") != expected_manager_digest
+        transition.get("manager_path_sha256") != expected_manager_digest
         or transition.get("pointer_sha256") != expected_pointer_digest
         or not isinstance(before_digest, str)
         or HASH_RE.fullmatch(before_digest) is None
@@ -2108,9 +2127,13 @@ def validate_receipt_bytes(
         or isinstance(before_size, bool)
         or not isinstance(after_size, int)
         or isinstance(after_size, bool)
-        or before_size != appended_manager_size(plan)
-        or after_size != plan.owner_prefix.size_bytes
-        or after_digest != plan.owner_prefix.sha256
+        or not valid_manager_transition_shape(
+            plan,
+            protocol=str(transition.get("protocol")),
+            before_size=before_size,
+            after_size=after_size,
+            after_digest=after_digest,
+        )
     ):
         raise ReceiptError("durable receipt manager transition is inconsistent")
     entry_fields = [
@@ -2453,17 +2476,24 @@ def read_manager_acknowledgment(plan: Plan, *, require_live_authority: bool = Tr
         if not math.isfinite(timestamp_s) or timestamp_s <= 0:
             raise ReceiptError("manager acknowledgment time is invalid")
         if (
-            protocol != "watcher-locked-pointer-transition-v1"
-            or manager_digest != hashlib.sha256(str(plan.manager).encode()).hexdigest()
+            manager_digest != hashlib.sha256(str(plan.manager).encode()).hexdigest()
             or pointer_digest != hashlib.sha256(plan.pointer.encode()).hexdigest()
             or HASH_RE.fullmatch(before_digest) is None
             or HASH_RE.fullmatch(after_digest) is None
             or before_digest == after_digest
-            or before_size != appended_manager_size(plan)
-            or after_size != plan.owner_prefix.size_bytes
-            or after_digest != plan.owner_prefix.sha256
+            or not valid_manager_transition_shape(
+                plan,
+                protocol=protocol,
+                before_size=before_size,
+                after_size=after_size,
+                after_digest=after_digest,
+            )
         ):
             raise ReceiptError("manager acknowledgment transition is inconsistent")
+        if protocol == "watcher-locked-pointer-removal-transition-v2":
+            current_manager = manager_bytes(plan.manager)
+            if len(current_manager) != after_size or hashlib.sha256(current_manager).hexdigest() != after_digest:
+                raise ReceiptError("manager acknowledgment removal post-state changed")
         if authority_protocol != "watcher-consumption-authority-v1":
             raise ReceiptError("manager acknowledgment authority protocol is inconsistent")
         authority = verify_manager_acknowledgment_authority(

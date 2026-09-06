@@ -40,6 +40,7 @@ CLEAR_KINDS = {"cancelled", "duplicate", "existing-owner-item", "report-only", "
 EMAIL_SOURCE_PREFIXES = ("(record and delegate ", "(from email ", "[source: email ")
 AGENT_SOURCE_PREFIXES = ("[omo-message-source: origin=agent ", "(from agent ")
 MANAGER_SOURCE_PREFIXES = ("(from manager ",)
+ROUTED_PENDING_PREFIXES = ("(manager handled:",)
 
 COMMAND_ALIASES = {
     "list": "pending-list",
@@ -801,10 +802,28 @@ def append_delegate_message(text: str, message: str) -> str:
         raise TaskFrontmatterError("task is already done; do not delegate new messages to done tasks.")
     if metadata.is_manager:
         raise TaskFrontmatterError("delegate-message requires a worker task file, not a manager task file.")
+    if has_live_pending_marker(text):
+        raise TaskFrontmatterError("delegate-message requires the existing live `(pending)` marker to be consumed first.")
     newline = preferred_newline(text)
     separator = "" if not text or text.endswith("\n") else newline
     message_text = message if message.endswith("\n") else f"{message}{newline}"
     return f"{text}{separator}{PENDING_MARKER}{newline}(from manager omo_task_edit delegate-message){newline}{message_text}"
+
+
+def has_live_pending_marker(text: str) -> bool:
+    """Find a pending marker outside Markdown fences."""
+
+    in_fence = False
+    lines = text.splitlines()
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            in_fence = not in_fence
+        elif not in_fence and stripped == PENDING_MARKER:
+            next_line = lines[idx + 1].strip() if idx + 1 < len(lines) else ""
+            if not next_line.startswith(ROUTED_PENDING_PREFIXES):
+                return True
+    return False
 
 
 def write_if_changed(path: Path, text: str, updated: str, before: os.stat_result) -> None:

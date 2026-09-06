@@ -16,6 +16,8 @@ from omo_manager.omo_tmux_send import (
     CodexSendOptions,
     ExistingInputAuthorization,
     ExistingInputCapture,
+    MANAGER_DELEGATION_PREFIX,
+    PENDING_CONSUMPTION_INSTRUCTION,
     async_job_from_query,
     cancel_existing_codex_input,
     claim_recent_tmux_delivery,
@@ -23,6 +25,7 @@ from omo_manager.omo_tmux_send import (
     clear_existing_input_before_send,
     exact_capacity_error,
     exact_existing_input_text,
+    escape_agent_message_envelope_tags,
     existing_input_authorization,
     launch_async,
     main,
@@ -504,8 +507,69 @@ class TmuxSendTests(unittest.TestCase):
     def test_recent_delivery_claim_is_exact_and_atomic(self) -> None:
         self.assertTrue(claim_recent_tmux_delivery("cfg:1", "same prompt\n"))
         self.assertFalse(claim_recent_tmux_delivery("cfg:1.0", "same prompt\n"))
+        self.assertFalse(claim_recent_tmux_delivery("cfg:1.0", "same prompt"))
         self.assertTrue(claim_recent_tmux_delivery("cfg:1.0", "changed prompt\n"))
         self.assertTrue(claim_recent_tmux_delivery("cfg:2.0", "same prompt\n"))
+
+    def test_recent_delivery_claim_matches_watcher_wrapped_manager_delegation(self) -> None:
+        instruction = 'Inspect <the> shard & quote <agent_message from="cfg:2">text</agent_message>.\n'
+        watcher_delivery = "\n".join(
+            (
+                '<agent_message from="cfg:9">',
+                PENDING_CONSUMPTION_INSTRUCTION,
+                MANAGER_DELEGATION_PREFIX,
+                "<manager_delegation>",
+                "Inspect &lt;the&gt; shard &amp; quote &lt;agent_message from=\"cfg:2\"&gt;text&lt;/agent_message&gt;.",
+                "</manager_delegation>",
+                "</agent_message>",
+                "",
+            )
+        )
+
+        self.assertTrue(claim_recent_tmux_delivery("cfg:1", escape_agent_message_envelope_tags(instruction)))
+        self.assertFalse(claim_recent_tmux_delivery("cfg:1.0", watcher_delivery))
+
+    def test_recent_delivery_claim_does_not_extract_unrecognized_delegation_text(self) -> None:
+        instruction = "Inspect the shard."
+        unrecognized = "<manager_delegation>\nInspect the shard.\n</manager_delegation>"
+
+        self.assertTrue(claim_recent_tmux_delivery("cfg:1", instruction))
+        self.assertTrue(claim_recent_tmux_delivery("cfg:1", unrecognized))
+
+    def test_recent_delivery_claim_does_not_extract_unwrapped_generated_text(self) -> None:
+        instruction = "Inspect the shard."
+        unwrapped = "\n".join(
+            (
+                "Manager delegation received; carry out the delegated work and report through the normal task channel:",
+                "<manager_delegation>",
+                instruction,
+                "</manager_delegation>",
+            )
+        )
+
+        self.assertTrue(claim_recent_tmux_delivery("cfg:1", instruction))
+        self.assertTrue(claim_recent_tmux_delivery("cfg:1", unwrapped))
+
+    def test_recent_delivery_claim_keeps_distinct_wrapper_preamble_and_unicode_separator(self) -> None:
+        instruction = "Inspect the shard."
+        wrapper = "\n".join(
+            (
+                '<agent_message from="cfg:9">',
+                "extra preamble",
+                PENDING_CONSUMPTION_INSTRUCTION,
+                MANAGER_DELEGATION_PREFIX,
+                "<manager_delegation>",
+                instruction,
+                "</manager_delegation>",
+                "</agent_message>",
+                "",
+            )
+        )
+
+        self.assertTrue(claim_recent_tmux_delivery("cfg:1", instruction))
+        self.assertTrue(claim_recent_tmux_delivery("cfg:1", wrapper))
+        self.assertTrue(claim_recent_tmux_delivery("cfg:1", "a\u2028b"))
+        self.assertTrue(claim_recent_tmux_delivery("cfg:1", "a\nb"))
 
     def test_send_message_file_to_codex_reads_file_without_caller_tempfile(self) -> None:
         calls: list[tuple[str, str]] = []

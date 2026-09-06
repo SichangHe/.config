@@ -2314,6 +2314,50 @@ return 75
             self.assertNotIn(body.decode().strip(), verified.stdout + verified.stderr)
             self.assertNotIn(str(draft), verified.stdout + verified.stderr)
 
+    def test_consumed_closure_accepts_authenticated_pointer_removal_after_manager_growth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, _owner = active_manager_fixture(tmp_path)
+            body = f"report consumed after manager growth {tmp}\n".encode()
+            draft = allocate_report_draft(case, body)
+            self.addCleanup(draft.unlink, missing_ok=True)
+            report = copy_report_helper(tmp_path)
+            described = run_report_from(case, draft, describe=True, status="blocked", report=report)
+            self.assertEqual(0, described.returncode, described.stderr)
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            pending = run_report_from(case, draft, status="blocked", report=report)
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            self.assertFalse(json.loads(pending.stdout)["accepted"])
+            manager.write_bytes(manager.read_bytes() + b"\nlater manager-owned work\n")
+
+            watched = run_manager_watcher_once(case, manager)
+            self.assertEqual(0, watched.returncode, watched.stderr)
+            self.assertNotIn("(pending)", manager.read_text(encoding="utf-8"))
+            self.assertTrue(manager.read_bytes().endswith(b"\nlater manager-owned work\n"))
+
+            verified = run_report_from(
+                case,
+                draft,
+                verify_consumed=True,
+                status="blocked",
+                report=report,
+            )
+            self.assertEqual(0, verified.returncode, verified.stderr)
+            attestation = json.loads(verified.stdout)
+            self.assertEqual("omo-report-consumed-closure/v1", attestation["schema"])
+            self.assertTrue(attestation["terminal"])
+
+            manager.write_bytes(manager.read_bytes() + b"post-consumption rewrite\n")
+            changed_post_state = run_report_from(
+                case,
+                draft,
+                verify_consumed=True,
+                status="blocked",
+                report=report,
+            )
+            self.assertNotEqual(0, changed_post_state.returncode)
+            self.assertIn("manager acknowledgment removal post-state changed", changed_post_state.stderr)
+
     def test_active_manager_concurrent_same_draft_retries_are_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             case, manager, owner = active_manager_fixture(Path(tmp))
