@@ -1,46 +1,52 @@
 #!/usr/bin/env python3
+import sys
+from http.client import HTTPException
 from os import environ, fsync, getuid, unlink
 from pathlib import Path
+from re import fullmatch
 from stat import S_IMODE, S_ISDIR, S_ISREG
 from tempfile import NamedTemporaryFile, gettempdir
-from types import SimpleNamespace
+from typing import NamedTuple
+from urllib.error import HTTPError, URLError
+from urllib.request import urlopen
 
-try:
-    from requests import RequestException, get
-except ModuleNotFoundError as exc:
-    if exc.name != "requests":
-        raise
 
-    from http.client import HTTPException
-    from urllib.error import HTTPError, URLError
-    from urllib.request import urlopen
+class RequestException(Exception):
+    pass
 
-    class RequestException(Exception):
-        pass
 
-    def get(url: str, timeout: int):
+class Response(NamedTuple):
+    status_code: int
+    text: str
+
+
+def get(url: str, timeout: int) -> Response:
+    try:
+        with urlopen(url, timeout=timeout) as response:
+            return Response(
+                response.status,
+                response.read().decode(
+                    response.headers.get_content_charset() or "utf-8"
+                ),
+            )
+    except HTTPError as exc:
         try:
-            with urlopen(url, timeout=timeout) as response:
-                return SimpleNamespace(
-                    status_code=response.status,
-                    text=response.read().decode(response.headers.get_content_charset() or "utf-8"),
-                )
-        except HTTPError as exc:
-            try:
-                text = exc.read().decode(exc.headers.get_content_charset() or "utf-8")
-            except (HTTPException, OSError, TimeoutError, UnicodeError) as read_exc:
-                raise RequestException(str(read_exc)) from read_exc
-            return SimpleNamespace(status_code=exc.code, text=text)
-        except (HTTPException, OSError, TimeoutError, UnicodeError, URLError) as exc:
-            raise RequestException(str(exc)) from exc
+            text = exc.read().decode(exc.headers.get_content_charset() or "utf-8")
+        except (HTTPException, OSError, TimeoutError, UnicodeError) as read_exc:
+            raise RequestException(str(read_exc)) from read_exc
+        return Response(exc.code, text)
+    except (HTTPException, OSError, TimeoutError, UnicodeError, URLError) as exc:
+        raise RequestException(str(exc)) from exc
+
 
 AGENTS_MD_URL = "https://raw.githubusercontent.com/SichangHe/sichanghe.github.io/refs/heads/main/src/notes/automation_software/AGENTS.md"
+INSTRUCTIONS_URL = "https://raw.githubusercontent.com/SichangHe/sichanghe.github.io/refs/heads/main/src/notes/automation_software/agent_instructions"
 ENV_FILE = Path(__file__).resolve().parent / ".env"
 FETCH_TIMEOUT_S = 10
 CACHE_DIR = Path(gettempdir()) / f"getagentsmd-cache-{getuid()}"
 CACHE_FILE = CACHE_DIR / "AGENTS.md"
 FALLBACK_NOTICE = (
-    "Failed to reach remote AGENTS.md; using cached content.\n"
+    "Failed to reach remote agent instructions; using cached content.\n"
     "Agent instruction: report that `~/.config/getagentsmd` failed to reach the remote and used cached content."
 )
 
@@ -76,7 +82,8 @@ def rendered_agents_md(remote_text: str) -> str:
     return output
 
 
-def write_cache(text: str) -> None:
+def write_cache(text: str, cache_file: Path | None = None) -> None:
+    cache_file = CACHE_FILE if cache_file is None else cache_file
     try:
         CACHE_DIR.mkdir(mode=0o700)
     except FileExistsError:
@@ -85,12 +92,12 @@ def write_cache(text: str) -> None:
         return
     with NamedTemporaryFile("w", encoding="utf-8", dir=CACHE_DIR, delete=False) as tmp:
         tmp_path = Path(tmp.name)
-        tmp.write(text)
+        _ = tmp.write(text)
         tmp.flush()
         fsync(tmp.fileno())
     try:
         tmp_path.chmod(0o600)
-        tmp_path.replace(CACHE_FILE)
+        _ = tmp_path.replace(cache_file)
     except OSError:
         try:
             unlink(tmp_path)
@@ -111,47 +118,85 @@ def cache_dir_is_private() -> bool:
         return False
 
 
-def read_cache() -> str | None:
+def read_cache(cache_file: Path | None = None) -> str | None:
+    cache_file = CACHE_FILE if cache_file is None else cache_file
     try:
         if not cache_dir_is_private():
             return None
-        cache_file_stat = CACHE_FILE.lstat()
+        cache_file_stat = cache_file.lstat()
         if not S_ISREG(cache_file_stat.st_mode) or cache_file_stat.st_uid != getuid():
             return None
         if S_IMODE(cache_file_stat.st_mode) & 0o077:
             return None
-        return CACHE_FILE.read_text(encoding="utf-8")
+        return cache_file.read_text(encoding="utf-8")
     except (FileNotFoundError, OSError, UnicodeDecodeError):
         return None
 
 
-def main():
+def print_remote_or_cache(
+    url: str, cache_file: Path, render_root: bool = False
+) -> bool:
     try:
-        response = get(AGENTS_MD_URL, timeout=FETCH_TIMEOUT_S)
+        response = get(url, timeout=FETCH_TIMEOUT_S)
     except RequestException as exc:
-        cached = read_cache()
+        cached = read_cache(cache_file)
         if cached is not None:
             print(FALLBACK_NOTICE)
             print(cached, end="")
-            return
-        print(f"Failed to fetch AGENTS.md. Report to the user: {type(exc).__name__}")
-        return
+            return True
+        print(
+            f"Failed to fetch agent instructions. Report to the user: {type(exc).__name__}"
+        )
+        return False
 
     if response.status_code == 200:
-        output = rendered_agents_md(response.text)
+        output = rendered_agents_md(response.text) if render_root else response.text
         print(output, end="")
         try:
-            write_cache(output)
+            write_cache(output, cache_file)
         except OSError:
             pass
-        return
+        return True
 
-    cached = read_cache()
+    cached = read_cache(cache_file)
     if cached is not None:
         print(FALLBACK_NOTICE)
         print(cached, end="")
+        return True
     else:
-        print(f"Failed to fetch AGENTS.md. Report to the user: HTTP {response.status_code}")
+        print(
+            f"Failed to fetch agent instructions. Report to the user: HTTP {response.status_code}"
+        )
+        return False
 
 
-main() if __name__ == "__main__" else None
+def instruction_name(value: str) -> str | None:
+    return value if fullmatch(r"[a-z0-9][a-z0-9_-]*", value) else None
+
+
+def main(args: list[str] | None = None) -> int:
+    args = sys.argv[1:] if args is None else args
+    if not args:
+        _ = print_remote_or_cache(AGENTS_MD_URL, CACHE_FILE, render_root=True)
+        return 0
+    if args == ["list"]:
+        found = print_remote_or_cache(
+            f"{INSTRUCTIONS_URL}/index.md", CACHE_DIR / "index.md"
+        )
+        return 0 if found else 1
+    # 🧑 “Don't require anything, just tell agents they have the option. Don't do language detection.”
+    if (
+        len(args) == 2
+        and args[0] == "get"
+        and (name := instruction_name(args[1])) is not None
+    ):
+        found = print_remote_or_cache(
+            f"{INSTRUCTIONS_URL}/{name}.md", CACHE_DIR / f"{name}.md"
+        )
+        return 0 if found else 1
+    print("Usage: getagentsmd [list | get INSTRUCTION_NAME]", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
