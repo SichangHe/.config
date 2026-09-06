@@ -735,7 +735,7 @@ def reconcile_ordinary_sent_completion(
                         values = dict(line.split("=", 1) for line in payload.splitlines())
                     except ValueError as exc:
                         raise OSError("completion email authorization is malformed") from exc
-                    expected_fields = {
+                    current_fields = {
                         "version",
                         "target",
                         "root",
@@ -746,10 +746,15 @@ def reconcile_ordinary_sent_completion(
                         "subject_sha256",
                         "body_sha256",
                     }
-                    if len(values) != len(payload.splitlines()) or set(values) != expected_fields or values["version"] != "1":
+                    legacy_fields = current_fields - {"task_sha256", "semantic_key"}
+                    if (
+                        len(values) != len(payload.splitlines())
+                        or frozenset(values) not in {frozenset(current_fields), frozenset(legacy_fields)}
+                        or values["version"] != "1"
+                    ):
                         raise OSError("completion email authorization is malformed")
                     authorizations.add(authorization.name)
-                    if values["notice_key"] == plan.notice_key and values["semantic_key"] == plan.semantic_key:
+                    if values["notice_key"] == plan.notice_key and values.get("semantic_key", plan.semantic_key) == plan.semantic_key:
                         matching_authorizations.append(authorization)
             used_dir = state / "completion-email-authorization-used"
             if used_dir.exists():

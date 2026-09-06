@@ -263,6 +263,35 @@ class CompletionEmailTest(unittest.TestCase):
                             semantic_key=semantic_key,
                         )
 
+    def test_unrelated_legacy_authorization_remains_compatible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            authorization_dir = state / "completion-email-authorizations"
+            authorization_dir.mkdir(mode=0o700, parents=True)
+            legacy = authorization_dir / ("d" * 64)
+            legacy.write_text(
+                "version=1\ntarget=cfg:9\nroot=/unrelated\ntask=old.md\n"
+                f"notice_key={'e' * 64}\nsubject_sha256={'f' * 64}\nbody_sha256={'0' * 64}\n",
+                encoding="utf-8",
+            )
+            legacy.chmod(0o600)
+            task = root / "task.md"
+            text = task_text().replace("pending_task_items:\n  - finish review", "pending_task_items: []")
+            task.write_text(text, encoding="utf-8")
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_completion_email.current_active_task", return_value=task
+            ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+                reconcile_ordinary_sent_completion(
+                    root,
+                    task,
+                    "task done",
+                    "<already-sent@example.test>",
+                    "b" * 64,
+                    "c" * 64,
+                    semantic_key="a" * 64,
+                )
+
     def test_structured_claim_cannot_race_past_ordinary_reconciliation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
