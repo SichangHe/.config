@@ -196,6 +196,55 @@ class TaskEditTests(unittest.TestCase):
             self.assertEqual(0, exit_code)
             self.assertEqual("finish review\nemail human\n", stdout.getvalue())
 
+    def test_lists_and_removes_quoted_colon_item_by_displayed_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            quoted = "'fresh residual review: exact bookkeeping candidate'"
+            task.write_text(task_frontmatter(pending_items=(quoted, "keep this")) + "body\n", encoding="utf-8")
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                self.assertEqual(0, run(Args(root, Path("task.md"), "pending-list")))
+            self.assertEqual("fresh residual review: exact bookkeeping candidate\nkeep this\n", stdout.getvalue())
+            summary = io.StringIO()
+            with redirect_stdout(summary):
+                self.assertEqual(0, run(Args(root, Path("task.md"), "summary")))
+            self.assertIn("  - fresh residual review: exact bookkeeping candidate\n", summary.getvalue())
+
+            with patch("omo_manager.omo_task_edit.require_owner_completion", return_value=True), patch(
+                "omo_manager.omo_task_edit.plan_completion_email", return_value=None
+            ):
+                self.assertEqual(
+                    0,
+                    run(
+                        Args(
+                            root,
+                            Path("task.md"),
+                            "pending-remove",
+                            items=("fresh residual review: exact bookkeeping candidate",),
+                            evidence="review complete",
+                        )
+                    ),
+                )
+
+            self.assertIn("pending_task_items:\n  - keep this\n", task.read_text(encoding="utf-8"))
+
+    def test_add_quotes_mapping_prone_item_and_round_trips_exact_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            item = "queue helper: preserve exact item"
+            task.write_text(task_frontmatter() + "body\n", encoding="utf-8")
+
+            self.assertEqual(0, run(Args(root, Path("task.md"), "pending-add", items=(item,))))
+
+            self.assertIn("pending_task_items:\n  - 'queue helper: preserve exact item'\n", task.read_text(encoding="utf-8"))
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(0, run(Args(root, Path("task.md"), "pending-list")))
+            self.assertEqual(f"{item}\n", stdout.getvalue())
+
     def test_adds_pending_items_and_preserves_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

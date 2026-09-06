@@ -188,12 +188,44 @@ def parse_v1_pending_items(lines: list[str], idx: int, value: str) -> tuple[tupl
     items: list[str] = []
     idx += 1
     while idx < len(lines) and lines[idx].startswith("  - "):
-        item = lines[idx][4:].strip()
-        if not item:
+        raw_item = lines[idx][4:].strip()
+        if not raw_item:
             raise TaskFrontmatterError("`pending_task_items` entries must not be empty.")
-        items.append(item)
+        items.append(parse_v1_pending_scalar(raw_item))
         idx += 1
     return tuple(items), idx
+
+
+def parse_v1_pending_scalar(raw_item: str) -> str:
+    """Decode an explicitly quoted v1 YAML scalar without reinterpreting legacy text."""
+    if len(raw_item) < 2 or raw_item[0] not in {"'", '"'} or raw_item[-1] != raw_item[0]:
+        return raw_item
+    try:
+        value = yaml.safe_load(raw_item)
+    except yaml.YAMLError as exc:
+        raise TaskFrontmatterError("quoted `pending_task_items` entry is invalid YAML.") from exc
+    if not isinstance(value, str) or not value or "\n" in value or "\r" in value:
+        raise TaskFrontmatterError("quoted `pending_task_items` entry must be nonempty one-line text.")
+    return value
+
+
+def render_v1_pending_scalar(item: str) -> str:
+    """Render one v1 item as a YAML-safe scalar while keeping simple text readable."""
+    try:
+        parsed = yaml.safe_load(f"value: {item}\n")
+    except yaml.YAMLError:
+        parsed = None
+    if isinstance(parsed, dict) and parsed.get("value") == item:
+        return item
+    python_line_boundaries = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+    if not any(character in item for character in python_line_boundaries):
+        single_quoted = f"'{item.replace(chr(39), chr(39) * 2)}'"
+        try:
+            if yaml.safe_load(single_quoted) == item:
+                return single_quoted
+        except yaml.YAMLError:
+            pass
+    return yaml.safe_dump(item, default_style='"', allow_unicode=True, width=10**9).splitlines()[0]
 
 
 def parse_v1_metadata(lines: list[str]) -> TaskMetadata:

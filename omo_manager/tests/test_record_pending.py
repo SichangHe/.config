@@ -97,6 +97,39 @@ class RecordPendingTests(unittest.TestCase):
             self.assertIn("pending_task_items:\n  - finish review\n  - email result\n", text)
             self.assertIn("Please do it.\n", text)
 
+    def test_records_mapping_prone_item_as_quoted_scalar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            task.write_text(task_frontmatter() + "(pending)\nPlease do it.\n", encoding="utf-8")
+            item = "fresh residual review: exact bookkeeping candidate"
+
+            self.assertEqual(0, run(Args(root, Path("task.md"), 10, Path("task.md"), (item,), False)))
+
+            text = task.read_text(encoding="utf-8")
+            self.assertIn("pending_task_items:\n  - 'fresh residual review: exact bookkeeping candidate'\n", text)
+            metadata = parse_task_metadata(text, root)
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual((item,), metadata.pending_task_items)
+
+    def test_records_yaml_control_and_python_line_boundary_as_escaped_scalars(self) -> None:
+        cases = (("inspect escape\x1bcharacter", "\\e"), ("inspect separator\u2028character", "\\L"))
+        for item, escaped in cases:
+            with self.subTest(item=item.encode("unicode_escape")), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task = root / "task.md"
+                task.write_text(task_frontmatter() + "(pending)\nPlease do it.\n", encoding="utf-8")
+
+                self.assertEqual(0, run(Args(root, Path("task.md"), 10, Path("task.md"), (item,), False)))
+
+                text = task.read_text(encoding="utf-8")
+                self.assertIn(escaped, text.split("---", 2)[1])
+                metadata = parse_task_metadata(text, root)
+                self.assertIsNotNone(metadata)
+                assert metadata is not None
+                self.assertEqual((item,), metadata.pending_task_items)
+
     def test_records_items_in_separate_target_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

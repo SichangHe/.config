@@ -109,6 +109,31 @@ class HeesFinalArtifactReplaceTests(unittest.TestCase):
             self.assertIn("separate supported launch/delivery remains required", result)
             self.assertEqual(stale_text.split("---\n", 2)[2], stale.split("---\n", 2)[2])
 
+    def test_successor_quotes_mapping_prone_pending_item(self) -> None:
+        colon_item = "Freeze one exact artifact: preserve its custody."
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stale_text = task_text(pending=(f"'{colon_item}'",))
+            todo_value = todo_text()
+            (root / "hees_1170_policy.md").write_text(stale_text, encoding="utf-8")
+            (root / "TODO.md").write_text(todo_value, encoding="utf-8")
+            args = Args(
+                root,
+                "hees_1170_policy.md",
+                "hees_final_artifact.md",
+                STALE_TARGET,
+                MANAGER_TARGET,
+                sha(stale_text),
+                sha(todo_value),
+                sha(colon_item),
+            )
+
+            replace(args)
+
+            successor = (root / "hees_final_artifact.md").read_text(encoding="utf-8")
+            self.assertIn(f"  - '{colon_item}'\n", successor)
+            self.assertEqual((colon_item,), metadata(successor, root).pending_task_items)
+
     def test_preserves_human_pending_successor_custody(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

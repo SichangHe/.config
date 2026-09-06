@@ -128,6 +128,24 @@ class PendingQueueTests(unittest.TestCase):
             self.assertIn("pending_task_items: []", text)
             self.assertIn("verified removed pending item: review passed", text)
 
+    def test_legacy_remove_matches_displayed_text_from_quoted_colon_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            item = "fresh residual review: exact bookkeeping candidate"
+            path.write_text(task_text(items=(f"'{item}'", "keep this")), encoding="utf-8")
+
+            with patch("omo_manager.omo_pending.current_active_task", return_value=path), patch(
+                "omo_manager.omo_pending.plan_completion_email"
+            ) as plan, patch("omo_manager.omo_pending.require_owner_completion") as require:
+                self.assertEqual(0, run(Args("remove", (item,), evidence="review passed", no_email=True), root))
+
+            plan.assert_not_called()
+            require.assert_not_called()
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn(item, text.split("---", 2)[1])
+            self.assertIn("  - keep this\n", text)
+
     def test_legacy_remove_no_email_failure_does_not_call_mail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

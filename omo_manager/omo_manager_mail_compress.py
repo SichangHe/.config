@@ -18,6 +18,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import zipfile
 import zipimport
@@ -66,7 +67,8 @@ SOURCE_1140_APPROVAL_SHA256 = "a80ed239e1acbd07750c2f55202ec2d5a68e6bd53068ae9c1
 SOURCE_1179_APPROVAL_FILE = "85c5dff58359-1179.txt"
 SOURCE_1179_APPROVAL_QUOTE = "Trash the emails that I no longer need to read that are not read yet."
 SOURCE_1179_APPROVAL_SHA256 = "0c470c290d70d8cf66a95ba8fabce3d2881b4ca0edb866267f28eabc529ce6db"
-REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION = "v1.1.0"
+REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION = "v1.2.0"
+LEGACY_REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION = "v1.1.0"
 GMAIL_IDENTITY_UID_BATCH = 40
 GMAIL_THREAD_OR_BATCH = 32
 EXPORT_FULL_FETCH_ATTEMPTS = 2
@@ -2617,6 +2619,10 @@ def require_source_1140_direct_removal(
     contexts: list[ScopedSource],
     preparer: str,
     reviewer: str,
+    source_uidvalidity: str = "",
+    source_location_mode: str = "strict-fresh",
+    allow_additive_final_context: bool = False,
+    runtime_bundle_sha256: str = "",
 ) -> bool:
     approvals = {
         SOURCE_1140_APPROVAL_FILE: (SOURCE_1140_APPROVAL_QUOTE, SOURCE_1140_APPROVAL_SHA256),
@@ -2664,18 +2670,26 @@ def require_source_1140_direct_removal(
     values: dict[str, list[str]] = {}
     for row in rows:
         values.setdefault(row["kind"], []).append(row["value"])
+    review_versions = values.get("version", [])
+    review_version = review_versions[0] if len(review_versions) == 1 else ""
     expected_single = {
-        "version": [REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION],
+        "version": [review_version],
         "approval_sha256": [expected_sha256],
         "task_id": [task_id],
         "preparer": [preparer],
         "reviewer": [reviewer],
         "verdict": ["PASS"],
     }
+    if review_version == REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION:
+        expected_single["source_uidvalidity"] = [source_uidvalidity]
+        expected_single["source_location_mode"] = [source_location_mode]
+        expected_single["allow_additive_final_context"] = [str(allow_additive_final_context).lower()]
+        expected_single["runtime_bundle_sha256"] = [runtime_bundle_sha256]
     expected_sources = sorted(f"{source.uid}:{source.gmail_msgid}:{source.gmail_thrid}:{source.raw_sha256}:{source.read_state}" for source in sources)
     expected_contexts = sorted(f"{context.gmail_msgid}:{context.gmail_thrid}:{context.raw_sha256}" for context in contexts)
     if (
-        set(values) != {*expected_single, "source", "context"}
+        review_version not in {LEGACY_REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION, REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION}
+        or set(values) != {*expected_single, "source", "context"}
         or any(values.get(kind) != expected for kind, expected in expected_single.items())
         or sorted(values.get("source", [])) != expected_sources
         or sorted(values.get("context", [])) != expected_contexts
@@ -2684,6 +2698,101 @@ def require_source_1140_direct_removal(
     ):
         raise RuntimeError("replacement-free removal review evidence does not match the exact operation")
     return approval_arg.name == SOURCE_1179_APPROVAL_FILE
+
+
+def replacement_free_review_text(
+    approval_file: Path,
+    approval_quote: str,
+    task_id: str,
+    sources: list[ScopedSource],
+    contexts: list[ScopedSource],
+    source_uidvalidity: str,
+    source_location_mode: str,
+    allow_additive_final_context: bool,
+    runtime_bundle_sha256: str,
+    preparer: str,
+    reviewer: str,
+) -> str:
+    """Build exact review evidence through the same fail-closed validator used at execution."""
+    if not source_uidvalidity or not source_uidvalidity.isdecimal():
+        raise RuntimeError("replacement-free review requires a decimal source UIDVALIDITY")
+    if source_location_mode not in {"strict-fresh", "recover-partial-move"}:
+        raise RuntimeError("replacement-free review requires an explicit supported source-location mode")
+    if not re.fullmatch(r"[0-9a-f]{64}", runtime_bundle_sha256):
+        raise RuntimeError("replacement-free review requires the exact lowercase runtime bundle SHA-256")
+    if not task_id or tsv_value(task_id) != task_id:
+        raise RuntimeError("replacement-free review requires one nonempty task identity")
+    if not preparer or not reviewer or tsv_value(preparer) != preparer or tsv_value(reviewer) != reviewer or preparer == reviewer:
+        raise RuntimeError("replacement-free review requires distinct nonempty one-line preparer and reviewer identities")
+    if not sources or len({source.uid for source in sources}) != len(sources) or len({source.gmail_msgid for source in sources}) != len(sources):
+        raise RuntimeError("replacement-free review requires unique explicit source identities")
+    if not contexts or len({context.gmail_msgid for context in contexts}) != len(contexts):
+        raise RuntimeError("replacement-free review requires unique explicit context identities")
+    context_ids = {context.gmail_msgid for context in contexts}
+    if any(source.gmail_msgid not in context_ids for source in sources) or {source.gmail_thrid for source in sources} - {context.gmail_thrid for context in contexts}:
+        raise RuntimeError("replacement-free review context must cover every source identity and thread")
+    with tempfile.TemporaryDirectory(prefix="omo-mail-review-") as tmp:
+        review_path = Path(tmp) / "review.tsv"
+        source_rows = sorted(f"source\t{source.uid}:{source.gmail_msgid}:{source.gmail_thrid}:{source.raw_sha256}:{source.read_state}\n" for source in sources)
+        context_rows = sorted(f"context\t{context.gmail_msgid}:{context.gmail_thrid}:{context.raw_sha256}\n" for context in contexts)
+        approval_path, approval_bytes = read_owner_only_regular_file(approval_file.expanduser(), "replacement-free removal approval file")
+        review_text = (
+            "kind\tvalue\n"
+            f"version\t{REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION}\n"
+            f"approval_sha256\t{hashlib.sha256(approval_bytes).hexdigest()}\n"
+            f"task_id\t{task_id}\n"
+            f"preparer\t{preparer}\n"
+            f"reviewer\t{reviewer}\n"
+            f"source_uidvalidity\t{source_uidvalidity}\n"
+            f"source_location_mode\t{source_location_mode}\n"
+            f"allow_additive_final_context\t{str(allow_additive_final_context).lower()}\n"
+            f"runtime_bundle_sha256\t{runtime_bundle_sha256}\n"
+            "verdict\tPASS\n"
+            + "".join(source_rows)
+            + "".join(context_rows)
+        )
+        write_private(review_path, review_text)
+        require_source_1140_direct_removal(
+            approval_path,
+            approval_quote,
+            review_path,
+            task_id,
+            sources,
+            contexts,
+            preparer,
+            reviewer,
+            source_uidvalidity,
+            source_location_mode,
+            allow_additive_final_context,
+            runtime_bundle_sha256,
+        )
+        return review_text
+
+
+def cmd_build_replacement_free_review(args: argparse.Namespace) -> int:
+    sources = [parse_explicit_source(value) for value in args.source]
+    contexts = [parse_explicit_context(value) for value in args.context]
+    text = replacement_free_review_text(
+        args.human_approval_file,
+        args.human_approval_quote,
+        args.task_id,
+        sources,
+        contexts,
+        args.source_uidvalidity,
+        args.source_location_mode,
+        args.allow_additive_final_context,
+        args.runtime_bundle_sha256,
+        args.preparer,
+        args.reviewer,
+    )
+    out = args.out.expanduser()
+    if not out.is_absolute():
+        raise RuntimeError("replacement-free review output must be an absolute path")
+    if not out.parent.is_dir():
+        raise RuntimeError("replacement-free review output parent is missing")
+    write_private_exclusive(out, text)
+    print(f"review_file={out} sha256={hashlib.sha256(text.encode()).hexdigest()}")
+    return 0
 
 
 def disposition_text(
@@ -3978,6 +4087,10 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
                 contexts,
                 args.preparer,
                 args.reviewer,
+                args.source_uidvalidity,
+                source_location_mode,
+                bool(getattr(args, "allow_additive_final_context", False)),
+                runtime_bundle_digest,
             )
         elif (
             getattr(args, "human_approval_file", None) is not None
@@ -4579,6 +4692,25 @@ This command moves the old message only from Inbox to recoverable Gmail Trash an
     locate_replacement = sub.add_parser("locate-replacement", help="Find the unique exact current manager-mail subject and print its RFC Message-ID.")
     locate_replacement.add_argument("--subject", required=True, help="Exact current subject, including any manager prefix.")
     locate_replacement.set_defaults(func=cmd_locate_replacement)
+    review = sub.add_parser(
+        "build-replacement-free-review",
+        help="Write exact owner-only PASS evidence for one reviewed replacement-free trash-explicit operation.",
+    )
+    review.add_argument("--out", type=Path, required=True, help="New absolute owner-only TSV path; existing files are refused.")
+    review.add_argument("--source", action="append", default=[], required=True, metavar="UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256:READ-STATE")
+    review.add_argument("--context", action="append", default=[], required=True, metavar="GMAIL-MSGID:GMAIL-THRID:RAW-SHA256")
+    review.add_argument("--human-approval-file", type=Path, required=True, help="Exact owner-only supported Human manager-mail file.")
+    review.add_argument("--human-approval-quote", required=True, help="Exact supported Human approval sentence.")
+    review.add_argument("--task-id", required=True, help="The single independently reviewed task identity.")
+    review.add_argument("--source-uidvalidity", required=True, help="Exact INBOX UIDVALIDITY printed by inspect-explicit.")
+    review_source_location = review.add_mutually_exclusive_group(required=True)
+    review_source_location.add_argument("--strict-fresh", action="store_const", dest="source_location_mode", const="strict-fresh")
+    review_source_location.add_argument("--recover-partial-move", action="store_const", dest="source_location_mode", const="recover-partial-move")
+    review.add_argument("--allow-additive-final-context", action="store_true", help="Bind the compatibility mode that permits only additive final thread context.")
+    review.add_argument("--runtime-bundle-sha256", required=True, help="Exact lowercase SHA-256 printed by build-runtime-bundle.")
+    review.add_argument("--preparer", required=True, help="Identity that prepared the grouping and no-replacement decision.")
+    review.add_argument("--reviewer", required=True, help="Distinct reviewer running this command after an independent PASS review.")
+    review.set_defaults(func=cmd_build_replacement_free_review)
     export = sub.add_parser("export", help="Export manager mail bodies into a private local directory.")
     export.add_argument("--out-dir", type=Path, required=True)
     export.add_argument("--threads-per-batch", type=int, default=DEFAULT_THREADS_PER_BATCH)

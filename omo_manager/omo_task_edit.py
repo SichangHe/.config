@@ -31,6 +31,7 @@ from omo_manager.omo_task_status import replace_if_unchanged
 from omo_manager.omo_task_status import task_path
 from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1
 from omo_manager.omo_task_metadata import frontmatter_parts
+from omo_manager.omo_task_metadata import render_v1_pending_scalar
 
 PENDING_MARKER = "(pending)"
 REMOVE_REMINDER = "Verify the removed pending item was actually done or cancelled; consider evaluator agents for uncertain verification."
@@ -480,7 +481,7 @@ def render_pending_items(text: str, items: tuple[str, ...]) -> str:
     bounds = pending_list_bounds(lines)
     newline = line_newline(lines[bounds.field_idx])
     if items:
-        replacement = [f"pending_task_items:{newline}", *(f"  - {item}{newline}" for item in items)]
+        replacement = [f"pending_task_items:{newline}", *(f"  - {render_v1_pending_scalar(item)}{newline}" for item in items)]
     else:
         replacement = [f"pending_task_items: []{newline}"]
     lines[bounds.field_idx : bounds.list_end] = replacement

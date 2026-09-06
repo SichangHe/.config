@@ -27,7 +27,7 @@ if __package__ in {None, ""}:
 
 from omo_manager.omo_agent_status import TASK_RE
 from omo_manager.omo_task_lock import task_file_lock, task_target_lock
-from omo_manager.omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_V1, TaskFrontmatterError, TaskMetadata, parse_task_metadata
+from omo_manager.omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_V1, TaskFrontmatterError, TaskMetadata, parse_task_metadata, render_v1_pending_scalar
 from omo_manager.omo_task_status import TODO_ROW_RE, has_pending_marker, root_membership_lock
 
 STALE_TASK = "hees_1170_policy.md"
@@ -270,7 +270,7 @@ def task_text(metadata: TaskMetadata, body: bytes, newline: bytes, *, status: st
         f"tool: {metadata.tool}",
         f"managerat: {metadata.managerat}",
         f"is_manager: {str(metadata.is_manager).lower()}",
-        *(("pending_task_items: []",) if not pending else ("pending_task_items:", *(f"  - {item}" for item in pending))),
+        *(("pending_task_items: []",) if not pending else ("pending_task_items:", *(f"  - {render_v1_pending_scalar(item)}" for item in pending))),
         "---",
     ]
     return newline.join(line.encode() for line in lines) + newline + body

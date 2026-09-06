@@ -23,6 +23,7 @@ from omo_manager.omo_blocking import split_task_text
 from omo_manager.omo_blocking import v2_enabled
 from omo_manager.omo_task_status import replace_if_unchanged
 from omo_manager.omo_task_status import task_path
+from omo_manager.omo_task_metadata import render_v1_pending_scalar
 
 PENDING_MARKER = "(pending)"
 EMAIL_HELPER = Path(__file__).resolve().parents[1] / "helper.sh" / "email_me.py"
@@ -136,7 +137,7 @@ def remove_line_once(text: str, line: str) -> str:
 
 
 def item_lines(items: tuple[str, ...]) -> list[str]:
-    return [f"  - {item}" for item in items]
+    return [f"  - {render_v1_pending_scalar(item)}" for item in items]
 
 
 def all_items_recorded(text: str, items: tuple[str, ...], work_log_root: Path | None = None) -> bool:

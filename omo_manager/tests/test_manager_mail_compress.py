@@ -57,6 +57,7 @@ from omo_manager.omo_manager_mail_compress import (
     cmd_mark_seen,
     cmd_unread_summary,
     cmd_agent_trash_replaced,
+    cmd_build_replacement_free_review,
     configured_work_logs_root,
     current_agent_mail_target,
     current_agent_session_id,
@@ -3147,6 +3148,28 @@ with tempfile.TemporaryDirectory() as tmp:
         self.assertNotIn("--source-dir", result.stdout)
         self.assertNotIn("--uid-file", result.stdout)
 
+    def test_replacement_free_review_help_names_complete_generated_contract(self) -> None:
+        helper = Path(__file__).parents[1] / "omo_manager_mail_compress.py"
+        result = subprocess.run([helper, "build-replacement-free-review", "--help"], capture_output=True, text=True, check=False)
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        for option in (
+            "--out OUT",
+            "--source UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256:READ-STATE",
+            "--context GMAIL-MSGID:GMAIL-THRID:RAW-SHA256",
+            "--human-approval-file",
+            "--human-approval-quote",
+            "--task-id",
+            "--source-uidvalidity",
+            "--strict-fresh",
+            "--recover-partial-move",
+            "--allow-additive-final-context",
+            "--runtime-bundle-sha256",
+            "--preparer",
+            "--reviewer",
+        ):
+            self.assertIn(option, result.stdout)
+
     def test_trash_explicit_direct_caller_requires_retained_binding(self) -> None:
         digest = "a" * 64
         args = argparse.Namespace(
@@ -3268,6 +3291,69 @@ with tempfile.TemporaryDirectory() as tmp:
             ):
                 self.assertEqual(2, cmd_trash_explicit(args))
             open_mailbox_mock.assert_not_called()
+
+    def test_build_replacement_free_review_writes_exact_owner_only_v12_evidence(self) -> None:
+        digest = "a" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail_root = root / "manager_mail"
+            mail_root.mkdir(mode=0o700)
+            approval = mail_root / SOURCE_1140_APPROVAL_FILE
+            approval.write_text(SOURCE_1140_APPROVAL_QUOTE, encoding="utf-8")
+            approval.chmod(0o600)
+            approval_sha256 = hashlib.sha256(approval.read_bytes()).hexdigest()
+            review = root / "review.tsv"
+            args = argparse.Namespace(
+                out=review,
+                source=[f"7:100:200:{digest}:unread"],
+                context=[f"100:200:{digest}"],
+                human_approval_file=approval,
+                human_approval_quote=SOURCE_1140_APPROVAL_QUOTE,
+                task_id="task-a",
+                source_uidvalidity="42",
+                source_location_mode="strict-fresh",
+                allow_additive_final_context=False,
+                runtime_bundle_sha256="b" * 64,
+                preparer="owner-a",
+                reviewer="reviewer-b",
+            )
+
+            with (
+                patch("omo_manager.omo_manager_mail_compress.configured_work_logs_root", return_value=root),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_1140_APPROVAL_SHA256", approval_sha256),
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(0, cmd_build_replacement_free_review(args))
+
+            self.assertEqual(0o600, review.stat().st_mode & 0o777)
+            text = review.read_text(encoding="utf-8")
+            self.assertIn("version\tv1.2.0\n", text)
+            self.assertIn("source_uidvalidity\t42\n", text)
+            self.assertIn("source_location_mode\tstrict-fresh\n", text)
+            self.assertIn("allow_additive_final_context\tfalse\n", text)
+            self.assertIn(f"runtime_bundle_sha256\t{'b' * 64}\n", text)
+            self.assertIn(f"source\t7:100:200:{digest}:unread\n", text)
+            with (
+                patch("omo_manager.omo_manager_mail_compress.configured_work_logs_root", return_value=root),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_1140_APPROVAL_SHA256", approval_sha256),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "exact operation"):
+                    require_source_1140_direct_removal(
+                        approval,
+                        SOURCE_1140_APPROVAL_QUOTE,
+                        review,
+                        "task-a",
+                        [parse_explicit_source(f"7:100:200:{digest}:unread")],
+                        [parse_explicit_context(f"100:200:{digest}")],
+                        "owner-a",
+                        "reviewer-b",
+                        "42",
+                        "recover-partial-move",
+                        False,
+                        "b" * 64,
+                    )
+                with self.assertRaisesRegex(RuntimeError, "already exists"):
+                    cmd_build_replacement_free_review(args)
 
     def test_source_1140_direct_removal_binds_exact_reviewed_operation(self) -> None:
         digest = "a" * 64
