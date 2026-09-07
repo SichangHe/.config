@@ -34,6 +34,7 @@ from omo_manager.omo_tmux_send import (
     parse_args,
     query_async_result,
     read_message,
+    revalidate_authorized_cursor_input,
     require_authorized_existing_input,
     require_no_existing_input,
     require_sendable_codex_target,
@@ -42,6 +43,7 @@ from omo_manager.omo_tmux_send import (
     run_control_to_codex,
     run_tmux,
     send_capacity_resume,
+    send_enter_to_pinned_cursor,
     send_message_file_to_codex,
     send_system_to_codex,
     send_to_codex,
@@ -1080,6 +1082,52 @@ class TmuxSendTests(unittest.TestCase):
             with self.subTest(footer=footer):
                 self.assertEqual("approved prompt", exact_existing_input_text(lines))
 
+    def test_exact_existing_input_text_accepts_complete_cursor_layout_only_when_enabled(self) -> None:
+        lines = cursor_agent_lines("approved prompt", running=True)
+
+        with self.assertRaisesRegex(RuntimeError, "complete Codex view"):
+            exact_existing_input_text(lines)
+        self.assertEqual(
+            "approved prompt",
+            exact_existing_input_text(lines, allow_cursor_agent=True),
+        )
+
+    def test_exact_existing_input_text_preserves_cursor_whitespace(self) -> None:
+        lines = cursor_agent_lines("  approved prompt  ")
+        multiline = [
+            "previous output",
+            " ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄",
+            "  → first  ",
+            "      second  ",
+            " ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+            "  Cursor Grok 4.6 Extra High · 28.2%                                                           Run Everything",
+            "  ~/.config · macos",
+        ]
+
+        self.assertEqual("  approved prompt  ", exact_existing_input_text(lines, allow_cursor_agent=True))
+        self.assertEqual("first  \n  second  ", exact_existing_input_text(multiline, allow_cursor_agent=True))
+
+    def test_ready_cursor_input_preserves_literal_stop_hint(self) -> None:
+        text = "approved prompt    ctrl+c to stop"
+
+        self.assertEqual(text, exact_existing_input_text(cursor_agent_lines(text), allow_cursor_agent=True))
+
+    def test_exact_existing_input_text_rejects_incomplete_or_ambiguous_cursor_layout(self) -> None:
+        complete = cursor_agent_lines("approved prompt", running=True)
+        defects = (
+            complete[2:],
+            [*complete, complete[-2]],
+            [*complete[:2], "  → second prompt", *complete[2:]],
+            [*complete[:-2], "unexpected", *complete[-2:]],
+            [*complete[:1], complete[1], *complete[1:]],
+            cursor_agent_followups_lines(prompt="approved prompt"),
+            [*complete[:-2], complete[-2] + " forged", complete[-1]],
+            [*complete[:-1], "  arbitrary"],
+        )
+        for lines in defects:
+            with self.subTest(lines=lines), self.assertRaises(RuntimeError):
+                exact_existing_input_text(lines, allow_cursor_agent=True)
+
     def test_exact_existing_input_text_accepts_prior_prompt_before_layout_boundary(self) -> None:
         lines = ["› prior prompt", "• Working", "› approved prompt", "  gpt-5.5"]
 
@@ -1262,6 +1310,82 @@ class TmuxSendTests(unittest.TestCase):
 
         enter.assert_called_once_with("%42")
         verify.assert_called_once_with("cfg:1.0", authorization, selected, "%42", None)
+
+    def test_submit_existing_digest_accepts_complete_cursor_layout(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt"))
+        result = subprocess.CompletedProcess(
+            ["tmux"],
+            0,
+            stdout="\n".join(cursor_agent_lines("approved prompt", running=True)) + "\n",
+        )
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"
+        ), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=result), patch(
+            "omo_manager.omo_tmux_send.revalidate_error_transition",
+            return_value=cursor_agent_lines("approved prompt", running=True),
+        ), patch("omo_manager.omo_tmux_send.validate_error_transition"), patch(
+            "omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True
+        ), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter, patch("omo_manager.omo_tmux_send.send_enter_to_pinned_cursor") as pinned_enter:
+            submit_existing_to_codex("cfg:1.0", authorization, options(submit_verify_timeout_s=0))
+
+        enter.assert_not_called()
+        pinned_enter.assert_called_once_with("cfg:1.0", "%42")
+
+    def test_cursor_submit_rejects_final_alias_process_or_error_drift(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt"))
+        lines = cursor_agent_lines("approved prompt", running=True)
+        for defect in ("alias", "process", "error"):
+            pane_ids = ["%42", "%43"] if defect == "alias" else ["%42", "%42"]
+            process = defect != "process"
+            error = RuntimeError("different Codex error") if defect == "error" else None
+            with self.subTest(defect=defect), patch(
+                "omo_manager.omo_tmux_send.capture_complete_input_lines", return_value=lines
+            ), patch("omo_manager.omo_tmux_send.exact_pane_id", side_effect=pane_ids), patch(
+                "omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=process
+            ), patch("omo_manager.omo_tmux_send.validate_error_transition", side_effect=error), self.assertRaises(RuntimeError):
+                revalidate_authorized_cursor_input("cfg:1.0", "%42", authorization, None)
+
+    def test_pinned_cursor_enter_rejects_server_guard_failure(self) -> None:
+        failed = subprocess.CompletedProcess(["tmux"], 1, stdout="", stderr="")
+
+        with patch("omo_manager.omo_tmux_send.subprocess.run", return_value=failed), self.assertRaisesRegex(
+            RuntimeError, "changed at submit-existing"
+        ):
+            send_enter_to_pinned_cursor("cfg:1.0", "%42")
+
+    def test_submit_existing_file_keeps_rejecting_complete_cursor_layout(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
+        result = subprocess.CompletedProcess(
+            ["tmux"],
+            0,
+            stdout="\n".join(cursor_agent_lines("approved prompt", running=True)) + "\n",
+        )
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"
+        ), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=result), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter, self.assertRaisesRegex(RuntimeError, "complete Codex view"):
+            submit_existing_to_codex("cfg:1.0", authorization, options())
+
+        enter.assert_not_called()
+
+    def test_cancel_existing_keeps_rejecting_complete_cursor_layout(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt"))
+        result = subprocess.CompletedProcess(
+            ["tmux"],
+            0,
+            stdout="\n".join(cursor_agent_lines("approved prompt", running=True)) + "\n",
+        )
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"
+        ), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=result), patch(
+            "omo_manager.omo_tmux_send.send_cancel_input"
+        ) as cancel, self.assertRaisesRegex(RuntimeError, "complete Codex view"):
+            cancel_existing_codex_input("cfg:1.0", authorization, options())
+
+        cancel.assert_not_called()
 
     def test_submit_existing_rejects_mismatched_input_before_enter(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")

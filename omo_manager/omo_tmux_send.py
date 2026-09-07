@@ -27,6 +27,8 @@ try:
         CODEX_EMPTY_INPUT_TEXTS,
         CODEX_RUNNING_EMPTY_INPUT_TEXTS,
         CURSOR_AGENT_EMPTY_INPUT_TEXTS,
+        CURSOR_AGENT_COMPOSER_BOTTOM_RE,
+        CURSOR_AGENT_TASK_COUNT_RE,
         SELECTED_MODEL_CAPACITY_RE,
         current_block,
         current_input_text,
@@ -39,6 +41,7 @@ try:
         has_plan_prompt,
         inspect,
         is_cursor_agent_capture,
+        pane_has_exact_cursor_process,
         pane_has_exact_managed_agent_process,
         status,
         tail,
@@ -53,6 +56,8 @@ except ModuleNotFoundError:
         CODEX_EMPTY_INPUT_TEXTS,
         CODEX_RUNNING_EMPTY_INPUT_TEXTS,
         CURSOR_AGENT_EMPTY_INPUT_TEXTS,
+        CURSOR_AGENT_COMPOSER_BOTTOM_RE,
+        CURSOR_AGENT_TASK_COUNT_RE,
         SELECTED_MODEL_CAPACITY_RE,
         current_block,
         current_input_text,
@@ -65,6 +70,7 @@ except ModuleNotFoundError:
         has_plan_prompt,
         inspect,
         is_cursor_agent_capture,
+        pane_has_exact_cursor_process,
         pane_has_exact_managed_agent_process,
         status,
         tail,
@@ -81,6 +87,11 @@ COLLAPSED_PASTE_RE = re.compile(r"\[Pasted (?:Content [0-9]+ chars|text #[0-9]+ 
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 EXACT_CODEX_MODEL_FOOTER_RE = re.compile(r"  gpt-\S+(?: .*)?\Z")
 EXACT_CODEX_QUEUE_FOOTER_RE = re.compile(r"  tab to queue message +[0-9]+(?:\.[0-9]+)?% context left\Z")
+EXACT_CURSOR_FOOTER_RE = re.compile(
+    r"  Cursor [A-Za-z0-9][A-Za-z0-9 ._/-]* · [0-9]+(?:\.[0-9]+)?%(?: · [0-9]+ files? edited)? +Run Everything\Z"
+)
+EXACT_CURSOR_WORKSPACE_RE = re.compile(r"  (?:~|/)[^\r\n]* · [A-Za-z0-9._/-]+\Z")
+EXACT_CURSOR_UPPER_BORDER_RE = re.compile(r"\s*▄+\s*\Z")
 AGENT_MESSAGE_CLOSE = "</agent_message>"
 AGENT_MESSAGE_TAG_RE = re.compile(r"<\s*/?\s*agent_message\b[^>]*>", re.IGNORECASE)
 AGENT_MESSAGE_SOURCE_RE = re.compile(r"^[A-Za-z0-9_.-]+:[0-9]+(?:\.[0-9]+)?$")
@@ -138,6 +149,7 @@ class ExistingInputAuthorization:
 class ExistingInputCapture:
     pane_id: str
     text: str
+    cursor: bool = False
 
 
 def tmux_delivery_state_dir() -> Path:
@@ -870,7 +882,68 @@ def verify_submit(
         time.sleep(min(0.25, max(0.05, min(deadline_s, next_enter_s) - now_s)))
 
 
-def exact_complete_input_text(lines: list[str], *, allow_codex_footer_spacer: bool = False) -> str:
+def exact_cursor_existing_input_text(lines: list[str]) -> str:
+    """Extract input only from one complete, bottom-anchored Cursor composer."""
+
+    end = len(lines)
+    while end and not lines[end - 1].strip():
+        end -= 1
+    visible = lines[:end]
+    if has_cursor_followups_overlay(visible):
+        raise RuntimeError("target existing input is in an unsupported Cursor overlay")
+    footer_indices = [idx for idx, line in enumerate(visible) if EXACT_CURSOR_FOOTER_RE.fullmatch(line) is not None]
+    if len(footer_indices) != 1:
+        raise RuntimeError("target input is not in a complete Cursor view")
+    footer_idx = footer_indices[0]
+    if footer_idx not in {len(visible) - 1, len(visible) - 2}:
+        raise RuntimeError("target input is not in a complete Cursor view")
+    if footer_idx == len(visible) - 2 and EXACT_CURSOR_WORKSPACE_RE.fullmatch(visible[-1]) is None:
+        raise RuntimeError("target input is not in a complete Cursor view")
+    bottom_indices = [
+        idx
+        for idx, line in enumerate(visible[:footer_idx])
+        if CURSOR_AGENT_COMPOSER_BOTTOM_RE.fullmatch(line) is not None
+    ]
+    if len(bottom_indices) != 1:
+        raise RuntimeError("target input is not in a complete Cursor view")
+    bottom_idx = bottom_indices[0]
+    between = visible[bottom_idx + 1 : footer_idx]
+    if len(between) > 1 or any(CURSOR_AGENT_TASK_COUNT_RE.fullmatch(line) is None for line in between):
+        raise RuntimeError("target input is not in a complete Cursor view")
+    prompt_indices = [idx for idx, line in enumerate(visible[:bottom_idx]) if line.startswith("  → ")]
+    if len(prompt_indices) != 1:
+        raise RuntimeError("target input is not in a complete Cursor view")
+    prompt_idx = prompt_indices[0]
+    upper_indices = [idx for idx, line in enumerate(visible[:bottom_idx]) if EXACT_CURSOR_UPPER_BORDER_RE.fullmatch(line)]
+    if upper_indices != [prompt_idx - 1]:
+        raise RuntimeError("target input is not in a complete Cursor view")
+    if any(re.fullmatch(r"\s*[▄▀]+\s*", line) is not None for line in visible[prompt_idx:bottom_idx]):
+        raise RuntimeError("target input is not in a complete Cursor view")
+    input_lines = visible[prompt_idx:bottom_idx]
+    first = input_lines[0][4:]
+    stop_hint = "    ctrl+c to stop"
+    if between and first.endswith(stop_hint):
+        first = first[: -len(stop_hint)]
+    continuations: list[str] = []
+    for line in input_lines[1:]:
+        if not line.startswith("    "):
+            raise RuntimeError("target input is not in a complete Cursor view")
+        continuations.append(line[4:])
+    input_text = "\n".join((first, *continuations))
+    if not is_real_input_text(input_text) or has_collapsed_paste_text(input_text):
+        raise RuntimeError("target existing input is incomplete")
+    return input_text
+
+
+# 🧑 "Fix the guarded sender to recognize and authenticate this current Cursor footer/layout without weakening exact-digest submission or permitting cancellation."
+def exact_complete_input_text(
+    lines: list[str],
+    *,
+    allow_codex_footer_spacer: bool = False,
+    allow_cursor_agent: bool = False,
+) -> str:
+    if allow_cursor_agent and is_cursor_agent_capture(lines):
+        return exact_cursor_existing_input_text(lines)
     end = len(lines)
     while end and not lines[end - 1].strip():
         end -= 1
@@ -913,8 +986,17 @@ def exact_complete_input_text(lines: list[str], *, allow_codex_footer_spacer: bo
     return text
 
 
-def exact_existing_input_text(lines: list[str], *, allow_codex_footer_spacer: bool = False) -> str:
-    text = exact_complete_input_text(lines, allow_codex_footer_spacer=allow_codex_footer_spacer)
+def exact_existing_input_text(
+    lines: list[str],
+    *,
+    allow_codex_footer_spacer: bool = False,
+    allow_cursor_agent: bool = False,
+) -> str:
+    text = exact_complete_input_text(
+        lines,
+        allow_codex_footer_spacer=allow_codex_footer_spacer,
+        allow_cursor_agent=allow_cursor_agent,
+    )
     if not is_real_input_text(text):
         raise RuntimeError("target existing input is incomplete")
     return text
@@ -938,13 +1020,22 @@ def capture_complete_input_lines(pane_id: str) -> list[str]:
     return (result.stdout or "").split("\n")
 
 
-def capture_complete_existing_input(target: str, *, allow_codex_footer_spacer: bool = False) -> ExistingInputCapture:
+def capture_complete_existing_input(
+    target: str,
+    *,
+    allow_codex_footer_spacer: bool = False,
+    allow_cursor_agent: bool = False,
+) -> ExistingInputCapture:
     pane_id = exact_pane_id(target)
     if not pane_id:
         raise RuntimeError(f"target cannot be resolved as an exact tmux pane: {target}")
     lines = capture_complete_input_lines(pane_id)
     try:
-        text = exact_existing_input_text(lines, allow_codex_footer_spacer=allow_codex_footer_spacer)
+        text = exact_existing_input_text(
+            lines,
+            allow_codex_footer_spacer=allow_codex_footer_spacer,
+            allow_cursor_agent=allow_cursor_agent,
+        )
     except RuntimeError as exc:
         if not allow_codex_footer_spacer or str(exc) != "target existing input has an ambiguous trailing blank line":
             raise
@@ -956,10 +1047,14 @@ def capture_complete_existing_input(target: str, *, allow_codex_footer_spacer: b
             raise
         candidate_lines = lines.copy()
         candidate_lines[spacer_index] = ""
-        text = exact_existing_input_text(candidate_lines, allow_codex_footer_spacer=True)
+        text = exact_existing_input_text(
+            candidate_lines,
+            allow_codex_footer_spacer=True,
+            allow_cursor_agent=allow_cursor_agent,
+        )
         if not has_recent_tmux_delivery(target, text):
             raise exc
-    return ExistingInputCapture(pane_id, text)
+    return ExistingInputCapture(pane_id, text, is_cursor_agent_capture(lines))
 
 
 def require_authorized_existing_input_text(text: str, authorization: ExistingInputAuthorization) -> None:
@@ -975,12 +1070,64 @@ def require_authorized_existing_input(
     expected_pane_id: str | None = None,
     *,
     allow_codex_footer_spacer: bool = False,
+    allow_cursor_agent: bool = False,
 ) -> ExistingInputCapture:
-    capture = capture_complete_existing_input(target, allow_codex_footer_spacer=allow_codex_footer_spacer)
+    capture = capture_complete_existing_input(
+        target,
+        allow_codex_footer_spacer=allow_codex_footer_spacer,
+        allow_cursor_agent=allow_cursor_agent,
+    )
     if expected_pane_id is not None and capture.pane_id != expected_pane_id:
         raise RuntimeError("target pane changed before submit-existing")
     require_authorized_existing_input_text(capture.text, authorization)
     return capture
+
+
+def revalidate_authorized_cursor_input(
+    target: str,
+    pane_id: str,
+    authorization: ExistingInputAuthorization,
+    preexisting_error: tuple[str, ...] | None,
+) -> None:
+    """Recheck one digest-authorized Cursor composer on the pinned pane."""
+
+    lines = capture_complete_input_lines(pane_id)
+    if not is_cursor_agent_capture(lines):
+        raise RuntimeError("target Cursor layout changed before submit-existing")
+    if authorization.text is not None:
+        raise RuntimeError("Cursor submit-existing requires digest authorization")
+    if exact_pane_id(target) != pane_id or not pane_has_exact_cursor_process(target, pane_id):
+        raise RuntimeError("target Cursor pane or process changed before submit-existing")
+    validate_error_transition(lines, preexisting_error, target, "before submit-existing")
+    require_authorized_existing_input_text(exact_cursor_existing_input_text(lines), authorization)
+    if exact_pane_id(target) != pane_id or not pane_has_exact_cursor_process(target, pane_id):
+        raise RuntimeError("target Cursor pane or process changed before submit-existing")
+
+
+def send_enter_to_pinned_cursor(target: str, pane_id: str) -> None:
+    """Submit only while tmux still resolves the exact Cursor pane and command."""
+
+    if re.fullmatch(r"%[0-9]+", pane_id) is None:
+        raise RuntimeError("Cursor submit-existing requires an exact pane id")
+    condition = f"#{{&&:#{{==:#{{pane_id}},{pane_id}}},#{{==:#{{pane_current_command}},agent}}}}"
+    result = subprocess.run(
+        [
+            "tmux",
+            "if-shell",
+            "-F",
+            "-t",
+            target,
+            condition,
+            f"send-keys -t {pane_id} Enter",
+            "run-shell 'exit 1'",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("target Cursor pane or process changed at submit-existing")
 
 
 def reject_human_owned_submit_existing_target(target: str) -> None:
@@ -1012,7 +1159,13 @@ def verify_authorized_existing_submit(
         now_s = time.monotonic()
         if is_real_input_text(input_text) and now_s >= next_enter_s:
             try:
-                capture = require_authorized_existing_input(target, authorization, pane_id, allow_codex_footer_spacer=True)
+                capture = require_authorized_existing_input(
+                    target,
+                    authorization,
+                    pane_id,
+                    allow_codex_footer_spacer=True,
+                    allow_cursor_agent=authorization.text is None,
+                )
             except RuntimeError:
                 confirmation_lines = tail_pane_id(pane_id, EXISTING_INPUT_CAPTURE_LINES)
                 validate_error_transition(confirmation_lines, preexisting_error, target, "after submit-existing")
@@ -1022,7 +1175,11 @@ def verify_authorized_existing_submit(
                 ):
                     return
                 raise
-            send_enter(capture.pane_id)
+            if capture.cursor:
+                revalidate_authorized_cursor_input(target, capture.pane_id, authorization, preexisting_error)
+                send_enter_to_pinned_cursor(target, capture.pane_id)
+            else:
+                send_enter(capture.pane_id)
             next_enter_s = now_s + max(options.enter_delay_s, 0.25)
         if now_s >= deadline_s:
             suffix = "authorized prompt still in input" if is_real_input_text(input_text) else "target did not become running"
@@ -1039,12 +1196,27 @@ def submit_existing_to_codex(target: str, authorization: ExistingInputAuthorizat
         return
     reject_human_owned_submit_existing_target(target)
     preexisting_error = require_sendable_codex_target(target, EXISTING_INPUT_CAPTURE_LINES)
-    initial_capture = require_authorized_existing_input(target, authorization, allow_codex_footer_spacer=True)
+    initial_capture = require_authorized_existing_input(
+        target,
+        authorization,
+        allow_codex_footer_spacer=True,
+        allow_cursor_agent=authorization.text is None,
+    )
     lines = revalidate_error_transition(target, EXISTING_INPUT_CAPTURE_LINES, preexisting_error, "before submit-existing")
     if has_plan_prompt(lines):
         raise RuntimeError("Codex submit blocked by unsafe Plan prompt")
-    capture = require_authorized_existing_input(target, authorization, initial_capture.pane_id, allow_codex_footer_spacer=True)
-    send_enter(capture.pane_id)
+    capture = require_authorized_existing_input(
+        target,
+        authorization,
+        initial_capture.pane_id,
+        allow_codex_footer_spacer=True,
+        allow_cursor_agent=authorization.text is None,
+    )
+    if capture.cursor:
+        revalidate_authorized_cursor_input(target, capture.pane_id, authorization, preexisting_error)
+        send_enter_to_pinned_cursor(target, capture.pane_id)
+    else:
+        send_enter(capture.pane_id)
     verify_authorized_existing_submit(target, authorization, selected, capture.pane_id, preexisting_error)
 
 
