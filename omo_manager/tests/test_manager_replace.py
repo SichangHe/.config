@@ -66,6 +66,24 @@ SOURCE1289_AUTHORITY = "".join(
         ">\r\n",
     )
 )
+SOURCE1477_AUTHORITY = (
+    "Subject: Re: Personal-browser replacement — current status\n\n"
+    "Replace all the managers involved and let the new managers make things\r\n"
+    "clean. Any agents that are not absolutely necessary should be closed, and\r\n"
+    "any agents should be in the correct T mark session that correspond to their\r\n"
+    "tasks.\r\n\r\n"
+    "On Sun, Sep 6, 2026 at 13:08 <sichangheagent@gmail.com> wrote:\r\n\r\n"
+    "> Personal-browser manager replacement status\r\n>\r\n"
+    "> Your correction requires the personal-browser manager to run in the PB\r\n"
+    "> session, handle only browser custody, and leave DW site generation to its\r\n"
+    "> separate owner while generation and checks continue in parallel.\r\n>\r\n"
+    "> The last agent said that replacement was in progress and promised a result\r\n"
+    "> by 10:53 AM, but no later manager message verifies that the replacement\r\n"
+    "> finished. I therefore am not treating it as complete. Please continue not\r\n"
+    "> using or closing the browser until a verified replacement result arrives.\r\n"
+    "> Accessible Travel's publication and crawl status is now reported separately\r\n"
+    "> by the Wix/B12 owner.\r\n>\r\n"
+)
 
 
 def sha(data: str) -> str:
@@ -234,6 +252,53 @@ class ManagerReplaceTests(unittest.TestCase):
             patch.object(manager_replace, "pane_inventory", side_effect=inventory),
             patch.object(manager_replace, "stop", side_effect=stopped),
             patch.object(manager_replace, "has_bound_close_proof", side_effect=lambda *_args: not state.get("old_live", True)),
+        )
+
+    def source1477_fixture(self, base: Path, old_task: str, old_target: str, new_session: str) -> tuple[Path, Args]:
+        root, args, files = self.fixture(base)
+        old_text = task_text(
+            status="long_running",
+            runat=old_target,
+            managerat=PARENT_TARGET,
+            is_manager=True,
+            pending=OLD_QUEUE,
+            session_id=SESSION_ID,
+        )
+        (root / args.old_task).unlink()
+        (root / old_task).write_text(old_text, encoding="utf-8")
+        children: list[ChildPin] = []
+        for task, status, runat, pending in (
+            ("child_a.md", "running", "worker:1", ("Translate one module.",)),
+            ("child_b.md", "blocked", "worker:2", ("Run the verifier.",)),
+        ):
+            text = task_text(status=status, runat=runat, managerat=old_target, is_manager=False, pending=pending)
+            (root / task).write_text(text, encoding="utf-8")
+            children.append(ChildPin(task, sha(text)))
+        todo = files["TODO.md"].replace(f"{args.old_task} {OLD_TARGET}", f"{old_task} {old_target}")
+        (root / "TODO.md").write_text(todo, encoding="utf-8")
+        authority_path = root / manager_replace.SOURCE1477_FILE
+        authority_path.write_bytes(SOURCE1477_AUTHORITY.encode())
+        authority_path.chmod(0o600)
+        canonical_excerpt = "\n".join(SOURCE1477_AUTHORITY.splitlines()[:6])
+        envelope = (
+            f'<human_instruction authoritative="true" source="{manager_replace.SOURCE1477_FILE}:1-6">\n'
+            f"{canonical_excerpt}\n</human_instruction>\n"
+        )
+        (root / args.authority_envelope_task).write_text(envelope, encoding="utf-8")
+        return root, replace(
+            args,
+            old_task=old_task,
+            successor_task=f"successor_{new_session}.md",
+            old_target=old_target,
+            new_target=f"{new_session}:19",
+            old_sha256=sha(old_text),
+            todo_sha256=sha(todo),
+            children=tuple(children),
+            authority_file=manager_replace.SOURCE1477_FILE,
+            authority_sha256=manager_replace.SOURCE1477_SHA256,
+            authority_lines=LineRange(*manager_replace.SOURCE1477_CARRIER_LINES),
+            authority_envelope_sha256=sha(envelope),
+            successor_item_lines=(LineRange(*manager_replace.SOURCE1477_SUCCESSOR_LINES),),
         )
 
     def whole_tree_fixture(self, base: Path) -> tuple[Path, Args, dict[str, str]]:
@@ -1327,6 +1392,78 @@ class ManagerReplaceTests(unittest.TestCase):
             for changes in variants:
                 with self.subTest(changes=changes):
                     self.assertFalse(manager_replace.is_source1443_semantic_exception(replace(exact, **changes)))
+
+    def test_source1477_semantic_exception_is_exact_and_non_reusable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _files = self.fixture(Path(tmp))
+            for old_task, old_target, new_session in manager_replace.SOURCE1477_REPLACEMENTS:
+                exact = replace(
+                    args,
+                    old_task=old_task,
+                    old_target=old_target,
+                    new_target=f"{new_session}:19",
+                    authority_file=manager_replace.SOURCE1477_FILE,
+                    authority_sha256=manager_replace.SOURCE1477_SHA256,
+                    authority_lines=LineRange(*manager_replace.SOURCE1477_CARRIER_LINES),
+                    successor_item_lines=(LineRange(*manager_replace.SOURCE1477_SUCCESSOR_LINES),),
+                )
+                self.assertTrue(manager_replace.is_source1477_semantic_exception(exact))
+                variants = (
+                    {"old_task": "other.md"},
+                    {"old_target": "wl:9"},
+                    {"new_target": "wl:19"},
+                    {"authority_file": "manager_mail/other.txt"},
+                    {"authority_sha256": "0" * 64},
+                    {"authority_lines": LineRange(1, 5)},
+                    {"successor_item_lines": (LineRange(3, 5),)},
+                    {"successor_item_lines": (LineRange(3, 6), LineRange(3, 6))},
+                )
+                for changes in variants:
+                    with self.subTest(old_task=old_task, changes=changes):
+                        self.assertFalse(manager_replace.is_source1477_semantic_exception(replace(exact, **changes)))
+
+    def test_source1477_replacements_retain_transactional_gates(self) -> None:
+        for old_task, old_target, new_session in manager_replace.SOURCE1477_REPLACEMENTS:
+            with self.subTest(old_task=old_task), tempfile.TemporaryDirectory() as tmp:
+                root, args = self.source1477_fixture(Path(tmp), old_task, old_target, new_session)
+                state = {"old_live": True}
+                runtime = self.runtime(state, old_target, args.new_target)
+                with runtime[0], runtime[1], runtime[2]:
+                    result = replace_manager(args)
+                self.assertIn("sole ownership", result)
+                self.assertEqual("done", parsed(root / old_task, root).status)
+                self.assertEqual("blocked", parsed(root / args.successor_task, root).status)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args = self.source1477_fixture(
+                Path(tmp), "personal_browser_mgr_pb.md", "pb:13.0", "pb"
+            )
+            state = {"old_live": True, "new_live": True}
+            inventory, _stopped, proof = self.runtime(state, args.old_target, args.new_target)
+            with inventory, proof, patch.object(manager_replace, "stop") as stop_mock, self.assertRaisesRegex(
+                ReplaceError, "successor target is already live"
+            ):
+                replace_manager(args)
+            stop_mock.assert_not_called()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args = self.source1477_fixture(Path(tmp), "dw_fpr_mgr.md", "dw:5.0", "dw")
+            (root / args.children[0].task).write_text("concurrent child drift\n", encoding="utf-8")
+            with patch.object(manager_replace, "stop") as stop_mock, self.assertRaises(ReplaceError):
+                replace_manager(args)
+            stop_mock.assert_not_called()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args = self.source1477_fixture(
+                Path(tmp), "personal_browser_mgr_pb.md", "pb:13.0", "pb"
+            )
+            with (
+                patch.object(manager_replace, "pane_inventory", return_value={}),
+                patch.object(manager_replace, "stop") as stop_mock,
+                self.assertRaisesRegex(ReplaceError, "old manager pane identity changed"),
+            ):
+                replace_manager(args)
+            stop_mock.assert_not_called()
 
     def test_other_authority_cannot_request_descendant_closure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
