@@ -5567,7 +5567,20 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                 )
                 validate_done_live_ownership(args.root, path, args.active_target)
                 if manager_consumed:
-                    _ = validate_manager_consumed_report(args, path, prevalidated_attestation, archived_task_payload)
+                    validation_task_payload = archived_task_payload
+                    if (
+                        validation_task_payload is None
+                        and archived
+                        and close_audit.state in {"note-prepared", "complete"}
+                        and current_text == text + close_audit.close_note
+                    ):
+                        validation_task_payload = text.encode()
+                    _ = validate_manager_consumed_report(
+                        args,
+                        path,
+                        prevalidated_attestation,
+                        validation_task_payload,
+                    )
                 if expected_capture_sha256:
                     observed = validate_terminal_shell(
                         args.active_target,

@@ -55,7 +55,6 @@ from omo_manager.omo_task_status import reserve_private_audit
 from omo_manager.omo_task_status import restore_terminal_target
 from omo_manager.omo_task_status import run
 from omo_manager.omo_task_status import stop_done_agent
-from omo_manager.omo_task_status import terminalized_done_live_audit_sha256
 from omo_manager.omo_task_status import tracked_dirty_state
 from omo_manager.omo_task_status import update_frontmatter_status
 from omo_manager.omo_task_status import validate_manager_consumed_report
@@ -2326,54 +2325,91 @@ class TaskStatusTests(unittest.TestCase):
                 manager_consumed_report_receipt_sha256=hashlib.sha256(evidence.read_bytes()).hexdigest(),
             )
 
-            secret = "d" * 64
-            commitment = hashlib.sha256(secret.encode()).hexdigest()
-            terminalized = DoneLiveCloseAudit(
-                "terminalized", "c" * 64, commitment, "", "", args.manager_consumed_report_receipt_sha256
-            )
-            terminalized_text = render_done_live_close_audit(args, archived, terminalized)
-            reserve_private_audit(args.audit_output, terminalized_text)
-            proof = args.audit_output.with_name(f".{args.audit_output.name}.owner-stopped")
-            terminalized_sha256 = terminalized_done_live_audit_sha256(args, archived, terminalized)
-            write_done_live_close_started(
-                proof,
-                args.audit_output,
-                secret,
-                commitment,
-                terminalized_sha256,
-                args.active_target,
-                args.expected_pane_id,
-                args.expected_pane_pid,
-                args.expected_pane_start_ticks,
-            )
-            with (
-                patch("omo_manager.omo_codex_stop.pane_id", return_value=""),
-                patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=None),
-            ):
-                promote_done_live_close_started(
-                    proof,
-                    args.audit_output,
-                    commitment,
-                    terminalized_sha256,
+            state = {"live": True, "interrupted": False}
+            capture_sha256 = "c" * 64
+
+            def target_pane(_target: str) -> str:
+                return "%42" if state["live"] else ""
+
+            def start_ticks(_pid: int) -> int | None:
+                return 73 if state["live"] else None
+
+            def terminalize(*values: object) -> ExitedCodexShell:
+                callback = values[6]
+                assert callable(callback)
+                callback()
+                return ExitedCodexShell(args.expected_session_id, capture_sha256)
+
+            def close(*values: object) -> None:
+                pre_close = values[10]
+                assert callable(pre_close)
+                pre_close()
+                proof_path = Path(str(values[4]))
+                audit_path = Path(str(values[5]))
+                write_done_live_close_started(
+                    proof_path,
+                    audit_path,
+                    str(values[6]),
+                    str(values[7]),
+                    str(values[12]),
                     args.active_target,
                     args.expected_pane_id,
                     args.expected_pane_pid,
                     args.expected_pane_start_ticks,
                 )
+                state["live"] = False
+                with (
+                    patch("omo_manager.omo_codex_stop.pane_id", return_value=""),
+                    patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=None),
+                ):
+                    promote_done_live_close_started(
+                        proof_path,
+                        audit_path,
+                        str(values[7]),
+                        str(values[12]),
+                        args.active_target,
+                        args.expected_pane_id,
+                        args.expected_pane_pid,
+                        args.expected_pane_start_ticks,
+                    )
+
+            original_replace = replace_private_audit
+
+            def interrupt_final_audit(path: Path, expected: str, updated: str) -> None:
+                if json.loads(updated)["state"] == "complete" and not state["interrupted"]:
+                    state["interrupted"] = True
+                    raise KeyboardInterrupt
+                original_replace(path, expected, updated)
+
+            def validate_while_original(*_values: object) -> dict[str, object]:
+                self.assertEqual(text, archived.read_text(encoding="utf-8"))
+                return attestation
+
+            with (
+                patch("omo_manager.omo_task_status.validate_consumed_closure_export_file", side_effect=ReceiptError("early failure")),
+                self.assertRaisesRegex(TaskFrontmatterError, "early failure"),
+            ):
+                close_done_live_no_mail(args, archived, text, archived.stat())
+            self.assertFalse(args.audit_output.exists())
+
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_task_status.pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_task_status.process_start_ticks", side_effect=start_ticks),
+                patch("omo_manager.omo_task_status.validate_consumed_closure_export_file", side_effect=validate_while_original),
+                patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell_with_consumed_report", side_effect=terminalize),
+                patch("omo_manager.omo_task_status.validate_exited_codex_shell_with_consumed_report", return_value=capture_sha256),
+                patch("omo_manager.omo_task_status.close_bound_tmux_target", side_effect=close),
+                patch("omo_manager.omo_task_status.replace_private_audit", side_effect=interrupt_final_audit),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                close_done_live_no_mail(args, archived, text, archived.stat())
+
+            proof = args.audit_output.with_name(f".{args.audit_output.name}.owner-stopped")
             note = close_note(args.active_target, args.expected_session_id)
             closed_text = text + note
-            note_prepared = replace(
-                terminalized,
-                state="note-prepared",
-                close_note=note,
-                completed_task_sha256=hashlib.sha256(closed_text.encode()).hexdigest(),
-            )
-            replace_private_audit(
-                args.audit_output,
-                terminalized_text,
-                render_done_live_close_audit(args, archived, note_prepared),
-            )
-            archived.write_text(closed_text, encoding="utf-8")
+            self.assertEqual(closed_text, archived.read_text(encoding="utf-8"))
+            self.assertEqual("note-prepared", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
 
             proof_text = proof.read_text(encoding="utf-8")
             proof.unlink()
