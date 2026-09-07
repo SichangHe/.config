@@ -270,7 +270,10 @@ def send_human_ack(items: tuple[str, ...], email_path: Path | None) -> None:
         body_path = Path(tmp) / "body.md"
         subject_path.write_text(ack_subject(email_path) + "\n", encoding="utf-8")
         body_path.write_text(ack_body(items), encoding="utf-8")
-        subprocess.run([str(EMAIL_HELPER), "--manager-human", "--subject-file", str(subject_path), "--message-file", str(body_path)], check=True)
+        subprocess.run(
+            [str(EMAIL_HELPER), "--manager-human", "--non-completion", "--subject-file", str(subject_path), "--message-file", str(body_path)],
+            check=True,
+        )
 
 
 def send_human_ack_once(pending_path: Path, args: Args, email_path: Path | None) -> None:

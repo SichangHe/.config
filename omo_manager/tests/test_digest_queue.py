@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from omo_manager.omo_digest_queue import decide_delivery, parse_items, queue_path
 from omo_manager.omo_pending_watch import find_markers
@@ -274,7 +275,7 @@ class DigestQueueTests(unittest.TestCase):
                 f"#!/usr/bin/env bash\n"
                 "while [ \"$#\" -gt 0 ]; do\n"
                 "  case \"$1\" in\n"
-                "    --manager-human) shift ;;\n"
+                "    --manager-human|--non-completion) shift ;;\n"
                 "    --subject-file) subject_file=\"$2\"; shift 2 ;;\n"
                 "    --message-file) message_file=\"$2\"; shift 2 ;;\n"
                 "    *) echo \"bad arg: $1\" >&2; exit 2 ;;\n"
@@ -308,27 +309,65 @@ class DigestQueueTests(unittest.TestCase):
             self.assertIn("sent-at:", queue_text)
             self.assertNotIn("status: queued", queue_text)
 
-    def test_email_me_manager_human_post_send_log_failure_still_exits_success(self) -> None:
+    # 🧑 Human source `manager_mail/85c5dff58359-1486.txt:1-4`: "clean up."
+    def test_email_me_manager_human_missing_exact_once_state_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             msg = Path(tmp) / "msg.md"
             msg.write_text("body\n", encoding="utf-8")
             subject = Path(tmp) / "subject.txt"
             subject.write_text("[omo_manager] test\n", encoding="utf-8")
+            mail_config = Path(tmp) / "local.env"
+            mail_config.write_text(
+                "OMO_AGENT_GMAIL_ADDRESS=agent@example.test\n"
+                "OMO_AGENT_GMAIL_APP_PASSWORD=secret\n"
+                "OMO_HUMAN_EMAIL_ADDRESS=human@example.test\n",
+                encoding="utf-8",
+            )
+            mail_config.chmod(0o600)
             bad_state = Path(tmp) / "not-a-dir"
             bad_state.write_text("file blocks mkdir\n", encoding="utf-8")
+            email_helper = str(Path.home() / ".config/helper.sh/email_me.py")
             result = subprocess.run(
-                [str(Path.home() / ".config/helper.sh/email_me.py"), "--manager-human", "--tmux-target", "wl:1.0", "--subject-file", str(subject), "--message-file", str(msg)],
+                [
+                    email_helper,
+                    "--manager-human",
+                    "--non-completion",
+                    "--tmux-target",
+                    "wl:1.0",
+                    "--subject-file",
+                    str(subject),
+                    "--message-file",
+                    str(msg),
+                ],
                 cwd=tmp,
-                env={"HOME": str(home), "EMAIL_ME_FAKE_SEND_LOG": str(Path(tmp) / "sent.txt"), "OMO_MANAGER_STATE_DIR": str(bad_state), "PATH": "/usr/bin:/bin"},
+                env={
+                    "HOME": str(home),
+                    "EMAIL_ME_FAKE_SEND_LOG": str(Path(tmp) / "sent.txt"),
+                    "OMO_MANAGER_LOCAL_ENV": str(mail_config),
+                    "OMO_MANAGER_STATE_DIR": str(bad_state),
+                    "PATH": "/usr/bin:/bin",
+                },
                 text=True,
                 capture_output=True,
                 timeout=10,
                 check=False,
             )
-            self.assertEqual(0, result.returncode, result.stderr)
-            self.assertEqual("Emailed the human\n", result.stdout)
-            self.assertEqual("[wl:1] test\nbody\n", (Path(tmp) / "sent.txt").read_text(encoding="utf-8"))
+            self.assertEqual(2, result.returncode, result.stderr)
+            self.assertEqual("", result.stdout)
+            self.assertIn("Human email exact-once state is unavailable", result.stderr)
+            self.assertFalse((Path(tmp) / "sent.txt").exists())
+
+    def test_agent_audit_does_not_impersonate_human_owned_manager(self) -> None:
+        from omo_manager.omo_agent_audit import ReviewVerdict, deliver_manager_escalation
+
+        with patch("omo_manager.omo_agent_audit.subprocess.run") as runner:
+            delivered = deliver_manager_escalation(
+                Path("/tmp"), "hcfg:1", "task.md", ReviewVerdict("strong", "problem", "loop")
+            )
+
+        self.assertFalse(delivered)
+        runner.assert_not_called()
 
     def test_first_use_concurrent_submit_and_deliver_preserves_item(self) -> None:
         for _ in range(10):

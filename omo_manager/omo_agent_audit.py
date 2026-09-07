@@ -367,8 +367,10 @@ def manager_task_path(root: Path, managerat: str) -> Path | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def deliver_manager_escalation(root: Path, managerat: str, task: str, verdict: ReviewVerdict, *, runner: Any = subprocess.run) -> bool:
+def deliver_manager_escalation(root: Path, managerat: str, task: str, verdict: ReviewVerdict) -> bool:
     """Deliver one bounded confirmed problem without rebinding a manager target."""
+    if managerat.partition(":")[0].startswith("h"):
+        return False
     message = f"Agent audit confirmed a problem for `{task}`: {verdict.evidence[:500]}"
     fd, raw_path = tempfile.mkstemp(prefix="omo-agent-audit-report-", suffix=".txt")
     path = Path(raw_path)
@@ -376,21 +378,6 @@ def deliver_manager_escalation(root: Path, managerat: str, task: str, verdict: R
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             _ = stream.write(message + "\n")
         path.chmod(0o600)
-        if managerat.partition(":")[0].startswith("h"):
-            subject_path = path.with_suffix(".subject")
-            subject_path.write_text(f"Agent audit problem: {Path(task).name}\n", encoding="utf-8")
-            subject_path.chmod(0o600)
-            try:
-                result = runner(
-                    [str(Path(__file__).parent.parent / "helper.sh" / "email_me.py"), "--manager-human", "--subject-file", str(subject_path), "--message-file", str(path)],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    check=False,
-                )
-                return result.returncode == 0
-            finally:
-                subject_path.unlink(missing_ok=True)
         manager = manager_task_path(root, managerat)
         if manager is None:
             return False

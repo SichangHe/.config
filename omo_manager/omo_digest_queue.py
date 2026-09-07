@@ -352,7 +352,11 @@ def command_deliver(args: argparse.Namespace) -> int:
         subject_file = write_private_temp(args.subject + "\n", ".txt")
         body_file = write_private_temp(body, ".md")
         try:
-            result = subprocess.run([str(args.send_helper), "--manager-human", "--subject-file", str(subject_file), "--message-file", str(body_file)], text=True, check=False)
+            result = subprocess.run(
+                [str(args.send_helper), "--manager-human", "--non-completion", "--subject-file", str(subject_file), "--message-file", str(body_file)],
+                text=True,
+                check=False,
+            )
             if result.returncode != 0:
                 return result.returncode
             replace_statuses(path, {item.item_id for item in queued}, iso_now())

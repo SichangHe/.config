@@ -15,7 +15,6 @@ import select
 import shlex
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -1604,35 +1603,9 @@ def mail_artifact_name(args: Args, uid: str) -> str:
     return f"{mailbox_id}-{uid}.txt"
 
 
-def write_private_temp(text: str, suffix: str) -> Path:
-    fd, raw_path = tempfile.mkstemp(prefix="omo-recovery-", suffix=suffix, text=True)
-    path = Path(raw_path)
-    try:
-        path.chmod(0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-    except Exception:
-        path.unlink(missing_ok=True)
-        raise
-    return path
-
-
-def email_human(args: Args, subject: str, body: str) -> None:
-    subject_path = write_private_temp(subject.rstrip("\n") + "\n", ".txt")
-    body_path = write_private_temp(body, ".md")
-    command = [str(Path.home() / ".config/helper.sh/email_me.py"), "--manager-human"]
-    if args.guest_hees:
-        command.append("--guest-hees")
-    if args.manager_target:
-        command.extend(("--sender-tmux-target", args.manager_target))
-    command.extend(("--subject-file", str(subject_path), "--message-file", str(body_path)))
-    try:
-        result = subprocess.run(command, text=True, check=False)
-        if result.returncode != 0:
-            logging.error("recovery human email failed: status=%s", result.returncode)
-    finally:
-        subject_path.unlink(missing_ok=True)
-        body_path.unlink(missing_ok=True)
+def log_recovery_failure(args: Args, subject: str, body: str) -> None:
+    del args
+    logging.error("%s: %s", subject, body.rstrip())
 
 
 def shell_join(command: list[str]) -> str:
@@ -1675,7 +1648,7 @@ def handle_recovery_email(args: Args, uid: str, txt_path: Path) -> None:
             command = [str(args.restart_script), "--manager-url", args.manager_url, "--root", str(args.root)]
             record_recovery_attempt(last_path, now_s, uid, "refused-non-loopback")
             append_recovery_record(args.root, txt_path, "recovery email recorded; restart refused because manager URL is not loopback", args.manager_file)
-            email_human(args, "Recovery action needed", f"Recovery email {source_ref(args.root, txt_path)} was accepted from the configured self address, but automatic restart was refused because manager-url is not loopback: {args.manager_url}\n\nRun only after correcting configuration:\n\n```sh\n{shell_join(command)}\n```\n")
+            log_recovery_failure(args, "Recovery action needed", f"Recovery email {source_ref(args.root, txt_path)} was accepted from the configured self address, but automatic restart was refused because manager-url is not loopback: {args.manager_url}\n\nRun only after correcting configuration:\n\n```sh\n{shell_join(command)}\n```\n")
             return
         log_path = recovery_dir / f"recover-{uid}-{int(now_s)}.log"
         command = [str(args.restart_script), "--manager-url", args.manager_url, "--root", str(args.root), "--state-dir", str(args.state_dir)]
@@ -1689,12 +1662,12 @@ def handle_recovery_email(args: Args, uid: str, txt_path: Path) -> None:
                 log_handle.write(f"failed to run restart helper: {exc}\n")
                 record_recovery_attempt(last_path, now_s, uid, "launch-failed")
                 append_recovery_record(args.root, txt_path, f"recovery restart helper could not be launched; see `{log_path}`", args.manager_file)
-                email_human(args, "Recovery action needed", f"Recovery email {source_ref(args.root, txt_path)} was accepted from the configured self address, but automatic restart helper launch failed.\n\nLog: {log_path}\n\nManual recovery command:\n\n```sh\n{shell_join(command)}\n```\n")
+                log_recovery_failure(args, "Recovery action needed", f"Recovery email {source_ref(args.root, txt_path)} was accepted from the configured self address, but automatic restart helper launch failed.\n\nLog: {log_path}\n\nManual recovery command:\n\n```sh\n{shell_join(command)}\n```\n")
                 return
         record_recovery_attempt(last_path, now_s, uid, f"returncode={result.returncode}")
         if result.returncode != 0:
             append_recovery_record(args.root, txt_path, f"recovery restart failed with exit {result.returncode}; see `{log_path}`", args.manager_file)
-            email_human(args, "Recovery action needed", f"Recovery email {source_ref(args.root, txt_path)} was accepted from the configured self address, but automatic restart failed with exit {result.returncode}.\n\nLog: {log_path}\n\nManual recovery command:\n\n```sh\n{shell_join(command)}\n```\n")
+            log_recovery_failure(args, "Recovery action needed", f"Recovery email {source_ref(args.root, txt_path)} was accepted from the configured self address, but automatic restart failed with exit {result.returncode}.\n\nLog: {log_path}\n\nManual recovery command:\n\n```sh\n{shell_join(command)}\n```\n")
     finally:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
