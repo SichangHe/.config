@@ -176,13 +176,14 @@ class PbWatcherCursorReplaceTests(unittest.TestCase):
 
     def test_wait_ready_requires_exact_process_environment_and_empty_composer(self) -> None:
         old = pane()
-        new = pane(200)
+        new = pane(200, command="cursor-agent")
         cursor = CursorProof(200, 2000, "/node", "f" * 64)
         environment = {"HOME": "/home/test"}
+        runtime = {"launcher_path": "/shim/agent", "launcher_resolved": "/version/cursor-agent"}
         with (
             patch("omo_manager.omo_pb_watcher_cursor_replace.pane_proof", return_value=new),
             patch("omo_manager.omo_pb_watcher_cursor_replace.cursor_candidates", return_value=[cursor]),
-            patch("omo_manager.omo_pb_watcher_cursor_replace.cursor_runtime_identity", return_value={}),
+            patch("omo_manager.omo_pb_watcher_cursor_replace.cursor_runtime_identity", return_value=runtime),
             patch("omo_manager.omo_pb_watcher_cursor_replace.pinned_tmux_identity", return_value={}),
             patch("omo_manager.omo_pb_watcher_cursor_replace.exact_process_environment", return_value=environment),
             patch("omo_manager.omo_pb_watcher_cursor_replace.inspect", return_value=Report("ready", [])),
@@ -192,37 +193,63 @@ class PbWatcherCursorReplaceTests(unittest.TestCase):
             patch("omo_manager.omo_pb_watcher_cursor_replace.has_cursor_followups_overlay", return_value=False),
             patch("omo_manager.omo_pb_watcher_cursor_replace.has_cursor_agent_running_indicator", return_value=False),
         ):
-            self.assertEqual((new, cursor), wait_ready_empty(old, b"", "cursor-grok-4.6-low", environment, {}, {}, 0.1, 0.01))
+            self.assertEqual((new, cursor), wait_ready_empty(old, b"", "cursor-grok-4.6-low", environment, runtime, {}, 0.1, 0.01))
         with (
             patch("omo_manager.omo_pb_watcher_cursor_replace.pane_proof", return_value=new),
             patch("omo_manager.omo_pb_watcher_cursor_replace.cursor_candidates", return_value=[cursor]),
-            patch("omo_manager.omo_pb_watcher_cursor_replace.cursor_runtime_identity", return_value={}),
+            patch("omo_manager.omo_pb_watcher_cursor_replace.cursor_runtime_identity", return_value=runtime),
             patch("omo_manager.omo_pb_watcher_cursor_replace.pinned_tmux_identity", return_value={}),
             patch("omo_manager.omo_pb_watcher_cursor_replace.exact_process_environment", return_value={"WRONG": "1"}),
             self.assertRaisesRegex(ReplaceError, "sanitized environment"),
         ):
-            wait_ready_empty(old, b"", "cursor-grok-4.6-low", environment, {}, {}, 0.1, 0.01)
+            wait_ready_empty(old, b"", "cursor-grok-4.6-low", environment, runtime, {}, 0.1, 0.01)
 
     def test_wait_ready_rejects_an_extra_cursor_process(self) -> None:
         old = pane()
-        new = pane(200)
+        new = pane(200, command="cursor-agent")
         exact = CursorProof(200, 2000, "/node", "f" * 64)
         extra = CursorProof(201, 2010, "/node", "e" * 64)
+        runtime = {"launcher_path": "/shim/agent", "launcher_resolved": "/version/cursor-agent"}
         with (
             patch("omo_manager.omo_pb_watcher_cursor_replace.pane_proof", return_value=new),
             patch("omo_manager.omo_pb_watcher_cursor_replace.cursor_candidates", side_effect=[[exact, extra], [exact]]),
-            patch("omo_manager.omo_pb_watcher_cursor_replace.cursor_runtime_identity", return_value={}),
+            patch("omo_manager.omo_pb_watcher_cursor_replace.cursor_runtime_identity", return_value=runtime),
             patch("omo_manager.omo_pb_watcher_cursor_replace.pinned_tmux_identity", return_value={}),
             self.assertRaisesRegex(ReplaceError, "exactly one total Cursor"),
         ):
-            wait_ready_empty(old, b"", "cursor-grok-4.6-low", {}, {}, {}, 0.1, 0.01)
+            wait_ready_empty(old, b"", "cursor-grok-4.6-low", {}, runtime, {}, 0.1, 0.01)
 
     def test_wait_ready_rejects_an_attached_replacement_session(self) -> None:
         with (
-            patch("omo_manager.omo_pb_watcher_cursor_replace.pane_proof", return_value=pane(200, attached=True)),
+            patch("omo_manager.omo_pb_watcher_cursor_replace.pane_proof", return_value=pane(200, command="cursor-agent", attached=True)),
             self.assertRaisesRegex(ReplaceError, "became attached"),
         ):
-            wait_ready_empty(pane(), b"", "cursor-grok-4.6-low", {}, {}, {}, 0.1, 0.01)
+            wait_ready_empty(
+                pane(),
+                b"",
+                "cursor-grok-4.6-low",
+                {},
+                {"launcher_path": "/shim/agent", "launcher_resolved": "/version/cursor-agent"},
+                {},
+                0.1,
+                0.01,
+            )
+
+    def test_wait_ready_rejects_the_old_pane_command_after_respawn(self) -> None:
+        with (
+            patch("omo_manager.omo_pb_watcher_cursor_replace.pane_proof", return_value=pane(200)),
+            self.assertRaisesRegex(ReplaceError, "not running Cursor Agent"),
+        ):
+            wait_ready_empty(
+                pane(),
+                b"",
+                "cursor-grok-4.6-low",
+                {},
+                {"launcher_path": "/shim/agent", "launcher_resolved": "/version/cursor-agent"},
+                {},
+                0.1,
+                0.01,
+            )
 
     def test_replacement_has_no_startup_prompt_and_uses_canonical_environment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

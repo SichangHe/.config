@@ -628,13 +628,21 @@ def capture_lines(target: str, tmux_runtime: dict[str, str]) -> list[str]:
     return result.stdout.splitlines()
 
 
-def capture_binding(args: Args, *, require_retained: bool = True) -> tuple[Binding, dict[str, str], dict[str, object], dict[str, str]]:
+def capture_binding(
+    args: Args,
+    *,
+    require_retained: bool = True,
+    allow_replacement_command: bool = False,
+) -> tuple[Binding, dict[str, str], dict[str, object], dict[str, str]]:
     runtime = cursor_runtime_identity()
     tmux_runtime = pinned_tmux_identity()
     environment = file_proof(ENV_FILE)
     values = parse_env(environment)
     target = pane_proof(TARGET, runtime=tmux_runtime)
-    if target.command != "agent" or target.session_attached or Path(target.workdir).resolve(strict=False) != WORKDIR:
+    expected_commands = {"agent"}
+    if allow_replacement_command:
+        expected_commands.add(Path(str(runtime["launcher_resolved"])).name)
+    if target.command not in expected_commands or target.session_attached or Path(target.workdir).resolve(strict=False) != WORKDIR:
         raise ReplaceError("PB watcher target is not the exact live Cursor pane in the protected workdir")
     candidates = cursor_candidates(target, runtime)
     if len(candidates) != 1:
@@ -760,7 +768,7 @@ def wait_ready_empty(
             raise ReplaceError("replacement changed the tmux session/window/pane binding")
         if current.session_attached:
             raise ReplaceError("replacement tmux session became attached")
-        if current.command != "agent":
+        if current.command != Path(str(runtime["launcher_resolved"])).name:
             raise ReplaceError("replacement pane is not running Cursor Agent")
         if cursor_runtime_identity() != runtime or pinned_tmux_identity() != tmux_runtime:
             raise ReplaceError("Cursor or tmux runtime changed during replacement startup")
@@ -896,7 +904,11 @@ def reconcile_replacement(args: Args) -> str:
             old_cursor = CursorProof(**record["cursor"])  # type: ignore[arg-type]
         except (TypeError, ValueError) as error:
             raise ReplaceError("replacement audit has invalid old pane/process evidence") from error
-        current, values, runtime, tmux_runtime = capture_binding(args, require_retained=False)
+        current, values, runtime, tmux_runtime = capture_binding(
+            args,
+            require_retained=False,
+            allow_replacement_command=True,
+        )
         if (
             canonical_json(asdict(current.lifecycle)) != canonical_json(record["lifecycle"])
             or canonical_json(asdict(current.protected)) != canonical_json(record["protected"])
