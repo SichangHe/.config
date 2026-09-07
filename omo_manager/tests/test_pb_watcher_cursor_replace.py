@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import nullcontext
@@ -29,6 +30,7 @@ from omo_manager.omo_pb_watcher_cursor_replace import (
     atomic_respawn,
     authority_proof,
     binding_sha256,
+    capture_binding,
     file_proof,
     finish_audit,
     live_marker,
@@ -37,6 +39,7 @@ from omo_manager.omo_pb_watcher_cursor_replace import (
     replacement_command,
     reserve_audit,
     require_isolated_pane_process_tree,
+    require_replacement_pane_process_tree,
     replace_watcher,
     verify_unchanged,
     wait_ready_empty,
@@ -145,6 +148,59 @@ class PbWatcherCursorReplaceTests(unittest.TestCase):
             self.assertRaisesRegex(ReplaceError, "sibling or child"),
         ):
             require_isolated_pane_process_tree(current_pane, cursor)
+
+    def test_replacement_tree_accepts_only_the_exact_pinned_worker_server(self) -> None:
+        current_pane = pane(200, command="cursor-agent")
+        cursor = CursorProof(200, 2000, "/node", "f" * 64)
+        node = str(Path(sys.executable))
+        runtime = {"node_path": node, "index_path": "/index.js"}
+        clean = {
+            200: ProcessInfo(200, 1, "S", ("/shim/agent",)),
+            201: ProcessInfo(201, 200, "S", (node, "/index.js", "worker-server")),
+        }
+        with (
+            patch("omo_manager.omo_pb_watcher_cursor_replace.read_processes", return_value=clean),
+            patch("omo_manager.omo_pb_watcher_cursor_replace.process_executable", return_value=Path(node).resolve()),
+            patch("omo_manager.omo_pb_watcher_cursor_replace.process_start_ticks", return_value=2010),
+        ):
+            require_replacement_pane_process_tree(current_pane, cursor, runtime)
+        dirty = dict(clean)
+        dirty[202] = ProcessInfo(202, 200, "S", ("python", "job.py"))
+        with (
+            patch("omo_manager.omo_pb_watcher_cursor_replace.read_processes", return_value=dirty),
+            self.assertRaisesRegex(ReplaceError, "sibling or child"),
+        ):
+            require_replacement_pane_process_tree(current_pane, cursor, runtime)
+
+    def test_reconciliation_capture_selects_the_replacement_tree_proof(self) -> None:
+        current_pane = pane(200, command="cursor-agent")
+        cursor = CursorProof(200, 2000, "/node", "f" * 64)
+        cursor_runtime = {
+            "launcher_path": "/shim/agent",
+            "launcher_resolved": "/version/cursor-agent",
+        }
+        args = Args(Path("/ssd1/sichangheagent/work_logs"), "202607/pbw_interpreter_live.md", TARGET, "", None, Path("/tmp"), 1, 0.1, False)
+        with (
+            patch("omo_manager.omo_pb_watcher_cursor_replace.cursor_runtime_identity", return_value=cursor_runtime),
+            patch("omo_manager.omo_pb_watcher_cursor_replace.pinned_tmux_identity", return_value={}),
+            patch("omo_manager.omo_pb_watcher_cursor_replace.file_proof", return_value=file_value("env")),
+            patch("omo_manager.omo_pb_watcher_cursor_replace.parse_env", return_value={}),
+            patch("omo_manager.omo_pb_watcher_cursor_replace.pane_proof", return_value=current_pane),
+            patch("omo_manager.omo_pb_watcher_cursor_replace.cursor_candidates", return_value=[cursor]),
+            patch("omo_manager.omo_pb_watcher_cursor_replace.capture_lines", return_value=["footer"]),
+            patch("omo_manager.omo_pb_watcher_cursor_replace.current_input_text", return_value="Plan, search, build anything"),
+            patch("omo_manager.omo_pb_watcher_cursor_replace.has_cursor_followups_overlay", return_value=False),
+            patch("omo_manager.omo_pb_watcher_cursor_replace.lifecycle_proof", return_value=lifecycle()),
+            patch("omo_manager.omo_pb_watcher_cursor_replace.protected_proof", return_value=protected()),
+            patch("omo_manager.omo_pb_watcher_cursor_replace.runtime_proof", return_value=runtime()),
+            patch("omo_manager.omo_pb_watcher_cursor_replace.authority_proof", return_value=authority()),
+            patch("omo_manager.omo_pb_watcher_cursor_replace.require_isolated_pane_process_tree") as strict,
+            patch("omo_manager.omo_pb_watcher_cursor_replace.require_replacement_pane_process_tree") as replacement,
+        ):
+            observed, _, _, _ = capture_binding(args, require_retained=False, allow_replacement_command=True)
+        self.assertEqual(current_pane, observed.target_pane)
+        strict.assert_not_called()
+        replacement.assert_called_once_with(current_pane, cursor, cursor_runtime)
 
     def test_binding_digest_and_protected_drift_fail_closed(self) -> None:
         original = binding()
@@ -354,12 +410,12 @@ class PbWatcherCursorReplaceTests(unittest.TestCase):
                 patch("omo_manager.omo_pb_watcher_cursor_replace.parse_env", return_value={}),
                 patch("omo_manager.omo_pb_watcher_cursor_replace.protected_proof", return_value=original.protected),
                 patch("omo_manager.omo_pb_watcher_cursor_replace.authoritative_active_target_task_paths", return_value=((directory / "202607/pbw_interpreter_live.md").resolve(),)),
-                patch("omo_manager.omo_pb_watcher_cursor_replace.require_isolated_pane_process_tree") as isolate,
+                patch("omo_manager.omo_pb_watcher_cursor_replace.require_replacement_pane_process_tree") as isolate,
             ):
                 result = replace_watcher(args)
             self.assertIn("replaced", result)
             respawn.assert_called_once()
-            isolate.assert_called_once_with(new_pane, new_cursor)
+            isolate.assert_called_once_with(new_pane, new_cursor, {})
             self.assertEqual("committed", json.loads(audit.read_text(encoding="utf-8"))["state"])
 
     def test_completion_unknown_audit_reconciles_without_respawn(self) -> None:
@@ -388,7 +444,7 @@ class PbWatcherCursorReplaceTests(unittest.TestCase):
                 patch("omo_manager.omo_pb_watcher_cursor_replace.process_start_ticks", side_effect=ReplaceError("gone")),
                 patch("omo_manager.omo_pb_watcher_cursor_replace.authoritative_active_target_task_paths", return_value=((directory / "202607/pbw_interpreter_live.md").resolve(),)),
                 patch("omo_manager.omo_pb_watcher_cursor_replace.atomic_respawn") as respawn,
-                patch("omo_manager.omo_pb_watcher_cursor_replace.require_isolated_pane_process_tree"),
+                patch("omo_manager.omo_pb_watcher_cursor_replace.require_replacement_pane_process_tree"),
             ):
                 result = replace_watcher(args)
             self.assertIn("reconciled", result)

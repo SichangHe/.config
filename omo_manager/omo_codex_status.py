@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 DEFAULT_COMPACTION_WAIT_TIMEOUT_S = float(os.environ.get("OMO_CODEX_COMPACTION_WAIT_TIMEOUT_S", "300"))
 COMPACTION_WAIT_INTERVAL_S = 0.5
@@ -74,8 +75,9 @@ CODEX_RUNNING_EMPTY_INPUT_TEXTS = {
 }
 CURSOR_AGENT_EMPTY_INPUT_TEXTS = {
     "Add a follow-up",
+    "Plan, search, build anything",
 }
-CURSOR_AGENT_FOOTER_RE = re.compile(r"^\s*Cursor \S.+·\s*[0-9]+(?:\.[0-9]+)?%")
+CURSOR_AGENT_FOOTER_RE = re.compile(r"^\s*Cursor \S.+(?:·\s*[0-9]+(?:\.[0-9]+)?%| {2,}Run Everything\s*$)")
 CURSOR_AGENT_INPUT_PREFIX_RE = re.compile(r"^\s*→ ")
 CURSOR_AGENT_STOP_HINT_RE = re.compile(r"[ \t]+ctrl\+c to stop\s*$")
 CURSOR_AGENT_COMPOSER_BOTTOM_RE = re.compile(r"^\s*▀+\s*$")
@@ -244,7 +246,34 @@ def pane_has_exact_cursor_process(target: str, pane_id: str) -> bool:
     if process is None:
         return False
     current_command, start_tokens = process
-    return current_command == "agent" and (not start_tokens or os.path.basename(start_tokens[0]) == "agent")
+    if current_command == "agent":
+        return not start_tokens or os.path.basename(start_tokens[0]) == "agent"
+    try:
+        launcher = (Path.home() / ".local/bin/agent").resolve(strict=True)
+    except OSError:
+        return False
+    if current_command != launcher.name or len(start_tokens) < 2 or start_tokens[-2] != "-c":
+        return False
+    try:
+        nested = shlex.split(start_tokens[-1])
+    except ValueError:
+        return False
+    required = [
+        "exec",
+        str(launcher),
+        "--force",
+        "--sandbox",
+        "disabled",
+        "--trust",
+        "--workspace",
+    ]
+    return (
+        len(nested) in {10, 11}
+        and nested[:7] == required
+        and Path(nested[7]).is_absolute()
+        and nested[8] == "--model"
+        and bool(nested[9])
+    )
 
 
 def pane_has_exact_managed_agent_process(target: str, pane_id: str) -> bool:

@@ -57,8 +57,10 @@ reserves its audit, and asks tmux to respawn only the bound pane. The fresh
 Cursor receives no startup prompt at all, so replacement cannot replay work or
 initiate browser, database, Gmail, or mail activity. Success requires the same
 tmux session/window/pane, a distinct authenticated Cursor process, exactly one
-task owner, unchanged protected evidence, and a ready empty composer. The audit
-is then committed. A failure after audit reservation is retained as `prepared`,
+task owner, unchanged protected evidence, and a ready empty composer. The only
+permitted post-start child is Cursor's direct `worker-server`, with its exact
+pinned node executable and argv; any other child or sibling fails closed. The
+audit is then committed. A failure after audit reservation is retained as `prepared`,
 `respawn-attempted`, or `completion-unknown`, according to the last durable
 step. Do not retry or create another worker. Reconcile the preserved audit
 without respawning by hashing it and running:

@@ -621,6 +621,55 @@ def require_isolated_pane_process_tree(pane: PaneProof, cursor: CursorProof) -> 
         raise ReplaceError("PB watcher pane contains unbound sibling or child work")
 
 
+def process_executable(pid: int) -> Path:
+    try:
+        return (Path("/proc") / str(pid) / "exe").resolve(strict=True)
+    except OSError as error:
+        raise ReplaceError(f"could not authenticate process {pid} executable: {error}") from error
+
+
+def require_replacement_pane_process_tree(
+    pane: PaneProof,
+    cursor: CursorProof,
+    runtime: dict[str, object],
+) -> None:
+    """Allow only the Cursor ancestry and its exact pinned worker-server child."""
+
+    processes = read_processes()
+    descendants = {
+        process.pid
+        for process in processes.values()
+        if process.state != "Z" and process_is_under(process.pid, pane.pane_pid, processes)
+    }
+    ancestry: set[int] = set()
+    current = cursor.pid
+    while True:
+        process = processes.get(current)
+        if process is None or process.state == "Z":
+            raise ReplaceError("replacement pane process ancestry is incomplete")
+        ancestry.add(current)
+        if current == pane.pane_pid:
+            break
+        current = process.ppid
+        if current <= 1 or current in ancestry:
+            raise ReplaceError("replacement Cursor is not in one exact pane ancestry")
+    extras = descendants - ancestry
+    if not extras:
+        return
+    if len(extras) != 1:
+        raise ReplaceError("replacement pane contains unbound sibling or child work")
+    worker = processes[next(iter(extras))]
+    node = Path(str(runtime["node_path"])).resolve(strict=True)
+    exact_argv = (str(runtime["node_path"]), str(runtime["index_path"]), "worker-server")
+    if (
+        worker.ppid != cursor.pid
+        or worker.argv != exact_argv
+        or process_executable(worker.pid) != node
+        or process_start_ticks(worker.pid) <= cursor.start_ticks
+    ):
+        raise ReplaceError("replacement pane contains an unauthenticated child process")
+
+
 def capture_lines(target: str, tmux_runtime: dict[str, str]) -> list[str]:
     result = run_tmux(["capture-pane", "-p", "-t", f"={target}", "-S", "-500"], runtime=tmux_runtime)
     if result.returncode != 0:
@@ -653,7 +702,10 @@ def capture_binding(
         raise ReplaceError("PB watcher no longer has the exact retained submitted-composer defect")
     if has_cursor_followups_overlay(lines):
         raise ReplaceError("PB watcher has a follow-up overlay; replacement ownership is ambiguous")
-    require_isolated_pane_process_tree(target, candidates[0])
+    if target.command == "agent":
+        require_isolated_pane_process_tree(target, candidates[0])
+    else:
+        require_replacement_pane_process_tree(target, candidates[0], runtime)
     lifecycle = lifecycle_proof(args)
     protected = protected_proof(environment, values, tmux_runtime)
     runtime_binding = runtime_proof(args, values, runtime, tmux_runtime)
@@ -952,7 +1004,7 @@ def reconcile_replacement(args: Args) -> str:
             raise ReplaceError("reconciliation cannot prove distinct old and new Cursor processes")
         if authoritative_active_target_task_paths(args.root, TARGET) != ((args.root / TASK_FILE).resolve(),):
             raise ReplaceError("reconciliation cannot prove exactly one authoritative task owner")
-        require_isolated_pane_process_tree(new_pane, new_cursor)
+        require_replacement_pane_process_tree(new_pane, new_cursor, runtime)
         finish_audit(audit_path, audit_data, "committed", new_pane=new_pane, new_cursor=new_cursor)
         return f"reconciled {TARGET}; one task owner remains and the replacement composer is empty; audit={audit_path}"
 
@@ -1019,7 +1071,7 @@ def replace_watcher(args: Args) -> str:
             owners = authoritative_active_target_task_paths(args.root, TARGET)
             if owners != ((args.root / TASK_FILE).resolve(),):
                 raise ReplaceError("replacement did not retain exactly one authoritative task owner")
-            require_isolated_pane_process_tree(new_pane, new_cursor)
+            require_replacement_pane_process_tree(new_pane, new_cursor, runtime)
             finish_audit(audit_path, active_audit, "committed", new_pane=new_pane, new_cursor=new_cursor)
             return f"replaced {TARGET} in place; one task owner remains and the new Cursor composer is empty; audit={audit_path}"
         except Exception as error:

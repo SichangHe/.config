@@ -1,8 +1,9 @@
 import subprocess
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_codex_status import Args, PlanPromptRecovery, Report, can_submit_stuck_input, current_block, current_input_text, dismiss_plan_prompt_if_present, dismiss_skills_menu_if_present, exact_pane_id, final_assistant_output, has_active_skills_menu, has_compacting_indicator, has_cursor_followups_overlay, has_resume_paused_goal_prompt, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, report_from_lines, status, submit_stuck_input_if_present, tail, tail_pane_id, visible_error_lines
+from omo_manager.omo_codex_status import Args, PlanPromptRecovery, Report, can_submit_stuck_input, current_block, current_input_text, dismiss_plan_prompt_if_present, dismiss_skills_menu_if_present, exact_pane_id, final_assistant_output, has_active_skills_menu, has_compacting_indicator, has_cursor_followups_overlay, has_resume_paused_goal_prompt, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, pane_has_exact_cursor_process, report_from_lines, status, submit_stuck_input_if_present, tail, tail_pane_id, visible_error_lines
 from omo_manager.omo_tmux_send import error_signature, exact_capacity_error
 
 
@@ -40,6 +41,40 @@ def cursor_retained_composer_lines(*, prompt: str = 'Read and execute PB watcher
 
 
 class CodexStatusTests(unittest.TestCase):
+    def test_fresh_cursor_placeholder_is_ready(self) -> None:
+        lines = [
+            "  → Plan, search, build anything",
+            " ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+            "  Cursor Grok 4.6 Low                                           Run Everything",
+            "  /ssd1/sichangheagent/personal_browser_setup · main",
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual("ready", report.status)
+        self.assertEqual("Plan, search, build anything", report.input_text)
+
+    def test_exact_fresh_cursor_process_uses_the_pinned_resolved_launcher(self) -> None:
+        start_tokens = [
+            "/usr/bin/env",
+            "-i",
+            "/usr/bin/bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            "exec /version/cursor-agent --force --sandbox disabled --trust --workspace /work --model cursor-grok-4.6-low",
+        ]
+        with (
+            patch("omo_manager.omo_codex_status.exact_pane_process", return_value=("cursor-agent", start_tokens)),
+            patch("pathlib.Path.resolve", return_value=Path("/version/cursor-agent")),
+        ):
+            self.assertTrue(pane_has_exact_cursor_process("pb:0.0", "%1"))
+        bad = list(start_tokens)
+        bad[-1] = bad[-1].replace("/version/cursor-agent", "/tmp/cursor-agent")
+        with (
+            patch("omo_manager.omo_codex_status.exact_pane_process", return_value=("cursor-agent", bad)),
+            patch("pathlib.Path.resolve", return_value=Path("/version/cursor-agent")),
+        ):
+            self.assertFalse(pane_has_exact_cursor_process("pb:0.0", "%1"))
+
     def test_extracts_last_output_from_current_block(self) -> None:
         lines = ['old', '────', ' kept  ', '', '─ Worked for 1m 2s ─', '  gpt-5.5']
         self.assertEqual([' kept'], last_output(lines))
