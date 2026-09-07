@@ -1638,6 +1638,280 @@ class EmailMeTests(unittest.TestCase):
             self.assertEqual("[wl:1] Manager update\nbody\n", send_log.read_text(encoding="utf-8"))
             self.assertIn("[wl:1] Manager update", (state_dir / "human-email-sent.tsv").read_text(encoding="utf-8"))
 
+    def test_manager_human_non_completion_claim_does_not_expire_across_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            send_log = Path(tmp) / "sent.txt"
+            body = Path(tmp) / "body.md"
+            body.write_text("one news report\n", encoding="utf-8")
+            env = {
+                "EMAIL_ME_FAKE_SEND_LOG": str(send_log),
+                "OMO_MANAGER_STATE_DIR": str(state_dir),
+                "OMO_MANAGER_EMAIL_DEDUPE_S": "0",
+                "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
+                "OMO_MANAGER_TMUX_TARGET": "wl:1.0",
+            }
+            argv = ["--manager-human", "--non-completion", "--subject", "News", "--message-file", str(body)]
+            with patch.dict(os.environ, env, clear=False), patch("sys.stdout", new_callable=StringIO) as stdout:
+                self.assertEqual(0, email_me.main(argv))
+                with patch.object(email_me.time, "time", return_value=email_me.time.time() + 10_000_000):
+                    self.assertEqual(0, email_me.main(argv))
+
+            self.assertEqual("[wl:1] News\none news report\n", send_log.read_text(encoding="utf-8"))
+            self.assertIn("Skipped duplicate human email", stdout.getvalue())
+            claims = list((state_dir / "human-email-exact-once").glob("*.claim"))
+            self.assertEqual(1, len(claims))
+
+    def test_manager_human_uncertain_smtp_retry_never_resubmits(self) -> None:
+        sent: list[object] = []
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        class UncertainSmtp:
+            def __init__(self, **_kwargs: object) -> None:
+                return None
+
+            def __enter__(self) -> "UncertainSmtp":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def login(self, _sender: str, _password: str) -> None:
+                return None
+
+            def send_message(self, message: object) -> None:
+                sent.append(message)
+                raise email_me.smtplib.SMTPException("uncertain after submit")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            env = {"OMO_MANAGER_STATE_DIR": str(state_dir), "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0"}
+            argv = ["--manager-human", "--non-completion", "--tmux-target", "wl:1", "--subject", "News"]
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(sys, "stdin", StringIO("one uncertain report\n")),
+                patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(email_me, "prepare_subject_and_headers", return_value=("[wl:1] News", {})),
+                patch.object(email_me.smtplib, "SMTP_SSL", UncertainSmtp),
+                patch.object(email_me.ssl, "create_default_context", return_value=None),
+                patch("sys.stderr", new_callable=StringIO),
+            ):
+                self.assertEqual(1, email_me.main(argv))
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(sys, "stdin", StringIO("one uncertain report\n")),
+                patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(email_me, "prepare_subject_and_headers", return_value=("[wl:1] News", {})),
+                patch.object(email_me.smtplib, "SMTP_SSL", UncertainSmtp),
+                patch.object(email_me.ssl, "create_default_context", return_value=None),
+            ):
+                self.assertEqual(1, email_me.main(argv))
+            self.assertEqual(1, len(sent))
+
+    def test_manager_human_post_submit_authentication_error_never_resubmits(self) -> None:
+        sent: list[object] = []
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        class UncertainAuthSmtp:
+            def __init__(self, **_kwargs: object) -> None:
+                return None
+
+            def __enter__(self) -> "UncertainAuthSmtp":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def login(self, _sender: str, _password: str) -> None:
+                return None
+
+            def send_message(self, message: object) -> None:
+                sent.append(message)
+                raise email_me.smtplib.SMTPAuthenticationError(535, b"uncertain after submit")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"), "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0"}
+            argv = ["--manager-human", "--non-completion", "--tmux-target", "wl:1", "--subject", "News"]
+            for _attempt in range(2):
+                with (
+                    patch.dict(os.environ, env, clear=False),
+                    patch.object(sys, "stdin", StringIO("one uncertain report\n")),
+                    patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                    patch.object(email_me, "prepare_subject_and_headers", return_value=("[wl:1] News", {})),
+                    patch.object(email_me.smtplib, "SMTP_SSL", UncertainAuthSmtp),
+                    patch.object(email_me.ssl, "create_default_context", return_value=None),
+                    patch("sys.stderr", new_callable=StringIO),
+                ):
+                    self.assertEqual(1, email_me.main(argv))
+            self.assertEqual(1, len(sent))
+
+    def test_manager_human_exact_once_rejects_orphan_delivery_artifacts(self) -> None:
+        for artifact_kind in ("regular", "dangling-symlink"):
+            with self.subTest(artifact_kind=artifact_kind), tempfile.TemporaryDirectory() as tmp:
+                state = Path(tmp) / "state"
+                claims = state / "human-email-exact-once"
+                claims.mkdir(mode=0o700, parents=True)
+                state.chmod(0o700)
+                digest, payload = email_me.exact_once_email_record(
+                    "News", "[wl:1] News", "body\0", "wl:1"
+                )
+                delivered = claims / f"{digest}.delivered"
+                if artifact_kind == "regular":
+                    delivered.write_bytes(payload)
+                    delivered.chmod(0o600)
+                else:
+                    delivered.symlink_to(claims / "missing")
+                with patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(state)}, clear=False):
+                    with self.assertRaisesRegex(ValueError, "orphan terminal artifact"):
+                        email_me.exact_once_email_claim(
+                            "News", "[wl:1] News", "body\0", "wl:1"
+                        )
+                self.assertFalse((claims / f"{digest}.claim").exists())
+
+    def test_manager_human_exact_once_rejects_ambiguous_receipt_state(self) -> None:
+        for artifact_kind in ("mismatched-claim", "release", "different-inode-delivered"):
+            with self.subTest(artifact_kind=artifact_kind), tempfile.TemporaryDirectory() as tmp:
+                state = Path(tmp) / "state"
+                claims = state / "human-email-exact-once"
+                claims.mkdir(mode=0o700, parents=True)
+                state.chmod(0o700)
+                digest, payload = email_me.exact_once_email_record(
+                    "News", "[wl:1] News", "body\0", "wl:1"
+                )
+                claim = claims / f"{digest}.claim"
+                claim.write_bytes(b"wrong\n" if artifact_kind == "mismatched-claim" else payload)
+                claim.chmod(0o600)
+                if artifact_kind == "release":
+                    os.link(claim, claim.with_suffix(".release"))
+                elif artifact_kind == "different-inode-delivered":
+                    delivered = claim.with_suffix(".delivered")
+                    delivered.write_bytes(payload)
+                    delivered.chmod(0o600)
+                with patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(state)}, clear=False):
+                    with self.assertRaisesRegex(ValueError, "conflicts|incomplete release"):
+                        email_me.exact_once_email_claim(
+                            "News", "[wl:1] News", "body\0", "wl:1"
+                        )
+
+    def test_manager_human_exact_once_rejects_subject_target_mismatch(self) -> None:
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            send_log = Path(tmp) / "sent.txt"
+            env = {
+                "EMAIL_ME_FAKE_SEND_LOG": str(send_log),
+                "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
+                "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
+            }
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(sys, "stdin", StringIO("one report\n")),
+                patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(email_me, "prepare_subject_and_headers", return_value=("[pb:13] News", {})),
+                patch("sys.stderr", new_callable=StringIO) as stderr,
+            ):
+                self.assertEqual(
+                    2,
+                    email_me.main(
+                        ["--manager-human", "--non-completion", "--tmux-target", "wl:1", "--subject", "News"]
+                    ),
+                )
+            self.assertIn("does not match its authenticated producer", stderr.getvalue())
+            self.assertFalse(send_log.exists())
+
+    def test_manager_human_exact_once_binds_producer_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            body = Path(tmp) / "body.md"
+            body.write_text("same report\n", encoding="utf-8")
+            for target in ("wl:1", "pb:13"):
+                send_log = Path(tmp) / f"{target.replace(':', '-')}.txt"
+                env = {
+                    "EMAIL_ME_FAKE_SEND_LOG": str(send_log),
+                    "OMO_MANAGER_STATE_DIR": str(state),
+                    "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
+                }
+                with patch.dict(os.environ, env, clear=False):
+                    self.assertEqual(
+                        0,
+                        email_me.main(
+                            [
+                                "--manager-human", "--non-completion", "--tmux-target", target,
+                                "--subject", "News", "--message-file", str(body),
+                            ]
+                        ),
+                    )
+                self.assertTrue(send_log.exists())
+            self.assertEqual(2, len(list((state / "human-email-exact-once").glob("*.delivered"))))
+
+    def test_manager_human_exact_once_state_failure_is_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = Path(tmp) / "blocked-state"
+            state_path.write_text("not a directory\n", encoding="utf-8")
+            send_log = Path(tmp) / "sent.txt"
+            env = {
+                "EMAIL_ME_FAKE_SEND_LOG": str(send_log),
+                "OMO_MANAGER_STATE_DIR": str(state_path),
+                "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
+                "OMO_MANAGER_TMUX_TARGET": "wl:1.0",
+            }
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(sys, "stdin", StringIO("one news report\n")),
+                patch("sys.stderr", new_callable=StringIO) as stderr,
+            ):
+                self.assertEqual(
+                    2,
+                    email_me.main(["--manager-human", "--non-completion", "--subject", "News"]),
+                )
+            self.assertIn("exact-once state is unavailable", stderr.getvalue())
+            self.assertFalse(send_log.exists())
+
+    def test_manager_human_exact_once_claim_releases_before_smtp_attempt(self) -> None:
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            send_log = Path(tmp) / "sent.txt"
+            body = Path(tmp) / "body.md"
+            body.write_text("one news report\n", encoding="utf-8")
+            env = {"OMO_MANAGER_STATE_DIR": str(state_dir), "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0"}
+            argv = [
+                "--manager-human", "--non-completion", "--tmux-target", "wl:1",
+                "--subject", "News", "--message-file", str(body),
+            ]
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(email_me, "prepare_subject_and_headers", return_value=("[wl:1] News", {})),
+                patch.object(email_me.smtplib, "SMTP_SSL", side_effect=OSError("connection refused")),
+                patch.object(email_me.ssl, "create_default_context", return_value=None),
+                patch("sys.stderr", new_callable=StringIO),
+            ):
+                self.assertEqual(1, email_me.main(argv))
+            self.assertEqual([], list((state_dir / "human-email-exact-once").glob("*.claim")))
+            with patch.dict(
+                os.environ,
+                {**env, "EMAIL_ME_FAKE_SEND_LOG": str(send_log)},
+                clear=False,
+            ):
+                self.assertEqual(0, email_me.main(argv))
+            self.assertTrue(send_log.exists())
+
     def test_completion_mail_requires_exact_owner_claim_and_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp) / "state"

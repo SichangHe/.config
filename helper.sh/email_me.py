@@ -1145,6 +1145,206 @@ def release_manager_email_key(dedupe_subject: str, display_subject: str, content
     _ = update_manager_email_key(dedupe_subject, display_subject, content, state_scope, release=True)
 
 
+def exact_once_email_record(
+    dedupe_subject: str,
+    display_subject: str,
+    content: str,
+    authenticated_producer_target: str,
+) -> tuple[str, bytes]:
+    targets = BRACKETED_TMUX_TAG_RE.findall(display_subject)
+    if len(targets) != 1:
+        raise ValueError("manager email exact-once subject has no unique producer target")
+    producer_target = canonical_email_tmux_target(authenticated_producer_target)
+    if canonical_email_tmux_target(targets[0][1:-1]) != producer_target:
+        raise ValueError("manager email exact-once subject target does not match its authenticated producer")
+    digest = hashlib.sha256(
+        dedupe_subject.encode() + b"\0" + producer_target.encode() + b"\0" + content.encode()
+    ).hexdigest()
+    payload = (
+        "schema=omo-manager-human-email-exact-once/v1\n"
+        f"digest={digest}\n"
+        f"producer_target={producer_target}\n"
+        f"dedupe_subject_sha256={hashlib.sha256(dedupe_subject.encode()).hexdigest()}\n"
+        f"content_sha256={hashlib.sha256(content.encode()).hexdigest()}\n"
+    ).encode()
+    return digest, payload
+
+
+def exact_once_email_claim(
+    dedupe_subject: str,
+    display_subject: str,
+    content: str,
+    authenticated_producer_target: str,
+) -> str:
+    """Reserve one non-completion Human email permanently before SMTP."""
+
+    state_dir = manager_state_dir()
+    state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    state_info = state_dir.lstat()
+    if not stat.S_ISDIR(state_info.st_mode) or state_info.st_uid != os.getuid() or state_info.st_mode & 0o077:
+        raise ValueError("manager email exact-once state directory is not owner-private")
+    claims = state_dir / "human-email-exact-once"
+    claims.mkdir(mode=0o700, exist_ok=True)
+    claims_info = claims.lstat()
+    if not stat.S_ISDIR(claims_info.st_mode) or claims_info.st_uid != os.getuid() or claims_info.st_mode & 0o077:
+        raise ValueError("manager email exact-once claim directory is not owner-private")
+    digest, payload = exact_once_email_record(
+        dedupe_subject, display_subject, content, authenticated_producer_target
+    )
+    claim = claims / f"{digest}.claim"
+    delivered = claim.with_suffix(".delivered")
+    release = claim.with_suffix(".release")
+    if os.path.lexists(delivered) or os.path.lexists(release):
+        if not os.path.lexists(claim):
+            raise ValueError("manager email exact-once state has an orphan terminal artifact")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(claim, flags, 0o600)
+    except FileExistsError:
+        if read_owner_private_file(claim, "manager email exact-once claim", 4096) != payload:
+            raise ValueError("manager email exact-once claim conflicts with this delivery")
+        if os.path.lexists(release):
+            raise ValueError("manager email exact-once claim has incomplete release state")
+        if not os.path.lexists(delivered):
+            return "uncertain"
+        claim_info = claim.lstat()
+        delivered_info = delivered.lstat()
+        if (
+            (claim_info.st_dev, claim_info.st_ino) != (delivered_info.st_dev, delivered_info.st_ino)
+            or read_owner_private_file(delivered, "manager email exact-once delivery", 4096) != payload
+        ):
+            raise ValueError("manager email exact-once delivery conflicts with its claim")
+        return "delivered"
+    preserve_claim = False
+    try:
+        if os.path.lexists(delivered) or os.path.lexists(release):
+            preserve_claim = True
+            os.close(fd)
+            raise ValueError("manager email exact-once state changed during reservation")
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        fsync_directory(claims)
+    except BaseException:
+        if not preserve_claim:
+            try:
+                claim.unlink()
+                fsync_directory(claims)
+            except OSError:
+                pass
+        raise
+    return "new"
+
+
+def mark_exact_once_email_delivered(
+    dedupe_subject: str,
+    display_subject: str,
+    content: str,
+    authenticated_producer_target: str,
+) -> None:
+    """Commit a successful SMTP return without changing the reserved bytes."""
+
+    digest, payload = exact_once_email_record(
+        dedupe_subject, display_subject, content, authenticated_producer_target
+    )
+    claims = manager_state_dir() / "human-email-exact-once"
+    claim = claims / f"{digest}.claim"
+    delivered = claim.with_suffix(".delivered")
+    release = claim.with_suffix(".release")
+    if os.path.lexists(release):
+        raise ValueError("manager email exact-once claim has incomplete release state")
+    if read_owner_private_file(claim, "manager email exact-once claim", 4096) != payload:
+        raise ValueError("manager email exact-once claim conflicts with this delivery")
+    try:
+        os.link(claim, delivered, follow_symlinks=False)
+    except FileExistsError:
+        claim_info = claim.lstat()
+        delivered_info = delivered.lstat()
+        if (
+            (claim_info.st_dev, claim_info.st_ino) != (delivered_info.st_dev, delivered_info.st_ino)
+            or read_owner_private_file(delivered, "manager email exact-once delivery", 4096) != payload
+        ):
+            raise ValueError("manager email exact-once delivery conflicts with its claim")
+    fsync_directory(claims)
+
+
+def release_exact_once_email_claim(
+    dedupe_subject: str,
+    display_subject: str,
+    content: str,
+    authenticated_producer_target: str,
+) -> None:
+    """Release a reservation only after proving SMTP was never attempted."""
+
+    digest, payload = exact_once_email_record(
+        dedupe_subject, display_subject, content, authenticated_producer_target
+    )
+    claims = manager_state_dir() / "human-email-exact-once"
+    claim = claims / f"{digest}.claim"
+    delivered = claim.with_suffix(".delivered")
+    release = claim.with_suffix(".release")
+    if os.path.lexists(delivered):
+        raise ValueError("manager email exact-once delivery is already committed")
+    if os.path.lexists(release):
+        raise ValueError("manager email exact-once claim has incomplete release state")
+    if read_owner_private_file(claim, "manager email exact-once claim", 4096) != payload:
+        raise ValueError("manager email exact-once claim conflicts with this delivery")
+    os.link(claim, release, follow_symlinks=False)
+    try:
+        claim.unlink()
+        if os.path.lexists(delivered):
+            os.link(release, claim, follow_symlinks=False)
+            raise ValueError("manager email exact-once delivery became committed during release")
+        release.unlink()
+        fsync_directory(claims)
+    except BaseException:
+        if not os.path.lexists(claim) and os.path.lexists(release):
+            try:
+                os.link(release, claim, follow_symlinks=False)
+            except OSError:
+                pass
+        try:
+            release.unlink()
+            fsync_directory(claims)
+        except OSError:
+            pass
+        raise
+
+
+def claim_email_delivery(
+    dedupe_subject: str,
+    display_subject: str,
+    content: str,
+    state_scope: str,
+    authenticated_producer_target: str,
+    *,
+    exact_once: bool,
+) -> str:
+    if exact_once:
+        return exact_once_email_claim(
+            dedupe_subject, display_subject, content, authenticated_producer_target
+        )
+    return "new" if should_send_manager_email_key(dedupe_subject, display_subject, content, state_scope) else "delivered"
+
+
+def release_email_delivery(
+    dedupe_subject: str,
+    display_subject: str,
+    content: str,
+    state_scope: str,
+    authenticated_producer_target: str,
+    *,
+    exact_once: bool,
+) -> None:
+    if exact_once:
+        release_exact_once_email_claim(
+            dedupe_subject, display_subject, content, authenticated_producer_target
+        )
+    else:
+        release_manager_email_key(dedupe_subject, display_subject, content, state_scope)
+
+
 def log_manager_email(subject: str, state_scope: str = "human") -> None:
     try:
         state_dir = manager_state_dir()
@@ -1276,6 +1476,7 @@ def main(argv: list[str]) -> int:
     dedupe_subject = normalized_subject_key(title) if args.manager_human and normalized_subject_key is not None else subject
     dedupe_content = args.content + "\0" + "\0".join(args.guest_image_references)
     state_scope = "guest-hees" if args.guest_hees else "human"
+    exact_once = args.manager_human and args.non_completion and not args.guest_hees
     if fake_log := fake_send_log_path():
         if args.guest_hees:
             print("EMAIL_ME_FAKE_SEND_LOG cannot verify a guest reply", file=sys.stderr)
@@ -1287,17 +1488,48 @@ def main(argv: list[str]) -> int:
             except (OSError, ValueError) as exc:
                 print(str(exc), file=sys.stderr)
                 return 2
-        elif not should_send_manager_email_key(dedupe_subject, subject, dedupe_content, state_scope):
-            print("Skipped duplicate human email")
-            return 0
+        else:
+            try:
+                claim_state = claim_email_delivery(
+                    dedupe_subject,
+                    subject,
+                    dedupe_content,
+                    state_scope,
+                    subject_tmux_target or "",
+                    exact_once=exact_once,
+                )
+            except (OSError, ValueError) as exc:
+                print(f"Human email exact-once state is unavailable: {exc}", file=sys.stderr)
+                return 2
+            if claim_state == "delivered":
+                print("Skipped duplicate human email")
+                return 0
+            if claim_state == "uncertain":
+                print("Human email delivery remains uncertain; refusing replay", file=sys.stderr)
+                return 1
         try:
             fake_log.write_text(f"{subject}\n{args.content}", encoding="utf-8")
         except OSError:
             if args.completion_authorization:
                 release_completion_authorization(args.completion_authorization, completion_authorization)
             else:
-                release_manager_email_key(dedupe_subject, subject, dedupe_content, state_scope)
+                release_email_delivery(
+                    dedupe_subject,
+                    subject,
+                    dedupe_content,
+                    state_scope,
+                    subject_tmux_target or "",
+                    exact_once=exact_once,
+                )
             raise
+        if exact_once:
+            try:
+                mark_exact_once_email_delivered(
+                    dedupe_subject, subject, dedupe_content, subject_tmux_target or ""
+                )
+            except (OSError, ValueError) as exc:
+                print(f"Human email was submitted but its exact-once receipt failed: {exc}", file=sys.stderr)
+                return 1
         if args.manager_human:
             log_manager_email(subject, state_scope)
             print("Emailed the human")
@@ -1396,9 +1628,24 @@ def main(argv: list[str]) -> int:
             print(str(exc), file=sys.stderr)
             return 2
     elif not args.guest_hees:
-        if not should_send_manager_email_key(dedupe_subject, subject, dedupe_content, state_scope):
+        try:
+            claim_state = claim_email_delivery(
+                dedupe_subject,
+                subject,
+                dedupe_content,
+                state_scope,
+                subject_tmux_target or "",
+                exact_once=exact_once,
+            )
+        except (OSError, ValueError) as exc:
+            print(f"Human email exact-once state is unavailable: {exc}", file=sys.stderr)
+            return 2
+        if claim_state == "delivered":
             print("Skipped duplicate human email")
             return 0
+        if claim_state == "uncertain":
+            print("Human email delivery remains uncertain; refusing replay", file=sys.stderr)
+            return 1
         email_claimed = True
     smtp_delivery_attempted = False
     try:
@@ -1412,21 +1659,39 @@ def main(argv: list[str]) -> int:
             smtp_delivery_attempted = True
             _ = smtp.send_message(msg)
     except smtplib.SMTPAuthenticationError:
-        if email_claimed:
-            release_manager_email_key(dedupe_subject, subject, dedupe_content, state_scope)
+        if email_claimed and not smtp_delivery_attempted:
+            release_email_delivery(
+                dedupe_subject,
+                subject,
+                dedupe_content,
+                state_scope,
+                subject_tmux_target or "",
+                exact_once=exact_once,
+            )
         elif args.completion_authorization:
             release_completion_authorization(args.completion_authorization, completion_authorization)
         if args.guest_hees:
             guest_claim.close()
-        print(
-            "Authentication failed. Ensure Gmail 2-Step Verification is enabled and use a valid app password.",
-            file=sys.stderr,
-        )
+        if smtp_delivery_attempted:
+            print("Email send failed: authentication error after delivery began", file=sys.stderr)
+            print(f"Delivery-uncertain Message-ID: {msg['Message-ID']}", file=sys.stderr)
+        else:
+            print(
+                "Authentication failed. Ensure Gmail 2-Step Verification is enabled and use a valid app password.",
+                file=sys.stderr,
+            )
         return 1
     except (OSError, smtplib.SMTPException) as exc:
         if not smtp_delivery_attempted:
             if email_claimed:
-                release_manager_email_key(dedupe_subject, subject, dedupe_content, state_scope)
+                release_email_delivery(
+                    dedupe_subject,
+                    subject,
+                    dedupe_content,
+                    state_scope,
+                    subject_tmux_target or "",
+                    exact_once=exact_once,
+                )
             elif args.completion_authorization:
                 release_completion_authorization(args.completion_authorization, completion_authorization)
             print(f"Email send failed before delivery: {exc}", file=sys.stderr)
@@ -1457,6 +1722,15 @@ def main(argv: list[str]) -> int:
         print(f"Guest reply verified in Sent Mail for {source}")
     elif smtp_uncertain:
         return 1
+
+    if exact_once:
+        try:
+            mark_exact_once_email_delivered(
+                dedupe_subject, subject, dedupe_content, subject_tmux_target or ""
+            )
+        except (OSError, ValueError) as exc:
+            print(f"Human email was submitted but its exact-once receipt failed: {exc}", file=sys.stderr)
+            return 1
 
     if args.manager_human:
         log_manager_email(subject, state_scope)
