@@ -40,6 +40,7 @@ from omo_manager.omo_codex_stop import (
     resume_cmd,
     send_exit_keys,
     stop,
+    submitted_status_response,
     validate_exited_codex_shell,
     validate_exited_codex_shell_with_consumed_report,
 )
@@ -2270,6 +2271,73 @@ class CodexStopTests(unittest.TestCase):
         after = f"{before}/status{response}"
         with patch("omo_manager.omo_codex_stop.capture", side_effect=[before, after]), patch("omo_manager.omo_codex_stop.paste_text"), patch("omo_manager.omo_codex_stop.tmux"):
             self.assertEqual((new, response), query_status_session_id("cfg:1.0", 10, 0.1, strict_status_response=True))
+
+    def test_query_status_session_id_strictly_handles_scrolled_ring_buffer(self) -> None:
+        old = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"
+        new = "019f670b-6a2f-7463-b9be-9aa6ff0cec43"
+        shared = "ready\nworking\n"
+        before = f"/status\n│  Session:              {old}       │\n{shared}"
+        response = f"\n│  Session:              {new}       │\n"
+        after = f"{shared}/status{response}"
+        with patch("omo_manager.omo_codex_stop.capture", side_effect=[before, after]), patch("omo_manager.omo_codex_stop.paste_text"), patch("omo_manager.omo_codex_stop.tmux"):
+            self.assertEqual((new, response), query_status_session_id("cfg:1.0", 10, 0.1, strict_status_response=True))
+
+    def test_query_status_session_id_strictly_handles_tui_insertion(self) -> None:
+        old = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"
+        new = "019f670b-6a2f-7463-b9be-9aa6ff0cec43"
+        before = f"history\n/status\n│  Session:              {old}       │\n\n› Ask Codex\nfooter\n"
+        response = f"\n│  Session:              {new}       │\n"
+        after = f"history\n/status\n│  Session:              {old}       │\n/status{response}\n› Ask Codex\nfooter\n"
+        with patch("omo_manager.omo_codex_stop.capture", side_effect=[before, after]), patch("omo_manager.omo_codex_stop.paste_text"), patch("omo_manager.omo_codex_stop.tmux"):
+            self.assertEqual((new, response), query_status_session_id("cfg:1.0", 10, 0.1, strict_status_response=True))
+
+    def test_query_status_session_id_prefers_proven_insertion_over_ambiguous_ring(self) -> None:
+        old = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"
+        new = "019f670b-6a2f-7463-b9be-9aa6ff0cec43"
+        repeated = "repeat\n"
+        old_response = f"│  Session:              {old}       │\n"
+        response = f"\n│  Session:              {new}       │\n"
+        before = f"{repeated}/status\n{old_response}{repeated}"
+        after = f"{repeated}/status{response}/status\n{old_response}{repeated}"
+        with patch("omo_manager.omo_codex_stop.capture", side_effect=[before, after]), patch("omo_manager.omo_codex_stop.paste_text"), patch("omo_manager.omo_codex_stop.tmux"):
+            self.assertEqual((new, response), query_status_session_id("cfg:1.0", 10, 0.1, strict_status_response=True))
+
+    def test_submitted_status_response_rejects_ambiguous_insertion_placement(self) -> None:
+        session_id = "019f670b-6a2f-7463-b9be-9aa6ff0cec43"
+        before = "/status\n/status\n"
+        after = f"/status\n/status\n/status\n│  Session:              {session_id}       │\n/status\n"
+        self.assertEqual("", submitted_status_response(before, after))
+
+    def test_submitted_status_response_accepts_duplicate_fallback_for_one_session(self) -> None:
+        session_id = "019f670b-6a2f-7463-b9be-9aa6ff0cec43"
+        card = f"│  Session:              {session_id}       │\n"
+        appended = f"/status\n{card}/status\n{card}"
+        response = submitted_status_response("ready\n", f"ready\n{appended}")
+        self.assertEqual(session_id, extract_status_session_id(response))
+
+    def test_submitted_status_response_rejects_duplicate_mixed_sessions(self) -> None:
+        first = "019f670b-6a2f-7463-b9be-9aa6ff0cec43"
+        second = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"
+        appended = f"/status\n│  Session:              {first}       │\n/status\n│  Session:              {second}       │\n"
+        self.assertEqual("", submitted_status_response("ready\n", f"ready\n{appended}"))
+
+    def test_submitted_status_response_rejects_mixed_sessions_within_block(self) -> None:
+        first = "019f670b-6a2f-7463-b9be-9aa6ff0cec43"
+        second = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"
+        appended = f"/status\n│  Session:              {first}       │\n│  Session:              {second}       │\n/status\n│  Session:              {second}       │\n"
+        self.assertEqual("", submitted_status_response("ready\n", f"ready\n{appended}"))
+
+    def test_query_status_session_id_strictly_rejects_disjoint_redraw(self) -> None:
+        old = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"
+        before = f"ready\n/status\n│  Session:              {old}       │\n"
+        after = f"/status\n/status\n│  Session:              {old}       │\nunrelated redraw\n"
+        with (
+            patch("omo_manager.omo_codex_stop.capture", side_effect=[before, after]),
+            patch("omo_manager.omo_codex_stop.paste_text"),
+            patch("omo_manager.omo_codex_stop.tmux"),
+            patch("omo_manager.omo_codex_stop.time.monotonic", side_effect=[0.0, 1.0]),
+        ):
+            self.assertEqual(("", ""), query_status_session_id("cfg:1.0", 10, 0.1, strict_status_response=True))
 
     def test_query_status_session_id_captures_once_after_deadline(self) -> None:
         session_id = "019f670b-6a2f-7463-b9be-9aa6ff0cec43"

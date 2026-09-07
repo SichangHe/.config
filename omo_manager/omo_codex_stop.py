@@ -256,6 +256,48 @@ def extract_new_status_session_id(before: str, after: str) -> str:
     return extract_status_session_id(after.rsplit("/status", 1)[-1])
 
 
+def submitted_status_response(before: str, after: str) -> str:
+    """Return only output appended after this invocation's `/status`."""
+    if after.startswith(before):
+        appended = after[len(before) :]
+    else:
+        appended = ""
+        before_lines = before.splitlines(keepends=True)
+        after_lines = after.splitlines(keepends=True)
+        inserted_line_count = len(after_lines) - len(before_lines)
+        insertion_candidates: list[str] = []
+        if inserted_line_count > 0:
+            for split in range(len(before_lines) + 1):
+                if before_lines[:split] != after_lines[:split]:
+                    break
+                if before_lines[split:] == after_lines[split + inserted_line_count :]:
+                    candidate = "".join(after_lines[split : split + inserted_line_count])
+                    if candidate.splitlines() and candidate.splitlines()[0].strip() == "/status":
+                        insertion_candidates.append(candidate)
+        if len(insertion_candidates) == 1:
+            appended = insertion_candidates[0]
+        elif insertion_candidates:
+            return ""
+        if not appended:
+            for n_lines in range(min(len(before_lines), len(after_lines)), 0, -1):
+                if before_lines[-n_lines:] == after_lines[:n_lines]:
+                    appended = "".join(after_lines[n_lines:])
+                    break
+    appended_lines = appended.splitlines(keepends=True)
+    marker_positions = [index for index, line in enumerate(appended_lines) if line.strip() == "/status"]
+    if marker_positions:
+        session_ids: list[str] = []
+        for marker_index, marker_position in enumerate(marker_positions):
+            end = marker_positions[marker_index + 1] if marker_index + 1 < len(marker_positions) else len(appended_lines)
+            block_session_ids = STATUS_SESSION_RE.findall("".join(appended_lines[marker_position + 1 : end]))
+            if len(block_session_ids) != 1:
+                return ""
+            session_ids.append(block_session_ids[0].lower())
+        if len(set(session_ids)) == 1:
+            return "\n" + "".join(appended_lines[marker_positions[0] + 1 :])
+    return ""
+
+
 def post_interrupt_output(before: str, after: str) -> str:
     if not before:
         return after
@@ -760,7 +802,7 @@ def query_status_session_id(
     fallback_sent = False
     while time.monotonic() < deadline_s:
         after = capture(target, n_lines) if tmux_guard is None else guarded_capture(target, n_lines, tmux_guard, expected_pane_pid)
-        response = after.rsplit("/status", 1)[-1] if after.count("/status") > before.count("/status") else ""
+        response = submitted_status_response(before, after)
         session_id = extract_status_session_id(response) if strict_status_response else extract_new_status_session_id(before, after)
         if session_id:
             return session_id, response if strict_status_response else after
@@ -776,7 +818,7 @@ def query_status_session_id(
             fallback_sent = True
         time.sleep(0.25)
     after = capture(target, n_lines) if tmux_guard is None else guarded_capture(target, n_lines, tmux_guard, expected_pane_pid)
-    response = (after.rsplit("/status", 1)[-1] if after.count("/status") > before.count("/status") else "") if strict_status_response else after
+    response = submitted_status_response(before, after) if strict_status_response else after
     session_id = extract_status_session_id(response) if strict_status_response else extract_new_status_session_id(before, after)
     return session_id, response
 

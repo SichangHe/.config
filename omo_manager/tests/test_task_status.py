@@ -55,9 +55,11 @@ from omo_manager.omo_task_status import reserve_private_audit
 from omo_manager.omo_task_status import restore_terminal_target
 from omo_manager.omo_task_status import run
 from omo_manager.omo_task_status import stop_done_agent
+from omo_manager.omo_task_status import terminalized_done_live_audit_sha256
 from omo_manager.omo_task_status import tracked_dirty_state
 from omo_manager.omo_task_status import update_frontmatter_status
 from omo_manager.omo_task_status import validate_manager_consumed_report
+from omo_manager.omo_task_status import validate_consumed_closure_attestation
 from omo_manager.omo_task_status import validate_done_live_todo
 from omo_manager.omo_task_status import Args as StatusArgs
 from omo_manager.omo_codex_stop import ExitedCodexShell
@@ -2253,9 +2255,166 @@ class TaskStatusTests(unittest.TestCase):
                 return_value=attestation,
             ):
                 self.assertTrue(validate_manager_consumed_report(args, archived))
+                archived.write_text(text + "\n(manager closed Codex agent 09-07 12:04 PDT; tmux target `wl:2`; session_id: `11111111-2222-3333-4444-555555555555`.)\n", encoding="utf-8")
+                with patch(
+                    "omo_manager.omo_task_status.validate_consumed_closure_export_file",
+                    side_effect=AssertionError("post-note recovery must use the bound prevalidated export"),
+                ):
+                    self.assertTrue(validate_manager_consumed_report(args, archived, attestation, text.encode()))
+                archived.write_text(text, encoding="utf-8")
+                # An archived done task may have been completed after its
+                # historical in-progress report was consumed without a
+                # detached manager-acceptance receipt.
+                attestation.pop("acceptance")
+                attestation["accepted"] = False
+                attestation["reason"] = "manager watcher consumed report; acceptance receipt unavailable"
+                unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
+                attestation["attestation_id"] = hashlib.sha256(
+                    json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+                args = replace(args, terminal_evidence=attestation["attestation_id"])
+                validate_consumed_closure_attestation(args, archived, attestation)
             validate_done_live_todo(root, archived, todo_text, args.active_target, archived=True)
             with self.assertRaisesRegex(TaskFrontmatterError, "previous TODO row"):
                 validate_done_live_todo(root, archived, todo_text, args.active_target)
+
+    def test_archived_done_live_close_recovers_exact_note_prepared_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, _todo_text, args = self.write_done_live_close_case(root)
+            month = root / "202608"
+            month.mkdir()
+            archived = month / task.name
+            task.rename(archived)
+            todo_text = "current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            args = replace(
+                args,
+                task_file=Path("202608/task.md"),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+            )
+            args = self.write_consumed_attestation(root, archived, args)
+            evidence = args.manager_consumed_report_receipt
+            assert evidence is not None
+            bundle = json.loads(evidence.read_text(encoding="utf-8"))
+            attestation = bundle["attestation"]
+            original = root / "task.md"
+            transfer = attestation["transfer_receipt"]
+            transfer["authority"]["source_task"] = str(original)
+            transfer["routing"]["task"] = str(original)
+            transfer["queue_item"]["producer"] = str(original)
+            attestation["archive_custody"] = {
+                "git_provenance": {"schema": "omo-report-archived-task-git-provenance/v1"},
+                "original_task": str(original),
+                "schema": "omo-report-archived-task-custody/v1",
+                "task": str(archived),
+                "task_ref": "202608/task.md",
+                "task_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                "todo": str(todo),
+                "todo_reference_count": 0,
+                "todo_sha256": hashlib.sha256(todo_text.encode()).hexdigest(),
+            }
+            unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
+            attestation["attestation_id"] = hashlib.sha256(
+                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            bundle["attestation"] = attestation
+            evidence.write_text(json.dumps(bundle, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+            args = replace(
+                args,
+                terminal_evidence=attestation["attestation_id"],
+                manager_consumed_report_receipt_sha256=hashlib.sha256(evidence.read_bytes()).hexdigest(),
+            )
+
+            secret = "d" * 64
+            commitment = hashlib.sha256(secret.encode()).hexdigest()
+            terminalized = DoneLiveCloseAudit(
+                "terminalized", "c" * 64, commitment, "", "", args.manager_consumed_report_receipt_sha256
+            )
+            terminalized_text = render_done_live_close_audit(args, archived, terminalized)
+            reserve_private_audit(args.audit_output, terminalized_text)
+            proof = args.audit_output.with_name(f".{args.audit_output.name}.owner-stopped")
+            terminalized_sha256 = terminalized_done_live_audit_sha256(args, archived, terminalized)
+            write_done_live_close_started(
+                proof,
+                args.audit_output,
+                secret,
+                commitment,
+                terminalized_sha256,
+                args.active_target,
+                args.expected_pane_id,
+                args.expected_pane_pid,
+                args.expected_pane_start_ticks,
+            )
+            with (
+                patch("omo_manager.omo_codex_stop.pane_id", return_value=""),
+                patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=None),
+            ):
+                promote_done_live_close_started(
+                    proof,
+                    args.audit_output,
+                    commitment,
+                    terminalized_sha256,
+                    args.active_target,
+                    args.expected_pane_id,
+                    args.expected_pane_pid,
+                    args.expected_pane_start_ticks,
+                )
+            note = close_note(args.active_target, args.expected_session_id)
+            closed_text = text + note
+            note_prepared = replace(
+                terminalized,
+                state="note-prepared",
+                close_note=note,
+                completed_task_sha256=hashlib.sha256(closed_text.encode()).hexdigest(),
+            )
+            replace_private_audit(
+                args.audit_output,
+                terminalized_text,
+                render_done_live_close_audit(args, archived, note_prepared),
+            )
+            archived.write_text(closed_text, encoding="utf-8")
+
+            proof_text = proof.read_text(encoding="utf-8")
+            proof.unlink()
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""), self.assertRaisesRegex(
+                TaskFrontmatterError, "post-note custody evidence"
+            ):
+                close_done_live_no_mail(args, archived, closed_text, archived.stat())
+            proof.write_text(proof_text, encoding="utf-8")
+            proof.chmod(0o600)
+            started = done_live_close_started_path(args.audit_output)
+            started.write_text(proof_text, encoding="utf-8")
+            started.chmod(0o600)
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""), self.assertRaisesRegex(
+                TaskFrontmatterError, "post-note custody evidence"
+            ):
+                close_done_live_no_mail(args, archived, closed_text, archived.stat())
+            started.unlink()
+            todo.write_text(todo_text + "unrelated.md wl:9\n", encoding="utf-8")
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""),
+                patch(
+                    "omo_manager.omo_task_status.validate_consumed_closure_export_file",
+                    side_effect=AssertionError("post-note recovery must not rerun immutable-source validation"),
+                ),
+            ):
+                self.assertEqual(
+                    (args.active_target, args.expected_session_id),
+                    close_done_live_no_mail(args, archived, closed_text, archived.stat()),
+                )
+            self.assertEqual("complete", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+
+            non_archived = dict(attestation)
+            non_archived.pop("archive_custody")
+            bundle["attestation"] = non_archived
+            evidence.write_text(json.dumps(bundle, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+            non_archived_args = replace(
+                args,
+                manager_consumed_report_receipt_sha256=hashlib.sha256(evidence.read_bytes()).hexdigest(),
+            )
+            with self.assertRaisesRegex(TaskFrontmatterError, "requires archived custody"):
+                validate_manager_consumed_report(non_archived_args, archived, non_archived, text.encode())
 
     def test_done_live_evidence_collects_guarded_current_close_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2280,7 +2439,6 @@ class TaskStatusTests(unittest.TestCase):
                 audit_output=None,
             )
             session_id = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"
-            ready = type("Ready", (), {"status": "ready"})()
             manager = Path(attestation["transfer_receipt"]["receiver"])
             manager_lock = {"held": False}
 
@@ -2296,7 +2454,7 @@ class TaskStatusTests(unittest.TestCase):
 
             def guarded_capture_while_manager_locked(*_values: object) -> str:
                 self.assertTrue(manager_lock["held"])
-                return "ready capture\n"
+                return "› Ask Codex to do anything\n\n  gpt-5.5 xhigh · ~/.config · 71.7M used\n\n\n"
 
             with (
                 patch("omo_manager.omo_task_status.validate_consumed_closure_export_file", return_value=attestation),
@@ -2306,7 +2464,6 @@ class TaskStatusTests(unittest.TestCase):
                 patch("omo_manager.omo_task_status.bound_guarded_read", return_value="%42\t4242\n"),
                 patch("omo_manager.omo_task_status.process_start_ticks", return_value=73),
                 patch("omo_manager.omo_task_status.guarded_capture", side_effect=guarded_capture_while_manager_locked),
-                patch("omo_manager.omo_task_status.report_from_lines", return_value=ready),
                 patch("omo_manager.omo_task_status.query_status_session_id", return_value=(session_id, "status")),
             ):
                 record = describe_done_live_no_mail(described, task, text, task.stat())

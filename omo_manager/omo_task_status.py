@@ -4896,6 +4896,7 @@ def validate_manager_consumed_report(
     args: Args,
     path: Path,
     prevalidated_attestation: dict[str, object] | None = None,
+    archived_task_payload: bytes | None = None,
 ) -> bool:
     """Validate the exceptional manager-consumed terminal-report compatibility receipt."""
 
@@ -4908,7 +4909,15 @@ def validate_manager_consumed_report(
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise TaskFrontmatterError("manager-consumed report receipt is not canonical JSON.") from exc
     if isinstance(loaded, dict) and loaded.get("schema") == "omo-report-consumed-export/v1":
-        if prevalidated_attestation is None:
+        if archived_task_payload is not None and prevalidated_attestation is None:
+            raise TaskFrontmatterError("manager-consumed report recovery lacks its prevalidated attestation.")
+        if archived_task_payload is not None:
+            if loaded.get("attestation") != prevalidated_attestation or not isinstance(prevalidated_attestation, dict):
+                raise TaskFrontmatterError("manager-consumed report recovery export changed after strict validation.")
+            if not isinstance(prevalidated_attestation.get("archive_custody"), dict):
+                raise TaskFrontmatterError("manager-consumed report recovery requires archived custody.")
+            attestation = prevalidated_attestation
+        elif prevalidated_attestation is None:
             try:
                 attestation = validate_consumed_closure_export_file(receipt_path, args.manager_consumed_report_receipt_sha256)
             except ReceiptError as exc:
@@ -4925,7 +4934,7 @@ def validate_manager_consumed_report(
                 raise TaskFrontmatterError(f"manager-consumed report export is invalid: {exc}") from exc
             if attestation != prevalidated_attestation:
                 raise TaskFrontmatterError("manager-consumed report transaction changed after strict validation.")
-        validate_consumed_closure_attestation(args, path, attestation)
+        validate_consumed_closure_attestation(args, path, attestation, archived_task_payload)
         return True
     if not isinstance(loaded, dict) or set(loaded) != DONE_LIVE_CONSUMED_RECEIPT_KEYS:
         raise TaskFrontmatterError("manager-consumed report receipt schema is invalid.")
@@ -5013,6 +5022,7 @@ def validate_consumed_closure_attestation(
     args: Args,
     path: Path,
     attestation: dict[str, object],
+    archived_task_payload: bytes | None = None,
 ) -> None:
     """Bind a strictly revalidated consumed export to this exact close."""
 
@@ -5033,7 +5043,11 @@ def validate_consumed_closure_attestation(
     archived = archive is not None
     original_task = str(archive.get("original_task", "")) if isinstance(archive, dict) else str(path)
     accepted = attestation.get("accepted") is True
-    allowed_statuses = {"done", "in-progress"} if archived and accepted else {"done"}
+    # Archival custody proves the current task is done.  The historical report
+    # itself may legitimately have been routed as in-progress before a manager
+    # completed and archived the task, regardless of whether a detached manager
+    # acceptance receipt was available.
+    allowed_statuses = {"done", "in-progress"} if archived else {"done"}
     expected_reason = (
         "manager acknowledged routed report"
         if accepted
@@ -5079,7 +5093,7 @@ def validate_consumed_closure_attestation(
         git_provenance = archive.get("git_provenance")
         todo_path = args.root / "TODO.md"
         try:
-            task_payload = path.read_bytes()
+            task_payload = archived_task_payload if archived_task_payload is not None else path.read_bytes()
             todo_payload = todo_path.read_bytes()
         except OSError as exc:
             raise TaskFrontmatterError("manager-consumed report archive custody is unavailable.") from exc
@@ -5093,7 +5107,10 @@ def validate_consumed_closure_attestation(
             or archive.get("task_sha256") != hashlib.sha256(task_payload).hexdigest()
             or archive.get("todo") != str(todo_path)
             or archive.get("todo_reference_count") != 0
-            or archive.get("todo_sha256") != hashlib.sha256(todo_payload).hexdigest()
+            or (
+                archived_task_payload is None
+                and archive.get("todo_sha256") != hashlib.sha256(todo_payload).hexdigest()
+            )
         ):
             raise TaskFrontmatterError("manager-consumed report archive custody changed.")
     try:
@@ -5337,7 +5354,10 @@ def describe_done_live_no_mail(args: Args, path: Path, text: str, before: os.sta
             evidence_is_current()
             try:
                 capture_text = guarded_capture(pane, 2000, (args.active_target, pane), pane_pid)
-                report = report_from_lines([line.rstrip() for line in capture_text.splitlines()])
+                capture_lines = [line.rstrip() for line in capture_text.splitlines()]
+                while capture_lines and not capture_lines[-1]:
+                    capture_lines.pop()
+                report = report_from_lines(capture_lines)
                 if report.status != "ready":
                     raise TaskFrontmatterError(f"done-live evidence requires a ready Codex pane, found {report.status}.")
                 session_id, _response = query_status_session_id(
@@ -5419,7 +5439,48 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
         raise TaskFrontmatterError("done-live close requires distinct task, TODO, and private audit files.")
     proof_path = audit_path.with_name(f".{audit_path.name}.owner-stopped")
     started_path = done_live_close_started_path(audit_path)
-    prevalidated_attestation, manager_path = prevalidate_manager_consumed_export(args, path)
+    archived_task_payload: bytes | None = None
+    prevalidated_attestation: dict[str, object] | None = None
+    manager_path: Path | None = None
+    recovery_audit_text = read_private_audit(audit_path)
+    if recovery_audit_text is not None and args.manager_consumed_report_receipt is not None:
+        recovery_audit = parse_done_live_close_audit(args, path, recovery_audit_text)
+        if recovery_audit.state in {"note-prepared", "complete"}:
+            note = recovery_audit.close_note
+            original_text = text[: -len(note)] if note and text.endswith(note) else ""
+            terminalized_sha256 = terminalized_done_live_audit_sha256(args, path, recovery_audit)
+            if (
+                hashlib.sha256(original_text.encode()).hexdigest() != args.expected_task_sha256
+                or hashlib.sha256(text.encode()).hexdigest() != recovery_audit.completed_task_sha256
+                or recovery_audit.manager_consumed_receipt_sha256 != args.manager_consumed_report_receipt_sha256
+                or not has_bound_close_proof(proof_path, recovery_audit.close_proof_commitment, terminalized_sha256)
+                or path_artifact_exists(started_path)
+                or done_live_pane_state(args) != "absent"
+            ):
+                raise TaskFrontmatterError("done-live close recovery lacks exact post-note custody evidence.")
+            payload = private_evidence_bytes(
+                args.manager_consumed_report_receipt,
+                args.manager_consumed_report_receipt_sha256,
+                "receipt",
+            )
+            try:
+                loaded: object = json.loads(payload)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise TaskFrontmatterError("manager-consumed report recovery receipt is not canonical JSON.") from exc
+            if (
+                not isinstance(loaded, dict)
+                or loaded.get("schema") != "omo-report-consumed-export/v1"
+                or payload != (json.dumps(loaded, sort_keys=True, separators=(",", ":")) + "\n").encode()
+                or not isinstance(loaded.get("attestation"), dict)
+                or not isinstance(loaded["attestation"].get("archive_custody"), dict)
+            ):
+                raise TaskFrontmatterError("manager-consumed report recovery receipt is invalid.")
+            prevalidated_attestation = loaded["attestation"]
+            assert isinstance(prevalidated_attestation, dict)
+            manager_path = consumed_attestation_manager_path(args.root, prevalidated_attestation)
+            archived_task_payload = original_text.encode()
+    if prevalidated_attestation is None:
+        prevalidated_attestation, manager_path = prevalidate_manager_consumed_export(args, path)
     archived = (
         prevalidated_attestation is not None
         and prevalidated_attestation.get("archive_custody") is not None
@@ -5437,9 +5498,9 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
             todo_text = todo.read_text(encoding="utf-8")
             if not same_file_state(before, current_before) or current_text != text:
                 raise TaskFrontmatterError("done-live close task changed while the operation was being prepared; retry.")
-            if hashlib.sha256(todo_text.encode()).hexdigest() != args.expected_todo_sha256:
+            if archived_task_payload is None and hashlib.sha256(todo_text.encode()).hexdigest() != args.expected_todo_sha256:
                 raise TaskFrontmatterError("done-live close TODO bytes do not match --expected-todo-sha256.")
-            manager_consumed = validate_manager_consumed_report(args, path, prevalidated_attestation)
+            manager_consumed = validate_manager_consumed_report(args, path, prevalidated_attestation, archived_task_payload)
             audit_text = read_private_audit(audit_path)
             audit = parse_done_live_close_audit(args, path, audit_text) if audit_text is not None else None
             validate_done_live_task(args, current_text, audit)
@@ -5506,7 +5567,7 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                 )
                 validate_done_live_ownership(args.root, path, args.active_target)
                 if manager_consumed:
-                    _ = validate_manager_consumed_report(args, path, prevalidated_attestation)
+                    _ = validate_manager_consumed_report(args, path, prevalidated_attestation, archived_task_payload)
                 if expected_capture_sha256:
                     observed = validate_terminal_shell(
                         args.active_target,
