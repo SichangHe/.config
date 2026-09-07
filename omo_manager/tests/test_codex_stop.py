@@ -1,5 +1,6 @@
 import ast
 import contextlib
+import dataclasses
 import hashlib
 import inspect
 import io
@@ -1000,10 +1001,78 @@ class CodexStopTests(unittest.TestCase):
                     ),
                 )
         self.assertEqual(
-            [(("manager_mail/test.txt", "a" * 64), {}), (("manager_mail/test.txt", "a" * 64), {})],
+            [(("manager_mail/test.txt", "a" * 64, root), {}), (("manager_mail/test.txt", "a" * 64, root), {})],
             [(call.args, call.kwargs) for call in read_authority.call_args_list],
         )
         self.assertEqual("%42", close.call_args.args[0])
+
+    def test_human_close_authority_accepts_config_alias_for_exact_canonical_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "canonical"
+            mail_root = root / "manager_mail"
+            mail_root.mkdir(parents=True, mode=0o700)
+            alias = base / "alias"
+            alias.symlink_to(root, target_is_directory=True)
+            payload = b"Subject: close task.md\n\nclose hcfg:1\n"
+            authority = mail_root / "human.txt"
+            authority.write_bytes(payload)
+            authority.chmod(0o600)
+            config = base / "env"
+            config.write_text(f'export OMO_WORK_LOGS_ROOT="{alias}"\n', encoding="utf-8")
+            config.chmod(0o600)
+            with patch("omo_manager.omo_codex_stop.LOCAL_ENV_PATH", config):
+                self.assertEqual(
+                    payload,
+                    codex_stop.read_human_close_authorization(
+                        "manager_mail/human.txt", hashlib.sha256(payload).hexdigest(), root
+                    ),
+                )
+
+    def test_human_close_authority_rejects_config_alias_for_other_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            configured = base / "configured"
+            (configured / "manager_mail").mkdir(parents=True, mode=0o700)
+            requested = base / "requested"
+            (requested / "manager_mail").mkdir(parents=True, mode=0o700)
+            alias = base / "alias"
+            alias.symlink_to(configured, target_is_directory=True)
+            config = base / "env"
+            config.write_text(f'export OMO_WORK_LOGS_ROOT="{alias}"\n', encoding="utf-8")
+            config.chmod(0o600)
+            with patch("omo_manager.omo_codex_stop.LOCAL_ENV_PATH", config):
+                with self.assertRaisesRegex(RuntimeError, "does not identify the requested root"):
+                    codex_stop.read_human_close_authorization("manager_mail/human.txt", "a" * 64, requested)
+
+    def test_human_close_authority_rejects_symlinked_requested_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "canonical"
+            (root / "manager_mail").mkdir(parents=True, mode=0o700)
+            alias = base / "alias"
+            alias.symlink_to(root, target_is_directory=True)
+            config = base / "env"
+            config.write_text(f'export OMO_WORK_LOGS_ROOT="{root}"\n', encoding="utf-8")
+            config.chmod(0o600)
+            with patch("omo_manager.omo_codex_stop.LOCAL_ENV_PATH", config):
+                with self.assertRaisesRegex(RuntimeError, "non-directory component"):
+                    codex_stop.read_human_close_authorization("manager_mail/human.txt", "a" * 64, alias)
+
+    def test_human_close_authority_rejects_symlinked_canonical_mail_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "canonical"
+            root.mkdir()
+            actual_mail = base / "actual-mail"
+            actual_mail.mkdir(mode=0o700)
+            (root / "manager_mail").symlink_to(actual_mail, target_is_directory=True)
+            config = base / "env"
+            config.write_text(f'export OMO_WORK_LOGS_ROOT="{root}"\n', encoding="utf-8")
+            config.chmod(0o600)
+            with patch("omo_manager.omo_codex_stop.LOCAL_ENV_PATH", config):
+                with self.assertRaisesRegex(RuntimeError, "non-directory component"):
+                    codex_stop.read_human_close_authorization("manager_mail/human.txt", "a" * 64, root)
 
     def test_source1240_exact_replacement_sentence_authorizes_named_human_pane(self) -> None:
         authority = (
@@ -1291,6 +1360,36 @@ class CodexStopTests(unittest.TestCase):
                     )
                 )
         pane_id.assert_not_called()
+
+    def test_source1474_authorizes_only_exact_hcfg_target(self) -> None:
+        authority = (
+            b"Subject: Re: Helper repair owner cannot resume safely\n\n"
+            b"Close hcfg:1, move out their tasks, then restart yourself\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "helper_audit_human_facing.md").write_text("---\nrunat: hcfg:1\n---\n", encoding="utf-8")
+            args = Args(
+                "hcfg:1",
+                0.0,
+                10,
+                True,
+                False,
+                root,
+                "helper_audit_human_facing.md",
+                True,
+                0.0,
+                codex_stop.HCFG_CLOSE_SOURCE,
+                codex_stop.HCFG_CLOSE_SHA256,
+            )
+            with patch("omo_manager.omo_codex_stop.read_human_close_authorization", return_value=authority):
+                codex_stop.validate_human_close_authorization(args)
+            wrong = dataclasses.replace(args, human_close_authorized_target="hcfg:2")
+            with (
+                patch("omo_manager.omo_codex_stop.read_human_close_authorization", return_value=authority),
+                self.assertRaisesRegex(RuntimeError, "frontmatter does not bind"),
+            ):
+                codex_stop.validate_human_close_authorization(wrong)
 
     def test_reply_human_authority_binds_task_through_quoted_exact_owner(self) -> None:
         authority = (

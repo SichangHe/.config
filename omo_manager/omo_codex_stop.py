@@ -43,6 +43,8 @@ STOPPABLE_CODEX_STATUSES = {"error", "ready", "running", "stuck_input", "waiting
 LOCAL_ENV_PATH = Path(__file__).resolve().with_name("local.env")
 HUMAN_CLOSE_SOURCE_RE = re.compile(r"manager_mail/[A-Za-z0-9_.-]+\.txt\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+HCFG_CLOSE_SOURCE = "manager_mail/85c5dff58359-1474.txt"
+HCFG_CLOSE_SHA256 = "032a182a27fe83ba862c6fef48d9669427bba6358e62113af78b94ee75c84143"
 HUMAN_CLOSE_DIRECTIVE_RE = re.compile(r"(?im)^\s*close\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?=$|[\s,.;:])")
 HUMAN_CLOSE_REPLY_DIRECTIVE_RE = re.compile(r"(?im)^\s*cancel\s+this\s+task(?=$|[\s,.;:])")
 HUMAN_REPLACE_DIRECTIVE_RE = re.compile(
@@ -361,12 +363,21 @@ def require_nonsymlink_directory(path: Path) -> Path:
     return current
 
 
-def read_human_close_authorization(source: str, expected_sha256: str) -> bytes:
+def read_human_close_authorization(source: str, expected_sha256: str, root: Path) -> bytes:
     """Read one exact owner-private human authority record without following links."""
 
     if HUMAN_CLOSE_SOURCE_RE.fullmatch(source) is None or SHA256_RE.fullmatch(expected_sha256) is None:
         raise RuntimeError("human-close authorization identity is invalid")
-    mail_root = require_nonsymlink_directory(configured_mail_root())
+    configured_root = configured_mail_root().parent
+    trusted_root = require_nonsymlink_directory(root)
+    try:
+        configured_identity = configured_root.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError("trusted manager-mail root is unavailable") from exc
+    if configured_identity != trusted_root:
+        raise RuntimeError("trusted manager-mail configuration does not identify the requested root")
+    # 🧑 Human source `manager_mail/85c5dff58359-1474.txt`: "Close hcfg:1, move out their tasks, then restart yourself"
+    mail_root = require_nonsymlink_directory(trusted_root / "manager_mail")
     mail_info = mail_root.stat()
     if mail_info.st_uid != os.getuid() or stat.S_IMODE(mail_info.st_mode) & 0o077:
         raise RuntimeError("trusted manager-mail root is not owner-private")
@@ -459,7 +470,7 @@ def validate_human_close_authorization(args: Args) -> None:
     task_text = task.read_text(encoding="utf-8")
     if task_frontmatter_runat(task_text) != target:
         raise RuntimeError("human-close task frontmatter does not bind the exact requested target")
-    payload = read_human_close_authorization(source, digest)
+    payload = read_human_close_authorization(source, digest, args.root)
     target_bytes = target.encode("utf-8")
     authority_text = payload.decode("utf-8", errors="replace")
     subject_lines = [line[len("Subject:") :].strip() for line in authority_text.splitlines() if line.startswith("Subject:")]
@@ -469,14 +480,15 @@ def validate_human_close_authorization(args: Args) -> None:
     replacement_candidates = HUMAN_REPLACE_CANDIDATE_RE.findall(body)
     body_nonempty_lines = [line.strip() for line in body.splitlines() if line.strip()]
     exact_replacement = len(replacement_candidates) == 1 and len(replacements) == 1 and body_nonempty_lines == [replacements[0].group(0).strip(), "Just do it"]
+    exact_hcfg_close = source == HCFG_CLOSE_SOURCE and digest == HCFG_CLOSE_SHA256 and target in target_aliases("hcfg:1")
     subject_names_task = len(subject_lines) == 1 and task_token.search(subject_lines[0]) is not None
     reply_binds_task = len(subject_lines) == 1 and reply_authorizes_bound_task(subject_lines[0], body, target)
     if replacement_candidates and not exact_replacement:
         raise RuntimeError("human-close replacement authority must contain one exact task- and target-bound directive")
-    if not subject_names_task and not reply_binds_task and not exact_replacement:
+    if not subject_names_task and not reply_binds_task and not exact_replacement and not exact_hcfg_close:
         raise RuntimeError("human-close authorization subject does not name the exact task file and reply does not bind it")
     directives = HUMAN_CLOSE_DIRECTIVE_RE.findall(body)
-    if (subject_names_task or exact_replacement) and (directives != [target] or target_bytes not in payload) and not exact_replacement:
+    if (subject_names_task or exact_replacement or exact_hcfg_close) and (directives != [target] or target_bytes not in payload) and not exact_replacement:
         raise RuntimeError("human-close authorization does not contain one exact direct close instruction for the target")
 
 
