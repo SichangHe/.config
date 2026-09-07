@@ -18,14 +18,21 @@ from omo_manager.omo_tmux_send import (
     ExistingInputCapture,
     MANAGER_DELEGATION_PREFIX,
     PENDING_CONSUMPTION_INSTRUCTION,
+    RetainedCursorComposerProof,
     async_job_from_query,
     cancel_existing_codex_input,
     claim_recent_tmux_delivery,
     capture_complete_existing_input,
+    clear_bound_cursor_composer,
+    clear_partial_cursor_composer,
+    clear_retained_cursor_text,
+    clear_ready_retained_cursor_composer,
     clear_existing_input_before_send,
     exact_capacity_error,
+    exact_cursor_runtime_binding,
     exact_existing_input_text,
     exact_file_authorized_trailing_blank_text,
+    exact_retained_cursor_rendering,
     escape_agent_message_envelope_tags,
     existing_input_authorization,
     launch_async,
@@ -33,11 +40,15 @@ from omo_manager.omo_tmux_send import (
     message_probes,
     notify_async_result,
     parse_args,
+    paste_to_retained_cursor,
     query_async_result,
     read_message,
     revalidate_authorized_cursor_input,
     require_authorized_existing_input,
+    require_empty_cursor_composer,
     require_no_existing_input,
+    require_ready_partial_cursor_composer,
+    require_ready_retained_cursor_composer,
     require_sendable_codex_target,
     run_async_worker,
     run_capacity_resume,
@@ -49,6 +60,7 @@ from omo_manager.omo_tmux_send import (
     send_system_to_codex,
     send_to_codex,
     submit_existing_to_codex,
+    submit_to_retained_cursor,
     text_sha256,
     validate_error_transition,
     verify_authorized_existing_submit,
@@ -117,6 +129,80 @@ def cursor_agent_followups_lines(chip: str = "[Pasted text #8 +59 lines]", promp
         " └─────────────────────────────────────────────────────────┘",
         *cursor_agent_lines(prompt, running=True)[1:],
     ]
+
+
+def cursor_retained_composer_lines(prompt: str = "Read the already handled wake") -> list[str]:
+    return [
+        '<agent_message from="pb-watch-loop:0">',
+        prompt,
+        "</agent_message>",
+        "Handled the watcher wake.",
+        "Waiting for a new wake.",
+        " ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄",
+        f"  → {prompt}",
+        "  </agent_message>",
+        " ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+        "  Cursor Grok 4.6 Extra High · 28.2%                                                           Run Everything",
+        "  ~/.config · macos",
+    ]
+
+
+def cursor_borderless_retained_lines(prompt: str = "Read the already handled wake") -> list[str]:
+    return [
+        '<agent_message from="pb-watch-loop:0">',
+        prompt,
+        "</agent_message>",
+        "Handled the watcher wake.",
+        "Waiting for a new wake.",
+        f"  → {prompt}",
+        "    </agent_message>",
+        "",
+        "",
+        "  Cursor Grok 4.6 Extra High · 28.2%                                                           Run Everything",
+        "  ~/.config · macos",
+        "",
+    ]
+
+
+def cursor_borderless_retained_80x24(prompt: str = "Read the already handled wake") -> list[str]:
+    rows = [
+        "Handled the watcher wake.",
+        "Waiting for a new wake.",
+        f"  → {prompt}",
+        "    </agent_message>",
+        "",
+        "",
+        "  Cursor Grok 4.6 Extra High · 28.2% Run Everything",
+        "  ~/.config · macos",
+        "",
+        "",
+    ]
+    return [*("previous output".ljust(80) for _ in range(14)), *(row.ljust(80) for row in rows), ""]
+
+
+def cursor_borderless_empty_lines() -> list[str]:
+    lines = cursor_borderless_retained_lines()
+    lines[5] = "  → Add a follow-up"
+    del lines[6]
+    return lines
+
+
+def cursor_partial_paste_80x24() -> list[str]:
+    rows = [
+        *("previous output" for _ in range(13)),
+        "  →",
+        "    Await its terminal result and require the manager acknowledged",
+        "     it before continuing.",
+        "     Preserve Gmail, browser, and report state.",
+        "    </agent_message>",
+        "",
+        "",
+        "",
+        "  Cursor Grok 4.6 Extra High · 28.2% Run Everything",
+        "  ~/.config · macos",
+        "",
+    ]
+    return [*(row.ljust(80) for row in rows), ""]
 
 
 def options(**kwargs: object) -> CodexSendOptions:
@@ -363,6 +449,21 @@ class TmuxSendTests(unittest.TestCase):
             ["--target", "cfg:1.0", "--cancel-existing-file", "existing.md", "--cancel-existing-sha256", "a" * 64],
             ["--target", "cfg:1.0", "--submit-existing-sha256", "a" * 64, "--cancel-existing-sha256", "a" * 64],
             ["--target", "cfg:1.0", "--cancel-existing-sha256", "A" * 64],
+        ):
+            with self.subTest(argv=argv), patch("sys.stderr", new_callable=StringIO):
+                with self.assertRaises(SystemExit):
+                    parse_args(argv)
+
+    def test_parse_partial_cursor_recovery_requires_one_exact_operation(self) -> None:
+        described = parse_args(["--target", "cfg:1.0", "--describe-partial-cursor"])
+        cleared = parse_args(["--target", "cfg:1.0", "--clear-partial-cursor-sha256", "a" * 64])
+        self.assertTrue(described.describe_partial_cursor)
+        self.assertEqual("a" * 64, cleared.clear_partial_cursor_sha256)
+        for argv in (
+            ["--target", "cfg:1.0", "--clear-partial-cursor-sha256", "A" * 64],
+            ["--target", "cfg:1.0", "--describe-partial-cursor", "--clear-partial-cursor-sha256", "a" * 64],
+            ["--target", "cfg:1.0", "--submit-existing-sha256", "a" * 64, "--describe-partial-cursor"],
+            ["--target", "cfg:1.0", "--message-file", "prompt.md", "--describe-partial-cursor"],
         ):
             with self.subTest(argv=argv), patch("sys.stderr", new_callable=StringIO):
                 with self.assertRaises(SystemExit):
@@ -973,28 +1074,711 @@ class TmuxSendTests(unittest.TestCase):
 
         enter.assert_called_once_with("cfg:1.0")
 
+    def test_wait_paste_visible_rejects_new_text_appended_to_retained_cursor_composer(self) -> None:
+        lines = cursor_agent_lines("old submitted wake\n  new wake")
+        with patch("omo_manager.omo_tmux_send.tail", return_value=lines), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "retained submitted Cursor composer was not replaced"):
+                wait_paste_visible(
+                    "pb-newswatcher-agent:0",
+                    "new wake",
+                    options(),
+                    forbidden_input_text="old submitted wake",
+                )
+
+    def test_wait_paste_visible_accepts_new_text_that_replaced_retained_cursor_composer(self) -> None:
+        lines = cursor_agent_lines("new wake")
+        with patch("omo_manager.omo_tmux_send.tail", return_value=lines), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True):
+            wait_paste_visible(
+                "pb-newswatcher-agent:0",
+                "new wake",
+                options(),
+                forbidden_input_text="old submitted wake",
+            )
+
+    def test_wait_paste_visible_requires_exact_new_borderless_cursor_input(self) -> None:
+        lines = cursor_borderless_retained_lines("new wake")
+        with patch("omo_manager.omo_tmux_send.require_same_cursor_target"), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=lines
+        ):
+            wait_paste_visible(
+                "pb-newswatcher-agent:0",
+                "new wake",
+                options(),
+                expected_cursor_pane_id="%42",
+                expected_cursor_pane_pid=4242,
+                expected_cursor_pane_command="cursor-agent",
+                expected_cursor_input_text="new wake\n</agent_message>\n",
+            )
+
+    def test_wait_paste_visible_accepts_exact_new_padded_80x24_cursor_input(self) -> None:
+        lines = cursor_borderless_retained_80x24("new wake")
+        with patch("omo_manager.omo_tmux_send.require_same_cursor_target"), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=lines
+        ):
+            wait_paste_visible(
+                "pb-newswatcher-agent:0",
+                "new wake",
+                options(),
+                expected_cursor_pane_id="%42",
+                expected_cursor_pane_pid=4242,
+                expected_cursor_pane_command="cursor-agent",
+                expected_cursor_input_text="new wake\n</agent_message>\n",
+            )
+
+    def test_wait_paste_visible_rejects_different_or_combined_borderless_cursor_input(self) -> None:
+        lines = cursor_borderless_retained_lines("old retained wake\nnew wake")
+        with patch("omo_manager.omo_tmux_send.require_same_cursor_target"), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=lines
+        ):
+            with self.assertRaisesRegex(RuntimeError, "different or combined"):
+                wait_paste_visible(
+                    "pb-newswatcher-agent:0",
+                    "new wake",
+                    options(),
+                    expected_cursor_pane_id="%42",
+                    expected_cursor_pane_pid=4242,
+                    expected_cursor_pane_command="cursor-agent",
+                    expected_cursor_input_text="new wake\n",
+                )
+
+    def test_wait_paste_visible_rejects_trailing_space_in_new_cursor_input(self) -> None:
+        lines = cursor_borderless_retained_lines("new wake ")
+        with patch("omo_manager.omo_tmux_send.require_same_cursor_target"), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=lines
+        ):
+            with self.assertRaisesRegex(RuntimeError, "different or combined"):
+                wait_paste_visible(
+                    "pb-newswatcher-agent:0",
+                    "new wake",
+                    options(),
+                    expected_cursor_pane_id="%42",
+                    expected_cursor_pane_pid=4242,
+                    expected_cursor_pane_command="cursor-agent",
+                    expected_cursor_input_text="new wake\n</agent_message>\n",
+                )
+
+    def test_wait_paste_visible_rejects_matching_text_in_retained_followups_overlay(self) -> None:
+        lines = cursor_agent_followups_lines(prompt="new wake")
+        with patch("omo_manager.omo_tmux_send.require_same_cursor_target"), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=lines
+        ), patch("omo_manager.omo_tmux_send.send_enter") as enter:
+            with self.assertRaisesRegex(RuntimeError, "unexpected follow-ups overlay"):
+                wait_paste_visible(
+                    "pb-newswatcher-agent:0",
+                    "new wake",
+                    options(),
+                    expected_cursor_pane_id="%42",
+                    expected_cursor_pane_pid=4242,
+                    expected_cursor_pane_command="cursor-agent",
+                    expected_cursor_input_text="new wake\n",
+                )
+        enter.assert_not_called()
+
+    def test_wait_paste_visible_rejects_matching_cursor_input_with_new_error(self) -> None:
+        lines = cursor_borderless_retained_lines("new wake")
+        lines.insert(5, "■ Error: new renderer failure")
+        with patch("omo_manager.omo_tmux_send.require_same_cursor_target"), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=lines
+        ), patch("omo_manager.omo_tmux_send.send_enter") as enter:
+            with self.assertRaisesRegex(RuntimeError, "new error"):
+                wait_paste_visible(
+                    "pb-newswatcher-agent:0",
+                    "new wake",
+                    options(),
+                    expected_cursor_pane_id="%42",
+                    expected_cursor_pane_pid=4242,
+                    expected_cursor_pane_command="cursor-agent",
+                    expected_cursor_input_text="new wake\n</agent_message>\n",
+                )
+        enter.assert_not_called()
+
     def test_clear_existing_input_before_send_flushes_unverified_input(self) -> None:
         report = Report("stuck_input", ["› Continue task"], "Continue task", False, "compacting")
-        with patch("omo_manager.omo_tmux_send.inspect", return_value=report), patch(
-            "omo_manager.omo_tmux_send.tail", return_value=["› Continue task", "  gpt-5.5"]
-        ), patch("omo_manager.omo_tmux_send.subprocess.run") as run:
+        with patch(
+            "omo_manager.omo_tmux_send.authenticated_full_report", return_value=("%42", report.lines, report)
+        ), patch("omo_manager.omo_tmux_send.validate_error_transition"), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
             self.assertEqual("existing_input", clear_existing_input_before_send("cfg:1.0", options(submit_verify_timeout_s=0.0)))
-        run.assert_called_once_with(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], timeout=5, check=True)
+        enter.assert_called_once_with("cfg:1.0")
 
     def test_clear_existing_input_before_send_fails_closed_when_inspect_fails(self) -> None:
-        with patch("omo_manager.omo_tmux_send.inspect", side_effect=RuntimeError("tmux unavailable")):
+        with patch("omo_manager.omo_tmux_send.authenticated_full_report", side_effect=RuntimeError("tmux unavailable")):
             self.assertEqual("inspect_failed", clear_existing_input_before_send("cfg:1.0", options()))
+
+    def test_clear_existing_input_never_enters_ready_retained_cursor_composer(self) -> None:
+        lines = cursor_retained_composer_lines()
+        report = Report("ready", lines, "Read the already handled wake\n</agent_message>", False)
+        with patch(
+            "omo_manager.omo_tmux_send.authenticated_full_report", return_value=("%42", lines, report)
+        ), patch("omo_manager.omo_tmux_send.send_enter") as enter:
+            self.assertEqual("cursor_retained_submitted", clear_existing_input_before_send("pb-newswatcher-agent:0", options()))
+
+        enter.assert_not_called()
+
+    def test_clear_existing_input_uses_full_capture_when_report_output_omits_composer(self) -> None:
+        lines = cursor_retained_composer_lines()
+        summarized = Report("ready", ["Waiting for a new wake."], "", False)
+        with patch("omo_manager.omo_tmux_send.inspect", return_value=summarized) as inspect_call, patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=lines
+        ), patch("omo_manager.omo_tmux_send.send_enter") as enter:
+            self.assertEqual("cursor_retained_submitted", clear_existing_input_before_send("pb-newswatcher-agent:0", options()))
+
+        inspect_call.assert_not_called()
+        enter.assert_not_called()
+
+    def test_clear_existing_input_never_enters_nonready_retained_cursor_composer(self) -> None:
+        lines = cursor_retained_composer_lines()
+        lines.insert(-2, "  1 task")
+        lines[6] += "    ctrl+c to stop"
+        report = Report("running", lines, "Read the already handled wake\n</agent_message>", False)
+        with patch(
+            "omo_manager.omo_tmux_send.authenticated_full_report", return_value=("%42", lines, report)
+        ), patch("omo_manager.omo_tmux_send.send_enter") as enter:
+            self.assertEqual(
+                "cursor_retained_submitted_not_ready",
+                clear_existing_input_before_send("pb-newswatcher-agent:0", options()),
+            )
+
+        enter.assert_not_called()
+
+    def test_clear_existing_input_stops_if_retained_composer_appears_at_enter_recheck(self) -> None:
+        initial = ["› old input", "  gpt-5.5"]
+        retained = cursor_retained_composer_lines()
+        report = Report("stuck_input", initial, "old input", False)
+        retained_report = Report("ready", retained, "Read the already handled wake\n  </agent_message>", False)
+        with patch(
+            "omo_manager.omo_tmux_send.authenticated_full_report",
+            side_effect=[("%42", initial, report), ("%42", retained, retained_report)],
+        ), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            self.assertEqual("cursor_retained_submitted", clear_existing_input_before_send("pb-newswatcher-agent:0", options()))
+
+        enter.assert_not_called()
+
+    def test_ready_retained_cursor_proof_binds_pane_process_and_composer(self) -> None:
+        lines = cursor_borderless_retained_80x24()
+        rendering, retained = exact_retained_cursor_rendering(lines)
+        expected = RetainedCursorComposerProof(
+            "%42", 4242, "cursor-agent", text_sha256(rendering), retained, len(retained.encode("utf-16-le")) // 2 + 1
+        )
+        with patch("omo_manager.omo_tmux_send.exact_cursor_runtime_binding", return_value=("%42", 4242, "cursor-agent")), patch(
+            "omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True
+        ), patch("omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=lines):
+            self.assertEqual(expected, require_ready_retained_cursor_composer("pb-newswatcher-agent:0"))
+            self.assertEqual(expected, require_ready_retained_cursor_composer("pb-newswatcher-agent:0", expected))
+
+    def test_ready_retained_cursor_proof_rejects_changed_composer(self) -> None:
+        original = cursor_borderless_retained_lines()
+        rendering, retained = exact_retained_cursor_rendering(original)
+        expected = RetainedCursorComposerProof(
+            "%42",
+            4242,
+            "cursor-agent",
+            text_sha256(rendering),
+            retained,
+        )
+        with patch("omo_manager.omo_tmux_send.exact_cursor_runtime_binding", return_value=("%42", 4242, "cursor-agent")), patch(
+            "omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True
+        ), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines",
+            return_value=cursor_borderless_retained_lines("different handled wake"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "composer changed"):
+                require_ready_retained_cursor_composer("pb-newswatcher-agent:0", expected)
+
+    def test_ready_retained_cursor_proof_rejects_whitespace_only_rendering_drift(self) -> None:
+        original = cursor_borderless_retained_lines()
+        rendering, retained = exact_retained_cursor_rendering(original)
+        expected = RetainedCursorComposerProof(
+            "%42", 4242, "cursor-agent", text_sha256(rendering), retained
+        )
+        changed = original.copy()
+        changed[5] = changed[5].replace("→ Read", "→  Read")
+        with patch(
+            "omo_manager.omo_tmux_send.exact_cursor_runtime_binding", return_value=("%42", 4242, "cursor-agent")
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=changed
+        ):
+            with self.assertRaisesRegex(RuntimeError, "composer changed"):
+                require_ready_retained_cursor_composer("pb-newswatcher-agent:0", expected)
+
+    def test_borderless_retained_cursor_rejects_trailing_space_content_drift(self) -> None:
+        original = cursor_borderless_retained_lines()[3:]
+        rendering, retained = exact_retained_cursor_rendering(original)
+        expected = RetainedCursorComposerProof("%42", 4242, "cursor-agent", text_sha256(rendering), retained)
+        changed = original.copy()
+        changed[2] += " "
+        with patch(
+            "omo_manager.omo_tmux_send.exact_cursor_runtime_binding", return_value=("%42", 4242, "cursor-agent")
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=changed
+        ):
+            with self.assertRaisesRegex(RuntimeError, "composer changed"):
+                require_ready_retained_cursor_composer("pb-newswatcher-agent:0", expected)
+
+    def test_borderless_retained_cursor_rejects_multiple_arrows(self) -> None:
+        lines = cursor_borderless_retained_lines()
+        lines.insert(5, "  → unrelated visible input")
+        with self.assertRaisesRegex(RuntimeError, "ambiguous"):
+            exact_retained_cursor_rendering(lines)
+
+    def test_borderless_retained_cursor_rejects_ambiguous_footer_or_workspace(self) -> None:
+        footer = cursor_borderless_retained_lines()[-3]
+        lines = cursor_borderless_retained_lines()
+        lines.insert(-3, footer)
+        with self.assertRaisesRegex(RuntimeError, "incomplete"):
+            exact_retained_cursor_rendering(lines)
+
+    def test_borderless_retained_cursor_rejects_workspace_drift(self) -> None:
+        lines = cursor_borderless_retained_lines()
+        lines[-2] = "  ~/.config without authenticated workspace marker"
+        with self.assertRaisesRegex(RuntimeError, "incomplete"):
+            exact_retained_cursor_rendering(lines)
+
+    def test_borderless_retained_cursor_rejects_non_bottom_anchoring(self) -> None:
+        lines = cursor_borderless_retained_lines()
+        lines.insert(-3, "unbound content below composer")
+        with self.assertRaisesRegex(RuntimeError, "layout is incomplete"):
+            exact_retained_cursor_rendering(lines)
+
+    def test_ready_retained_cursor_proof_rejects_unmarked_fatal_output(self) -> None:
+        lines = cursor_borderless_retained_lines()
+        lines.insert(5, "fatal: Cursor renderer crashed")
+        with patch(
+            "omo_manager.omo_tmux_send.exact_cursor_runtime_binding", return_value=("%42", 4242, "cursor-agent")
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=lines
+        ):
+            with self.assertRaisesRegex(RuntimeError, "fatal error"):
+                require_ready_retained_cursor_composer("pb-newswatcher-agent:0")
+
+    def test_ready_retained_cursor_proof_rejects_marked_error_output(self) -> None:
+        lines = cursor_borderless_retained_lines()
+        lines.insert(5, "■ Error: Cursor renderer failed")
+        with patch(
+            "omo_manager.omo_tmux_send.exact_cursor_runtime_binding", return_value=("%42", 4242, "cursor-agent")
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=lines
+        ):
+            with self.assertRaisesRegex(RuntimeError, "fatal error"):
+                require_ready_retained_cursor_composer("pb-newswatcher-agent:0")
+
+    def test_partial_cursor_proof_accepts_suffix_only_padded_80x24_paste(self) -> None:
+        lines = cursor_partial_paste_80x24()
+        rendering, input_text = exact_retained_cursor_rendering(lines)
+        proof = RetainedCursorComposerProof(
+            "%421",
+            3680846,
+            "cursor-agent",
+            text_sha256(rendering),
+            input_text,
+            len(input_text.encode("utf-16-le")) // 2 + 1,
+        )
+        with patch(
+            "omo_manager.omo_tmux_send.exact_cursor_runtime_binding", return_value=("%421", 3680846, "cursor-agent")
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=lines
+        ):
+            self.assertEqual(
+                proof,
+                require_ready_partial_cursor_composer("pb-newswatcher-agent:0.0", proof.input_sha256),
+            )
+
+    def test_partial_cursor_proof_rejects_wrong_rendered_digest(self) -> None:
+        lines = cursor_partial_paste_80x24()
+        with patch(
+            "omo_manager.omo_tmux_send.exact_cursor_runtime_binding", return_value=("%421", 3680846, "cursor-agent")
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=lines
+        ):
+            with self.assertRaisesRegex(RuntimeError, "digest changed"):
+                require_ready_partial_cursor_composer("pb-newswatcher-agent:0.0", "0" * 64)
+
+    def test_partial_cursor_proof_rejects_complete_transport(self) -> None:
+        lines = cursor_partial_paste_80x24()
+        lines[13] = '  → <agent_message from="pb:13">'.ljust(80)
+        with patch(
+            "omo_manager.omo_tmux_send.exact_cursor_runtime_binding", return_value=("%421", 3680846, "cursor-agent")
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=lines
+        ):
+            with self.assertRaisesRegex(RuntimeError, "not one authenticated partial"):
+                require_ready_partial_cursor_composer("pb-newswatcher-agent:0.0")
+
+    def test_partial_cursor_proof_rejects_embedded_opening_transport_tag(self) -> None:
+        lines = cursor_partial_paste_80x24()
+        lines[15] = '     <agent_message from="pb:13">'.ljust(80)
+        with patch(
+            "omo_manager.omo_tmux_send.exact_cursor_runtime_binding", return_value=("%421", 3680846, "cursor-agent")
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=lines
+        ):
+            with self.assertRaisesRegex(RuntimeError, "not one authenticated partial"):
+                require_ready_partial_cursor_composer("pb-newswatcher-agent:0.0")
+
+    def test_partial_cursor_proof_rejects_generic_agent_launcher(self) -> None:
+        lines = cursor_partial_paste_80x24()
+        with patch(
+            "omo_manager.omo_tmux_send.exact_cursor_runtime_binding", return_value=("%421", 3680846, "agent")
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=lines
+        ):
+            with self.assertRaisesRegex(RuntimeError, "exact cursor-agent launcher"):
+                require_ready_partial_cursor_composer("pb-newswatcher-agent:0.0")
+
+    def test_partial_cursor_proof_rejects_overlay_or_error(self) -> None:
+        for marker, error in (
+            (" ┌─ follow-ups ────────────────────────────────────────────┐", "authenticated retained"),
+            ("■ Error: Cursor renderer failed", "fatal error"),
+        ):
+            lines = cursor_partial_paste_80x24()
+            lines[11] = marker.ljust(80)
+            if "follow-ups" in marker:
+                lines[12] = " enter send now · ↑ select/edit · esc cancel".ljust(80)
+            with self.subTest(marker=marker), patch(
+                "omo_manager.omo_tmux_send.exact_cursor_runtime_binding", return_value=("%421", 3680846, "cursor-agent")
+            ), patch("omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True), patch(
+                "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=lines
+            ):
+                with self.assertRaisesRegex(RuntimeError, error):
+                    require_ready_partial_cursor_composer("pb-newswatcher-agent:0.0")
+
+    def test_partial_cursor_clear_never_submits_and_requires_empty_verification(self) -> None:
+        rendering, input_text = exact_retained_cursor_rendering(cursor_partial_paste_80x24())
+        expected_keys = len(input_text.encode("utf-16-le")) // 2 + 1
+        proof = RetainedCursorComposerProof(
+            "%421", 3680846, "cursor-agent", text_sha256(rendering), input_text, expected_keys
+        )
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with patch(
+            "omo_manager.omo_tmux_send.require_ready_partial_cursor_composer", side_effect=[proof, proof]
+        ), patch("omo_manager.omo_tmux_send.require_ready_retained_cursor_composer", return_value=proof), patch(
+            "omo_manager.omo_tmux_send.require_same_cursor_target"
+        ), patch("omo_manager.omo_tmux_send.require_empty_cursor_composer") as empty, patch(
+            "omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run
+        ), patch("omo_manager.omo_tmux_send.send_enter") as enter:
+            empty.return_value = ""
+            clear_partial_cursor_composer("pb-newswatcher-agent:0.0", proof.input_sha256, options())
+        backspace = next(command for command in calls if any("BSpace" in part for part in command))
+        self.assertIn(f"send-keys -N {expected_keys}", backspace[6])
+        empty.assert_called_once_with("pb-newswatcher-agent:0.0", "%421", proof.input_text, 3680846, "cursor-agent")
+        enter.assert_not_called()
+
+    def test_partial_cursor_clear_fails_before_mutation_on_proof_drift(self) -> None:
+        proof = RetainedCursorComposerProof("%421", 3680846, "cursor-agent", "a" * 64, "\nAwait\n</agent_message>", 300)
+        with patch(
+            "omo_manager.omo_tmux_send.require_ready_partial_cursor_composer",
+            side_effect=[proof, RuntimeError("target retained submitted Cursor composer changed before paste")],
+        ), patch("omo_manager.omo_tmux_send.clear_bound_cursor_composer") as clear:
+            with self.assertRaisesRegex(RuntimeError, "composer changed"):
+                clear_partial_cursor_composer("pb-newswatcher-agent:0.0", proof.input_sha256, options())
+        clear.assert_not_called()
+
+    def test_partial_cursor_clear_propagates_empty_verification_failure_without_enter(self) -> None:
+        proof = RetainedCursorComposerProof("%421", 3680846, "cursor-agent", "a" * 64, "\nAwait\n</agent_message>", 300)
+        result = subprocess.CompletedProcess(["tmux"], 0, "", "")
+        with patch(
+            "omo_manager.omo_tmux_send.require_ready_partial_cursor_composer", side_effect=[proof, proof]
+        ), patch("omo_manager.omo_tmux_send.require_ready_retained_cursor_composer", return_value=proof), patch(
+            "omo_manager.omo_tmux_send.require_same_cursor_target"
+        ), patch(
+            "omo_manager.omo_tmux_send.require_empty_cursor_composer",
+            side_effect=RuntimeError("target Cursor composer is not empty after non-submitting clear"),
+        ), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=result), patch(
+            "omo_manager.omo_tmux_send.time.monotonic", side_effect=[0.0, 0.0]
+        ), patch("omo_manager.omo_tmux_send.send_enter") as enter:
+            with self.assertRaisesRegex(RuntimeError, "composer is not empty"):
+                clear_partial_cursor_composer(
+                    "pb-newswatcher-agent:0.0",
+                    proof.input_sha256,
+                    options(submit_verify_timeout_s=0.1),
+                )
+        enter.assert_not_called()
+
+    def test_exact_cursor_runtime_binding_accepts_installed_cursor_agent_name(self) -> None:
+        result = subprocess.CompletedProcess(
+            ["tmux"],
+            0,
+            "%421\t3680846\tcursor-agent\n",
+            "",
+        )
+        with patch("omo_manager.omo_tmux_send.subprocess.run", return_value=result):
+            self.assertEqual(("%421", 3680846, "cursor-agent"), exact_cursor_runtime_binding("pb-newswatcher-agent:0.0"))
+
+    def test_exact_cursor_runtime_binding_rejects_command_drift(self) -> None:
+        result = subprocess.CompletedProcess(["tmux"], 0, "%421\t3680846\tbash\n", "")
+        with patch("omo_manager.omo_tmux_send.subprocess.run", return_value=result):
+            with self.assertRaisesRegex(RuntimeError, "cannot be authenticated"):
+                exact_cursor_runtime_binding("pb-newswatcher-agent:0.0")
+
+    def test_retained_cursor_actions_atomically_bind_cursor_agent_pid_and_pane(self) -> None:
+        proof = RetainedCursorComposerProof("%421", 3680846, "cursor-agent", text_sha256("old"), "old")
+        result = subprocess.CompletedProcess(["tmux"], 0, "", "")
+        with patch("omo_manager.omo_tmux_send.require_ready_retained_cursor_composer", return_value=proof), patch(
+            "omo_manager.omo_tmux_send.subprocess.run", return_value=result
+        ) as run:
+            clear_retained_cursor_text("pb-newswatcher-agent:0.0", proof)
+
+        command = run.call_args.args[0]
+        self.assertEqual(["tmux", "if-shell", "-F", "-t", "pb-newswatcher-agent:0.0"], command[:5])
+        self.assertIn("#{pane_id},%421", command[5])
+        self.assertIn("#{pane_pid},3680846", command[5])
+        self.assertIn("#{pane_current_command},cursor-agent", command[5])
+        self.assertIn("BSpace", command[6])
+        self.assertNotIn("Enter", command[6])
+
+    def test_retained_cursor_actions_fail_closed_on_action_time_command_drift(self) -> None:
+        proof = RetainedCursorComposerProof("%421", 3680846, "cursor-agent", text_sha256("old"), "old")
+        failed = subprocess.CompletedProcess(["tmux"], 1, "", "")
+        for action, error in (
+            (lambda: clear_retained_cursor_text("pb-newswatcher-agent:0.0", proof), "non-submitting clear"),
+            (lambda: paste_to_retained_cursor("pb-newswatcher-agent:0.0", proof, "omo-buffer"), "at paste"),
+            (lambda: submit_to_retained_cursor("pb-newswatcher-agent:0.0", proof), "at submit"),
+        ):
+            with self.subTest(error=error), patch(
+                "omo_manager.omo_tmux_send.require_ready_retained_cursor_composer", return_value=proof
+            ), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=failed):
+                with self.assertRaisesRegex(RuntimeError, error):
+                    action()
+
+    def test_retained_cursor_clear_rechecks_content_immediately_before_action(self) -> None:
+        proof = RetainedCursorComposerProof("%421", 3680846, "cursor-agent", text_sha256("old"), "old")
+        with patch(
+            "omo_manager.omo_tmux_send.require_ready_retained_cursor_composer",
+            side_effect=RuntimeError("target retained submitted Cursor composer changed before paste"),
+        ), patch("omo_manager.omo_tmux_send.subprocess.run") as run:
+            with self.assertRaisesRegex(RuntimeError, "composer changed"):
+                clear_retained_cursor_text("pb-newswatcher-agent:0.0", proof)
+        run.assert_not_called()
+
+    def test_retained_cursor_clear_uses_non_submitting_backspaces_and_never_enter(self) -> None:
+        proof = RetainedCursorComposerProof("%42", 4242, "cursor-agent", text_sha256("old submitted wake"), "old submitted wake")
+        with patch(
+            "omo_manager.omo_tmux_send.require_ready_retained_cursor_composer", side_effect=[proof, proof]
+        ), patch("omo_manager.omo_tmux_send.require_same_cursor_target"), patch(
+            "omo_manager.omo_tmux_send.clear_retained_cursor_text"
+        ) as clear, patch("omo_manager.omo_tmux_send.require_empty_cursor_composer") as empty, patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            empty.return_value = ""
+            self.assertEqual(proof, clear_ready_retained_cursor_composer("pb-newswatcher-agent:0", options()))
+
+        clear.assert_called_once_with("pb-newswatcher-agent:0", proof)
+        empty.assert_called_once_with("pb-newswatcher-agent:0", "%42", "old submitted wake", 4242, "cursor-agent")
+        enter.assert_not_called()
+
+    def test_retained_cursor_clear_waits_for_shrinking_redraw_then_empty_ready(self) -> None:
+        original_lines = cursor_partial_paste_80x24()
+        rendering, input_text = exact_retained_cursor_rendering(original_lines)
+        proof = RetainedCursorComposerProof(
+            "%421", 3680846, "cursor-agent", text_sha256(rendering), input_text, 120
+        )
+        shrinking_lines = original_lines.copy()
+        shrinking_lines[17] = "".ljust(80)
+        _, shrinking_text = exact_retained_cursor_rendering(shrinking_lines)
+        self.assertTrue(input_text.startswith(shrinking_text))
+
+        with patch("omo_manager.omo_tmux_send.require_same_cursor_target"), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines",
+            side_effect=[shrinking_lines, cursor_borderless_empty_lines()],
+        ), patch("omo_manager.omo_tmux_send.clear_retained_cursor_text") as clear, patch(
+            "omo_manager.omo_tmux_send.time.monotonic", side_effect=[0.0, 0.1]
+        ), patch("omo_manager.omo_tmux_send.time.sleep") as sleep, patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            clear_bound_cursor_composer("pb-newswatcher-agent:0.0", proof, options())
+
+        clear.assert_called_once_with("pb-newswatcher-agent:0.0", proof)
+        sleep.assert_called_once()
+        enter.assert_not_called()
+
+    def test_retained_cursor_clear_times_out_when_redraw_never_shrinks(self) -> None:
+        proof = RetainedCursorComposerProof(
+            "%421", 3680846, "cursor-agent", "a" * 64, "unchanged authenticated partial", 120
+        )
+        with patch("omo_manager.omo_tmux_send.require_same_cursor_target"), patch(
+            "omo_manager.omo_tmux_send.clear_retained_cursor_text"
+        ) as clear, patch(
+            "omo_manager.omo_tmux_send.require_empty_cursor_composer",
+            return_value=proof.input_text,
+        ), patch("omo_manager.omo_tmux_send.time.monotonic", side_effect=[0.0, 1.0]), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            with self.assertRaisesRegex(RuntimeError, "did not become empty"):
+                clear_bound_cursor_composer(
+                    "pb-newswatcher-agent:0.0",
+                    proof,
+                    options(submit_verify_timeout_s=0.5),
+                )
+
+        clear.assert_called_once_with("pb-newswatcher-agent:0.0", proof)
+        enter.assert_not_called()
+
+    def test_retained_cursor_clear_fails_before_backspaces_on_pane_or_process_drift(self) -> None:
+        proof = RetainedCursorComposerProof("%42", 4242, "cursor-agent", text_sha256("old submitted wake"), "old submitted wake")
+        with patch(
+            "omo_manager.omo_tmux_send.require_ready_retained_cursor_composer", side_effect=[proof, proof]
+        ), patch(
+            "omo_manager.omo_tmux_send.require_same_cursor_target", side_effect=RuntimeError("pane or process changed")
+        ), patch("omo_manager.omo_tmux_send.clear_retained_cursor_text") as clear:
+            with self.assertRaisesRegex(RuntimeError, "pane or process changed"):
+                clear_ready_retained_cursor_composer("pb-newswatcher-agent:0", options())
+
+        clear.assert_not_called()
+
+    def test_retained_cursor_clear_fails_closed_when_empty_verification_fails(self) -> None:
+        proof = RetainedCursorComposerProof("%42", 4242, "cursor-agent", text_sha256("old submitted wake"), "old submitted wake")
+        with patch(
+            "omo_manager.omo_tmux_send.require_ready_retained_cursor_composer", side_effect=[proof, proof]
+        ), patch("omo_manager.omo_tmux_send.require_same_cursor_target"), patch(
+            "omo_manager.omo_tmux_send.clear_retained_cursor_text"
+        ) as clear, patch(
+            "omo_manager.omo_tmux_send.require_empty_cursor_composer",
+            side_effect=RuntimeError("target Cursor composer is not empty after non-submitting clear"),
+        ), patch("omo_manager.omo_tmux_send.time.monotonic", side_effect=[0.0, 0.0]), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            with self.assertRaisesRegex(RuntimeError, "composer is not empty"):
+                clear_ready_retained_cursor_composer(
+                    "pb-newswatcher-agent:0",
+                    options(submit_verify_timeout_s=0.0),
+                )
+
+        clear.assert_called_once_with("pb-newswatcher-agent:0", proof)
+        enter.assert_not_called()
+
+    def test_retained_cursor_clear_waits_through_only_incomplete_layout_then_requires_empty(self) -> None:
+        proof = RetainedCursorComposerProof("%42", 4242, "cursor-agent", text_sha256("old submitted wake"), "old submitted wake")
+        transient = [
+            "Handled the prior wake.",
+            " ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄",
+            "  → Add a follow-up",
+        ]
+        with patch(
+            "omo_manager.omo_tmux_send.require_ready_retained_cursor_composer", side_effect=[proof, proof]
+        ), patch("omo_manager.omo_tmux_send.exact_cursor_runtime_binding", return_value=("%42", 4242, "cursor-agent")), patch(
+            "omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True
+        ), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", side_effect=[transient, cursor_agent_lines()]
+        ), patch("omo_manager.omo_tmux_send.clear_retained_cursor_text") as clear, patch(
+            "omo_manager.omo_tmux_send.time.monotonic", side_effect=[0.0, 0.1]
+        ), patch("omo_manager.omo_tmux_send.time.sleep") as sleep, patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            self.assertEqual(proof, clear_ready_retained_cursor_composer("pb-newswatcher-agent:0", options()))
+
+        clear.assert_called_once_with("pb-newswatcher-agent:0", proof)
+        sleep.assert_called_once()
+        enter.assert_not_called()
+
+    def test_retained_cursor_clear_times_out_on_incomplete_layout(self) -> None:
+        proof = RetainedCursorComposerProof("%42", 4242, "cursor-agent", text_sha256("old submitted wake"), "old submitted wake")
+        transient = ["Handled the prior wake.", "  → Add a follow-up"]
+        with patch(
+            "omo_manager.omo_tmux_send.require_ready_retained_cursor_composer", side_effect=[proof, proof]
+        ), patch("omo_manager.omo_tmux_send.exact_cursor_runtime_binding", return_value=("%42", 4242, "cursor-agent")), patch(
+            "omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True
+        ), patch("omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=transient), patch(
+            "omo_manager.omo_tmux_send.clear_retained_cursor_text"
+        ) as clear, patch(
+            "omo_manager.omo_tmux_send.time.monotonic", side_effect=[0.0, 1.0]
+        ), patch("omo_manager.omo_tmux_send.send_enter") as enter:
+            with self.assertRaisesRegex(RuntimeError, "did not become empty"):
+                clear_ready_retained_cursor_composer(
+                    "pb-newswatcher-agent:0",
+                    options(submit_verify_timeout_s=0.5),
+                )
+
+        clear.assert_called_once_with("pb-newswatcher-agent:0", proof)
+        enter.assert_not_called()
+
+    def test_retained_cursor_clear_fails_on_pane_drift_during_incomplete_transition(self) -> None:
+        proof = RetainedCursorComposerProof("%42", 4242, "cursor-agent", text_sha256("old submitted wake"), "old submitted wake")
+        with patch(
+            "omo_manager.omo_tmux_send.require_ready_retained_cursor_composer", side_effect=[proof, proof]
+        ), patch(
+            "omo_manager.omo_tmux_send.exact_cursor_runtime_binding",
+            side_effect=[("%42", 4242, "cursor-agent"), ("%43", 4343, "cursor-agent")],
+        ), patch(
+            "omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True
+        ), patch("omo_manager.omo_tmux_send.clear_retained_cursor_text") as clear, patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            with self.assertRaisesRegex(RuntimeError, "pane or process changed"):
+                clear_ready_retained_cursor_composer("pb-newswatcher-agent:0", options())
+
+        clear.assert_called_once_with("pb-newswatcher-agent:0", proof)
+        enter.assert_not_called()
+
+    def test_empty_cursor_verification_requires_same_strict_ready_layout(self) -> None:
+        with patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
+            "omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True
+        ), patch("omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=cursor_agent_lines()):
+            require_empty_cursor_composer("pb-newswatcher-agent:0", "%42")
+
+    def test_empty_cursor_verification_accepts_strict_borderless_layout(self) -> None:
+        with patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
+            "omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True
+        ), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=cursor_borderless_empty_lines()
+        ):
+            require_empty_cursor_composer("pb-newswatcher-agent:0", "%42")
+
+    def test_empty_cursor_verification_rejects_retained_or_changed_text(self) -> None:
+        with patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
+            "omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True
+        ), patch("omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=cursor_retained_composer_lines()):
+            with self.assertRaisesRegex(RuntimeError, "grew or became unrelated"):
+                require_empty_cursor_composer("pb-newswatcher-agent:0", "%42", "another submitted wake")
+
+    def test_empty_cursor_verification_rejects_content_growth_during_redraw(self) -> None:
+        lines = cursor_partial_paste_80x24()
+        _, current_text = exact_retained_cursor_rendering(lines)
+        with patch("omo_manager.omo_tmux_send.require_same_cursor_target"), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=lines
+        ):
+            with self.assertRaisesRegex(RuntimeError, "grew or became unrelated"):
+                require_empty_cursor_composer(
+                    "pb-newswatcher-agent:0.0",
+                    "%421",
+                    current_text[:-1],
+                    3680846,
+                    "cursor-agent",
+                )
+
+    def test_empty_cursor_verification_rejects_error_during_incomplete_layout(self) -> None:
+        transient_error = ["■ Error: Cursor failed during redraw", "  → Add a follow-up"]
+        with patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
+            "omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True
+        ), patch("omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=transient_error):
+            with self.assertRaisesRegex(RuntimeError, "entered an error"):
+                require_empty_cursor_composer("pb-newswatcher-agent:0", "%42")
 
     def test_clear_existing_input_rechecks_error_before_enter(self) -> None:
         report = Report("stuck_input", ["› Continue task"], "Continue task", True)
         lines = ["■ Error: different failure", "› Continue task", "  gpt-5.5"]
-        with patch("omo_manager.omo_tmux_send.inspect", return_value=report), patch(
-            "omo_manager.omo_tmux_send.tail", return_value=lines
-        ), patch("omo_manager.omo_tmux_send.subprocess.run") as run:
+        changed = Report("stuck_input", lines, "Continue task", True)
+        with patch(
+            "omo_manager.omo_tmux_send.authenticated_full_report",
+            side_effect=[("%42", report.lines, report), ("%42", lines, changed)],
+        ), patch("omo_manager.omo_tmux_send.send_enter") as enter:
             with self.assertRaisesRegex(RuntimeError, "different Codex error"):
                 clear_existing_input_before_send("cfg:1.0", options(), ("old failure",))
 
-        run.assert_not_called()
+        enter.assert_not_called()
 
     def test_require_no_existing_input_rejects_real_input_before_paste(self) -> None:
         report = Report("running", ["• Working"], "queued worker message", False)
@@ -1809,13 +2593,18 @@ class TmuxSendTests(unittest.TestCase):
 
         reports = iter(
             [
-                Report("ready", ["› old input", "  gpt-5.5"], "old input", False),
+                Report("running", ["• Working", "  gpt-5.5"], "", False),
                 Report("running", ["• Working", "  gpt-5.5"], "", False),
                 Report("running", ["• Working", "  gpt-5.5"], "", False),
             ]
         )
+        old = Report("ready", ["› old input", "  gpt-5.5"], "old input", False)
+        cleared = Report("running", ["• Working", "  gpt-5.5"], "", False)
         with patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch(
             "omo_manager.omo_tmux_send.inspect", side_effect=lambda _args: next(reports)
+        ), patch(
+            "omo_manager.omo_tmux_send.authenticated_full_report",
+            side_effect=[("%42", old.lines, old), ("%42", old.lines, old), ("%42", cleared.lines, cleared)],
         ), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch(
             "omo_manager.omo_tmux_send.verify_submit"
         ), patch(
@@ -1827,6 +2616,122 @@ class TmuxSendTests(unittest.TestCase):
 
         self.assertTrue(any(command[:3] == ["tmux", "send-keys", "-t"] and command[-1] == "Enter" for command in calls))
         self.assertTrue(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+
+    def test_run_tmux_pastes_before_enter_on_same_ready_retained_cursor_pane(self) -> None:
+        events: list[tuple[str, str]] = []
+        proof = RetainedCursorComposerProof("%42", 4242, "cursor-agent", text_sha256("old submitted wake"), "old submitted wake")
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(command, 0)
+
+        def fake_clear(_target: str, _options: CodexSendOptions) -> RetainedCursorComposerProof:
+            events.append(("clear-backspaces", "%42"))
+            return proof
+
+        def fake_empty(_target: str, pane_id: str, *_args: object, **_kwargs: object) -> None:
+            events.append(("empty", pane_id))
+
+        def fake_paste(_target: str, _proof: RetainedCursorComposerProof, _buffer: str) -> None:
+            events.append(("paste", "%42"))
+
+        def fake_submit(_target: str, _proof: RetainedCursorComposerProof) -> None:
+            events.append(("enter", "%42"))
+
+        with patch("omo_manager.omo_tmux_send.agent_message_source", return_value="helper"), patch(
+            "omo_manager.omo_tmux_send.require_sendable_codex_target"
+        ), patch(
+            "omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value="cursor_retained_submitted"
+        ), patch(
+            "omo_manager.omo_tmux_send.clear_ready_retained_cursor_composer", side_effect=fake_clear
+        ), patch(
+            "omo_manager.omo_tmux_send.require_empty_cursor_composer", side_effect=fake_empty
+        ), patch(
+            "omo_manager.omo_tmux_send.require_same_cursor_target"
+        ), patch(
+            "omo_manager.omo_tmux_send.tail_pane_id", return_value=cursor_agent_lines("new wake")
+        ), patch(
+            "omo_manager.omo_tmux_send.validate_error_transition"
+        ), patch("omo_manager.omo_tmux_send.revalidate_error_transition"), patch(
+            "omo_manager.omo_tmux_send.require_no_existing_input"
+        ) as no_input, patch(
+            "omo_manager.omo_tmux_send.wait_paste_visible"
+        ), patch("omo_manager.omo_tmux_send.verify_submit"), patch(
+            "omo_manager.omo_tmux_send.paste_to_retained_cursor", side_effect=fake_paste
+        ), patch(
+            "omo_manager.omo_tmux_send.submit_to_retained_cursor", side_effect=fake_submit
+        ), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            run_tmux("pb-newswatcher-agent:0", "new wake\n", options(enter_count=2))
+
+        no_input.assert_not_called()
+        self.assertEqual(
+            [("clear-backspaces", "%42"), ("empty", "%42"), ("paste", "%42"), ("enter", "%42")],
+            events,
+        )
+
+    def test_run_tmux_does_not_paste_or_enter_if_retained_cursor_proof_changes(self) -> None:
+        calls: list[list[str]] = []
+        proof = RetainedCursorComposerProof("%42", 4242, "cursor-agent", text_sha256("old submitted wake"), "old submitted wake")
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.agent_message_source", return_value="helper"), patch(
+            "omo_manager.omo_tmux_send.require_sendable_codex_target"
+        ), patch(
+            "omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value="cursor_retained_submitted"
+        ), patch(
+            "omo_manager.omo_tmux_send.clear_ready_retained_cursor_composer", return_value=proof
+        ), patch(
+            "omo_manager.omo_tmux_send.require_empty_cursor_composer",
+            side_effect=RuntimeError("target retained submitted Cursor composer changed before paste"),
+        ), patch("omo_manager.omo_tmux_send.revalidate_error_transition"), patch(
+            "omo_manager.omo_tmux_send.paste_to_retained_cursor"
+        ) as paste, patch("omo_manager.omo_tmux_send.submit_to_retained_cursor") as submit, patch(
+            "omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run
+        ):
+            with self.assertRaisesRegex(RuntimeError, "composer changed"):
+                run_tmux("pb-newswatcher-agent:0", "new wake\n", options())
+
+        paste.assert_not_called()
+        submit.assert_not_called()
+        self.assertFalse(any(command[1] == "paste-buffer" for command in calls))
+
+    def test_run_tmux_post_paste_rebind_never_enters_replacement_pane(self) -> None:
+        calls: list[list[str]] = []
+        pasted = False
+        proof = RetainedCursorComposerProof("%42", 4242, "cursor-agent", text_sha256("old submitted wake"), "old submitted wake")
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        def fake_same(_target: str, _pane_id: str, phase: str, *_identity: object) -> None:
+            if pasted:
+                raise RuntimeError(f"target retained Cursor pane or process changed {phase}")
+
+        def fake_paste(_target: str, _proof: RetainedCursorComposerProof, _buffer: str) -> None:
+            nonlocal pasted
+            pasted = True
+
+        with patch("omo_manager.omo_tmux_send.agent_message_source", return_value="helper"), patch(
+            "omo_manager.omo_tmux_send.require_sendable_codex_target"
+        ), patch(
+            "omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value="cursor_retained_submitted"
+        ), patch("omo_manager.omo_tmux_send.clear_ready_retained_cursor_composer", return_value=proof), patch(
+            "omo_manager.omo_tmux_send.require_empty_cursor_composer"
+        ), patch("omo_manager.omo_tmux_send.revalidate_error_transition"), patch(
+            "omo_manager.omo_tmux_send.require_same_cursor_target", side_effect=fake_same
+        ), patch("omo_manager.omo_tmux_send.paste_to_retained_cursor", side_effect=fake_paste), patch(
+            "omo_manager.omo_tmux_send.submit_to_retained_cursor"
+        ) as submit, patch(
+            "omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run
+        ):
+            with self.assertRaisesRegex(RuntimeError, "pane or process changed while verifying paste"):
+                run_tmux("pb-newswatcher-agent:0", "new wake\n", options())
+
+        self.assertTrue(pasted)
+        submit.assert_not_called()
 
     def test_run_tmux_stops_before_paste_when_callback_introduces_input(self) -> None:
         calls: list[list[str]] = []

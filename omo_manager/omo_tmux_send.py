@@ -30,6 +30,7 @@ try:
         CURSOR_AGENT_COMPOSER_BOTTOM_RE,
         CURSOR_AGENT_TASK_COUNT_RE,
         SELECTED_MODEL_CAPACITY_RE,
+        UNRELATED_FATAL_LINE_RE,
         current_block,
         current_input_text,
         cursor_usage_limit_lines,
@@ -41,16 +42,16 @@ try:
         has_plan_prompt,
         inspect,
         is_cursor_agent_capture,
+        is_cursor_retained_submitted_composer,
         pane_has_exact_cursor_process,
         pane_has_exact_managed_agent_process,
+        report_from_lines,
         status,
         tail,
         tail_pane_id,
         visible_error_lines,
     )
-    from omo_manager.omo_codex_status import (
-        Args as StatusArgs,
-    )
+    from omo_manager.omo_codex_status import Args as StatusArgs, Report
     from omo_manager.omo_tmux_input_lock import tmux_input_lock
 except ModuleNotFoundError:
     from omo_codex_status import (
@@ -60,6 +61,7 @@ except ModuleNotFoundError:
         CURSOR_AGENT_COMPOSER_BOTTOM_RE,
         CURSOR_AGENT_TASK_COUNT_RE,
         SELECTED_MODEL_CAPACITY_RE,
+        UNRELATED_FATAL_LINE_RE,
         current_block,
         current_input_text,
         cursor_usage_limit_lines,
@@ -71,16 +73,16 @@ except ModuleNotFoundError:
         has_plan_prompt,
         inspect,
         is_cursor_agent_capture,
+        is_cursor_retained_submitted_composer,
         pane_has_exact_cursor_process,
         pane_has_exact_managed_agent_process,
+        report_from_lines,
         status,
         tail,
         tail_pane_id,
         visible_error_lines,
     )
-    from omo_codex_status import (
-        Args as StatusArgs,
-    )
+    from omo_codex_status import Args as StatusArgs, Report
     from omo_tmux_input_lock import tmux_input_lock
 
 
@@ -104,6 +106,7 @@ EXISTING_INPUT_CAPTURE_LINES = 2000
 DEFAULT_TMUX_DELIVERY_DEDUPE_S = int(os.environ.get("OMO_MANAGER_TMUX_DELIVERY_DEDUPE_S", "300"))
 MANAGER_DELEGATION_PREFIX = "Manager delegation received; carry out the delegated work and report through the normal task channel:"
 PENDING_CONSUMPTION_INSTRUCTION = "A task file may have at most one live `(pending)` marker. Consume it as soon as possible: reroute it or record its open work in `pending_task_items`."
+PARTIAL_CURSOR_TAIL_PREFIX = "Await its terminal result"
 MANAGER_DELEGATION_ENVELOPE_RE = re.compile(
     rf'^<agent_message from="{AGENT_MESSAGE_SOURCE_RE.pattern[1:-1]}">\n'
     rf'(?:{re.escape(AGENT_MESSAGE_AUTHORITY_REMINDER)}\n\n)?'
@@ -139,6 +142,8 @@ class Args:
     submit_existing_sha256: str = ""
     cancel_existing_file: Path | None = None
     cancel_existing_sha256: str = ""
+    describe_partial_cursor: bool = False
+    clear_partial_cursor_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -152,6 +157,16 @@ class ExistingInputCapture:
     pane_id: str
     text: str
     cursor: bool = False
+
+
+@dataclass(frozen=True)
+class RetainedCursorComposerProof:
+    pane_id: str
+    pane_pid: int
+    pane_command: str
+    input_sha256: str
+    input_text: str
+    clear_key_count: int = 0
 
 
 def tmux_delivery_state_dir() -> Path:
@@ -256,6 +271,8 @@ class ParsedArgs(argparse.Namespace):
     submit_existing_sha256: str = ""
     cancel_existing_file: Path | None = None
     cancel_existing_sha256: str = ""
+    describe_partial_cursor: bool = False
+    clear_partial_cursor_sha256: str = ""
     enter_count: int = 1
     enter_delay_s: float = 0.15
     submit_verify_timeout_s: float = DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S
@@ -278,6 +295,16 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--submit-existing-sha256", metavar="SHA256", help="Submit existing input only if its exact UTF-8 text has this lowercase SHA-256 digest.")
     _ = parser.add_argument("--cancel-existing-file", type=Path, help="Cancel existing input only if it exactly matches this UTF-8 file.")
     _ = parser.add_argument("--cancel-existing-sha256", metavar="SHA256", help="Cancel existing input only if its exact UTF-8 text has this lowercase SHA-256 digest.")
+    _ = parser.add_argument(
+        "--describe-partial-cursor",
+        action="store_true",
+        help="Read-only: describe one exact partial Cursor transport left by a failed paste.",
+    )
+    _ = parser.add_argument(
+        "--clear-partial-cursor-sha256",
+        metavar="SHA256",
+        help="Clear, without submitting, one partial Cursor transport with this exact rendered SHA-256 digest.",
+    )
     _ = parser.add_argument("--enter-count", type=int, default=1, help="Number of Enter keys to send after paste; default: 1.")
     _ = parser.add_argument("--enter-delay-s", type=float, default=0.15, help="Delay between repeated Enter keys; default: 0.15.")
     _ = parser.add_argument("--submit-verify-timeout-s", type=float, default=DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S, help="Wait up to this many seconds to verify submission or cancellation.")
@@ -324,11 +351,14 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--target is required.")
     submit_existing = parsed.submit_existing_file is not None or bool(parsed.submit_existing_sha256)
     cancel_existing = parsed.cancel_existing_file is not None or bool(parsed.cancel_existing_sha256)
-    existing_recovery = submit_existing or cancel_existing
+    partial_cursor_recovery = parsed.describe_partial_cursor or bool(parsed.clear_partial_cursor_sha256)
+    existing_recovery = submit_existing or cancel_existing or partial_cursor_recovery
     if parsed.message_file is not None and existing_recovery:
         parser.error("--message-file cannot be used with existing-input recovery.")
-    if submit_existing and cancel_existing:
-        parser.error("choose either submit-existing or cancel-existing recovery.")
+    if sum((submit_existing, cancel_existing, partial_cursor_recovery)) > 1:
+        parser.error("choose one existing-input recovery operation.")
+    if parsed.describe_partial_cursor and parsed.clear_partial_cursor_sha256:
+        parser.error("choose either partial Cursor describe or clear.")
     if parsed.submit_existing_file is not None and parsed.submit_existing_sha256:
         parser.error("choose either --submit-existing-file or --submit-existing-sha256.")
     if parsed.cancel_existing_file is not None and parsed.cancel_existing_sha256:
@@ -337,6 +367,8 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--submit-existing-sha256 must be a lowercase 64-character SHA-256 digest.")
     if parsed.cancel_existing_sha256 and SHA256_RE.fullmatch(parsed.cancel_existing_sha256) is None:
         parser.error("--cancel-existing-sha256 must be a lowercase 64-character SHA-256 digest.")
+    if parsed.clear_partial_cursor_sha256 and SHA256_RE.fullmatch(parsed.clear_partial_cursor_sha256) is None:
+        parser.error("--clear-partial-cursor-sha256 must be a lowercase 64-character SHA-256 digest.")
     if existing_recovery and (parsed.async_mode or parsed.async_worker):
         parser.error("--async cannot be used with existing-input recovery.")
     if parsed.message_file is None and not existing_recovery:
@@ -356,6 +388,8 @@ def parse_args(argv: list[str]) -> Args:
         parsed.submit_existing_sha256,
         parsed.cancel_existing_file,
         parsed.cancel_existing_sha256,
+        parsed.describe_partial_cursor,
+        parsed.clear_partial_cursor_sha256,
     )
 
 
@@ -737,6 +771,11 @@ def wait_paste_visible(
     message: str,
     options: CodexSendOptions,
     preexisting_error: tuple[str, ...] | None = None,
+    forbidden_input_text: str = "",
+    expected_cursor_pane_id: str = "",
+    expected_cursor_pane_pid: int = 0,
+    expected_cursor_pane_command: str = "",
+    expected_cursor_input_text: str = "",
 ) -> None:
     if options.submit_verify_timeout_s <= 0:
         return
@@ -749,10 +788,40 @@ def wait_paste_visible(
     last_input = ""
     recovered_overlay = False
     while True:
-        lines = tail(target, n_lines)
+        if expected_cursor_pane_id:
+            require_same_cursor_target(
+                target,
+                expected_cursor_pane_id,
+                "while verifying paste",
+                expected_cursor_pane_pid,
+                expected_cursor_pane_command,
+            )
+            if expected_cursor_input_text:
+                raw_lines = capture_raw_visible_pane_lines(expected_cursor_pane_id)
+                lines = normalized_rendered_lines(raw_lines)
+            else:
+                lines = tail_pane_id(expected_cursor_pane_id, n_lines)
+            require_same_cursor_target(
+                target,
+                expected_cursor_pane_id,
+                "while verifying paste",
+                expected_cursor_pane_pid,
+                expected_cursor_pane_command,
+            )
+        else:
+            lines = tail(target, n_lines)
+        if expected_cursor_pane_id and (
+            cursor_usage_limit_lines(lines[-40:])
+            or visible_error_lines(current_block(lines).lines, allow_cursor_quota=False)
+            or any(UNRELATED_FATAL_LINE_RE.search(line) is not None for line in current_block(lines).lines[-40:])
+        ):
+            raise RuntimeError("target has a new error before retained Cursor submit")
+        validate_error_transition(lines, preexisting_error, target, "before submit")
         visible_overlay = file_search_overlay_input_text(lines)
         if visible_overlay:
             if not recovered_overlay:
+                if expected_cursor_pane_id:
+                    raise RuntimeError("Cursor paste entered an unexpected file-search overlay")
                 send_enter(target)
                 recovered_overlay = True
             now_s = time.monotonic()
@@ -761,6 +830,8 @@ def wait_paste_visible(
             time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
             continue
         if has_cursor_followups_overlay(lines):
+            if expected_cursor_pane_id:
+                raise RuntimeError("Cursor paste entered an unexpected follow-ups overlay")
             overlay_text = "\n".join(lines)
             if all(probe in overlay_text for probe in probes) or has_collapsed_paste_text(overlay_text):
                 return
@@ -772,10 +843,26 @@ def wait_paste_visible(
                 raise RuntimeError(f"Codex paste not verified after {options.submit_verify_timeout_s:g}s: Cursor follow-ups overlay did not transition")
             time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
             continue
+        if expected_cursor_input_text:
+            try:
+                _ = bottom_anchored_cursor_input(raw_lines, expected_cursor_input_text.removesuffix("\n"))
+                return
+            except RuntimeError as exc:
+                input_text = current_input_text(lines)
+                if is_real_input_text(input_text):
+                    raise RuntimeError("Codex paste not verified: Cursor composer contains different or combined text") from exc
+                now_s = time.monotonic()
+                if now_s >= deadline_s:
+                    raise RuntimeError(
+                        f"Codex paste not verified after {options.submit_verify_timeout_s:g}s: exact Cursor input is not visible"
+                    ) from exc
+                time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
+                continue
         last_status = target_status(target, lines)
-        validate_error_transition(lines, preexisting_error, target, "before submit")
         input_text = current_input_text(lines)
         if is_real_input_text(input_text) and (all(probe in input_text for probe in probes) or has_collapsed_paste_text(input_text)):
+            if forbidden_input_text and re.sub(r"\s+", " ", forbidden_input_text).strip() in re.sub(r"\s+", " ", input_text).strip():
+                raise RuntimeError("Codex paste not verified: retained submitted Cursor composer was not replaced")
             return
         last_input = "" if input_text in CODEX_PLACEHOLDER_INPUT_TEXTS else input_text
         now_s = time.monotonic()
@@ -842,6 +929,9 @@ def verify_submit(
     message: str,
     options: CodexSendOptions,
     preexisting_error: tuple[str, ...] | None = None,
+    expected_cursor_pane_id: str = "",
+    expected_cursor_pane_pid: int = 0,
+    expected_cursor_pane_command: str = "",
 ) -> None:
     if options.submit_verify_timeout_s <= 0:
         return
@@ -853,12 +943,31 @@ def verify_submit(
     last_status = "unknown"
     next_enter_s = 0.0
     while True:
-        lines = tail(target, n_lines)
+        if expected_cursor_pane_id:
+            require_same_cursor_target(
+                target,
+                expected_cursor_pane_id,
+                "while verifying submit",
+                expected_cursor_pane_pid,
+                expected_cursor_pane_command,
+            )
+            lines = tail_pane_id(expected_cursor_pane_id, n_lines)
+            require_same_cursor_target(
+                target,
+                expected_cursor_pane_id,
+                "while verifying submit",
+                expected_cursor_pane_pid,
+                expected_cursor_pane_command,
+            )
+        else:
+            lines = tail(target, n_lines)
         last_status = target_status(target, lines)
         validate_error_transition(lines, preexisting_error, target, "after submit")
         if has_cursor_followups_overlay(lines):
             now_s = time.monotonic()
             if now_s >= next_enter_s:
+                if expected_cursor_pane_id:
+                    raise RuntimeError("Cursor submit entered an unexpected follow-ups overlay")
                 send_enter(target)
                 next_enter_s = now_s + max(options.enter_delay_s, 0.25)
             if now_s >= deadline_s:
@@ -876,6 +985,8 @@ def verify_submit(
             raise RuntimeError("Codex submit blocked by unsafe Plan prompt")
         now_s = time.monotonic()
         if prompt_still_present and now_s >= next_enter_s:
+            if expected_cursor_pane_id:
+                raise RuntimeError("Cursor prompt remained visible after guarded submit")
             send_enter(target)
             next_enter_s = now_s + max(options.enter_delay_s, 0.25)
         if now_s >= deadline_s:
@@ -884,7 +995,7 @@ def verify_submit(
         time.sleep(min(0.25, max(0.05, min(deadline_s, next_enter_s) - now_s)))
 
 
-def exact_cursor_existing_input_text(lines: list[str]) -> str:
+def exact_cursor_existing_input_text(lines: list[str], *, allow_empty: bool = False) -> str:
     """Extract input only from one complete, bottom-anchored Cursor composer."""
 
     end = len(lines)
@@ -932,7 +1043,7 @@ def exact_cursor_existing_input_text(lines: list[str]) -> str:
             raise RuntimeError("target input is not in a complete Cursor view")
         continuations.append(line[4:])
     input_text = "\n".join((first, *continuations))
-    if not is_real_input_text(input_text) or has_collapsed_paste_text(input_text):
+    if (not allow_empty and not is_real_input_text(input_text)) or has_collapsed_paste_text(input_text):
         raise RuntimeError("target existing input is incomplete")
     return input_text
 
@@ -1019,6 +1130,26 @@ def capture_complete_input_lines(pane_id: str) -> list[str]:
         raise RuntimeError("target input capture failed") from exc
     if result.returncode != 0:
         raise RuntimeError("target input capture failed")
+    return (result.stdout or "").split("\n")
+
+
+def capture_raw_visible_pane_lines(pane_id: str) -> list[str]:
+    """Capture one visible pane without stripping rendered trailing spaces."""
+
+    if re.fullmatch(r"%[0-9]+", pane_id) is None:
+        raise RuntimeError("target pane capture requires an exact tmux pane id")
+    try:
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-p", "-J", "-N", "-t", pane_id],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("target pane capture failed") from exc
+    if result.returncode != 0:
+        raise RuntimeError("target pane capture failed")
     return (result.stdout or "").split("\n")
 
 
@@ -1344,15 +1475,26 @@ def clear_existing_input_before_send(
     preexisting_error: tuple[str, ...] | None = None,
 ) -> str:
     try:
-        report = inspect(StatusArgs(target, 80))
-        overlay = has_cursor_followups_overlay(tail(target, 80))
+        _, lines, report = authenticated_full_report(target)
+        overlay = has_cursor_followups_overlay(lines)
     except Exception:
         return "inspect_failed"
+    if is_cursor_retained_submitted_composer(lines) or is_authenticated_retained_cursor_capture(lines):
+        return "cursor_retained_submitted" if retained_cursor_is_ready(lines) else "cursor_retained_submitted_not_ready"
     if not is_real_input_text(report.input_text) and not overlay:
         return ""
     deadline_s = time.monotonic() + options.submit_verify_timeout_s
     while True:
-        lines = revalidate_error_transition(target, 80, preexisting_error, "before existing-input flush")
+        try:
+            _, lines, report = authenticated_full_report(target)
+        except RuntimeError:
+            return "inspect_failed"
+        validate_error_transition(lines, preexisting_error, target, "before existing-input flush")
+        overlay = has_cursor_followups_overlay(lines)
+        if is_cursor_retained_submitted_composer(lines) or is_authenticated_retained_cursor_capture(lines):
+            return "cursor_retained_submitted" if retained_cursor_is_ready(lines) else "cursor_retained_submitted_not_ready"
+        if not is_real_input_text(current_input_text(lines)) and not overlay:
+            return ""
         if has_plan_prompt(lines) and not options.allow_plan_prompt_enter:
             return "plan_prompt"
         send_enter(target)
@@ -1361,12 +1503,384 @@ def clear_existing_input_before_send(
             return "followups_overlay" if overlay else "existing_input"
         time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
         try:
-            report = inspect(StatusArgs(target, 80))
-            overlay = has_cursor_followups_overlay(tail(target, 80))
-        except Exception:
+            _, lines, report = authenticated_full_report(target)
+            overlay = has_cursor_followups_overlay(lines)
+        except RuntimeError:
             return "inspect_failed"
         if not is_real_input_text(report.input_text) and not overlay:
             return ""
+
+
+def exact_cursor_runtime_binding(target: str) -> tuple[str, int, str]:
+    try:
+        result = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", target, "#{pane_id}\t#{pane_pid}\t#{pane_current_command}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("target Cursor runtime cannot be authenticated") from exc
+    fields = (result.stdout or "").rstrip("\n").split("\t") if result.returncode == 0 else []
+    accepted_commands = {"agent"}
+    try:
+        accepted_commands.add((Path.home() / ".local/bin/agent").resolve(strict=True).name)
+    except OSError:
+        pass
+    if (
+        len(fields) != 3
+        or re.fullmatch(r"%[0-9]+", fields[0]) is None
+        or not fields[1].isdigit()
+        or int(fields[1]) <= 0
+        or fields[2] not in accepted_commands
+    ):
+        raise RuntimeError("target Cursor runtime cannot be authenticated")
+    return fields[0], int(fields[1]), fields[2]
+
+
+def authenticated_full_report(target: str) -> tuple[str, list[str], Report]:
+    """Derive status and input from one pinned full capture, never summarized output."""
+
+    pane_id = exact_pane_id(target)
+    if not pane_id or not pane_has_exact_managed_agent_process(target, pane_id):
+        raise RuntimeError("target full pane cannot be authenticated")
+    raw_lines = capture_raw_visible_pane_lines(pane_id)
+    if exact_pane_id(target) != pane_id or not pane_has_exact_managed_agent_process(target, pane_id):
+        raise RuntimeError("target full pane changed during capture")
+    lines = normalized_rendered_lines(raw_lines)
+    return pane_id, lines, report_from_lines(lines)
+
+
+def normalized_rendered_lines(raw_lines: list[str]) -> list[str]:
+    """Normalize only a derived status view; authentication retains the raw capture."""
+
+    lines = [line.rstrip() for line in raw_lines]
+    while lines and not lines[-1]:
+        lines.pop()
+    return lines
+
+
+def bottom_anchored_cursor_input(raw_lines: list[str], expected_text: str | None = None) -> tuple[str, str]:
+    """Authenticate exact input in one borderless, bottom-anchored Cursor composer."""
+
+    visible = raw_lines.copy()
+    normalized = [line.rstrip() for line in visible]
+    layout_end = len(normalized)
+    while layout_end and not normalized[layout_end - 1]:
+        layout_end -= 1
+    footer_indices = [idx for idx, line in enumerate(normalized) if EXACT_CURSOR_FOOTER_RE.fullmatch(line)]
+    workspace_indices = [idx for idx, line in enumerate(normalized) if EXACT_CURSOR_WORKSPACE_RE.fullmatch(line)]
+    if footer_indices != [layout_end - 2] or workspace_indices != [layout_end - 1]:
+        raise RuntimeError("target retained Cursor layout is incomplete")
+    footer_idx = footer_indices[0]
+    content_end = footer_idx - 1
+    while content_end >= 0 and not normalized[content_end]:
+        content_end -= 1
+    if content_end == footer_idx - 1:
+        raise RuntimeError("target retained Cursor layout is incomplete")
+    arrow_indices = [
+        idx
+        for idx, line in enumerate(normalized[: content_end + 1])
+        if (line == "  →" or line.startswith("  → "))
+        and all(not row or row.startswith("    ") for row in visible[idx + 1 : content_end + 1])
+    ]
+    if len(arrow_indices) != 1:
+        raise RuntimeError("target retained Cursor layout is ambiguous")
+    prompt_idx = arrow_indices[0]
+    if prompt_idx and (normalized[prompt_idx - 1] == "  →" or normalized[prompt_idx - 1].startswith("  → ")):
+        raise RuntimeError("target retained Cursor layout is ambiguous")
+    input_rows = visible[prompt_idx : content_end + 1]
+    if any(row and not row.startswith("    ") for row in input_rows[1:]):
+        raise RuntimeError("target retained Cursor layout is incomplete")
+    logical_rows = [input_rows[0][4:].rstrip(), *(row[4:].rstrip() if row else "" for row in input_rows[1:])]
+    input_text = "\n".join(logical_rows)
+    if expected_text is not None:
+        expected_rows = expected_text.split("\n")
+        expected_rendering = [f"  → {expected_rows[0]}", *(f"    {row}" for row in expected_rows[1:])]
+        nonempty_widths = {len(row) for row in input_rows if row}
+        if len(nonempty_widths) == 1:
+            width = next(iter(nonempty_widths))
+            if width >= max(map(len, expected_rendering), default=0):
+                expected_rendering = [row.ljust(width) for row in expected_rendering]
+        if input_rows != expected_rendering:
+            raise RuntimeError("target retained Cursor composer content is not exact")
+        input_text = expected_text
+    return "\n".join(visible[prompt_idx:]), input_text
+
+
+# 🧑 "The retained composer has no visible border rows: input begins at the arrow row ... then the exact Cursor footer and workspace line."
+def exact_retained_cursor_rendering(raw_lines: list[str]) -> tuple[str, str]:
+    """Bind the unique visible retained composer without off-screen history."""
+
+    return bottom_anchored_cursor_input(raw_lines)
+
+
+def is_authenticated_retained_cursor_capture(lines: list[str]) -> bool:
+    """Recognize only a complete transport envelope in the strict retained layout."""
+
+    try:
+        _, input_text = exact_retained_cursor_rendering(lines)
+    except RuntimeError:
+        return False
+    return re.search(r"(?:^|\n)</agent_message>\Z", input_text.rstrip()) is not None
+
+
+def retained_cursor_is_ready(lines: list[str]) -> bool:
+    """Treat strict retained input as the sole reason a terminal pane is stuck."""
+
+    current_status = status(lines, current_block(lines))
+    return current_status == "ready" or (current_status == "stuck_input" and not has_plan_prompt(lines))
+
+
+def require_ready_retained_cursor_composer(
+    target: str,
+    expected: RetainedCursorComposerProof | None = None,
+) -> RetainedCursorComposerProof:
+    """Bind one ready retained submitted composer to its pane and exact text."""
+
+    pane_id, pane_pid, pane_command = exact_cursor_runtime_binding(target)
+    if expected is not None and (pane_id, pane_pid, pane_command) != (expected.pane_id, expected.pane_pid, expected.pane_command):
+        raise RuntimeError("target retained Cursor pane changed before paste")
+    if not pane_has_exact_cursor_process(target, pane_id):
+        raise RuntimeError("target retained Cursor process changed before paste")
+    raw_lines = capture_raw_visible_pane_lines(pane_id)
+    if exact_cursor_runtime_binding(target) != (pane_id, pane_pid, pane_command) or not pane_has_exact_cursor_process(target, pane_id):
+        raise RuntimeError("target retained Cursor pane or process changed before paste")
+    lines = normalized_rendered_lines(raw_lines)
+    block = current_block(lines)
+    if (
+        cursor_usage_limit_lines(lines[-40:])
+        or visible_error_lines(block.lines, allow_cursor_quota=False)
+        or any(UNRELATED_FATAL_LINE_RE.search(line) is not None for line in block.lines[-40:])
+    ):
+        raise RuntimeError("target retained Cursor pane contains a fatal error")
+    rendering, input_text = exact_retained_cursor_rendering(raw_lines)
+    if has_cursor_followups_overlay(lines) or not is_authenticated_retained_cursor_capture(raw_lines):
+        raise RuntimeError("target no longer has one authenticated retained submitted Cursor composer")
+    if not retained_cursor_is_ready(lines):
+        raise RuntimeError("target retained submitted Cursor composer is not ready for paste")
+    proof = RetainedCursorComposerProof(
+        pane_id,
+        pane_pid,
+        pane_command,
+        text_sha256(rendering),
+        input_text,
+        len(input_text.encode("utf-16-le")) // 2 + 1,
+    )
+    if expected is not None and proof != expected:
+        raise RuntimeError("target retained submitted Cursor composer changed before paste")
+    return proof
+
+
+def require_same_cursor_target(target: str, pane_id: str, phase: str, pane_pid: int = 0, pane_command: str = "") -> None:
+    same_runtime = (
+        exact_cursor_runtime_binding(target) == (pane_id, pane_pid, pane_command)
+        if pane_pid and pane_command
+        else exact_pane_id(target) == pane_id
+    )
+    if not same_runtime or not pane_has_exact_cursor_process(target, pane_id):
+        raise RuntimeError(f"target retained Cursor pane or process changed {phase}")
+
+
+def guarded_retained_cursor_action(
+    target: str,
+    proof: RetainedCursorComposerProof,
+    command: str,
+    failure: str,
+) -> None:
+    condition = (
+        f"#{{&&:#{{==:#{{pane_id}},{proof.pane_id}}},"
+        f"#{{&&:#{{==:#{{pane_pid}},{proof.pane_pid}}},#{{==:#{{pane_current_command}},{proof.pane_command}}}}}}}"
+    )
+    result = subprocess.run(
+        ["tmux", "if-shell", "-F", "-t", target, condition, command, "run-shell 'exit 1'"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(failure)
+
+
+def clear_retained_cursor_text(target: str, proof: RetainedCursorComposerProof) -> None:
+    """Backspace the exact retained value under one atomic pane/process guard."""
+
+    _ = require_ready_retained_cursor_composer(target, proof)
+    n_keys = proof.clear_key_count or len(proof.input_text.encode("utf-16-le")) // 2 + 1
+    guarded_retained_cursor_action(
+        target,
+        proof,
+        f"send-keys -N {n_keys} -t {proof.pane_id} BSpace",
+        "target retained Cursor pane or process changed at non-submitting clear",
+    )
+
+
+def paste_to_retained_cursor(target: str, proof: RetainedCursorComposerProof, buffer_name: str) -> None:
+    if re.fullmatch(r"[A-Za-z0-9_-]+", buffer_name) is None:
+        raise RuntimeError("Cursor paste buffer identity is invalid")
+    guarded_retained_cursor_action(
+        target,
+        proof,
+        f"paste-buffer -b {buffer_name} -t {proof.pane_id}",
+        "target retained Cursor pane or process changed at paste",
+    )
+
+
+def submit_to_retained_cursor(target: str, proof: RetainedCursorComposerProof) -> None:
+    guarded_retained_cursor_action(
+        target,
+        proof,
+        f"send-keys -t {proof.pane_id} Enter",
+        "target retained Cursor pane or process changed at submit",
+    )
+
+
+def require_empty_cursor_composer(
+    target: str,
+    pane_id: str,
+    cleared_text: str = "",
+    pane_pid: int = 0,
+    pane_command: str = "",
+) -> str:
+    """Return authenticated shrinking input, or empty after a verified clear."""
+
+    require_same_cursor_target(target, pane_id, "before empty-composer verification", pane_pid, pane_command)
+    raw_lines = capture_raw_visible_pane_lines(pane_id)
+    lines = normalized_rendered_lines(raw_lines)
+    require_same_cursor_target(target, pane_id, "during empty-composer verification", pane_pid, pane_command)
+    if (
+        cursor_usage_limit_lines(lines[-40:])
+        or visible_error_lines(current_block(lines).lines, allow_cursor_quota=False)
+        or any(UNRELATED_FATAL_LINE_RE.search(line) is not None for line in current_block(lines).lines[-40:])
+    ):
+        raise RuntimeError("target Cursor entered an error during non-submitting clear")
+    if has_cursor_followups_overlay(lines) or has_plan_prompt(lines):
+        raise RuntimeError("target Cursor entered an ambiguous overlay during non-submitting clear")
+    try:
+        _, strict_input = bottom_anchored_cursor_input(raw_lines)
+    except RuntimeError:
+        strict_input = ""
+    else:
+        if is_real_input_text(strict_input):
+            if cleared_text and len(strict_input) <= len(cleared_text) and cleared_text.startswith(strict_input):
+                return strict_input
+            raise RuntimeError("target Cursor composer grew or became unrelated during non-submitting clear")
+        if status(lines, current_block(lines)) != "ready":
+            raise RuntimeError("target Cursor pane is not ready after retained-composer clear")
+        return ""
+    if not is_cursor_agent_capture(lines):
+        visible_prompts = [line[4:].rstrip() for line in lines[-20:] if line.startswith("  → ")]
+        if any(is_real_input_text(prompt) for prompt in visible_prompts):
+            raise RuntimeError("target Cursor composer became nonempty during incomplete-layout transition")
+        raise RuntimeError("target Cursor layout is transiently incomplete after non-submitting clear")
+    input_text = current_input_text(lines)
+    if is_real_input_text(input_text) or is_cursor_retained_submitted_composer(lines):
+        if cleared_text and len(input_text) <= len(cleared_text) and cleared_text.startswith(input_text):
+            return input_text
+        raise RuntimeError("target Cursor composer grew or became unrelated during non-submitting clear")
+    if status(lines, current_block(lines)) != "ready":
+        raise RuntimeError("target Cursor pane is not ready after retained-composer clear")
+    try:
+        input_text = exact_cursor_existing_input_text(lines, allow_empty=True)
+    except RuntimeError as exc:
+        raise RuntimeError("target Cursor layout is transiently incomplete after non-submitting clear") from exc
+    if is_real_input_text(input_text):
+        raise RuntimeError("target Cursor composer is not empty after non-submitting clear")
+    return ""
+
+
+def clear_ready_retained_cursor_composer(
+    target: str,
+    options: CodexSendOptions,
+) -> RetainedCursorComposerProof:
+    """Clear one authenticated completed Cursor composer without submitting it."""
+
+    proof = require_ready_retained_cursor_composer(target)
+    require_ready_retained_cursor_composer(target, proof)
+    clear_bound_cursor_composer(target, proof, options)
+    return proof
+
+
+def clear_bound_cursor_composer(
+    target: str,
+    proof: RetainedCursorComposerProof,
+    options: CodexSendOptions,
+) -> None:
+    """Clear one exact proof and require the same pane to become ready and empty."""
+
+    require_same_cursor_target(target, proof.pane_id, "before non-submitting clear", proof.pane_pid, proof.pane_command)
+    clear_retained_cursor_text(target, proof)
+    deadline_s = time.monotonic() + options.submit_verify_timeout_s
+    prior_text = proof.input_text
+    while True:
+        try:
+            remaining_text = require_empty_cursor_composer(
+                target,
+                proof.pane_id,
+                prior_text,
+                proof.pane_pid,
+                proof.pane_command,
+            )
+            if not remaining_text:
+                return
+            prior_text = remaining_text
+        except RuntimeError as exc:
+            if "layout is transiently incomplete" not in str(exc):
+                raise
+        now_s = time.monotonic()
+        if now_s >= deadline_s:
+            raise RuntimeError("target Cursor composer did not become empty before non-submitting clear timeout")
+        time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
+
+
+def require_ready_partial_cursor_composer(
+    target: str,
+    expected_sha256: str = "",
+    expected: RetainedCursorComposerProof | None = None,
+) -> RetainedCursorComposerProof:
+    """Authenticate one suffix-only transport left by a failed Cursor paste."""
+
+    proof = require_ready_retained_cursor_composer(target, expected)
+    logical_input = proof.input_text.rstrip()
+    if proof.pane_command != "cursor-agent":
+        raise RuntimeError("partial Cursor recovery requires the exact cursor-agent launcher")
+    if (
+        not logical_input.lstrip().startswith(PARTIAL_CURSOR_TAIL_PREFIX)
+        or not logical_input.endswith(AGENT_MESSAGE_CLOSE)
+        or re.search(r"<\s*agent_message\b", logical_input, re.IGNORECASE) is not None
+    ):
+        raise RuntimeError("target Cursor input is not one authenticated partial transport")
+    if expected_sha256 and proof.input_sha256 != expected_sha256:
+        raise RuntimeError("target partial Cursor rendering digest changed")
+    return proof
+
+
+def describe_partial_cursor_composer(target: str) -> None:
+    """Print current partial-composer identity without mutating the pane."""
+
+    proof = require_ready_partial_cursor_composer(target)
+    print(f"pane_id: {proof.pane_id}")
+    print(f"pane_pid: {proof.pane_pid}")
+    print(f"pane_command: {proof.pane_command}")
+    print(f"rendered_sha256: {proof.input_sha256}")
+
+
+def clear_partial_cursor_composer(target: str, expected_sha256: str, options: CodexSendOptions) -> None:
+    """Clear an exact partial paste without Enter, retry, or cancellation."""
+
+    if target.partition(":")[0].startswith("h"):
+        raise RuntimeError("partial Cursor recovery refuses human-owned targets")
+    if options.submit_verify_timeout_s <= 0:
+        raise RuntimeError("partial Cursor recovery requires a positive verification timeout")
+    proof = require_ready_partial_cursor_composer(target, expected_sha256)
+    if options.dry_run:
+        print(f"would non-submit clear partial Cursor rendering {proof.input_sha256} at {proof.pane_id}")
+        print("would verify the same ready Cursor pane has an empty composer")
+        return
+    _ = require_ready_partial_cursor_composer(target, expected_sha256, proof)
+    clear_bound_cursor_composer(target, proof, options)
 
 
 def require_no_existing_input(target: str) -> None:
@@ -1430,37 +1944,106 @@ def _run_tmux_payload(
                 return
             claim_owned = True
         clear_result = clear_existing_input_before_send(target, options, preexisting_error)
-        if clear_result:
+        retained_cursor = clear_ready_retained_cursor_composer(target, options) if clear_result == "cursor_retained_submitted" else None
+        if clear_result and retained_cursor is None:
             raise RuntimeError(f"target existing input blocks normal tmux paste: {clear_result}")
         preexisting_error = require_sendable_codex_target(target, inspect_lines_for_message(verification_message))
         _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)
         if before_paste is not None:
             before_paste()
         _ = revalidate_error_transition(target, inspect_lines_for_message(verification_message), preexisting_error, "before paste")
-        require_no_existing_input(target)
-        delivery_may_have_happened = True
+        paste_target = target
+        if retained_cursor is None:
+            require_no_existing_input(target)
+        else:
+            require_empty_cursor_composer(
+                target,
+                retained_cursor.pane_id,
+                pane_pid=retained_cursor.pane_pid,
+                pane_command=retained_cursor.pane_command,
+            )
+            paste_target = retained_cursor.pane_id
+            require_same_cursor_target(
+                target,
+                retained_cursor.pane_id,
+                "immediately before paste",
+                retained_cursor.pane_pid,
+                retained_cursor.pane_command,
+            )
+        if retained_cursor is None:
+            delivery_may_have_happened = True
+            try:
+                _ = subprocess.run(["tmux", "paste-buffer", "-b", buffer_name, "-t", paste_target], timeout=5, check=True)
+            except (OSError, subprocess.CalledProcessError):
+                delivery_may_have_happened = False
+                raise
+        else:
+            paste_to_retained_cursor(target, retained_cursor, buffer_name)
+            delivery_may_have_happened = True
         try:
-            _ = subprocess.run(["tmux", "paste-buffer", "-b", buffer_name, "-t", target], timeout=5, check=True)
-        except (OSError, subprocess.CalledProcessError):
-            delivery_may_have_happened = False
-            raise
-        try:
-            if not verify_placeholder_paste(target, verification_message, options):
-                wait_paste_visible(target, verification_message, options, preexisting_error)
+            if retained_cursor is not None or not verify_placeholder_paste(target, verification_message, options):
+                wait_paste_visible(
+                    target,
+                    verification_message,
+                    options,
+                    preexisting_error,
+                    retained_cursor.input_text if retained_cursor is not None else "",
+                    retained_cursor.pane_id if retained_cursor is not None else "",
+                    retained_cursor.pane_pid if retained_cursor is not None else 0,
+                    retained_cursor.pane_command if retained_cursor is not None else "",
+                    message if retained_cursor is not None else "",
+                )
         except RuntimeError as exc:
             dedupe_s = int(os.environ.get("OMO_MANAGER_TMUX_DELIVERY_DEDUPE_S", str(DEFAULT_TMUX_DELIVERY_DEDUPE_S)))
             raise RuntimeError(
                 f"{exc}; delivery outcome is unknown and an exact retry is suppressed for {dedupe_s}s"
             ) from exc
         enter_n_lines = inspect_lines_for_message(verification_message)
-        for idx in range(options.enter_count):
+        enter_count = 1 if retained_cursor is not None else options.enter_count
+        for idx in range(enter_count):
             if idx:
                 time.sleep(options.enter_delay_s)
-            lines = revalidate_error_transition(target, enter_n_lines, preexisting_error, "before submit")
+            if retained_cursor is None:
+                lines = revalidate_error_transition(target, enter_n_lines, preexisting_error, "before submit")
+            else:
+                require_same_cursor_target(
+                    target,
+                    retained_cursor.pane_id,
+                    "before submit",
+                    retained_cursor.pane_pid,
+                    retained_cursor.pane_command,
+                )
+                lines = tail_pane_id(retained_cursor.pane_id, enter_n_lines)
+                require_same_cursor_target(
+                    target,
+                    retained_cursor.pane_id,
+                    "before submit",
+                    retained_cursor.pane_pid,
+                    retained_cursor.pane_command,
+                )
+                validate_error_transition(lines, preexisting_error, target, "before submit")
             if has_plan_prompt(lines) and not options.allow_plan_prompt_enter:
                 raise RuntimeError("Codex submit blocked by unsafe Plan prompt")
-            send_enter(target)
-        verify_submit(target, verification_message, options, preexisting_error)
+            if retained_cursor is not None:
+                require_same_cursor_target(
+                    target,
+                    retained_cursor.pane_id,
+                    "immediately before submit",
+                    retained_cursor.pane_pid,
+                    retained_cursor.pane_command,
+                )
+                submit_to_retained_cursor(target, retained_cursor)
+            else:
+                send_enter(target)
+        verify_submit(
+            target,
+            verification_message,
+            options,
+            preexisting_error,
+            retained_cursor.pane_id if retained_cursor is not None else "",
+            retained_cursor.pane_pid if retained_cursor is not None else 0,
+            retained_cursor.pane_command if retained_cursor is not None else "",
+        )
     finally:
         if claim_owned and not delivery_may_have_happened:
             try:
@@ -1682,6 +2265,14 @@ def main(argv: list[str]) -> int:
         args = parse_args(argv)
         if args.async_result:
             return query_async_result(args.async_result)
+        if args.describe_partial_cursor:
+            with tmux_input_lock(args.target):
+                describe_partial_cursor_composer(args.target)
+            return 0
+        if args.clear_partial_cursor_sha256:
+            with tmux_input_lock(args.target):
+                clear_partial_cursor_composer(args.target, args.clear_partial_cursor_sha256, args.options)
+            return 0
         if args.submit_existing_file is not None or args.submit_existing_sha256:
             with tmux_input_lock(args.target):
                 submit_existing_to_codex(args.target, existing_input_authorization(args), args.options)
