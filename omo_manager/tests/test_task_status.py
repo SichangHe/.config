@@ -58,6 +58,7 @@ from omo_manager.omo_task_status import stop_done_agent
 from omo_manager.omo_task_status import tracked_dirty_state
 from omo_manager.omo_task_status import update_frontmatter_status
 from omo_manager.omo_task_status import validate_manager_consumed_report
+from omo_manager.omo_task_status import validate_done_live_todo
 from omo_manager.omo_task_status import Args as StatusArgs
 from omo_manager.omo_codex_stop import ExitedCodexShell
 from omo_manager.omo_codex_stop import done_live_close_started_path
@@ -2188,6 +2189,73 @@ class TaskStatusTests(unittest.TestCase):
                 parse_args(candidate)
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
             parse_args([*complete[:-1], "--expected-pane-id", "%42", complete[-1]])
+
+    def test_archived_accepted_report_authorizes_absent_todo_custody(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, _todo_text, args = self.write_done_live_close_case(root)
+            month = root / "202608"
+            month.mkdir()
+            archived = month / task.name
+            task.rename(archived)
+            todo_text = "current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            args = replace(args, task_file=Path("202608/task.md"))
+            args = self.write_consumed_attestation(root, archived, args)
+            evidence = args.manager_consumed_report_receipt
+            assert evidence is not None
+            bundle = json.loads(evidence.read_text(encoding="utf-8"))
+            attestation = bundle["attestation"]
+            original = root / "task.md"
+            transfer = attestation["transfer_receipt"]
+            transfer["authority"]["source_task"] = str(original)
+            transfer["routing"]["task"] = str(original)
+            transfer["queue_item"]["producer"] = str(original)
+            attestation.update(
+                {
+                    "acceptance": {
+                        "accepted_at_utc": "2026-09-06T00:00:00Z",
+                        "publication_id": "a" * 64,
+                        "receipt_id": "b" * 64,
+                    },
+                    "accepted": True,
+                    "archive_custody": {
+                        "git_provenance": {
+                            "schema": "omo-report-archived-task-git-provenance/v1",
+                        },
+                        "original_task": str(original),
+                        "schema": "omo-report-archived-task-custody/v1",
+                        "task": str(archived),
+                        "task_ref": "202608/task.md",
+                        "task_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                        "todo": str(todo),
+                        "todo_reference_count": 0,
+                        "todo_sha256": hashlib.sha256(todo_text.encode()).hexdigest(),
+                    },
+                    "reason": "manager acknowledged routed report",
+                    "status": "in-progress",
+                }
+            )
+            unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
+            attestation["attestation_id"] = hashlib.sha256(
+                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            bundle["attestation"] = attestation
+            evidence.write_text(json.dumps(bundle, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+            args = replace(
+                args,
+                terminal_evidence=attestation["attestation_id"],
+                manager_consumed_report_receipt_sha256=hashlib.sha256(evidence.read_bytes()).hexdigest(),
+            )
+
+            with patch(
+                "omo_manager.omo_task_status.validate_consumed_closure_export_file",
+                return_value=attestation,
+            ):
+                self.assertTrue(validate_manager_consumed_report(args, archived))
+            validate_done_live_todo(root, archived, todo_text, args.active_target, archived=True)
+            with self.assertRaisesRegex(TaskFrontmatterError, "previous TODO row"):
+                validate_done_live_todo(root, archived, todo_text, args.active_target)
 
     def test_done_live_evidence_collects_guarded_current_close_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -9,6 +9,9 @@ command
 - for a consumed report whose pane output was lost, first run `omo_task_status.py --describe-done-live-no-mail TASK.md`
   - bind `--active-target`, `--manager-target`, the absolute exported `--manager-consumed-report-receipt`, and its SHA-256
   - the helper requires a ready pane, revalidates the export and task/TODO ownership before every pane input, sends one guarded `/status`, and returns current pane id, process id/start ticks, session, report token, and task/TODO digests
+- when the done task was moved into `YYYYMM/` and removed from TODO, first create the export with `omo_report.sh --export-archived-consumed PRIVATE_ENVELOPE --consumed-attestation-output ABSOLUTE_FILE`
+  - validate it with `omo_report.sh --validate-consumed-export FILE --expected-sha256 SHA256`
+  - pass the archived task path, its original manager target, the export, and its digest to the same describe command
 - run `omo_task_status.py --close-done-live-no-mail TASK.md`
   - bind `--active-target` and `--manager-target`
   - bind `--expected-task-sha256` and `--expected-todo-sha256`
@@ -23,7 +26,7 @@ task custody
 - require one non-manager `tool: codex` record at the exact non-human target and manager
 - require an empty ordered queue and no live `(pending)` marker
 - require no active competing owner for the target
-- require one exact unannotated `TASK.md TARGET` row under canonical `previous:`
+- require either one exact unannotated `TASK.md TARGET` row under canonical `previous:`, or an archive export that binds the current done task, its Git-authenticated original path, and exact TODO bytes containing no reference
 - keep the TODO bytes unchanged
 
 pane closure

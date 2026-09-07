@@ -4733,8 +4733,15 @@ def validate_done_live_task(args: Args, text: str, audit: DoneLiveCloseAudit | N
     return metadata
 
 
-def validate_done_live_todo(root: Path, path: Path, text: str, target: str) -> None:
-    """Require one exact canonical previous-row custody record."""
+def validate_done_live_todo(
+    root: Path,
+    path: Path,
+    text: str,
+    target: str,
+    *,
+    archived: bool = False,
+) -> None:
+    """Require exact previous-row custody, or authenticated archival absence."""
 
     section = ""
     previous_headers = 0
@@ -4749,6 +4756,8 @@ def validate_done_live_todo(root: Path, path: Path, text: str, target: str) -> N
         if path in todo_row_task_paths(root, line):
             rows.append((section, line))
     expected = f"{relative_task_ref(root, path)} {target}"
+    if archived and previous_headers == 1 and not rows:
+        return
     if previous_headers != 1 or rows != [("previous", expected)]:
         raise TaskFrontmatterError("done-live close requires one exact canonical previous TODO row.")
 
@@ -5020,26 +5029,73 @@ def validate_consumed_closure_attestation(
     queue_item = transfer.get("queue_item")
     routing = transfer.get("routing")
     manager_path = Path(str(transfer.get("receiver", "")))
+    archive = attestation.get("archive_custody")
+    archived = archive is not None
+    original_task = str(archive.get("original_task", "")) if isinstance(archive, dict) else str(path)
+    accepted = attestation.get("accepted") is True
+    allowed_statuses = {"done", "in-progress"} if archived and accepted else {"done"}
+    expected_reason = (
+        "manager acknowledged routed report"
+        if accepted
+        else "manager watcher consumed report; acceptance receipt unavailable"
+    )
     if (
-        attestation.get("accepted") is not False
+        not isinstance(attestation.get("accepted"), bool)
         or attestation.get("terminal") is not True
-        or attestation.get("status") != "done"
-        or attestation.get("reason") != "manager watcher consumed report; acceptance receipt unavailable"
+        or attestation.get("status") not in allowed_statuses
+        or attestation.get("reason") != expected_reason
         or attestation.get("recovery_residue") != []
         or args.terminal_evidence != attestation.get("attestation_id")
         or not isinstance(authority, dict)
         or not isinstance(queue_item, dict)
         or authority.get("kind") != "agent-originated"
-        or authority.get("source_task") != str(path)
+        or authority.get("source_task") != original_task
         or authority.get("producer_target") != args.active_target
         or not isinstance(routing, dict)
-        or routing.get("task") != str(path)
+        or routing.get("task") != original_task
         or routing.get("producer_target") != args.active_target
         or routing.get("requested_manager_target") != args.manager_target
         or routing.get("resolved_manager_target") != args.manager_target
         or routing.get("manager") != str(manager_path)
     ):
         raise TaskFrontmatterError("manager-consumed report attestation binding is inconsistent.")
+    if accepted:
+        acceptance = attestation.get("acceptance")
+        if (
+            not isinstance(acceptance, dict)
+            or set(acceptance) != {"accepted_at_utc", "publication_id", "receipt_id"}
+            or SHA256_RE.fullmatch(str(acceptance.get("publication_id", ""))) is None
+            or SHA256_RE.fullmatch(str(acceptance.get("receipt_id", ""))) is None
+        ):
+            raise TaskFrontmatterError("manager-consumed report acceptance binding is invalid.")
+    elif "acceptance" in attestation:
+        raise TaskFrontmatterError("manager-consumed report acceptance binding is invalid.")
+    if archived:
+        if not isinstance(archive, dict) or set(archive) != {
+            "git_provenance", "original_task", "schema", "task", "task_ref", "task_sha256", "todo",
+            "todo_reference_count", "todo_sha256"
+        }:
+            raise TaskFrontmatterError("manager-consumed report archive custody is invalid.")
+        git_provenance = archive.get("git_provenance")
+        todo_path = args.root / "TODO.md"
+        try:
+            task_payload = path.read_bytes()
+            todo_payload = todo_path.read_bytes()
+        except OSError as exc:
+            raise TaskFrontmatterError("manager-consumed report archive custody is unavailable.") from exc
+        if (
+            archive.get("schema") != "omo-report-archived-task-custody/v1"
+            or not isinstance(git_provenance, dict)
+            or git_provenance.get("schema") != "omo-report-archived-task-git-provenance/v1"
+            or not Path(original_task).is_absolute()
+            or archive.get("task") != str(path)
+            or archive.get("task_ref") != relative_task_ref(args.root, path)
+            or archive.get("task_sha256") != hashlib.sha256(task_payload).hexdigest()
+            or archive.get("todo") != str(todo_path)
+            or archive.get("todo_reference_count") != 0
+            or archive.get("todo_sha256") != hashlib.sha256(todo_payload).hexdigest()
+        ):
+            raise TaskFrontmatterError("manager-consumed report archive custody changed.")
     try:
         manager_text = owned_regular_text_beneath(args.root, manager_path, "manager route")
     except (OSError, UnicodeDecodeError, ValueError) as exc:
@@ -5215,6 +5271,7 @@ def describe_done_live_no_mail(args: Args, path: Path, text: str, before: os.sta
     )
     if prevalidated_attestation is None or manager_path is None:
         raise TaskFrontmatterError("done-live evidence requires one exported consumed-closure attestation.")
+    archived = prevalidated_attestation.get("archive_custody") is not None
     terminal_evidence = bound_json_id(prevalidated_attestation, "attestation_id")
     with root_membership_lock(args.root), task_target_lock(args.root, args.active_target):
         with ExitStack() as locks:
@@ -5267,7 +5324,13 @@ def describe_done_live_no_mail(args: Args, path: Path, text: str, before: os.sta
                 ):
                     raise TaskFrontmatterError("done-live evidence changed during guarded collection; retry.")
                 validate_done_live_task(bound_args, current_text, None)
-                validate_done_live_todo(args.root, path, todo_text, args.active_target)
+                validate_done_live_todo(
+                    args.root,
+                    path,
+                    todo_text,
+                    args.active_target,
+                    archived=archived,
+                )
                 validate_done_live_ownership(args.root, path, args.active_target)
                 _ = validate_manager_consumed_report(bound_args, path, prevalidated_attestation)
 
@@ -5357,6 +5420,10 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
     proof_path = audit_path.with_name(f".{audit_path.name}.owner-stopped")
     started_path = done_live_close_started_path(audit_path)
     prevalidated_attestation, manager_path = prevalidate_manager_consumed_export(args, path)
+    archived = (
+        prevalidated_attestation is not None
+        and prevalidated_attestation.get("archive_custody") is not None
+    )
     locked_paths = {path, todo}
     if manager_path is not None:
         locked_paths.add(manager_path)
@@ -5376,7 +5443,13 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
             audit_text = read_private_audit(audit_path)
             audit = parse_done_live_close_audit(args, path, audit_text) if audit_text is not None else None
             validate_done_live_task(args, current_text, audit)
-            validate_done_live_todo(args.root, path, todo_text, args.active_target)
+            validate_done_live_todo(
+                args.root,
+                path,
+                todo_text,
+                args.active_target,
+                archived=archived,
+            )
             validate_done_live_ownership(args.root, path, args.active_target)
             if audit is None:
                 if path_artifact_exists(proof_path) or path_artifact_exists(started_path):
@@ -5424,7 +5497,13 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                 ):
                     raise TaskFrontmatterError("done-live close task, TODO, or audit evidence drifted.")
                 validate_done_live_task(args, current_text, close_audit)
-                validate_done_live_todo(args.root, path, todo_text, args.active_target)
+                validate_done_live_todo(
+                    args.root,
+                    path,
+                    todo_text,
+                    args.active_target,
+                    archived=archived,
+                )
                 validate_done_live_ownership(args.root, path, args.active_target)
                 if manager_consumed:
                     _ = validate_manager_consumed_report(args, path, prevalidated_attestation)

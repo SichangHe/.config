@@ -201,6 +201,8 @@ validate_consumed_export=""
 validate_consumed_export_sha256=""
 validate_consumed_export_requested=0
 validate_consumed_export_sha256_requested=0
+export_archived_consumed=""
+export_archived_consumed_requested=0
 agent="${OMO_AGENT_NAME:-agent}"
 agent_explicit=0
 usage() {
@@ -208,6 +210,7 @@ usage() {
     "Usage: omo_report.sh --status STATUS --message-file FILE [--agent NAME] [--recover-moved REPLAY_ID]" \
     "       omo_report.sh --describe --status STATUS --message-file FILE [--agent NAME]" \
     "       omo_report.sh --verify-consumed [--consumed-attestation-output FILE] --status STATUS --message-file FILE [--agent NAME]" \
+    "       omo_report.sh --export-archived-consumed REPORT --consumed-attestation-output FILE" \
     "       omo_report.sh --validate-consumed-export FILE --expected-sha256 SHA256" \
     "       omo_report.sh --alloc-message-file" \
     "" \
@@ -217,7 +220,7 @@ usage() {
 }
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --status|--message-file|--agent|--recover-moved|--consumed-attestation-output|--validate-consumed-export|--expected-sha256)
+    --status|--message-file|--agent|--recover-moved|--consumed-attestation-output|--validate-consumed-export|--expected-sha256|--export-archived-consumed)
       if [ "$#" -lt 2 ]; then echo "missing value for $1" >&2; usage >&2; exit 2; fi
       option="$1"
       value="$2"
@@ -229,6 +232,7 @@ while [ "$#" -gt 0 ]; do
         --consumed-attestation-output) consumed_attestation_output="$value" ;;
         --validate-consumed-export) validate_consumed_export="$value"; validate_consumed_export_requested=$((validate_consumed_export_requested + 1)) ;;
         --expected-sha256) validate_consumed_export_sha256="$value"; validate_consumed_export_sha256_requested=$((validate_consumed_export_sha256_requested + 1)) ;;
+        --export-archived-consumed) export_archived_consumed="$value"; export_archived_consumed_requested=$((export_archived_consumed_requested + 1)) ;;
       esac
       shift 2
       ;;
@@ -244,9 +248,9 @@ if [ "$alloc_message_file" -eq 1 ] && [ -n "$recover_moved" ]; then echo "--allo
 if [ "$alloc_message_file" -eq 1 ] && [ "$describe" -eq 1 ]; then echo "--alloc-message-file cannot be combined with --describe" >&2; exit 2; fi
 if [ "$alloc_message_file" -eq 1 ] && [ "$verify_consumed" -eq 1 ]; then echo "--alloc-message-file cannot be combined with --verify-consumed" >&2; exit 2; fi
 if [ "$describe" -eq 1 ] && [ "$verify_consumed" -eq 1 ]; then echo "--describe cannot be combined with --verify-consumed" >&2; exit 2; fi
-if [ -n "$consumed_attestation_output" ] && [ "$verify_consumed" -ne 1 ]; then echo "--consumed-attestation-output requires --verify-consumed" >&2; exit 2; fi
+if [ -n "$consumed_attestation_output" ] && [ "$verify_consumed" -ne 1 ] && [ -z "$export_archived_consumed" ]; then echo "--consumed-attestation-output requires --verify-consumed or --export-archived-consumed" >&2; exit 2; fi
 if [ "$validate_consumed_export_requested" -ne 0 ] || [ "$validate_consumed_export_sha256_requested" -ne 0 ]; then
-  if [ "$validate_consumed_export_requested" -ne 1 ] || [ "$validate_consumed_export_sha256_requested" -ne 1 ] || [ -z "$validate_consumed_export" ] || [ -z "$validate_consumed_export_sha256" ] || [ -n "$status$message_file$recover_moved$consumed_attestation_output" ] || [ "$alloc_message_file" -ne 0 ] || [ "$describe" -ne 0 ] || [ "$verify_consumed" -ne 0 ] || [ "$agent_explicit" -ne 0 ]; then
+  if [ "$validate_consumed_export_requested" -ne 1 ] || [ "$validate_consumed_export_sha256_requested" -ne 1 ] || [ -z "$validate_consumed_export" ] || [ -z "$validate_consumed_export_sha256" ] || [ -n "$status$message_file$recover_moved$consumed_attestation_output$export_archived_consumed" ] || [ "$alloc_message_file" -ne 0 ] || [ "$describe" -ne 0 ] || [ "$verify_consumed" -ne 0 ] || [ "$agent_explicit" -ne 0 ]; then
     echo "--validate-consumed-export requires only an absolute FILE and --expected-sha256" >&2
     exit 2
   fi
@@ -256,6 +260,75 @@ if [ "$validate_consumed_export_requested" -ne 0 ] || [ "$validate_consumed_expo
   task_lock_path="$(dirname "$helper_path")/omo_task_lock.py"
   exec env OMO_REPORT_RECEIVER_BOOTSTRAP=1 PYTHONDONTWRITEBYTECODE=1 python3 -I -S - "$receiver_path" "$pending_digest_path" "$task_lock_path" "$helper_path" \
     --validate-consumed-export "$validate_consumed_export" "$validate_consumed_export_sha256" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import os
+import stat
+import sys
+import types
+from pathlib import Path
+
+MAX_SOURCE_BYTES = 4 * 1024 * 1024
+
+def source_bytes(raw_path: str) -> tuple[Path, bytes]:
+    path = Path(raw_path).resolve(strict=True)
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_size > MAX_SOURCE_BYTES:
+            raise RuntimeError(f"helper source is not a safe owned regular file: {path}")
+        payload = b""
+        while len(payload) <= MAX_SOURCE_BYTES:
+            chunk = os.read(fd, min(1024 * 1024, MAX_SOURCE_BYTES + 1 - len(payload)))
+            if not chunk:
+                break
+            payload += chunk
+        after = os.fstat(fd)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) or len(payload) != before.st_size or len(payload) > MAX_SOURCE_BYTES:
+            raise RuntimeError(f"helper source changed while creating its execution snapshot: {path}")
+    finally:
+        os.close(fd)
+    return path, payload
+
+def load_module(name: str, path: Path, payload: bytes) -> types.ModuleType:
+    module = types.ModuleType(name)
+    module.__file__ = str(path)
+    module.__package__ = "omo_manager"
+    module.__executed_source_sha256__ = hashlib.sha256(payload).hexdigest()
+    sys.modules[name] = module
+    exec(compile(payload, str(path), "exec"), module.__dict__)
+    return module
+
+receiver_path, receiver_payload = source_bytes(sys.argv[1])
+pending_path, pending_payload = source_bytes(sys.argv[2])
+lock_path, lock_payload = source_bytes(sys.argv[3])
+helper_path = Path(sys.argv[4]).resolve(strict=True)
+receiver_arguments = sys.argv[5:]
+package = types.ModuleType("omo_manager")
+package.__package__ = "omo_manager"
+package.__path__ = []
+sys.modules["omo_manager"] = package
+load_module("omo_manager.omo_pending_digest", pending_path, pending_payload)
+load_module("omo_manager.omo_task_lock", lock_path, lock_payload)
+receiver = load_module("omo_manager.omo_report_receipt", receiver_path, receiver_payload)
+receiver.__executed_helper_path__ = str(helper_path)
+receiver.__executed_helper_sha256__ = os.environ.get("OMO_REPORT_HELPER_SHA256", "")
+sys.argv = [str(receiver_path), *receiver_arguments]
+raise SystemExit(receiver.main())
+PY
+fi
+if [ "$export_archived_consumed_requested" -ne 0 ]; then
+  if [ "$export_archived_consumed_requested" -ne 1 ] || [ -z "$export_archived_consumed" ] || [ -z "$consumed_attestation_output" ] || [ -n "$status$message_file$recover_moved$validate_consumed_export$validate_consumed_export_sha256" ] || [ "$alloc_message_file" -ne 0 ] || [ "$describe" -ne 0 ] || [ "$verify_consumed" -ne 0 ] || [ "$agent_explicit" -ne 0 ]; then
+    echo "--export-archived-consumed requires only REPORT and --consumed-attestation-output FILE" >&2
+    exit 2
+  fi
+  helper_path="${OMO_REPORT_HELPER_PATH:?}"
+  receiver_path="$(dirname "$helper_path")/omo_report_receipt.py"
+  pending_digest_path="$(dirname "$helper_path")/omo_pending_digest.py"
+  task_lock_path="$(dirname "$helper_path")/omo_task_lock.py"
+  exec env OMO_REPORT_RECEIVER_BOOTSTRAP=1 PYTHONDONTWRITEBYTECODE=1 python3 -I -S - "$receiver_path" "$pending_digest_path" "$task_lock_path" "$helper_path" \
+    --export-archived-consumed "$export_archived_consumed" "$consumed_attestation_output" <<'PY'
 from __future__ import annotations
 
 import hashlib

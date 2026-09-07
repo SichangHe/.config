@@ -101,6 +101,7 @@ class Arguments:
     helper: Path
     root: Path
     task: Path
+    archived_task: Path | None
     manager: Path
     requested_manager_target: str
     resolved_manager_target: str
@@ -129,6 +130,7 @@ class Plan:
     mode: str
     root: Path
     task: Path
+    archived_task: Path | None
     manager: Path
     helper_path: Path
     receiver_path: Path
@@ -235,6 +237,8 @@ def manager_preserves_owner_prefix(manager: Path, payload: bytes, binding: Owner
 
 
 def exact_done_previous_custody(plan: Plan) -> bool:
+    if plan.archived_task is not None:
+        return False
     task_snapshot = frontmatter_snapshot(regular_file_bytes(plan.task, maximum=MAX_ROUTE_FILE_BYTES, field="task"))
     if task_snapshot is None or task_snapshot[0].get("status") != "done":
         return False
@@ -793,6 +797,7 @@ def parse_args(argv: list[str] | None = None) -> Arguments:
     _ = parser.add_argument("--helper", required=True, type=Path)
     _ = parser.add_argument("--root", required=True, type=Path)
     _ = parser.add_argument("--task", required=True, type=Path)
+    _ = parser.add_argument("--archived-task", type=Path)
     _ = parser.add_argument("--manager", required=True, type=Path)
     _ = parser.add_argument("--requested-manager-target", required=True)
     _ = parser.add_argument("--resolved-manager-target", required=True)
@@ -820,6 +825,7 @@ def parse_args(argv: list[str] | None = None) -> Arguments:
         parsed.helper,
         parsed.root,
         parsed.task,
+        parsed.archived_task,
         parsed.manager,
         parsed.requested_manager_target,
         parsed.resolved_manager_target,
@@ -1423,7 +1429,7 @@ def bind_owner_prefix(
     return binding
 
 
-def build_plan(args: Arguments) -> Plan:
+def build_plan(args: Arguments, *, allow_archived_done: bool = False) -> Plan:
     raw_message_path = args.message_file.expanduser()
     if not raw_message_path.is_absolute():
         raw_message_path = Path.cwd() / raw_message_path
@@ -1440,6 +1446,7 @@ def build_plan(args: Arguments) -> Plan:
             message_identity=message_identity,
             message_fd=message_fd,
             message=message,
+            allow_archived_done=allow_archived_done,
         )
     except BaseException:
         os.close(message_fd)
@@ -1453,19 +1460,25 @@ def _build_plan_from_message(
     message_identity: tuple[int, int],
     message_fd: int,
     message: bytes,
+    allow_archived_done: bool = False,
 ) -> Plan:
     root = absolute_path(args.root)
     task = absolute_path(args.task)
+    archived_task = absolute_path(args.archived_task) if args.archived_task is not None else None
     manager = absolute_path(args.manager)
     helper_path = absolute_path(args.helper)
     receiver_path = absolute_path(Path(__file__))
     _ = validate_directory(root, private=False, field="root")
-    for candidate, field in ((task, "task"), (helper_path, "helper"), (receiver_path, "receiver")):
+    required_files = [(helper_path, "helper"), (receiver_path, "receiver")]
+    required_files.append((archived_task or task, "task"))
+    for candidate, field in required_files:
         if not validate_optional_regular(candidate, field):
             raise ReceiptError(f"{field} does not exist")
     try:
         task.relative_to(root)
         manager.relative_to(root)
+        if archived_task is not None:
+            archived_task.relative_to(root)
     except ValueError as exc:
         raise ReceiptError("task and manager must be inside root") from exc
     _ = validate_directory(manager.parent, private=False, field="manager parent")
@@ -1613,6 +1626,7 @@ def _build_plan_from_message(
         mode=args.mode,
         root=root,
         task=task,
+        archived_task=archived_task,
         manager=manager,
         helper_path=helper_path,
         receiver_path=receiver_path,
@@ -1661,9 +1675,16 @@ def _build_plan_from_message(
         receipt_publication_temporary=receipt_publication_temporary,
         receipt_publication_final=receipt_publication_final,
     )
-    plan = orphan_transfer_plan(plan)
-    task_snapshot = frontmatter_snapshot(regular_file_bytes(task, maximum=MAX_ROUTE_FILE_BYTES, field="task"))
-    if task_snapshot is not None and task_snapshot[0].get("status") == "done" and not plan.authenticated_recovery:
+    if archived_task is None:
+        plan = orphan_transfer_plan(plan)
+    current_task = archived_task or task
+    task_snapshot = frontmatter_snapshot(regular_file_bytes(current_task, maximum=MAX_ROUTE_FILE_BYTES, field="task"))
+    if (
+        task_snapshot is not None
+        and task_snapshot[0].get("status") == "done"
+        and not plan.authenticated_recovery
+        and not allow_archived_done
+    ):
         raise ReceiptError("done task routing requires an authenticated committed report allocation")
     transfer_size_probe = {**transfer_contract(plan), "commitment_id": "0" * 64, "transfer_id": "0" * 64}
     sample_envelope = envelope_bytes(
@@ -3389,9 +3410,10 @@ def validate_transaction_commitment_bytes(
         )
     ):
         raise ReceiptError("transaction commitment allocation replay lock is inconsistent")
-    if require_current_allocation_identity:
-        if not plan.receipt_final.exists():
-            validate_current_allocation_identity(plan, parsed)
+    if require_current_allocation_identity and (
+        not plan.receipt_final.exists() or plan.archived_task is not None
+    ):
+        validate_current_allocation_identity(plan, parsed)
     commitment = parsed.get("commitment")
     if (
         not isinstance(commitment, dict)
@@ -3771,6 +3793,51 @@ def plan_for_historical_commitment(
 ) -> Plan:
     if plan.transaction_commitment_final.exists():
         return plan
+    if plan.archived_task is not None and plan.recovery_replay_id:
+        replay_id = plan.recovery_replay_id
+        candidate = plan.receipt_directory / f"{replay_id}.commitment"
+        payload = regular_file_bytes(candidate, maximum=MAX_RECEIPT_BYTES, field="historical transaction commitment")
+        parsed = recovery_commitment_record(candidate, replay_id, payload)
+        preflight = parsed.get("preflight")
+        records = preflight.get("records") if isinstance(preflight, dict) else None
+        routing_sources = preflight.get("routing_sources") if isinstance(preflight, dict) else None
+        if (
+            not isinstance(records, dict)
+            or records.get("manager") != str(plan.manager)
+            or records.get("producer") != str(plan.task)
+            or records.get("private_envelope") != str(plan.envelope_final)
+            or not isinstance(routing_sources, list)
+            or not all(isinstance(item, dict) for item in routing_sources)
+        ):
+            raise ReceiptError("archived historical commitment route is inconsistent")
+        validated_routing_sources = validate_committed_route_evidence(
+            plan,
+            routing_sources,
+            require_current=False,
+        )
+        route_locks = tuple(
+            sorted(
+                (
+                    (Path(str(item["path"])), task_file_lock_path(Path(str(item["path"]))))
+                    for item in validated_routing_sources
+                ),
+                key=lambda pair: str(pair[0]),
+            )
+        )
+        return replace(
+            plan,
+            route_evidence=validated_routing_sources,
+            route_locks=route_locks,
+            replay_id=replay_id,
+            manager_temporary=plan.manager.parent / f".{plan.manager.name}.omo-report-{replay_id}.tmp",
+            envelope_temporary=plan.envelope_directory / f".{plan.envelope_final.name}.{replay_id}.tmp",
+            transaction_commitment_temporary=plan.receipt_directory / f".{replay_id}.commitment.tmp",
+            transaction_commitment_final=candidate,
+            receipt_temporary=plan.receipt_directory / f".{replay_id}.tmp",
+            receipt_final=plan.receipt_directory / f"{replay_id}.json",
+            receipt_publication_temporary=plan.receipt_directory / f".{replay_id}.publication.tmp",
+            receipt_publication_final=plan.receipt_directory / f"{replay_id}.publication.json",
+        )
     matches: list[tuple[str, tuple[dict[str, object], ...]]] = []
     for candidate in sorted(plan.receipt_directory.glob("*.commitment")):
         if not validate_optional_regular(candidate, "historical transaction commitment", exact_mode=0o600):
@@ -3877,11 +3944,136 @@ def plan_for_historical_commitment(
     )
 
 
-def consumed_closure_attestation(plan: Plan) -> dict[str, object]:
+def archived_task_custody(plan: Plan) -> dict[str, object]:
+    """Bind an archived done task and the exact TODO bytes that omit it."""
+
+    if plan.archived_task is None:
+        raise ReceiptError("archived consumed export has no archived task path")
+    task = plan.archived_task
+    inferred_task, git_provenance = infer_archived_task_path(
+        plan.root,
+        plan.task,
+        plan.route_evidence,
+        plan.replay_id,
+        str(plan.routing["requested_manager_target"]),
+    )
+    if inferred_task != task:
+        raise ReceiptError("archived consumed export task provenance changed")
+    task_payload = regular_file_bytes(task, maximum=MAX_ROUTE_FILE_BYTES, field="task")
+    snapshot = frontmatter_snapshot(task_payload)
+    todo_path = plan.root / "TODO.md"
+    todo_payload = regular_file_bytes(todo_path, maximum=MAX_ROUTE_FILE_BYTES, field="TODO")
+    task_ref = task.relative_to(plan.root).as_posix()
+    references = 0
+    for line in todo_payload.decode("utf-8").splitlines():
+        for match in re.findall(r"`?([A-Za-z0-9_./-]+\.md)`?", line):
+            if (plan.root / match).resolve(strict=False) == task:
+                references += 1
+    metadata = snapshot[0] if snapshot is not None else {}
+    if (
+        metadata.get("status") != "done"
+        or canonical_target(metadata.get("runat", ""), required=True, field="task run target")
+        != plan.routing["producer_target"]
+        or canonical_target(metadata.get("managerat", ""), required=True, field="task manager target")
+        != plan.routing["requested_manager_target"]
+        or references != 0
+    ):
+        raise ReceiptError("archived consumed export requires one done task absent from TODO")
+    return {
+        "schema": "omo-report-archived-task-custody/v1",
+        "original_task": str(plan.task),
+        "task": str(task),
+        "task_ref": task_ref,
+        "task_sha256": hashlib.sha256(task_payload).hexdigest(),
+        "git_provenance": git_provenance,
+        "todo": str(todo_path),
+        "todo_reference_count": references,
+        "todo_sha256": hashlib.sha256(todo_payload).hexdigest(),
+    }
+
+
+def validate_historical_acceptance_pair(plan: Plan, commitment: dict[str, object]) -> dict[str, object] | None:
+    """Validate immutable acceptance artifacts without requiring their old helper source."""
+
+    receipt_exists = validate_optional_regular(plan.receipt_final, "durable receipt", exact_mode=0o600)
+    publication_exists = validate_optional_regular(
+        plan.receipt_publication_final,
+        "receipt publication record",
+        exact_mode=0o600,
+    )
+    if receipt_exists != publication_exists:
+        raise ReceiptError("consumed report has incomplete durable acceptance evidence")
+    if not receipt_exists:
+        return None
+    receipt_payload = regular_file_bytes(plan.receipt_final, maximum=MAX_RECEIPT_BYTES, field="durable receipt")
+    publication_payload = regular_file_bytes(
+        plan.receipt_publication_final,
+        maximum=MAX_RECEIPT_BYTES,
+        field="receipt publication record",
+    )
+    try:
+        receipt = json.loads(receipt_payload)
+        publication = json.loads(publication_payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReceiptError("durable acceptance evidence is not valid JSON") from exc
+    receipt_unsigned = dict(receipt) if isinstance(receipt, dict) else {}
+    receipt_id = receipt_unsigned.pop("receipt_id", None)
+    publication_unsigned = dict(publication) if isinstance(publication, dict) else {}
+    publication_id = publication_unsigned.pop("publication_id", None)
+    transfer = commitment.get("transfer")
+    routing = receipt.get("routing") if isinstance(receipt, dict) else None
+    receipt_record_value = receipt.get("receipt_record") if isinstance(receipt, dict) else None
+    side_effects = receipt.get("side_effects") if isinstance(receipt, dict) else None
+    private_allocation = side_effects.get("private_allocation") if isinstance(side_effects, dict) else None
+    commitment_effect = private_allocation.get("transaction_commitment") if isinstance(private_allocation, dict) else None
+    expected_receipt_keys = {
+        "accepted", "accepted_at_utc", "helper", "input", "preflight", "receipt_id",
+        "receipt_record", "replay_id", "report_context", "routing", "schema", "side_effects", "status",
+    }
+    expected_publication_keys = {
+        "publication_id", "receipt_id", "receipt_path", "receipt_state", "replay_id", "schema",
+    }
+    if (
+        not isinstance(receipt, dict)
+        or canonical_json(receipt) != receipt_payload
+        or set(receipt) != expected_receipt_keys
+        or receipt.get("schema") != RECEIPT_SCHEMA
+        or receipt.get("accepted") is not True
+        or receipt.get("replay_id") != plan.replay_id
+        or receipt.get("status") != plan.status
+        or receipt.get("input") != plan.input_info
+        or receipt.get("preflight") != commitment.get("preflight")
+        or not isinstance(receipt_id, str)
+        or receipt_id != bound_receipt_id(receipt_unsigned)
+        or not isinstance(transfer, dict)
+        or not isinstance(routing, dict)
+        or any(routing.get(key) != value for key, value in public_routing(plan).items())
+        or receipt_record_value != receipt_record(plan)
+        or not isinstance(commitment_effect, dict)
+        or commitment_effect.get("commitment_id") != commitment.get("commitment_id")
+        or commitment_effect.get("final") != str(plan.transaction_commitment_final)
+        or not isinstance(publication, dict)
+        or canonical_json(publication) != publication_payload
+        or set(publication) != expected_publication_keys
+        or publication.get("schema") != RECEIPT_PUBLICATION_SCHEMA
+        or publication.get("replay_id") != plan.replay_id
+        or publication.get("receipt_id") != receipt_id
+        or publication.get("receipt_path") != str(plan.receipt_final)
+        or publication.get("receipt_state") != path_state(plan.receipt_final)
+        or not isinstance(publication_id, str)
+        or publication_id != bound_receipt_id(publication_unsigned)
+    ):
+        raise ReceiptError("durable acceptance evidence is inconsistent")
+    return {
+        "accepted_at_utc": receipt.get("accepted_at_utc"),
+        "publication_id": publication_id,
+        "receipt_id": receipt_id,
+    }
+
+
+def consumed_closure_attestation(plan: Plan, *, archived: bool = False) -> dict[str, object]:
     plan = plan_for_historical_commitment(plan, allow_historical_route_inventory=True)
     validate_private_layout(plan, allow_consumed_residue=True)
-    require_absent(plan.receipt_final, "durable receipt")
-    require_absent(plan.receipt_publication_final, "receipt publication record")
     _ = require_valid_envelope(plan)
     commitment = read_transaction_commitment(
         plan,
@@ -3895,6 +4087,12 @@ def consumed_closure_attestation(plan: Plan) -> dict[str, object]:
         raise ReceiptError("consumed report has no exact watcher transition")
     if plan.pointer.encode() in manager_bytes(plan.manager):
         raise ReceiptError("consumed report pointer is still active")
+    if archived:
+        acceptance = validate_historical_acceptance_pair(plan, commitment)
+    else:
+        require_absent(plan.receipt_final, "durable receipt")
+        require_absent(plan.receipt_publication_final, "receipt publication record")
+        acceptance = None
     recovery_residue = [
         {
             "path": str(path),
@@ -3904,11 +4102,15 @@ def consumed_closure_attestation(plan: Plan) -> dict[str, object]:
         if path.exists()
     ]
     record: dict[str, object] = {
-        "accepted": False,
+        "accepted": acceptance is not None,
         "consumption_evidence": acknowledgment,
         "consumed_at_unix_s": acknowledgment["recorded_at_unix_s"],
         "input": plan.input_info,
-        "reason": "manager watcher consumed report; acceptance receipt unavailable",
+        "reason": (
+            "manager acknowledged routed report"
+            if acceptance is not None
+            else "manager watcher consumed report; acceptance receipt unavailable"
+        ),
         "recovery_residue": recovery_residue,
         "replay_id": plan.replay_id,
         "schema": "omo-report-consumed-closure/v1",
@@ -3916,10 +4118,19 @@ def consumed_closure_attestation(plan: Plan) -> dict[str, object]:
         "terminal": True,
         "transfer_receipt": transfer_receipt(plan, str(commitment["commitment_id"])),
     }
+    if acceptance is not None:
+        record["acceptance"] = acceptance
+    if archived:
+        record["archive_custody"] = archived_task_custody(plan)
     return {**record, "attestation_id": bound_receipt_id(record)}
 
 
-def consumed_closure_export(plan: Plan, attestation: dict[str, object]) -> dict[str, object]:
+def consumed_closure_export(
+    plan: Plan,
+    attestation: dict[str, object],
+    *,
+    archived: bool = False,
+) -> dict[str, object]:
     """Bind a consumed attestation to the inputs needed for strict revalidation."""
 
     tmux = plan.routing["tmux"]
@@ -3950,6 +4161,10 @@ def consumed_closure_export(plan: Plan, attestation: dict[str, object]) -> dict[
         "tmux_window_index": tmux.get("window_index", ""),
         "tmux_window_name": tmux.get("window_name", ""),
     }
+    if archived:
+        verification["archived_task"] = True
+        verification["archived_task_path"] = str(plan.archived_task)
+        verification["recovery_replay_id"] = plan.replay_id
     record: dict[str, object] = {
         "attestation": attestation,
         "schema": "omo-report-consumed-export/v1",
@@ -3980,6 +4195,9 @@ def validate_consumed_closure_export(payload: bytes) -> dict[str, object]:
         "state_home", "task", "task_route_evidence", "tmux_pane_id", "tmux_pane_index", "tmux_session",
         "tmux_window_index", "tmux_window_name",
     }
+    archived = verification.get("archived_task") is True if isinstance(verification, dict) else False
+    if archived:
+        expected_context.update({"archived_task", "archived_task_path", "recovery_replay_id"})
     if (
         loaded.get("schema") != "omo-report-consumed-export/v1"
         or export_id != bound_receipt_id(unsigned)
@@ -4001,13 +4219,16 @@ def validate_consumed_closure_export(payload: bytes) -> dict[str, object]:
         "tmux_pane_index", "tmux_pane_id", "tmux_window_name",
     ):
         argv.extend((f"--{key.replace('_', '-')}", str(verification[key])))
+    if archived:
+        argv.extend(("--archived-task", str(verification["archived_task_path"])))
+        argv.extend(("--recover-moved", str(verification["recovery_replay_id"])))
     state_home = Path(str(verification["state_home"]))
     if not state_home.is_absolute():
         raise ReceiptError("consumed attestation export state home is invalid")
     previous_state_home = os.environ.get("XDG_STATE_HOME")
     os.environ["XDG_STATE_HOME"] = str(state_home)
     try:
-        verified = run(argv)
+        verified = run(argv, allow_archived_done=archived)
     finally:
         if previous_state_home is None:
             del os.environ["XDG_STATE_HOME"]
@@ -4721,20 +4942,22 @@ def pending_output(plan: Plan) -> dict[str, object]:
     }
 
 
-def run(argv: list[str] | None = None) -> bytes:
+def run(argv: list[str] | None = None, *, allow_archived_done: bool = False) -> bytes:
     args = parse_args(argv)
     for attempt in range(32):
-        plan = build_plan(args)
+        plan = build_plan(args, allow_archived_done=allow_archived_done)
         try:
             if plan.mode == "describe":
                 return canonical_json(description(plan))
             if plan.mode == "verify-consumed":
-                attestation = consumed_closure_attestation(plan)
+                attestation = consumed_closure_attestation(plan, archived=allow_archived_done)
                 output = canonical_json(attestation)
                 if plan.consumed_attestation_output is not None:
                     persist_consumed_closure_attestation(
                         plan.consumed_attestation_output,
-                        canonical_json(consumed_closure_export(plan, attestation)),
+                        canonical_json(
+                            consumed_closure_export(plan, attestation, archived=allow_archived_done)
+                        ),
                     )
                 return output
             try:
@@ -4780,12 +5003,376 @@ def run(argv: list[str] | None = None) -> bytes:
     raise AssertionError("owner-prefix rebind loop exhausted")
 
 
+def infer_archived_task_path(
+    root: Path,
+    original_task: Path,
+    route_evidence: tuple[dict[str, object], ...] | list[dict[str, object]],
+    replay_id: str,
+    manager_target: str,
+) -> tuple[Path, dict[str, object]]:
+    """Authenticate one archived task through immutable report and Git custody."""
+
+    try:
+        original_ref = original_task.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise ReceiptError("committed task path escapes the archived work-log root") from exc
+    source_records = [item for item in route_evidence if item.get("path") == str(original_task)]
+    if len(source_records) != 1 or source_records[0].get("exists") is not True:
+        raise ReceiptError("archived task commitment source is missing or ambiguous")
+    source_record = source_records[0]
+    todo_records = [item for item in route_evidence if Path(str(item.get("path", ""))).name == "TODO.md"]
+    source_sha256 = source_record.get("sha256")
+    source_size = source_record.get("size_bytes")
+    if (
+        HASH_RE.fullmatch(str(source_sha256)) is None
+        or not isinstance(source_size, int)
+        or len(todo_records) != 1
+        or HASH_RE.fullmatch(str(todo_records[0].get("sha256", ""))) is None
+    ):
+        raise ReceiptError("archived task commitment source is invalid")
+    git_object_re = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+    def git(*arguments: str, text: bool = False) -> bytes | str:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(root), *arguments],
+                capture_output=True,
+                timeout=30,
+                check=True,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ReceiptError("archived task Git provenance is unavailable") from exc
+        if text:
+            try:
+                return result.stdout.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ReceiptError("archived task Git provenance is invalid") from exc
+        return result.stdout
+
+    repository = str(git("rev-parse", "--show-toplevel", text=True)).strip()
+    if Path(repository).resolve(strict=True) != root.resolve(strict=True):
+        raise ReceiptError("archived task root is not the exact Git worktree")
+    candidates: list[Path] = []
+    for month in root.iterdir():
+        if re.fullmatch(r"20[0-9]{4}", month.name) is None:
+            continue
+        try:
+            month_info = month.lstat()
+        except OSError as exc:
+            raise ReceiptError("archived task month is unavailable") from exc
+        if not stat.S_ISDIR(month_info.st_mode) or month_info.st_uid != os.getuid() or month.resolve(strict=True) != month:
+            raise ReceiptError("archived task month is not an owned real directory")
+        candidate = month / original_task.name
+        if validate_optional_regular(candidate, "archived task"):
+            candidates.append(candidate)
+
+    matches: list[tuple[Path, str, str]] = []
+    for candidate in sorted(candidates):
+        candidate_ref = candidate.relative_to(root).as_posix()
+        history = str(
+            git(
+                "log", "--follow", "--format=commit:%H", "--name-status",
+                "--find-renames", "HEAD", "--", candidate_ref, text=True,
+            )
+        ).splitlines()
+        current_commit = ""
+        for line in history:
+            if line.startswith("commit:") and git_object_re.fullmatch(line[7:]) is not None:
+                current_commit = line[7:]
+                continue
+            fields = line.split("\t")
+            if (
+                current_commit
+                and len(fields) == 3
+                and re.fullmatch(r"R[0-9]{3}", fields[0])
+                and fields[1] == original_ref
+                and fields[2] == candidate_ref
+            ):
+                matches.append((candidate, current_commit, fields[0][1:]))
+    if len(matches) != 1:
+        raise ReceiptError("archived task Git rename provenance is missing or ambiguous")
+    candidate, rename_commit, similarity = matches[0]
+    candidate_ref = candidate.relative_to(root).as_posix()
+    parents = str(git("rev-list", "--parents", "-n", "1", rename_commit, text=True)).split()
+    if len(parents) != 2 or parents[0] != rename_commit:
+        raise ReceiptError("archived task Git rename parent is ambiguous")
+    rename_parent = parents[1]
+    source_blob = str(git("rev-parse", f"{rename_parent}:{original_ref}", text=True)).strip()
+    destination_blob = str(git("rev-parse", f"{rename_commit}:{candidate_ref}", text=True)).strip()
+    head_blob = str(git("rev-parse", f"HEAD:{candidate_ref}", text=True)).strip()
+    if not all(git_object_re.fullmatch(value) for value in (source_blob, destination_blob, head_blob)):
+        raise ReceiptError("archived task Git blob identity is invalid")
+    current_payload = regular_file_bytes(candidate, maximum=MAX_ROUTE_FILE_BYTES, field="archived task")
+    head_payload = bytes(git("cat-file", "blob", head_blob))
+    if destination_blob != head_blob or current_payload != head_payload:
+        raise ReceiptError("archived task differs from its authenticated Git rename destination")
+
+    committed_blobs: set[str] = set()
+    raw_history = str(
+        git("log", "--format=", "--raw", "--no-abbrev", rename_parent, "--", original_ref, text=True)
+    ).splitlines()
+    zero_object = "0" * len(head_blob)
+    history_blobs = {
+        blob
+        for line in raw_history
+        if line.startswith(":")
+        for blob in line.split("\t", 1)[0].split()[2:4]
+        if git_object_re.fullmatch(blob) is not None and blob != zero_object
+    }
+    for blob in history_blobs:
+        payload = bytes(git("cat-file", "blob", blob))
+        if len(payload) == source_size and hashlib.sha256(payload).hexdigest() == source_sha256:
+            committed_blobs.add(blob)
+    if committed_blobs:
+        commitment_binding: dict[str, object] = {
+            "kind": "historical-git-blob",
+            "blob": sorted(committed_blobs)[0],
+        }
+    else:
+        record_pattern = re.compile(
+            rf"\(verified removed pending item: [^\r\n]*operation-scoped hashes: "
+            rf"{re.escape(original_task.name)} (?P<task_sha>[0-9a-f]{{64}}) and TODO\.md "
+            rf"(?P<todo_sha>[0-9a-f]{{64}}); report replay (?P<replay>[0-9a-f]{{64}}) "
+            rf"was consumed by (?P<manager>[A-Za-z0-9_.%-]+:[0-9]+(?:\.[0-9]+)?) manager watcher\.\)"
+        )
+        try:
+            archive_lines = current_payload.decode("utf-8").splitlines()
+        except UnicodeDecodeError as exc:
+            raise ReceiptError("archived task record is not UTF-8") from exc
+        records = [match for line in archive_lines if (match := record_pattern.fullmatch(line)) is not None]
+        matching_records = [
+            match
+            for match in records
+            if match.group("task_sha") == source_sha256
+            and match.group("todo_sha") == todo_records[0]["sha256"]
+            and match.group("replay") == replay_id
+            and match.group("manager") == manager_target
+        ]
+        if len(records) != 1 or len(matching_records) != 1:
+            raise ReceiptError("archived task Git history does not authenticate its committed report source")
+        record = matching_records[0].group(0)
+        commitment_binding = {
+            "kind": "archived-task-record",
+            "blob": head_blob,
+            "record_sha256": hashlib.sha256(record.encode()).hexdigest(),
+        }
+    return candidate, {
+        "schema": "omo-report-archived-task-git-provenance/v1",
+        "original_ref": original_ref,
+        "archived_ref": candidate_ref,
+        "rename_commit": rename_commit,
+        "rename_parent": rename_parent,
+        "rename_similarity": similarity,
+        "rename_source_blob": source_blob,
+        "rename_destination_blob": destination_blob,
+        "head_blob": head_blob,
+        "commitment_source_sha256": source_sha256,
+        "commitment_source_size_bytes": source_size,
+        "commitment_binding": commitment_binding,
+    }
+
+
+def export_archived_consumed_report(report_path: Path, output_path: Path) -> bytes:
+    """Infer an archived transaction only from its exact private envelope."""
+
+    report_path = absolute_path(report_path)
+    report_payload = regular_file_bytes(report_path, maximum=MAX_ENVELOPE_BYTES, field="archived private envelope")
+    report_info = report_path.lstat()
+    if report_info.st_uid != os.getuid() or stat.S_IMODE(report_info.st_mode) != 0o600 or report_info.st_nlink != 1:
+        raise ReceiptError("archived private envelope is not one exact owner-private file")
+    header, separator, message = report_payload.partition(b"message:\n")
+    try:
+        header_lines = header.decode("utf-8").splitlines()
+        _ = message.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ReceiptError("archived private envelope is not UTF-8") from exc
+    if not separator or len(header_lines) not in {4, 6}:
+        raise ReceiptError("archived private envelope has no authenticated transfer")
+    sent = SENT_LINE_RE.fullmatch(header_lines[0])
+    message_hash = HASH_LINE_RE.fullmatch(header_lines[1])
+    owner = OWNER_PREFIX_LINE_RE.fullmatch(header_lines[2])
+    transfer_line = header_lines[3]
+    if sent is None or message_hash is None or owner is None or not transfer_line.startswith("[omo-transfer: ") or not transfer_line.endswith("]"):
+        raise ReceiptError("archived private envelope identity is invalid")
+    route_note = ""
+    if len(header_lines) == 6:
+        if header_lines[4] != "route-warning:":
+            raise ReceiptError("archived private envelope route warning is invalid")
+        route_note = header_lines[5]
+    try:
+        attached_transfer = json.loads(transfer_line[len("[omo-transfer: ") : -1])
+    except json.JSONDecodeError as exc:
+        raise ReceiptError("archived private envelope transfer is invalid") from exc
+    commitment_path = Path(str(attached_transfer.get("commitment_path", ""))) if isinstance(attached_transfer, dict) else Path("")
+    receipt_directory = receipt_state_home() / "omo-manager" / "report-receipts"
+    if (
+        not commitment_path.is_absolute()
+        or commitment_path.parent != receipt_directory
+        or commitment_path.suffix != ".commitment"
+        or HASH_RE.fullmatch(commitment_path.stem) is None
+        or not validate_optional_regular(commitment_path, "archived transaction commitment", exact_mode=0o600)
+    ):
+        raise ReceiptError("archived private envelope commitment path is invalid")
+    commitment_payload = regular_file_bytes(
+        commitment_path,
+        maximum=MAX_RECEIPT_BYTES,
+        field="archived transaction commitment",
+    )
+    commitment = recovery_commitment_record(commitment_path, commitment_path.stem, commitment_payload)
+    transfer = commitment.get("transfer")
+    expected_transfer_record = {**transfer, "commitment_id": commitment.get("commitment_id")} if isinstance(transfer, dict) else {}
+    expected_transfer = {**expected_transfer_record, "transfer_id": bound_receipt_id(expected_transfer_record)}
+    preflight = commitment.get("preflight")
+    records = preflight.get("records") if isinstance(preflight, dict) else None
+    routing_sources = preflight.get("routing_sources") if isinstance(preflight, dict) else None
+    allocation = commitment.get("allocation")
+    submitted = allocation.get("file_at_submission") if isinstance(allocation, dict) else None
+    routing = transfer.get("routing") if isinstance(transfer, dict) else None
+    authority = transfer.get("authority") if isinstance(transfer, dict) else None
+    if (
+        attached_transfer != expected_transfer
+        or not isinstance(records, dict)
+        or records.get("private_envelope") != str(report_path)
+        or not isinstance(routing_sources, list)
+        or not all(isinstance(item, dict) for item in routing_sources)
+        or not isinstance(allocation, dict)
+        or not isinstance(submitted, dict)
+        or not isinstance(routing, dict)
+        or not isinstance(authority, dict)
+    ):
+        raise ReceiptError("archived private envelope transaction is inconsistent")
+    task = Path(str(records.get("producer", "")))
+    manager = Path(str(records.get("manager", "")))
+    producer_target = str(authority.get("producer_target", ""))
+    if (
+        authority.get("source_task") != str(task)
+        or routing.get("task") != str(task)
+        or routing.get("manager") != str(manager)
+        or routing.get("producer_target") != producer_target
+        or sent.group(2) != producer_target
+    ):
+        raise ReceiptError("archived private envelope owner route is inconsistent")
+    agent = sent.group(1)
+    if sent.group(3) != safe_label(task.name):
+        raise ReceiptError("archived private envelope task label is inconsistent")
+    message_path = Path(str(allocation.get("file", "")))
+    if not message_path.is_absolute():
+        raise ReceiptError("archived report allocation is not the exact committed object")
+    if path_state(message_path) != submitted:
+        raise ReceiptError("archived report allocation is not the exact committed object")
+    current_message = regular_file_bytes(
+        message_path,
+        maximum=MAX_ENVELOPE_BYTES,
+        field="archived report allocation",
+    )
+    if message != current_message or message_hash.group(1) != hashlib.sha256(current_message).hexdigest():
+        raise ReceiptError("archived private envelope body is inconsistent")
+    status_matches = []
+    for candidate_status in ("blocked", "in-progress", "done"):
+        report_parts = [
+            current_message,
+            agent.encode(),
+            candidate_status.encode(),
+            safe_label(producer_target).encode(),
+            str(task).encode(),
+        ]
+        if route_note:
+            report_parts.append(route_note.encode())
+        report_key = hashlib.sha256(b"\0".join(report_parts)).hexdigest()
+        candidate = report_path.parent / f"{safe_part(agent)}_{safe_part(candidate_status)}_{report_key}.md"
+        if candidate == report_path:
+            status_matches.append(candidate_status)
+    if len(status_matches) != 1:
+        raise ReceiptError("archived private envelope status is ambiguous")
+    todo_sources = [
+        Path(str(item.get("path")))
+        for item in routing_sources
+        if item.get("exists") is True and Path(str(item.get("path"))).name == "TODO.md"
+    ]
+    roots = [candidate.parent for candidate in todo_sources if candidate.parent in task.parents and candidate.parent in manager.parents]
+    if len(roots) != 1:
+        raise ReceiptError("archived private envelope work-log root is ambiguous")
+    root = roots[0]
+    archived_task, _git_provenance = infer_archived_task_path(
+        root,
+        task,
+        routing_sources,
+        commitment_path.stem,
+        str(routing.get("requested_manager_target", "")),
+    )
+    route_manifest = json.dumps(routing_sources, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    route_kind = str(routing.get("route_kind", ""))
+    manager_selection = "sole-active" if route_kind == "active-manager-task" else "not-applicable"
+    manager_frontmatter_sha256 = "0" * 64 if route_kind == "active-manager-task" else "not-applicable"
+    helper_path = Path(str(getattr(sys.modules.get("omo_manager.omo_report_receipt"), "__executed_helper_path__", "")))
+    arguments = Arguments(
+        mode="verify-consumed",
+        helper=helper_path,
+        root=root,
+        task=task,
+        archived_task=archived_task,
+        manager=manager,
+        requested_manager_target=str(routing.get("requested_manager_target", "")),
+        resolved_manager_target=str(routing.get("resolved_manager_target", "")),
+        route_kind=route_kind,
+        route_note=route_note,
+        task_route_evidence=route_manifest,
+        manager_route_evidence=route_manifest,
+        manager_route_selection=manager_selection,
+        manager_frontmatter_sha256=manager_frontmatter_sha256,
+        route_local_date=datetime.now().astimezone().strftime("%Y-%m-%d"),
+        status=status_matches[0],
+        recovery_replay_id=commitment_path.stem,
+        consumed_attestation_output=absolute_path(output_path),
+        message_file=message_path,
+        agent=agent,
+        producer_target=producer_target,
+        tmux_session="",
+        tmux_window_index="",
+        tmux_pane_index="",
+        tmux_pane_id="",
+        tmux_window_name="",
+    )
+    verified_message, message_identity, message_fd = open_regular_file_snapshot(
+        message_path,
+        maximum=MAX_ENVELOPE_BYTES,
+        field="archived report allocation",
+    )
+    try:
+        if verified_message != current_message or path_state(message_path) != submitted:
+            raise ReceiptError("archived report allocation changed during verification")
+        plan = _build_plan_from_message(
+            arguments,
+            message_path=message_path,
+            message_identity=message_identity,
+            message_fd=message_fd,
+            message=verified_message,
+            allow_archived_done=True,
+        )
+        plan = plan_for_historical_commitment(plan, allow_historical_route_inventory=True)
+        attestation = consumed_closure_attestation(plan, archived=True)
+        output = canonical_json(attestation)
+        if path_state(message_path) != submitted:
+            raise ReceiptError("archived report allocation changed during verification")
+        persist_consumed_closure_attestation(
+            arguments.consumed_attestation_output,
+            canonical_json(consumed_closure_export(plan, attestation, archived=True)),
+        )
+        return output
+    finally:
+        os.close(message_fd)
+
+
 def main() -> int:
     try:
         if len(sys.argv) == 4 and sys.argv[1] == "--validate-consumed-export":
             output = validate_consumed_closure_export_input(Path(sys.argv[2]), sys.argv[3])
+        elif len(sys.argv) == 4 and sys.argv[1] == "--export-archived-consumed":
+            output = export_archived_consumed_report(Path(sys.argv[2]), Path(sys.argv[3]))
         elif "--validate-consumed-export" in sys.argv:
             raise ReceiptError("invalid consumed attestation export validation arguments")
+        elif "--export-archived-consumed" in sys.argv:
+            raise ReceiptError("invalid archived consumed report export arguments")
         else:
             output = run()
     except RetryableDescriptionError:

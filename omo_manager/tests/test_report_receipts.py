@@ -224,6 +224,71 @@ def validate_export_from(
     )
 
 
+def initialize_report_git(case: ReportFixture) -> None:
+    """Commit the report-time route sources before the transaction."""
+
+    subprocess.run(["git", "init", "-q", str(case.root)], check=True)
+    subprocess.run(["git", "-C", str(case.root), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(case.root), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(case.root), "add", "--", "TODO.md", "worker.md", "manager.md"], check=True)
+    subprocess.run(["git", "-C", str(case.root), "commit", "-qm", "record report task"], check=True)
+
+
+def archive_report_task(case: ReportFixture) -> Path:
+    """Record one exact root-to-month task rename in local Git history."""
+
+    task = case.root / "worker.md"
+    task.write_text(
+        task.read_text(encoding="utf-8").replace("status: running", "status: done", 1),
+        encoding="utf-8",
+    )
+    (case.root / "TODO.md").write_text("current:\nmanager.md vl:2\n\nprevious:\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(case.root), "add", "--", "TODO.md", "worker.md", "manager.md"], check=True)
+    subprocess.run(["git", "-C", str(case.root), "commit", "-qm", "record done task"], check=True)
+    month = case.root / "202608"
+    month.mkdir()
+    archived = month / task.name
+    task.rename(archived)
+    subprocess.run(["git", "-C", str(case.root), "add", "-A", "--", "TODO.md", "worker.md", "202608/worker.md"], check=True)
+    subprocess.run(["git", "-C", str(case.root), "commit", "-qm", "archive done task"], check=True)
+    return archived
+
+
+def export_archived_report(
+    case: ReportFixture,
+    envelope: Path,
+    output: Path,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            str(REPORT),
+            "--export-archived-consumed",
+            str(envelope),
+            "--consumed-attestation-output",
+            str(output),
+        ],
+        cwd=case.root.parent,
+        env=case.env,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+
+def archived_consumed_fixture(tmp_path: Path) -> tuple[ReportFixture, Path, Path, Path]:
+    case, manager, _owner = active_manager_fixture(tmp_path)
+    initialize_report_git(case)
+    draft = allocate_report_draft(case, b"archived report\n")
+    case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+    pending = run_report_from(case, draft, status="done")
+    assert pending.returncode == 0, pending.stderr
+    assert run_manager_watcher_once(case, manager).returncode == 0
+    transfer = json.loads(pending.stdout)["transfer_receipt"]
+    envelope = Path(str(transfer["queue_item"]["pointer"]).rsplit(" ", 1)[1][:-1])
+    return case, draft, envelope, archive_report_task(case)
+
+
 def transaction_commitment_path(description: dict[str, object]) -> Path:
     files = description["files"]
     assert isinstance(files, dict)
@@ -2992,6 +3057,191 @@ return 75
                 manager_consumed_report_receipt_sha256=hashlib.sha256(exported.read_bytes()).hexdigest(),
             )
             self.assertTrue(validate_manager_consumed_report(close_args, case.root / "worker.md"))
+
+    def test_archived_consumed_export_covers_current_untracked_done_shapes(self) -> None:
+        shapes = (
+            ("dw_git_cleanup", "progressing", True),
+            ("pb_wix_post_016", "done", False),
+            ("pb_wix_post_017", "done", True),
+        )
+        for label, status, accepted in shapes:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                case, manager, _owner = active_manager_fixture(tmp_path, body=f"{label}\n".encode())
+                initialize_report_git(case)
+                draft = allocate_report_draft(case, f"archived {label}\n".encode())
+                case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+                pending = run_report_from(case, draft, status=status)
+                self.assertEqual(0, pending.returncode, pending.stderr)
+                self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+                if accepted:
+                    retried = run_report_from(case, draft, status=status)
+                    self.assertEqual(0, retried.returncode, retried.stderr)
+                    self.assertTrue(json.loads(retried.stdout)["accepted"])
+                transfer = json.loads(pending.stdout)["transfer_receipt"]
+                envelope = Path(str(transfer["queue_item"]["pointer"]).rsplit(" ", 1)[1][:-1])
+                archived = archive_report_task(case)
+                exported = tmp_path / f"{label}.json"
+
+                result = export_archived_report(case, envelope, exported)
+
+                self.assertEqual(0, result.returncode, result.stderr)
+                attestation = json.loads(result.stdout)
+                self.assertEqual(accepted, attestation["accepted"])
+                self.assertEqual("in-progress" if status == "progressing" else status, attestation["status"])
+                self.assertEqual(str(archived), attestation["archive_custody"]["task"])
+                self.assertEqual(str(case.root / "worker.md"), attestation["archive_custody"]["original_task"])
+                self.assertEqual(0, attestation["archive_custody"]["todo_reference_count"])
+                validated = validate_export_from(case, exported)
+                self.assertEqual(0, validated.returncode, validated.stderr)
+                self.assertEqual(attestation, json.loads(validated.stdout))
+
+    def test_archived_consumed_export_fails_closed_without_unique_git_rename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, _owner = active_manager_fixture(tmp_path)
+            initialize_report_git(case)
+            draft = allocate_report_draft(case, b"ambiguous archive\n")
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            pending = run_report_from(case, draft, status="done")
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+            transfer = json.loads(pending.stdout)["transfer_receipt"]
+            envelope = Path(str(transfer["queue_item"]["pointer"]).rsplit(" ", 1)[1][:-1])
+            archived = archive_report_task(case)
+            restored = case.root / archived.name
+            restored.write_bytes(archived.read_bytes())
+            subprocess.run(["git", "-C", str(case.root), "add", "--", "worker.md"], check=True)
+            subprocess.run(["git", "-C", str(case.root), "commit", "-qm", "restore duplicate task"], check=True)
+            duplicate = case.root / "202607" / archived.name
+            duplicate.parent.mkdir()
+            restored.rename(duplicate)
+            subprocess.run(["git", "-C", str(case.root), "add", "-A", "--", "worker.md", "202607/worker.md"], check=True)
+            subprocess.run(["git", "-C", str(case.root), "commit", "-qm", "archive duplicate task"], check=True)
+            exported = tmp_path / "ambiguous.json"
+
+            rejected = export_archived_report(case, envelope, exported)
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("missing or ambiguous", rejected.stderr)
+            self.assertFalse(exported.exists())
+
+    def test_archived_consumed_export_rejects_untracked_archive_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, _draft, envelope, archived = archived_consumed_fixture(tmp_path)
+            archived.write_bytes(archived.read_bytes() + b"\nuntracked change\n")
+
+            rejected = export_archived_report(case, envelope, tmp_path / "changed.json")
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("rename destination", rejected.stderr)
+
+    def test_archived_consumed_export_requires_one_exact_lifecycle_record_fallback(self) -> None:
+        for exact_record in (True, False):
+            with self.subTest(exact_record=exact_record), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                case, manager, _owner = active_manager_fixture(tmp_path)
+                task = case.root / "worker.md"
+                task_sha256 = hashlib.sha256(task.read_bytes()).hexdigest()
+                todo_sha256 = hashlib.sha256((case.root / "TODO.md").read_bytes()).hexdigest()
+                draft = allocate_report_draft(case, b"record fallback\n")
+                case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+                pending = run_report_from(case, draft, status="done")
+                self.assertEqual(0, pending.returncode, pending.stderr)
+                self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+                acceptance = json.loads(pending.stdout)
+                replay_id = acceptance["replay_id"]
+                transfer = acceptance["transfer_receipt"]
+                envelope = Path(str(transfer["queue_item"]["pointer"]).rsplit(" ", 1)[1][:-1])
+                record = (
+                    "(verified removed pending item: operation-scoped hashes: "
+                    f"worker.md {task_sha256} and TODO.md {todo_sha256}; report replay {replay_id} "
+                    "was consumed by vl:2 manager watcher.)"
+                    if exact_record
+                    else f"unrelated notes contain {task_sha256} and {replay_id}"
+                )
+                task.write_text(
+                    task.read_text(encoding="utf-8").replace("status: running", "status: done", 1)
+                    + f"\n{record}\n",
+                    encoding="utf-8",
+                )
+                (case.root / "TODO.md").write_text("current:\nmanager.md vl:2\n\nprevious:\n", encoding="utf-8")
+                subprocess.run(["git", "init", "-q", str(case.root)], check=True)
+                subprocess.run(["git", "-C", str(case.root), "config", "user.name", "Test"], check=True)
+                subprocess.run(["git", "-C", str(case.root), "config", "user.email", "test@example.com"], check=True)
+                subprocess.run(["git", "-C", str(case.root), "add", "--", "TODO.md", "worker.md", "manager.md"], check=True)
+                subprocess.run(["git", "-C", str(case.root), "commit", "-qm", "record done task"], check=True)
+                month = case.root / "202608"
+                month.mkdir()
+                task.rename(month / task.name)
+                subprocess.run(["git", "-C", str(case.root), "add", "-A"], check=True)
+                subprocess.run(["git", "-C", str(case.root), "commit", "-qm", "archive done task"], check=True)
+
+                result = export_archived_report(case, envelope, tmp_path / "fallback.json")
+
+                self.assertEqual(0 if exact_record else 2, result.returncode, result.stderr)
+                if not exact_record:
+                    self.assertIn("does not authenticate", result.stderr)
+
+    def test_archived_consumed_export_rejects_symlinked_month(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, _draft, envelope, archived = archived_consumed_fixture(tmp_path)
+            month = archived.parent
+            real_month = case.root / "archive-real"
+            month.rename(real_month)
+            month.symlink_to(real_month, target_is_directory=True)
+
+            rejected = export_archived_report(case, envelope, tmp_path / "symlink.json")
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("owned real directory", rejected.stderr)
+
+    def test_archived_consumed_export_revalidation_binds_git_history_and_allocation(self) -> None:
+        for defect in ("rewritten history", "replaced allocation"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                case, draft, envelope, _archived = archived_consumed_fixture(tmp_path)
+                exported = tmp_path / "archive.json"
+                self.assertEqual(0, export_archived_report(case, envelope, exported).returncode)
+                if defect == "rewritten history":
+                    subprocess.run(
+                        ["git", "-C", str(case.root), "commit", "--amend", "-qm", "rewritten archive"],
+                        check=True,
+                    )
+                else:
+                    payload = draft.read_bytes()
+                    draft.rename(tmp_path / "old-draft")
+                    draft.write_bytes(payload)
+                    draft.chmod(0o600)
+
+                rejected = validate_export_from(case, exported)
+
+                self.assertEqual(2, rejected.returncode)
+
+    def test_archived_consumed_export_rejects_repeated_option(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, _draft, envelope, _archived = archived_consumed_fixture(tmp_path)
+            output = tmp_path / "archive.json"
+
+            rejected = subprocess.run(
+                [
+                    str(REPORT), "--export-archived-consumed", str(envelope),
+                    "--export-archived-consumed", str(envelope),
+                    "--consumed-attestation-output", str(output),
+                ],
+                cwd=case.root.parent,
+                env=case.env,
+                text=True,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("requires only", rejected.stderr)
 
     def test_consumed_closure_export_rejects_changed_transaction_state(self) -> None:
         for defect in ("active pointer", "missing acknowledgment", "recovery residue", "malformed commitment"):
