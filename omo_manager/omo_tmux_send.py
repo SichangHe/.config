@@ -51,6 +51,7 @@ try:
     from omo_manager.omo_codex_status import (
         Args as StatusArgs,
     )
+    from omo_manager.omo_tmux_input_lock import tmux_input_lock
 except ModuleNotFoundError:
     from omo_codex_status import (
         CODEX_EMPTY_INPUT_TEXTS,
@@ -80,6 +81,7 @@ except ModuleNotFoundError:
     from omo_codex_status import (
         Args as StatusArgs,
     )
+    from omo_tmux_input_lock import tmux_input_lock
 
 
 CODEX_PLACEHOLDER_INPUT_TEXTS = CODEX_EMPTY_INPUT_TEXTS | CODEX_RUNNING_EMPTY_INPUT_TEXTS | CURSOR_AGENT_EMPTY_INPUT_TEXTS
@@ -1618,10 +1620,12 @@ def main(argv: list[str]) -> int:
         if args.async_result:
             return query_async_result(args.async_result)
         if args.submit_existing_file is not None or args.submit_existing_sha256:
-            submit_existing_to_codex(args.target, existing_input_authorization(args), args.options)
+            with tmux_input_lock(args.target):
+                submit_existing_to_codex(args.target, existing_input_authorization(args), args.options)
             return 0
         if args.cancel_existing_file is not None or args.cancel_existing_sha256:
-            cancel_existing_codex_input(args.target, existing_input_authorization(args), args.options)
+            with tmux_input_lock(args.target):
+                cancel_existing_codex_input(args.target, existing_input_authorization(args), args.options)
             return 0
         if args.async_mode:
             message = read_message(args)
@@ -1630,10 +1634,12 @@ def main(argv: list[str]) -> int:
                 args.message_file.unlink(missing_ok=True)
             return 0
         if args.async_worker:
-            return run_async_worker(args)
+            with tmux_input_lock(args.target):
+                return run_async_worker(args)
         if args.message_file is None:
             raise RuntimeError("--message-file is required.")
-        send_message_file_to_codex(args.target, args.message_file, args.options)
+        with tmux_input_lock(args.target):
+            send_message_file_to_codex(args.target, args.message_file, args.options)
     except Exception as exc:
         print(f"omo_tmux_send: {exc}", file=sys.stderr)
         return 1
