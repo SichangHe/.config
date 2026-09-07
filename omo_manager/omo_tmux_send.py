@@ -1027,10 +1027,13 @@ def capture_complete_existing_input(
     *,
     allow_codex_footer_spacer: bool = False,
     allow_cursor_agent: bool = False,
+    required_pane_id: str | None = None,
 ) -> ExistingInputCapture:
     pane_id = exact_pane_id(target)
     if not pane_id:
         raise RuntimeError(f"target cannot be resolved as an exact tmux pane: {target}")
+    if required_pane_id is not None and pane_id != required_pane_id:
+        raise RuntimeError("target pane changed before submit-existing")
     lines = capture_complete_input_lines(pane_id)
     try:
         text = exact_existing_input_text(
@@ -1049,14 +1052,41 @@ def capture_complete_existing_input(
             raise
         candidate_lines = lines.copy()
         candidate_lines[spacer_index] = ""
-        text = exact_existing_input_text(
-            candidate_lines,
-            allow_codex_footer_spacer=True,
-            allow_cursor_agent=allow_cursor_agent,
-        )
+        try:
+            text = exact_existing_input_text(
+                candidate_lines,
+                allow_codex_footer_spacer=True,
+                allow_cursor_agent=allow_cursor_agent,
+            )
+        except RuntimeError:
+            raise exc
         if not has_recent_tmux_delivery(target, text):
             raise exc
     return ExistingInputCapture(pane_id, text, is_cursor_agent_capture(lines))
+
+
+def exact_file_authorized_trailing_blank_text(lines: list[str], authorized_text: str) -> str:
+    """Recover at most one space-rendered final input row plus its composer spacer."""
+
+    end = len(lines)
+    while end and not lines[end - 1].strip():
+        end -= 1
+    padded_rows: list[int] = []
+    idx = end - 2
+    while idx >= 0 and lines[idx] and not lines[idx].strip(" "):
+        padded_rows.append(idx)
+        idx -= 1
+    if len(padded_rows) != 2:
+        raise RuntimeError("target existing input has an ambiguous trailing blank line")
+    candidate_lines = lines.copy()
+    candidate_lines[padded_rows[0]] = ""
+    candidates = [exact_existing_input_text(candidate_lines, allow_codex_footer_spacer=True)]
+    candidate_lines[padded_rows[1]] = ""
+    candidates.append(exact_existing_input_text(candidate_lines, allow_codex_footer_spacer=True))
+    matches = {candidate for candidate in candidates if candidate == authorized_text}
+    if len(matches) != 1:
+        raise RuntimeError("target existing input does not exactly match the authorized file")
+    return matches.pop()
 
 
 def require_authorized_existing_input_text(text: str, authorization: ExistingInputAuthorization) -> None:
@@ -1073,12 +1103,42 @@ def require_authorized_existing_input(
     *,
     allow_codex_footer_spacer: bool = False,
     allow_cursor_agent: bool = False,
+    allow_file_authorized_trailing_blank: bool = False,
 ) -> ExistingInputCapture:
-    capture = capture_complete_existing_input(
-        target,
-        allow_codex_footer_spacer=allow_codex_footer_spacer,
-        allow_cursor_agent=allow_cursor_agent,
+    recover_trailing_blank = (
+        allow_file_authorized_trailing_blank
+        and authorization.text is not None
+        and authorization.text.endswith("\n")
+        and not authorization.text.endswith("\r\n")
     )
+    pinned_pane_id = expected_pane_id
+    if recover_trailing_blank and pinned_pane_id is None:
+        pinned_pane_id = exact_pane_id(target)
+        if not pinned_pane_id:
+            raise RuntimeError(f"target cannot be resolved as an exact tmux pane: {target}")
+    try:
+        capture = capture_complete_existing_input(
+            target,
+            allow_codex_footer_spacer=allow_codex_footer_spacer,
+            allow_cursor_agent=allow_cursor_agent,
+            required_pane_id=pinned_pane_id if recover_trailing_blank else None,
+        )
+    except RuntimeError as exc:
+        if (
+            not recover_trailing_blank
+            or authorization.text is None
+            or str(exc) != "target existing input has an ambiguous trailing blank line"
+        ):
+            raise
+        if pinned_pane_id is None:
+            raise RuntimeError("target pane binding is unavailable for submit-existing") from exc
+        if exact_pane_id(target) != pinned_pane_id:
+            raise RuntimeError("target pane changed before submit-existing") from exc
+        lines = capture_complete_input_lines(pinned_pane_id)
+        if exact_pane_id(target) != pinned_pane_id:
+            raise RuntimeError("target pane changed before submit-existing") from exc
+        text = exact_file_authorized_trailing_blank_text(lines, authorization.text)
+        capture = ExistingInputCapture(pinned_pane_id, text, False)
     if expected_pane_id is not None and capture.pane_id != expected_pane_id:
         raise RuntimeError("target pane changed before submit-existing")
     require_authorized_existing_input_text(capture.text, authorization)
@@ -1167,6 +1227,7 @@ def verify_authorized_existing_submit(
                     pane_id,
                     allow_codex_footer_spacer=True,
                     allow_cursor_agent=authorization.text is None,
+                    allow_file_authorized_trailing_blank=True,
                 )
             except RuntimeError:
                 confirmation_lines = tail_pane_id(pane_id, EXISTING_INPUT_CAPTURE_LINES)
@@ -1203,6 +1264,7 @@ def submit_existing_to_codex(target: str, authorization: ExistingInputAuthorizat
         authorization,
         allow_codex_footer_spacer=True,
         allow_cursor_agent=authorization.text is None,
+        allow_file_authorized_trailing_blank=True,
     )
     lines = revalidate_error_transition(target, EXISTING_INPUT_CAPTURE_LINES, preexisting_error, "before submit-existing")
     if has_plan_prompt(lines):
@@ -1213,6 +1275,7 @@ def submit_existing_to_codex(target: str, authorization: ExistingInputAuthorizat
         initial_capture.pane_id,
         allow_codex_footer_spacer=True,
         allow_cursor_agent=authorization.text is None,
+        allow_file_authorized_trailing_blank=True,
     )
     if capture.cursor:
         revalidate_authorized_cursor_input(target, capture.pane_id, authorization, preexisting_error)

@@ -25,6 +25,7 @@ from omo_manager.omo_tmux_send import (
     clear_existing_input_before_send,
     exact_capacity_error,
     exact_existing_input_text,
+    exact_file_authorized_trailing_blank_text,
     escape_agent_message_envelope_tags,
     existing_input_authorization,
     launch_async,
@@ -1296,6 +1297,87 @@ class TmuxSendTests(unittest.TestCase):
             ):
                 require_authorized_existing_input("cfg:1.0", authorization, allow_codex_footer_spacer=True)
             recent.assert_not_called()
+
+    def test_file_authorization_recovers_one_space_rendered_final_blank(self) -> None:
+        lines = ["› approved prompt", " ", " ", "  gpt-5.6-sol medium · /workspace · 1.41M used"]
+
+        self.assertEqual(
+            "approved prompt\n",
+            exact_file_authorized_trailing_blank_text(lines, "approved prompt\n"),
+        )
+
+    def test_file_authorized_trailing_blank_rejects_other_bytes_and_ambiguous_suffixes(self) -> None:
+        defects = (
+            (["› approved prompt", " ", " ", "  gpt-5.5"], "different\n"),
+            (["› approved prompt", " ", " ", " ", "  gpt-5.5"], "approved prompt\n\n"),
+            (["› approved prompt", "\t", " ", "  gpt-5.5"], "approved prompt\n"),
+            (["› approved prompt", " ", " ", "not a footer"], "approved prompt\n"),
+        )
+        for lines, authorized in defects:
+            with self.subTest(lines=lines), self.assertRaises(RuntimeError):
+                exact_file_authorized_trailing_blank_text(lines, authorized)
+
+    def test_submit_existing_file_accepts_one_authenticated_rendered_final_blank(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt\n"), "approved prompt\n")
+        result = subprocess.CompletedProcess(
+            ["tmux"],
+            0,
+            stdout="› approved prompt\n \n \n  gpt-5.6-sol medium · /workspace · 1.41M used\n",
+        )
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"
+        ), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=result), patch(
+            "omo_manager.omo_tmux_send.revalidate_error_transition",
+            return_value=["• Working", "  gpt-5.5"],
+        ), patch("omo_manager.omo_tmux_send.send_enter") as enter:
+            submit_existing_to_codex("cfg:1.0", authorization, options(submit_verify_timeout_s=0))
+
+        enter.assert_called_once_with("%42")
+
+    def test_file_authorized_trailing_blank_rejects_pane_drift_before_recovery(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt\n"), "approved prompt\n")
+        result = subprocess.CompletedProcess(
+            ["tmux"],
+            0,
+            stdout="› approved prompt\n \n \n  gpt-5.5\n",
+        )
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", side_effect=["%42", "%42", "%43"]
+        ), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=result), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter, self.assertRaisesRegex(RuntimeError, "pane changed"):
+            submit_existing_to_codex("cfg:1.0", authorization, options())
+
+        enter.assert_not_called()
+
+    def test_digest_and_cancel_paths_reject_space_rendered_final_blank(self) -> None:
+        result = subprocess.CompletedProcess(
+            ["tmux"],
+            0,
+            stdout="› approved prompt\n \n \n  gpt-5.5\n",
+        )
+        authorizations = (
+            ExistingInputAuthorization(text_sha256("approved prompt\n")),
+            ExistingInputAuthorization(text_sha256("approved prompt\n"), "approved prompt\n"),
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"OMO_MANAGER_STATE_DIR": tmp, "OMO_MANAGER_TMUX_DELIVERY_DEDUPE_S": "300"},
+        ):
+            for authorization in authorizations:
+                with self.subTest(file_authorized=authorization.text is not None), patch(
+                    "omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None
+                ), patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
+                    "omo_manager.omo_tmux_send.subprocess.run", return_value=result
+                ), patch("omo_manager.omo_tmux_send.send_enter") as enter, patch(
+                    "omo_manager.omo_tmux_send.send_cancel_input"
+                ) as cancel, self.assertRaisesRegex(RuntimeError, "ambiguous trailing blank"):
+                    if authorization.text is None:
+                        submit_existing_to_codex("cfg:1.0", authorization, options())
+                    else:
+                        cancel_existing_codex_input("cfg:1.0", authorization, options())
+                enter.assert_not_called()
+                cancel.assert_not_called()
 
     def test_submit_existing_digest_sends_exact_authorized_input(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("approved prompt"))
