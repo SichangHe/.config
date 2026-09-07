@@ -5,6 +5,7 @@ import json
 import contextlib
 import tempfile
 import unittest
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -109,6 +110,21 @@ def parsed(path: Path, root: Path) -> TaskMetadata:
 
 
 class ManagerReplaceTests(unittest.TestCase):
+    def test_script_help_uses_manager_replace_parser(self) -> None:
+        script = Path(manager_replace.__file__).resolve()
+        result = subprocess.run(
+            [str(script), "--help"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--old-task OLD_TASK", result.stdout)
+        self.assertIn("--successor-task SUCCESSOR_TASK", result.stdout)
+        self.assertNotIn("--task-file TASK_FILE", result.stdout)
+
     def fixture(self, base: Path) -> tuple[Path, Args, dict[str, str]]:
         root = base / "work_logs"
         root.mkdir(mode=0o700)

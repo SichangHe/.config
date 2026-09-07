@@ -24,7 +24,8 @@ from pathlib import Path
 HELPER_DIR = Path(__file__).resolve().parent
 HELPER_ENV = HELPER_DIR / ".venv"
 
-if Path(sys.prefix).resolve() != HELPER_ENV.resolve():
+# 🧑 "omo_manager_replace.py --help" must remain the replacement helper's CLI.
+if __name__ == "__main__" and Path(sys.prefix).resolve() != HELPER_ENV.resolve():
     project_python = HELPER_ENV / "bin" / "python"
     if project_python.is_file():
         os.execv(project_python, [project_python, __file__, *sys.argv[1:]])
