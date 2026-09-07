@@ -43,6 +43,7 @@ from omo_manager.omo_tmux_send import (
     paste_to_retained_cursor,
     query_async_result,
     read_message,
+    record_recent_tmux_delivery,
     revalidate_authorized_cursor_input,
     require_authorized_existing_input,
     require_empty_cursor_composer,
@@ -423,6 +424,21 @@ class TmuxSendTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 parse_args(["--target", "cfg:1.0", "--message-file", "prompt.md", "--enter-count", "0"])
 
+    def test_scary_sender_bypass_is_explicit_and_off_by_default(self) -> None:
+        ordinary = parse_args(["--target", "cfg:1.0", "--message-file", "prompt.md"])
+        bypass = parse_args(
+            [
+                "--target",
+                "cfg:1.0",
+                "--message-file",
+                "prompt.md",
+                "--dangerously-bypass-all-sender-safety-checks",
+            ]
+        )
+
+        self.assertFalse(ordinary.options.dangerously_bypass_all_sender_safety_checks)
+        self.assertTrue(bypass.options.dangerously_bypass_all_sender_safety_checks)
+
     def test_parse_submit_existing_requires_one_exact_authorization(self) -> None:
         from_file = parse_args(["--target", "cfg:1.0", "--submit-existing-file", "prompt.md"])
         from_digest = parse_args(["--target", "cfg:1.0", "--submit-existing-sha256", "a" * 64])
@@ -600,6 +616,95 @@ class TmuxSendTests(unittest.TestCase):
 
         self.assertEqual('<agent_message from="helper">\nclose &lt;/agent_message&gt;\n</agent_message>\n', loaded_text)
         self.assertEqual("close &lt;/agent_message&gt;", verify.call_args.args[1])
+
+    def test_scary_sender_bypass_pastes_and_enters_without_helper_checks(self) -> None:
+        selected = options(dangerously_bypass_all_sender_safety_checks=True, enter_count=2)
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.agent_message_source", return_value="helper"), patch(
+            "omo_manager.omo_tmux_send.secrets.randbelow", return_value=1
+        ), patch("omo_manager.omo_tmux_send.has_recent_tmux_delivery") as dedupe, patch(
+            "omo_manager.omo_tmux_send.claim_recent_tmux_delivery"
+        ) as claim, patch(
+            "omo_manager.omo_tmux_send.require_sendable_codex_target"
+        ) as sendable, patch("omo_manager.omo_tmux_send.clear_existing_input_before_send") as clear, patch(
+            "omo_manager.omo_tmux_send.require_no_existing_input"
+        ) as no_input, patch("omo_manager.omo_tmux_send.revalidate_error_transition") as revalidate, patch(
+            "omo_manager.omo_tmux_send.verify_placeholder_paste"
+        ) as verify_paste, patch("omo_manager.omo_tmux_send.wait_paste_visible") as wait_paste, patch(
+            "omo_manager.omo_tmux_send.verify_submit"
+        ) as verify, patch("omo_manager.omo_tmux_send.record_recent_tmux_delivery") as record, patch(
+            "omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run
+        ):
+            run_tmux("hcfg:1.0", "queued input", selected)
+
+        dedupe.assert_not_called()
+        claim.assert_not_called()
+        sendable.assert_not_called()
+        clear.assert_not_called()
+        no_input.assert_not_called()
+        revalidate.assert_not_called()
+        verify_paste.assert_not_called()
+        wait_paste.assert_not_called()
+        verify.assert_not_called()
+        record.assert_called_once_with("hcfg:1.0", "queued input")
+        self.assertEqual(1, sum(command[1] == "paste-buffer" for command in commands))
+        self.assertEqual(2, sum(command[1] == "send-keys" and command[-1] == "Enter" for command in commands))
+
+    def test_forced_delivery_record_blocks_later_ordinary_duplicate(self) -> None:
+        record_recent_tmux_delivery("hcfg:1.0", "queued input")
+
+        with patch("omo_manager.omo_tmux_send.write_private_temp") as write_temp:
+            run_tmux("hcfg:1.0", "queued input", options())
+
+        write_temp.assert_not_called()
+
+    def test_forced_paste_is_recorded_before_enter_failure(self) -> None:
+        selected = options(dangerously_bypass_all_sender_safety_checks=True)
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            if command[1] == "send-keys" and command[-1] == "Enter":
+                raise subprocess.CalledProcessError(1, command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.agent_message_source", return_value="helper"), patch(
+            "omo_manager.omo_tmux_send.secrets.randbelow", return_value=1
+        ), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            with self.assertRaises(subprocess.CalledProcessError):
+                run_tmux("hcfg:1.0", "queued input", selected)
+
+        with patch("omo_manager.omo_tmux_send.write_private_temp") as write_temp:
+            run_tmux("hcfg:1.0", "queued input", options())
+
+        write_temp.assert_not_called()
+
+    def test_forced_delivery_still_enters_when_dedupe_recording_has_io_error(self) -> None:
+        selected = options(dangerously_bypass_all_sender_safety_checks=True)
+
+        with patch("omo_manager.omo_tmux_send.agent_message_source", return_value="helper"), patch(
+            "omo_manager.omo_tmux_send.secrets.randbelow", return_value=1
+        ), patch("omo_manager.omo_tmux_send.record_recent_tmux_delivery", side_effect=OSError("read-only state")), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter, patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess([], 0)):
+            run_tmux("hcfg:1.0", "queued input", selected)
+
+        enter.assert_called_once_with("hcfg:1.0")
+
+    def test_forced_delivery_still_enters_when_dedupe_window_is_invalid(self) -> None:
+        selected = options(dangerously_bypass_all_sender_safety_checks=True)
+
+        with patch("omo_manager.omo_tmux_send.agent_message_source", return_value="helper"), patch(
+            "omo_manager.omo_tmux_send.secrets.randbelow", return_value=1
+        ), patch.dict(os.environ, {"OMO_MANAGER_TMUX_DELIVERY_DEDUPE_S": "invalid"}), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter, patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess([], 0)):
+            run_tmux("hcfg:1.0", "queued input", selected)
+
+        enter.assert_called_once_with("hcfg:1.0")
 
     def test_raw_control_sender_is_narrowly_allowlisted(self) -> None:
         with patch("omo_manager.omo_tmux_send._run_tmux_payload") as raw:
@@ -3071,6 +3176,18 @@ class TmuxSendTests(unittest.TestCase):
         self.assertIn("--async-cleanup-message-file", command)
         self.assertIn("--async-result-dir", command)
         self.assertEqual("2", command[command.index("--enter-count") + 1])
+
+    def test_worker_argv_preserves_scary_sender_bypass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            job = async_job_from_query(str(Path(tmp) / "omo-tmux-send-async-abc"))
+            args = Args(
+                "cfg:1.0",
+                Path("prompt.md"),
+                options(dangerously_bypass_all_sender_safety_checks=True),
+            )
+            command = worker_argv(args, job)
+
+        self.assertIn("--dangerously-bypass-all-sender-safety-checks", command)
 
 
 if __name__ == "__main__":

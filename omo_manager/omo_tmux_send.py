@@ -124,6 +124,7 @@ class CodexSendOptions:
     dry_run: bool
     submit_verify_timeout_s: float = DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S
     allow_plan_prompt_enter: bool = False
+    dangerously_bypass_all_sender_safety_checks: bool = False
 
 
 @dataclass(frozen=True)
@@ -197,7 +198,7 @@ def tmux_delivery_digest(target: str, message: str) -> str:
     return hashlib.sha256(canonical_tmux_delivery_target(target).encode() + b"\0" + identity_message.encode()).hexdigest()
 
 
-def update_recent_tmux_delivery(target: str, message: str, operation: Literal["check", "claim", "release"]) -> bool:
+def update_recent_tmux_delivery(target: str, message: str, operation: Literal["check", "claim", "record", "release"]) -> bool:
     dedupe_s = int(os.environ.get("OMO_MANAGER_TMUX_DELIVERY_DEDUPE_S", str(DEFAULT_TMUX_DELIVERY_DEDUPE_S)))
     if dedupe_s <= 0:
         return operation != "check"
@@ -231,8 +232,10 @@ def update_recent_tmux_delivery(target: str, message: str, operation: Literal["c
             return claimed
         if operation == "claim" and claimed:
             return False
-        if operation == "claim":
+        if operation in {"claim", "record"}:
             safe_target = canonical_tmux_delivery_target(target).replace("\t", " ").replace("\n", " ")
+            if operation == "record":
+                rows = [row for row in rows if row[1] != digest]
             rows.append((now_s, digest, safe_target))
         else:
             rows = [row for row in rows if row[1] != digest]
@@ -264,6 +267,12 @@ def release_recent_tmux_delivery(target: str, message: str) -> None:
     _ = update_recent_tmux_delivery(target, message, "release")
 
 
+def record_recent_tmux_delivery(target: str, message: str) -> None:
+    """Record a completed forced delivery without using dedupe as a precondition."""
+
+    _ = update_recent_tmux_delivery(target, message, "record")
+
+
 class ParsedArgs(argparse.Namespace):
     target: str | None = None
     message_file: Path | None = None
@@ -285,6 +294,7 @@ class ParsedArgs(argparse.Namespace):
     async_result: str = ""
     async_result_dir: Path | None = None
     allow_plan_prompt_enter: bool = False
+    dangerously_bypass_all_sender_safety_checks: bool = False
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -322,6 +332,14 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--async-result", default="", metavar="ID_OR_DIR", help="Query an async send result by printed id or result directory.")
     _ = parser.add_argument("--async-result-dir", type=Path, help=argparse.SUPPRESS)
     _ = parser.add_argument("--allow-plan-prompt-enter", action="store_true", help=argparse.SUPPRESS)
+    _ = parser.add_argument(
+        "--dangerously-bypass-all-sender-safety-checks",
+        action="store_true",
+        help=(
+            "DANGER: paste and press Enter without checking the target, existing input, "
+            "submission state, or duplicate delivery. Intended only as a deliberate operator escape hatch."
+        ),
+    )
     _ = parser.add_argument("--async-worker", action="store_true", help=argparse.SUPPRESS)
     _ = parser.add_argument("--async-cleanup-message-file", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
@@ -339,6 +357,7 @@ def parse_args(argv: list[str]) -> Args:
         parsed.dry_run,
         parsed.submit_verify_timeout_s,
         parsed.allow_plan_prompt_enter,
+        parsed.dangerously_bypass_all_sender_safety_checks,
     )
     if parsed.async_result:
         return Args(
@@ -1940,7 +1959,8 @@ def _run_tmux_payload(
     dedupe_delivery: bool = True,
 ) -> None:
     verification_message = message if probe_message is None else probe_message
-    if not options.dry_run and dedupe_delivery and has_recent_tmux_delivery(target, verification_message):
+    bypass_checks = options.dangerously_bypass_all_sender_safety_checks
+    if not options.dry_run and dedupe_delivery and not bypass_checks and has_recent_tmux_delivery(target, verification_message):
         print("omo_tmux_send: skipped duplicate recent delivery")
         return
     temp_path = write_private_temp(message)
@@ -1953,6 +1973,26 @@ def _run_tmux_payload(
             _ = print(f"would paste buffer {buffer_name} to {target}")
             for _ in range(options.enter_count):
                 _ = print(f"would send Enter to {target}")
+            return
+        if bypass_checks:
+            _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)
+            if before_paste is not None:
+                before_paste()
+            delivery_may_have_happened = True
+            try:
+                _ = subprocess.run(["tmux", "paste-buffer", "-b", buffer_name, "-t", target], timeout=5, check=True)
+            except (OSError, subprocess.CalledProcessError):
+                delivery_may_have_happened = False
+                raise
+            if dedupe_delivery:
+                try:
+                    record_recent_tmux_delivery(target, verification_message)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    print(f"omo_tmux_send: forced delivery succeeded but dedupe recording failed: {exc}", file=sys.stderr)
+            for idx in range(options.enter_count):
+                if idx:
+                    time.sleep(options.enter_delay_s)
+                send_enter(target)
             return
         preexisting_error = require_sendable_codex_target(target, inspect_lines_for_message(verification_message))
         if dedupe_delivery:
@@ -2188,6 +2228,8 @@ def worker_argv(args: Args, job: AsyncJob) -> list[str]:
     ]
     if options.allow_plan_prompt_enter:
         argv.append("--allow-plan-prompt-enter")
+    if options.dangerously_bypass_all_sender_safety_checks:
+        argv.append("--dangerously-bypass-all-sender-safety-checks")
     return argv
 
 
