@@ -19,6 +19,7 @@ COMPACTION_WAIT_LINES = 2000
 CODEX_RE = re.compile(r"  gpt-")
 CODEX_FOOTER_RE = re.compile(r"^  gpt-")
 SUPPORTED_CODEX_PACKAGES = {"@openai/codex", "@openai/codex@latest"}
+PROC_ROOT = Path("/proc")
 ERROR_RE = re.compile(r"\b(failed|panic|traceback|exception)\b|\berror\b(?!\s*=\s*\d)", re.IGNORECASE)
 SELECTED_MODEL_CAPACITY_RE = re.compile(
     r"^\s*(?:(?:⚠\ufe0f?\s*)?Selected model is at capacity\. Please try a different model\.|■\s*\{\"detail\":\"The '[A-Za-z0-9][A-Za-z0-9._-]*' model is not supported when using Codex with a ChatGPT account\.\"\})\s*$"
@@ -114,6 +115,15 @@ class Report:
     input_text: str = ""
     can_submit_input: bool = False
     input_blocker: str = ""
+
+
+@dataclass(frozen=True)
+class ProcessTerminalIdentity:
+    process_group: int
+    session: int
+    tty: int
+    foreground_group: int
+    start_ticks: int
 
 
 @dataclass(frozen=True)
@@ -227,16 +237,138 @@ def exact_pane_process(target: str, pane_id: str) -> tuple[str, list[str]] | Non
     return current_command, start_tokens
 
 
-def pane_has_exact_codex_process(target: str, pane_id: str) -> bool:
+def process_terminal_identity(process_dir: Path) -> ProcessTerminalIdentity | None:
+    """Read the stable terminal binding needed to identify a foreground process."""
+
+    try:
+        raw = (process_dir / "stat").read_text(encoding="ascii")
+    except (OSError, UnicodeError):
+        return None
+    separator = raw.rfind(") ")
+    fields = raw[separator + 2 :].split() if separator >= 0 else []
+    if len(fields) < 20 or fields[0] == "Z":
+        return None
+    try:
+        return ProcessTerminalIdentity(*(int(fields[index]) for index in (2, 3, 4, 5, 19)))
+    except ValueError:
+        return None
+
+
+# 🧑 "The pending watcher seems broken"
+def exact_shell_started_foreground_argv(
+    target: str,
+    pane_id: str,
+    current_command: str,
+    proc_root: Path | None = None,
+) -> list[str] | None:
+    """Authenticate a shell-started pane through its terminal foreground process."""
+
+    if exact_pane_id(target) != pane_id:
+        return None
+    selected_proc_root = proc_root or PROC_ROOT
+
+    def pane_binding() -> tuple[int, str] | None:
+        try:
+            result = subprocess.run(
+                ["tmux", "display-message", "-p", "-t", pane_id, "#{pane_id}\t#{pane_pid}\t#{pane_current_command}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        fields = (result.stdout or "").rstrip("\r\n").split("\t") if result.returncode == 0 else []
+        if len(fields) != 3 or fields[0] != pane_id or not fields[1].isdigit() or int(fields[1]) <= 1:
+            return None
+        return int(fields[1]), fields[2]
+
+    binding = pane_binding()
+    if binding is None or binding[1] != current_command:
+        return None
+    pane_pid = binding[0]
+    pane_process = selected_proc_root / str(pane_pid)
+    try:
+        pane_state = pane_process.stat()
+    except OSError:
+        return None
+    pane_identity = process_terminal_identity(pane_process)
+    if (
+        pane_state.st_uid != os.getuid()
+        or pane_identity is None
+        or pane_identity.process_group != pane_pid
+        or pane_identity.session != pane_pid
+        or pane_identity.tty == 0
+        or pane_identity.foreground_group <= 1
+    ):
+        return None
+    foreground_process = selected_proc_root / str(pane_identity.foreground_group)
+    try:
+        foreground_state = foreground_process.stat()
+        raw_argv = (foreground_process / "cmdline").read_bytes()
+    except OSError:
+        return None
+    foreground_identity = process_terminal_identity(foreground_process)
+    if (
+        foreground_state.st_uid != os.getuid()
+        or foreground_identity is None
+        or foreground_identity.process_group != pane_identity.foreground_group
+        or foreground_identity.session != pane_identity.session
+        or foreground_identity.tty != pane_identity.tty
+        or foreground_identity.foreground_group != pane_identity.foreground_group
+        or not raw_argv
+        or len(raw_argv) > 1_000_000
+        or not raw_argv.endswith(b"\0")
+    ):
+        return None
+    try:
+        final_pane_state = pane_process.stat()
+        final_foreground_state = foreground_process.stat()
+        final_argv = (foreground_process / "cmdline").read_bytes()
+    except OSError:
+        return None
+    if (
+        process_terminal_identity(pane_process) != pane_identity
+        or process_terminal_identity(foreground_process) != foreground_identity
+        or (final_pane_state.st_dev, final_pane_state.st_ino, final_pane_state.st_uid)
+        != (pane_state.st_dev, pane_state.st_ino, pane_state.st_uid)
+        or (final_foreground_state.st_dev, final_foreground_state.st_ino, final_foreground_state.st_uid)
+        != (foreground_state.st_dev, foreground_state.st_ino, foreground_state.st_uid)
+        or final_argv != raw_argv
+        or pane_binding() != binding
+        or exact_pane_id(target) != pane_id
+    ):
+        return None
+    parts = raw_argv[:-1].split(b"\0")
+    return [os.fsdecode(part) for part in parts] if parts and all(parts) else None
+
+
+def exact_codex_launch(current_command: str, tokens: list[str]) -> bool:
+    """Recognize one supported Codex launcher command line."""
+
+    if current_command == "codex":
+        return bool(tokens and os.path.basename(tokens[0]) == "codex")
+    return (
+        current_command in {"bunx", "npx"}
+        and len(tokens) >= 2
+        and os.path.basename(tokens[0]) == current_command
+        and tokens[1] in SUPPORTED_CODEX_PACKAGES
+    )
+
+
+def pane_has_exact_codex_process(target: str, pane_id: str, proc_root: Path | None = None) -> bool:
     """Confirm that an exact pane is still running a known Codex launcher."""
 
     process = exact_pane_process(target, pane_id)
     if process is None:
         return False
     current_command, start_tokens = process
-    if current_command == "codex":
-        return bool(start_tokens and os.path.basename(start_tokens[0]) == "codex")
-    return current_command in {"bunx", "npx"} and len(start_tokens) >= 2 and os.path.basename(start_tokens[0]) == current_command and start_tokens[1] in SUPPORTED_CODEX_PACKAGES
+    if exact_codex_launch(current_command, start_tokens):
+        return True
+    if current_command not in {"codex", "bunx", "npx"}:
+        return False
+    foreground_tokens = exact_shell_started_foreground_argv(target, pane_id, current_command, proc_root)
+    return foreground_tokens is not None and exact_codex_launch(current_command, foreground_tokens)
 
 
 def pane_has_exact_cursor_process(target: str, pane_id: str) -> bool:

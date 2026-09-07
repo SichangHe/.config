@@ -1,9 +1,10 @@
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_codex_status import Args, PlanPromptRecovery, Report, can_submit_stuck_input, current_block, current_input_text, dismiss_plan_prompt_if_present, dismiss_skills_menu_if_present, exact_pane_id, final_assistant_output, has_active_skills_menu, has_compacting_indicator, has_cursor_followups_overlay, has_resume_paused_goal_prompt, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, pane_has_exact_cursor_process, report_from_lines, status, submit_stuck_input_if_present, tail, tail_pane_id, visible_error_lines
+from omo_manager.omo_codex_status import Args, PlanPromptRecovery, Report, can_submit_stuck_input, current_block, current_input_text, dismiss_plan_prompt_if_present, dismiss_skills_menu_if_present, exact_pane_id, final_assistant_output, has_active_skills_menu, has_compacting_indicator, has_cursor_followups_overlay, has_resume_paused_goal_prompt, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, pane_has_exact_codex_process, pane_has_exact_cursor_process, report_from_lines, status, submit_stuck_input_if_present, tail, tail_pane_id, visible_error_lines
 from omo_manager.omo_tmux_send import error_signature, exact_capacity_error
 
 
@@ -41,6 +42,62 @@ def cursor_retained_composer_lines(*, prompt: str = 'Read and execute PB watcher
 
 
 class CodexStatusTests(unittest.TestCase):
+    def test_exact_shell_started_codex_process_uses_terminal_foreground_group(self) -> None:
+        def write_stat(root: Path, pid: int, name: str, ppid: int, group: int, session: int, tty: int, foreground: int, start: int) -> None:
+            process = root / str(pid)
+            _ = process.mkdir()
+            fields = [str(ppid), str(group), str(session), str(tty), str(foreground), *("0" for _ in range(13)), str(start)]
+            _ = (process / "stat").write_text(f"{pid} ({name}) S {' '.join(fields)}\n", encoding="ascii")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            write_stat(proc_root, 101, "zsh", 1, 101, 101, 34817, 202, 11)
+            write_stat(proc_root, 202, "bunx", 101, 202, 101, 34817, 202, 22)
+            _ = (proc_root / "202" / "cmdline").write_bytes(b"/home/agent/bin/bunx\0@openai/codex@latest\0--model\0gpt-5.6-sol\0")
+
+            def tmux(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                output = "%7\t101\tbunx\n" if "#{pane_pid}" in command[-1] else "%7\tbunx\t\n"
+                return subprocess.CompletedProcess(command, 0, output, "")
+
+            with patch("omo_manager.omo_codex_status.exact_pane_id", return_value="%7"), patch(
+                "omo_manager.omo_codex_status.subprocess.run", side_effect=tmux
+            ):
+                self.assertTrue(pane_has_exact_codex_process("cfg:1.0", "%7", proc_root))
+                _ = (proc_root / "202" / "cmdline").write_bytes(b"/home/agent/bin/bunx\0example/not-codex\0")
+                self.assertFalse(pane_has_exact_codex_process("cfg:1.0", "%7", proc_root))
+
+    def test_shell_started_codex_process_rejects_unrelated_terminal_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            pane_process = proc_root / "101"
+            foreground_process = proc_root / "202"
+            _ = pane_process.mkdir()
+            _ = foreground_process.mkdir()
+            _ = pane_process.joinpath("stat").write_text(
+                "101 (zsh) S 1 101 101 34817 202 " + "0 " * 13 + "11\n", encoding="ascii"
+            )
+            _ = foreground_process.joinpath("stat").write_text(
+                "202 (bunx) S 101 202 999 34817 202 " + "0 " * 13 + "22\n", encoding="ascii"
+            )
+            _ = foreground_process.joinpath("cmdline").write_bytes(b"/home/agent/bin/bunx\0@openai/codex@latest\0")
+
+            def tmux(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                output = "%7\t101\tbunx\n" if "#{pane_pid}" in command[-1] else "%7\tbunx\t\n"
+                return subprocess.CompletedProcess(command, 0, output, "")
+
+            with patch("omo_manager.omo_codex_status.exact_pane_id", return_value="%7"), patch(
+                "omo_manager.omo_codex_status.subprocess.run", side_effect=tmux
+            ):
+                self.assertFalse(pane_has_exact_codex_process("cfg:1.0", "%7", proc_root))
+
+    def test_codex_process_check_does_not_probe_cursor_foreground_process(self) -> None:
+        with patch("omo_manager.omo_codex_status.exact_pane_process", return_value=("cursor-agent", [])), patch(
+            "omo_manager.omo_codex_status.exact_shell_started_foreground_argv"
+        ) as foreground:
+            self.assertFalse(pane_has_exact_codex_process("pb:1.0", "%7"))
+
+        foreground.assert_not_called()
+
     def test_fresh_cursor_placeholder_is_ready(self) -> None:
         lines = [
             "  → Plan, search, build anything",
