@@ -1771,9 +1771,26 @@ def require_empty_cursor_composer(
             raise RuntimeError("target Cursor pane is not ready after retained-composer clear")
         return ""
     if not is_cursor_agent_capture(lines):
-        visible_prompts = [line[4:].rstrip() for line in lines[-20:] if line.startswith("  → ")]
-        if any(is_real_input_text(prompt) for prompt in visible_prompts):
-            raise RuntimeError("target Cursor composer became nonempty during incomplete-layout transition")
+        arrow_indices = [index for index, line in enumerate(raw_lines) if line == "  →" or line.startswith("  → ")]
+        if len(arrow_indices) > 1:
+            raise RuntimeError("target Cursor composer is ambiguous during incomplete-layout transition")
+        if len(arrow_indices) == 1:
+            prompt_index = arrow_indices[0]
+            input_rows = [raw_lines[prompt_index]]
+            saw_trailing_blank = False
+            for row in raw_lines[prompt_index + 1 :]:
+                if not row:
+                    saw_trailing_blank = True
+                    continue
+                if saw_trailing_blank or not row.startswith("    "):
+                    raise RuntimeError("target Cursor layout has unrelated rows during incomplete-layout transition")
+                input_rows.append(row)
+            logical_rows = [input_rows[0][4:].rstrip(), *(row[4:].rstrip() for row in input_rows[1:])]
+            prompt = "\n".join(logical_rows)
+            if is_real_input_text(prompt):
+                if cleared_text and len(prompt) <= len(cleared_text) and cleared_text.startswith(prompt):
+                    return prompt
+                raise RuntimeError("target Cursor composer grew or became unrelated during incomplete-layout transition")
         raise RuntimeError("target Cursor layout is transiently incomplete after non-submitting clear")
     input_text = current_input_text(lines)
     if is_real_input_text(input_text) or is_cursor_retained_submitted_composer(lines):

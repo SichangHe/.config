@@ -1684,6 +1684,87 @@ class TmuxSendTests(unittest.TestCase):
         sleep.assert_called_once()
         enter.assert_not_called()
 
+    def test_retained_cursor_clear_waits_through_shrinking_incomplete_redraw(self) -> None:
+        proof = RetainedCursorComposerProof("%421", 3680846, "cursor-agent", "a" * 64, "Await its terminal result now", 120)
+        transient = ["Handled the prior wake.", "  → Await its terminal result"]
+        with patch(
+            "omo_manager.omo_tmux_send.require_ready_retained_cursor_composer", side_effect=[proof, proof]
+        ), patch("omo_manager.omo_tmux_send.require_same_cursor_target"), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines",
+            side_effect=[transient, cursor_borderless_empty_lines()],
+        ), patch("omo_manager.omo_tmux_send.clear_retained_cursor_text") as clear, patch(
+            "omo_manager.omo_tmux_send.time.monotonic", side_effect=[0.0, 0.1]
+        ), patch("omo_manager.omo_tmux_send.time.sleep") as sleep, patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            self.assertEqual(proof, clear_ready_retained_cursor_composer("pb-newswatcher-agent:0", options()))
+
+        clear.assert_called_once_with("pb-newswatcher-agent:0", proof)
+        sleep.assert_called_once()
+        enter.assert_not_called()
+
+    def test_retained_cursor_clear_rejects_unrelated_incomplete_redraw(self) -> None:
+        proof = RetainedCursorComposerProof("%421", 3680846, "cursor-agent", "a" * 64, "Await its terminal result now", 120)
+        transient = ["Handled the prior wake.", "  → different input"]
+        with patch(
+            "omo_manager.omo_tmux_send.require_ready_retained_cursor_composer", side_effect=[proof, proof]
+        ), patch("omo_manager.omo_tmux_send.require_same_cursor_target"), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=transient
+        ), patch("omo_manager.omo_tmux_send.clear_retained_cursor_text"), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            with self.assertRaisesRegex(RuntimeError, "grew or became unrelated"):
+                clear_ready_retained_cursor_composer("pb-newswatcher-agent:0", options())
+
+        enter.assert_not_called()
+
+    def test_retained_cursor_clear_rejects_unrelated_incomplete_continuation(self) -> None:
+        proof = RetainedCursorComposerProof("%421", 3680846, "cursor-agent", "a" * 64, "Await its terminal result", 120)
+        transient = ["  → Await its terminal", "    unrelated continuation"]
+        with patch(
+            "omo_manager.omo_tmux_send.require_ready_retained_cursor_composer", side_effect=[proof, proof]
+        ), patch("omo_manager.omo_tmux_send.require_same_cursor_target"), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=transient
+        ), patch("omo_manager.omo_tmux_send.clear_retained_cursor_text"), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            with self.assertRaisesRegex(RuntimeError, "grew or became unrelated"):
+                clear_ready_retained_cursor_composer("pb-newswatcher-agent:0", options())
+
+        enter.assert_not_called()
+
+    def test_retained_cursor_clear_rejects_unparsed_incomplete_suffix(self) -> None:
+        proof = RetainedCursorComposerProof("%421", 3680846, "cursor-agent", "a" * 64, "Await its terminal result", 120)
+        for transient in (
+            ["  → Await its terminal", "unrelated text"],
+            ["  → Await its terminal", "", "    unrelated continuation"],
+        ):
+            with self.subTest(transient=transient), patch(
+                "omo_manager.omo_tmux_send.require_ready_retained_cursor_composer", side_effect=[proof, proof]
+            ), patch("omo_manager.omo_tmux_send.require_same_cursor_target"), patch(
+                "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=transient
+            ), patch("omo_manager.omo_tmux_send.clear_retained_cursor_text"), patch(
+                "omo_manager.omo_tmux_send.send_enter"
+            ) as enter:
+                with self.assertRaisesRegex(RuntimeError, "unrelated rows"):
+                    clear_ready_retained_cursor_composer("pb-newswatcher-agent:0", options())
+                enter.assert_not_called()
+
+    def test_retained_cursor_clear_rejects_second_arrow_outside_tail_window(self) -> None:
+        proof = RetainedCursorComposerProof("%421", 3680846, "cursor-agent", "a" * 64, "Await its terminal result", 120)
+        transient = ["  → older visible composer", *("history" for _ in range(20)), "  → Await its terminal result"]
+        with patch(
+            "omo_manager.omo_tmux_send.require_ready_retained_cursor_composer", side_effect=[proof, proof]
+        ), patch("omo_manager.omo_tmux_send.require_same_cursor_target"), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=transient
+        ), patch("omo_manager.omo_tmux_send.clear_retained_cursor_text"), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            with self.assertRaisesRegex(RuntimeError, "ambiguous"):
+                clear_ready_retained_cursor_composer("pb-newswatcher-agent:0", options())
+
+        enter.assert_not_called()
+
     def test_retained_cursor_clear_times_out_on_incomplete_layout(self) -> None:
         proof = RetainedCursorComposerProof("%42", 4242, "cursor-agent", text_sha256("old submitted wake"), "old submitted wake")
         transient = ["Handled the prior wake.", "  → Add a follow-up"]
