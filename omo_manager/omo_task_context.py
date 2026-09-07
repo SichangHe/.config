@@ -2,6 +2,7 @@
 """Resolve the active task owned by the current tmux pane."""
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 from pathlib import Path
@@ -62,4 +63,49 @@ def infer_active_task(root: Path, target: str) -> Path:
 def current_active_task(root: Path) -> Path:
     """Resolve the current pane to one active task."""
 
-    return infer_active_task(root, current_tmux_target())
+    try:
+        return infer_active_task(root, current_tmux_target())
+    except TaskFrontmatterError as direct_error:
+        if str(direct_error) != "current tmux pane cannot be identified":
+            raise
+        # A sandboxed owner may inherit the correct TMUX_PANE while being unable
+        # to open tmux's socket.  The watcher actor authenticates the Unix peer,
+        # pane process ancestry, and sole live task using its trusted connection.
+        try:
+            from omo_manager.omo_blocking_actor import request
+
+            result = request(root, {"operation": "active-task"})
+            relative = result.get("task")
+            target = result.get("target")
+            task_sha256 = result.get("task_sha256")
+            todo_sha256 = result.get("todo_sha256")
+            if (
+                not isinstance(relative, str)
+                or not relative
+                or not isinstance(target, str)
+                or not target
+                or not isinstance(task_sha256, str)
+                or not isinstance(todo_sha256, str)
+            ):
+                raise TaskFrontmatterError("current work queue actor returned an invalid task")
+            path = (root / relative).resolve(strict=False)
+            try:
+                path.relative_to(root.resolve())
+            except ValueError as exc:
+                raise TaskFrontmatterError("current work queue actor returned an invalid task") from exc
+            task_payload = path.read_bytes()
+            todo_payload = (root / "TODO.md").read_bytes()
+            metadata = read_task_metadata(path, root)
+            if (
+                hashlib.sha256(task_payload).hexdigest() != task_sha256
+                or hashlib.sha256(todo_payload).hexdigest() != todo_sha256
+                or metadata is None
+                or metadata.status not in ACTIVE_STATUSES
+                or infer_active_task(root, target) != path
+            ):
+                raise TaskFrontmatterError("current work queue actor returned an inactive task")
+            return path
+        except TaskFrontmatterError:
+            raise
+        except Exception as exc:
+            raise direct_error from exc

@@ -14,6 +14,15 @@ ownership. `list` prints item text. `add` and `replace` keep work open. `remove`
 requires one-line completion or cancellation evidence. Output never includes a
 task filename, `runat`, or `managerat`.
 
+If an owner's sandbox inherits `TMUX_PANE` but cannot open the tmux socket,
+the helper asks the existing pending-watcher actor to resolve its Unix-socket
+peer. The actor uses its trusted tmux connection to bind that pane id to the
+current pane process, requires the requesting process to descend from it, and
+returns only the sole active task for that target. This fallback takes no task,
+root, target, or manager override and is used only when direct tmux identity
+lookup is unavailable; ambiguous ownership, missing ancestry, changed task
+state, or an unavailable actor fails closed.
+
 ## command shape
 
 Use one manager-side CLI:

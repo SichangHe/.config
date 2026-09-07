@@ -101,6 +101,13 @@ class PendingQueueTests(unittest.TestCase):
             parse_args(["remove", "--help"])
         self.assertIn("answer a human question and remove its pending item with one email", " ".join(output.getvalue().split()))
 
+    def test_emailing_remove_requires_lowercase_sha256_completion_key(self) -> None:
+        base = ["remove", "--item", "finish review", "--evidence", "review passed"]
+        for value in ("", "not-a-digest", "A" * 64):
+            with self.subTest(value=value), self.assertRaises(SystemExit):
+                parse_args([*base, "--completion-key", value])
+        self.assertEqual("a" * 64, parse_args([*base, "--completion-key", "a" * 64]).completion_key)
+
     def test_legacy_remove_no_email_preserves_evidence_without_mail_calls(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -253,12 +260,15 @@ class PendingQueueTests(unittest.TestCase):
                             evidence="answered",
                             answer_subject_file=subject,
                             answer_message_file=message,
+                            completion_key="c" * 64,
                         ),
                         root,
                     ),
                 )
             self.assertEqual("Re: Original question", plan.call_args.kwargs["human_subject"])
             self.assertEqual("The concise answer.\n", plan.call_args.kwargs["human_body"])
+            self.assertEqual("c" * 64, plan.call_args.kwargs["semantic_key"])
+            self.assertEqual("c" * 64, require.call_args.kwargs["semantic_key"])
             require.assert_called_once()
             self.assertNotIn("answer question", path.read_text(encoding="utf-8").split("---", 2)[1])
 
@@ -307,6 +317,7 @@ class PendingQueueTests(unittest.TestCase):
                             evidence="review passed",
                             item_id="pi_019f0000-0000-7000-8000-000000000002",
                             outcome="completed",
+                            completion_key="d" * 64,
                         ),
                         root,
                     ),
@@ -314,6 +325,8 @@ class PendingQueueTests(unittest.TestCase):
             resolve.assert_called_once_with(document, "pi_019f0000-0000-7000-8000-000000000002", "completed", "review passed")
             self.assertEqual(("finish review",), plan.call_args.kwargs["items"])
             self.assertEqual("review passed", plan.call_args.kwargs["evidence"])
+            self.assertEqual("d" * 64, plan.call_args.kwargs["semantic_key"])
+            self.assertEqual("d" * 64, require.call_args.kwargs["semantic_key"])
             require.assert_called_once()
 
     def test_v2_remove_with_answer_files_sends_only_combined_email(self) -> None:

@@ -133,10 +133,19 @@ class BlockingActor:
         return path
 
     def _authorize(self, payload: dict[object, object], peer_pid: int) -> None:
+        caller_path, _target = self._active_task_for_peer(peer_pid)
+        caller = load_task(caller_path, root=self.root)
+        owner = load_task(self._task_path(payload["task"]), root=self.root)
+        if not caller.metadata["is_manager"] or not same_tmux_target(owner.metadata["managerat"], caller.metadata["runat"]):
+            raise BlockingError("the current manager does not directly own the edited task")
+
+    def _active_task_for_peer(self, peer_pid: int) -> tuple[Path, str]:
+        """Resolve a socket peer through the watcher's trusted tmux connection."""
+
         environ = Path(f"/proc/{peer_pid}/environ").read_bytes().split(b"\0")
         pane = next((entry.split(b"=", 1)[1].decode() for entry in environ if entry.startswith(b"TMUX_PANE=")), "")
         if not pane:
-            raise BlockingError("dependency changes require an identifiable manager pane")
+            raise BlockingError("current work queue requires an identifiable pane")
         result = subprocess.run(
             ["tmux", "display-message", "-p", "-t", pane, "#{session_name}:#{window_index}.#{pane_index}\t#{pane_pid}"],
             capture_output=True,
@@ -146,22 +155,36 @@ class BlockingActor:
         )
         target, separator, pane_pid_text = result.stdout.strip().partition("\t")
         if result.returncode != 0 or not target or not separator:
-            raise BlockingError("dependency changes require an active manager pane")
+            raise BlockingError("current work queue requires an active pane")
         try:
             pane_pid = int(pane_pid_text)
         except ValueError as exc:
-            raise BlockingError("dependency changes require an identifiable manager process") from exc
+            raise BlockingError("current work queue requires an identifiable pane process") from exc
         if pane_pid not in _ancestor_pids(peer_pid):
-            raise BlockingError("dependency changes must originate from the claimed manager pane")
-        caller = load_task(infer_active_task(self.root, target), root=self.root)
-        owner = load_task(self._task_path(payload["task"]), root=self.root)
-        if not caller.metadata["is_manager"] or not same_tmux_target(owner.metadata["managerat"], caller.metadata["runat"]):
-            raise BlockingError("the current manager does not directly own the edited task")
+            raise BlockingError("current work queue request does not originate from the claimed pane")
+        return infer_active_task(self.root, target), target
 
     def _handle(self, payload: object, peer_pid: int) -> dict[str, object]:
         if not isinstance(payload, dict):
             raise BlockingError("actor request must be a mapping")
         operation = payload.get("operation")
+        if operation == "active-task":
+            task, target = self._active_task_for_peer(peer_pid)
+            task_payload = task.read_bytes()
+            todo_payload = (self.root / "TODO.md").read_bytes()
+            if (
+                infer_active_task(self.root, target) != task
+                or task.read_bytes() != task_payload
+                or (self.root / "TODO.md").read_bytes() != todo_payload
+            ):
+                raise BlockingError("current work queue changed during authenticated resolution")
+            return {
+                "ok": True,
+                "target": target,
+                "task": str(task.relative_to(self.root)),
+                "task_sha256": hashlib.sha256(task_payload).hexdigest(),
+                "todo_sha256": hashlib.sha256(todo_payload).hexdigest(),
+            }
         if not v2_enabled(self.root):
             if operation == "queue":
                 return {"ok": True, "changed": []}

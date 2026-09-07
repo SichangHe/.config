@@ -295,7 +295,7 @@ class BidirectionalBlockingTests(unittest.TestCase):
                 "omo_manager.omo_blocking_actor.subprocess.run",
                 return_value=SimpleNamespace(returncode=0, stdout="mgr:1.0\t999999\n"),
             ),
-            self.assertRaisesRegex(BlockingError, "originate from the claimed manager pane"),
+            self.assertRaisesRegex(BlockingError, "does not originate from the claimed pane"),
         ):
             actor._authorize(payload, 1)
 

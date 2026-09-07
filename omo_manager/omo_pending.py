@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,6 +50,7 @@ class Args:
     answer_subject_file: Path | None = None
     answer_message_file: Path | None = None
     no_email: bool = False
+    completion_key: str = ""
 
 
 def pending_item_state(item: PendingTaskItem) -> str:
@@ -85,6 +87,7 @@ def parse_args(argv: list[str]) -> Args:
         help="Required with --item-id and accepted as optional documentation with legacy --item.",
     )
     remove.add_argument("--evidence", required=True)
+    remove.add_argument("--completion-key", default="", help="Exact shared SHA-256 identity required for completion email.")
     remove.add_argument(
         "--no-email",
         action="store_true",
@@ -114,6 +117,8 @@ def parse_args(argv: list[str]) -> Args:
             parser.error("--no-email is supported only for legacy --item removal.")
         if parsed.no_email and (parsed.answer_subject_file or parsed.answer_message_file):
             parser.error("--no-email cannot be combined with answer-email options.")
+        if not parsed.no_email and re.fullmatch(r"[0-9a-f]{64}", parsed.completion_key or "") is None:
+            parser.error("emailing remove requires --completion-key as a lowercase SHA-256 digest.")
         if bool(parsed.answer_subject_file) != bool(parsed.answer_message_file):
             parser.error("remove requires both --answer-subject-file and --answer-message-file when either is used.")
         items = normalized_items(tuple(parsed.item or ()))
@@ -126,6 +131,7 @@ def parse_args(argv: list[str]) -> Args:
             answer_subject_file=parsed.answer_subject_file,
             answer_message_file=parsed.answer_message_file,
             no_email=parsed.no_email,
+            completion_key=parsed.completion_key,
         )
     if parsed.command == "wake-ack":
         return Args("wake-ack", notice_id=parsed.notice_id)
@@ -207,6 +213,7 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
                     evidence=args.evidence,
                     human_subject=answer_subject,
                     human_body=answer_body,
+                    semantic_key=args.completion_key,
                 )
                 if answer_subject and email is None:
                     raise BlockingError("combined human answer is not allowed by this task's reporting policy")
@@ -220,6 +227,7 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
                     human_subject=answer_subject,
                     human_body=answer_body,
                     owner_may_mutate_after_delivery=True,
+                    semantic_key=args.completion_key,
                 ):
                     raise BlockingError("responsible-owner completion email requested; retry removal after owner delivery")
                 resolve_item(document, args.item_id, args.outcome, args.evidence)
@@ -260,6 +268,7 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
             evidence=args.evidence,
             human_subject=answer_subject,
             human_body=answer_body,
+            semantic_key=args.completion_key,
         )
         if answer_subject and email is None:
             raise BlockingError("combined human answer is not allowed by this task's reporting policy")
@@ -273,6 +282,7 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
             human_subject=answer_subject,
             human_body=answer_body,
             owner_may_mutate_after_delivery=True,
+            semantic_key=args.completion_key,
         ):
             raise BlockingError("responsible-owner completion email requested; retry removal after owner delivery")
         replace_if_unchanged(path, updated, before)
