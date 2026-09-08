@@ -1,0 +1,27 @@
+# stale predecessor input disposition
+
+- purpose
+  - clear the exact incident-bound `/status` completion menu without submitting text or stopping a pane
+  - preserve the earlier prepared close audit as immutable evidence
+- prepare
+  - authenticate the prior close packet, PASS review, prepared audit, executor reports, and literal `/status` authorization
+  - bind both pane, process, and session identities plus unchanged task, TODO, manager, helper, and report bytes
+  - capture only the bottom-anchored two-row `/status` completion menu
+- review
+  - independently revalidate every static and live binding
+  - bind the exact menu capture to a packet-specific PASS record
+- execute
+  - hold every bound input open under target, task-file, and tmux-input locks
+  - publish a separate prepared disposition audit before any key
+  - immediately bracket each one-queue key action with full held-file, lifecycle, pane-process, and Codex-session validation
+  - send `Escape` only while tmux also sees the reviewed menu capture byte-identically on the same live pane PID and non-shell foreground command
+  - send `Ctrl+C` only while the same tmux guards hold after the complete parser proves the remaining input is exactly `/status`
+  - require a complete ready view before publishing the disposition result
+- recovery
+  - accept only the recorded menu, exact `/status` input, or ready state after a prepared disposition audit exists
+  - validate an existing complete disposition only when its prepared audit matches and the pane is ready
+- exclusions
+  - never send `Enter`, stop either pane, change lifecycle files, or modify the prior prepared close audit
+  - treat the prior close packet as evidence-only after successful disposition
+  - fail closed on any different menu, input, pane, session, file, or state transition
+  - serialize supported lifecycle and input helpers through their shared locks; tmux cannot inspect a descendant Codex UUID in its command format, so an uncooperative external process replacement is outside this helper's guarantee and is detected only by the post-action validation
