@@ -71,6 +71,7 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
                 "task_sha256": subject.sha256(before_task),
                 "todo_sha256": "a" * 64,
                 "helper": str(Path(subject.__file__).resolve(strict=True)),
+                "helper_sha256": subject.RECOVERABLE_HELPER_SHA256,
             }
         )
         root_audit = tmp / "root-audit.json"
@@ -651,6 +652,64 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             ):
                 subject.prepare_todo_recovery(args)
             self.assertFalse(rollback_output.exists())
+
+    def test_latest_failed_disposition_is_the_only_new_recovery_eligibility(self) -> None:
+        latest = subject.recoverable_incident(subject.LATEST_RECOVERABLE_PACKET_SHA256)
+        self.assertEqual(
+            (
+                subject.LATEST_RECOVERABLE_REVIEW_SHA256,
+                subject.LATEST_RECOVERABLE_PREPARED_AUDIT_SHA256,
+                subject.LATEST_RECOVERABLE_HELPER_SHA256,
+            ),
+            latest,
+        )
+        self.assertIsNone(subject.recoverable_incident("0" * 64))
+        packet = {"helper_sha256": subject.LATEST_RECOVERABLE_HELPER_SHA256}
+        with (
+            patch.object(subject, "packet_bytes", return_value=b"latest packet"),
+            patch.object(subject, "sha256", return_value=subject.LATEST_RECOVERABLE_PACKET_SHA256),
+        ):
+            self.assertTrue(subject.is_recoverable_prepared_packet(packet))
+            packet["helper_sha256"] = subject.RECOVERABLE_HELPER_SHA256
+            self.assertFalse(subject.is_recoverable_prepared_packet(packet))
+
+    def test_latest_prepared_helper_recovery_rejects_review_and_audit_drift(self) -> None:
+        packet: dict[str, object] = {}
+        prepared = b"latest prepared audit\n"
+        prepared_path = Path("/tmp/latest-prepared-audit")
+        with (
+            patch.object(subject, "is_recoverable_prepared_packet", return_value=True),
+            patch.object(subject, "sha256", return_value=subject.LATEST_RECOVERABLE_PREPARED_AUDIT_SHA256),
+            patch.object(subject, "read_bound", return_value=prepared),
+        ):
+            self.assertTrue(
+                subject.authorize_prepared_helper_recovery(
+                    packet,
+                    subject.LATEST_RECOVERABLE_PACKET_SHA256,
+                    subject.LATEST_RECOVERABLE_REVIEW_SHA256,
+                    prepared_path,
+                    prepared,
+                )
+            )
+            self.assertFalse(
+                subject.authorize_prepared_helper_recovery(
+                    packet,
+                    subject.LATEST_RECOVERABLE_PACKET_SHA256,
+                    subject.RECOVERABLE_REVIEW_SHA256,
+                    prepared_path,
+                    prepared,
+                )
+            )
+        with patch.object(subject, "is_recoverable_prepared_packet", return_value=True):
+            self.assertFalse(
+                subject.authorize_prepared_helper_recovery(
+                    packet,
+                    subject.LATEST_RECOVERABLE_PACKET_SHA256,
+                    subject.LATEST_RECOVERABLE_REVIEW_SHA256,
+                    prepared_path,
+                    b"drifted audit\n",
+                )
+            )
 
     def test_prepare_todo_recovery_reserves_every_absent_prior_close_control_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

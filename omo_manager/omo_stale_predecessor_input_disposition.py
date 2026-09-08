@@ -101,6 +101,10 @@ RECOVERABLE_PACKET_SHA256 = "e7350f2b8ce7d28d9e5480837b5a1985242c43cccfecb62ab2f
 RECOVERABLE_REVIEW_SHA256 = "feb306c06dd5fb0cef6614b0e6a78866a9fd46d35f3b94f2359e8249b00ddc38"
 RECOVERABLE_PREPARED_AUDIT_SHA256 = "ea0cc462c460598775244919ee913448e1f0655008e0a4420c8d03cbf44fc9fd"
 RECOVERABLE_HELPER_SHA256 = "ab4c54f5cdc06823ce8d36333e7ee928b82e9813bb7de1da76df526e7f90cb85"
+LATEST_RECOVERABLE_PACKET_SHA256 = "d9037a18a9ec4ab999b6c9059a87f85231f94601b8dec05ae3d4f8e2dc9a7c25"
+LATEST_RECOVERABLE_REVIEW_SHA256 = "2a91482ee7170cc783cc8ec66f5a8bb13238483359e8ab06966fb49e10aea751"
+LATEST_RECOVERABLE_PREPARED_AUDIT_SHA256 = "d0df18ce5617e099cb89abca02afc0cd35f342707cb500fca4a494252fa134ff"
+LATEST_RECOVERABLE_HELPER_SHA256 = "af137b28809b36adf81ac0c5057c066518ffe35a6d86f8d47d343c3a3ba89c4c"
 SOURCE1485_ROOT_AUDIT_SHA256 = "dd2cd04c1c6cd6c4050c7cd537d893e3c24aec45c504c1db3dbe0e4c0c792f2b"
 SOURCE1485_ORIGINAL_TASK_SHA256 = "b79fb58c6b1409dfce202f0f05105e8e3d88887cde77d69e2fc810687148094e"
 EXPECTED_SCOPE = {
@@ -682,10 +686,21 @@ def validate_disposition_output_paths(output: Path, audit: Path, reserved: set[P
         raise TaskFrontmatterError("disposition output paths overlap immutable evidence.")
 
 
-def is_recoverable_prepared_packet(packet: dict[str, object]) -> bool:
-    """Recognize only the exact packet stranded by the first guarded attempt."""
+def recoverable_incident(packet_sha256: str) -> tuple[str, str, str] | None:
+    """Return the exact review, prepared-audit, and helper identities allowed to recover."""
 
-    return packet.get("helper") == str(Path(__file__).resolve(strict=True)) and packet.get("helper_sha256") == RECOVERABLE_HELPER_SHA256 and sha256(packet_bytes(packet)) == RECOVERABLE_PACKET_SHA256
+    if packet_sha256 == RECOVERABLE_PACKET_SHA256:
+        return RECOVERABLE_REVIEW_SHA256, RECOVERABLE_PREPARED_AUDIT_SHA256, RECOVERABLE_HELPER_SHA256
+    if packet_sha256 == LATEST_RECOVERABLE_PACKET_SHA256:
+        return LATEST_RECOVERABLE_REVIEW_SHA256, LATEST_RECOVERABLE_PREPARED_AUDIT_SHA256, LATEST_RECOVERABLE_HELPER_SHA256
+    return None
+
+
+def is_recoverable_prepared_packet(packet: dict[str, object]) -> bool:
+    """Recognize only an immutable packet from an explicitly allowed failed attempt."""
+
+    incident = recoverable_incident(sha256(packet_bytes(packet)))
+    return incident is not None and packet.get("helper_sha256") == incident[2]
 
 
 def validate_incident_digests(packet: dict[str, object]) -> None:
@@ -1051,7 +1066,7 @@ def static_evidence(
             raise TaskFrontmatterError("prepared disposition helper recovery binding is invalid.")
         prior_helper_input = object_map(raw_inputs[-1], "recoverable input disposition helper")
         prior_helper_identity = file_identity_from(prior_helper_input.get("file"), "recoverable input disposition helper")
-        if prior_helper_identity.path != str(packet["helper"]) or prior_helper_identity.sha256 != RECOVERABLE_HELPER_SHA256:
+        if prior_helper_identity.path != str(packet["helper"]) or prior_helper_identity.sha256 != packet["helper_sha256"]:
             raise TaskFrontmatterError("prepared disposition helper recovery binding is invalid.")
         expected_inputs[-1] = prior_helper_input
     if packet.get("inputs") != expected_inputs:
@@ -1376,29 +1391,34 @@ def validate_todo_recovery_packet(
 ) -> bytes:
     if sha256(todo_recovery_bytes(recovery)) != recovery_sha256:
         raise TaskFrontmatterError("TODO recovery packet hash is invalid.")
+    packet_sha256 = sha256(packet_bytes(packet))
+    incident = recoverable_incident(packet_sha256)
+    if incident is None:
+        raise TaskFrontmatterError("TODO recovery packet does not bind the exact failed disposition.")
+    review_sha256, prepared_sha256, _helper_sha256 = incident
     expected = {
         "packet": str(packet_path),
-        "packet_sha256": RECOVERABLE_PACKET_SHA256,
+        "packet_sha256": packet_sha256,
         "review_report": str(review_path),
-        "review_report_sha256": RECOVERABLE_REVIEW_SHA256,
+        "review_report_sha256": review_sha256,
         "prepared_audit": str(prepared_path),
-        "prepared_audit_sha256": RECOVERABLE_PREPARED_AUDIT_SHA256,
+        "prepared_audit_sha256": prepared_sha256,
     }
     if any(recovery.get(key) != value for key, value in expected.items()) or not is_recoverable_prepared_packet(packet):
         raise TaskFrontmatterError("TODO recovery packet does not bind the exact failed disposition.")
-    prepared_data = prepared_disposition_audit(packet, RECOVERABLE_PACKET_SHA256)
+    prepared_data = prepared_disposition_audit(packet, packet_sha256)
     if (
-        sha256(prepared_data) != RECOVERABLE_PREPARED_AUDIT_SHA256
+        sha256(prepared_data) != prepared_sha256
         or read_bound(
             prepared_path,
-            RECOVERABLE_PREPARED_AUDIT_SHA256,
+            prepared_sha256,
             "recoverable prepared disposition audit",
             private=True,
         )
         != prepared_data
     ):
         raise TaskFrontmatterError("recoverable prepared disposition audit changed.")
-    validate_review(review_path, RECOVERABLE_REVIEW_SHA256, packet, RECOVERABLE_PACKET_SHA256)
+    validate_review(review_path, review_sha256, packet, packet_sha256)
     current_todo, _current_task, _manager_task, _manager_target, _manager_parent = validate_todo_recovery_current(packet, recovery)
     static_evidence(packet, rebind_recoverable_helper=True, todo_recovery=recovery)
     return current_todo
@@ -1445,7 +1465,8 @@ def load_exact_failed_disposition(args: argparse.Namespace) -> tuple[dict[str, o
     packet_path = args.packet.resolve(strict=True)
     review_path = args.review_report.resolve(strict=True)
     packet = validate_packet(read_bound(packet_path, args.packet_sha256, "input disposition packet", private=True), args.packet_sha256)
-    if args.packet_sha256 != RECOVERABLE_PACKET_SHA256 or args.review_report_sha256 != RECOVERABLE_REVIEW_SHA256:
+    incident = recoverable_incident(args.packet_sha256)
+    if incident is None or args.review_report_sha256 != incident[0] or not is_recoverable_prepared_packet(packet):
         raise TaskFrontmatterError("TODO recovery requires the exact failed disposition and review.")
     validate_review(review_path, args.review_report_sha256, packet, args.packet_sha256)
     prepared_path = Path(f"{packet['audit']}.prepared").resolve(strict=True)
@@ -1454,6 +1475,9 @@ def load_exact_failed_disposition(args: argparse.Namespace) -> tuple[dict[str, o
 
 def prepare_todo_recovery(args: argparse.Namespace) -> None:
     packet, packet_path, review_path, prepared_path = load_exact_failed_disposition(args)
+    incident = recoverable_incident(args.packet_sha256)
+    if incident is None:  # load_exact_failed_disposition already enforces this invariant.
+        raise TaskFrontmatterError("TODO recovery requires the exact failed disposition and review.")
     output = args.todo_recovery_output.resolve(strict=False)
     current_manager_task = Path(str(packet["root"])) / "dw_root_new.md"
     prior_prepared = Path(str(packet["prepared_close_audit"])).resolve(strict=True)
@@ -1516,7 +1540,7 @@ def prepare_todo_recovery(args: argparse.Namespace) -> None:
             "review_report": str(review_path),
             "review_report_sha256": args.review_report_sha256,
             "prepared_audit": str(prepared_path),
-            "prepared_audit_sha256": RECOVERABLE_PREPARED_AUDIT_SHA256,
+            "prepared_audit_sha256": incident[1],
             "task": packet["task"],
             "original_task_sha256": packet["task_sha256"],
             "current_task_input": {
@@ -1655,7 +1679,7 @@ def hold_inputs(
             current = hold_absolute(current_identity, current_ancestors)
             manager_rebound = True
         elif rebind_recoverable_helper and identity.path == str(packet["helper"]):
-            if helper_rebound or identity.sha256 != RECOVERABLE_HELPER_SHA256:
+            if helper_rebound or identity.sha256 != packet["helper_sha256"]:
                 raise TaskFrontmatterError("prepared disposition helper recovery binding is invalid.")
             if todo_recovery is None:
                 helper = Path(__file__).resolve(strict=True)
@@ -1708,16 +1732,12 @@ def authorize_prepared_helper_recovery(
 ) -> bool:
     """Rebind the helper only for the exact immutable failed execution."""
 
-    if (
-        packet_sha256 != RECOVERABLE_PACKET_SHA256
-        or review_sha256 != RECOVERABLE_REVIEW_SHA256
-        or sha256(prepared_data) != RECOVERABLE_PREPARED_AUDIT_SHA256
-        or not is_recoverable_prepared_packet(packet)
-    ):
+    incident = recoverable_incident(packet_sha256)
+    if incident is None or review_sha256 != incident[0] or sha256(prepared_data) != incident[1] or not is_recoverable_prepared_packet(packet):
         return False
     observed = read_bound(
         prepared_path,
-        RECOVERABLE_PREPARED_AUDIT_SHA256,
+        incident[1],
         "recoverable prepared disposition audit",
         private=True,
     )
