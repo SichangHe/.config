@@ -216,10 +216,7 @@ class CodexStopTests(unittest.TestCase):
 
     def test_consumed_report_shell_validation_only_waives_visible_acceptance(self) -> None:
         session_id = "11111111-2222-3333-4444-555555555555"
-        transcript = (
-            f"terminal report sent\nTo continue this session, run:\n  codex resume {session_id}\n"
-            "Or run codex resume and select Define manager worker defaults.\n$ "
-        )
+        transcript = f"terminal report sent\nTo continue this session, run:\n  codex resume {session_id}\nOr run codex resume and select Define manager worker defaults.\n$ "
         with (
             patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
             patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
@@ -230,9 +227,7 @@ class CodexStopTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "terminal report evidence is absent"):
                 validate_exited_codex_shell("cfg:1", "%42", session_id, "specific-token")
-            observed = validate_exited_codex_shell_with_consumed_report(
-                "cfg:1", "%42", session_id, "specific-token"
-            )
+            observed = validate_exited_codex_shell_with_consumed_report("cfg:1", "%42", session_id, "specific-token")
         self.assertEqual(hashlib.sha256(transcript.encode()).hexdigest(), observed)
 
     def test_close_exited_codex_shell_matches_frozen_helper_contract_and_preserves_order(self) -> None:
@@ -268,6 +263,7 @@ class CodexStopTests(unittest.TestCase):
             tuple(parameters),
         )
         for keyword in helper_keywords:
+            assert keyword is not None
             self.assertEqual(inspect.Parameter.KEYWORD_ONLY, parameters[keyword].kind)
 
         session_id = "11111111-2222-3333-4444-555555555555"
@@ -1024,9 +1020,7 @@ class CodexStopTests(unittest.TestCase):
             with patch("omo_manager.omo_codex_stop.LOCAL_ENV_PATH", config):
                 self.assertEqual(
                     payload,
-                    codex_stop.read_human_close_authorization(
-                        "manager_mail/human.txt", hashlib.sha256(payload).hexdigest(), root
-                    ),
+                    codex_stop.read_human_close_authorization("manager_mail/human.txt", hashlib.sha256(payload).hexdigest(), root),
                 )
 
     def test_human_close_authority_rejects_config_alias_for_other_root(self) -> None:
@@ -1362,10 +1356,7 @@ class CodexStopTests(unittest.TestCase):
         pane_id.assert_not_called()
 
     def test_source1474_authorizes_only_exact_hcfg_target(self) -> None:
-        authority = (
-            b"Subject: Re: Helper repair owner cannot resume safely\n\n"
-            b"Close hcfg:1, move out their tasks, then restart yourself\n"
-        )
+        authority = b"Subject: Re: Helper repair owner cannot resume safely\n\nClose hcfg:1, move out their tasks, then restart yourself\n"
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "helper_audit_human_facing.md").write_text("---\nrunat: hcfg:1\n---\n", encoding="utf-8")
@@ -1926,8 +1917,16 @@ class CodexStopTests(unittest.TestCase):
                 patch("omo_manager.omo_codex_stop.guarded_tmux_sequence", return_value="") as guarded,
             ):
                 codex_stop.close_bound_tmux_target(
-                    "%42", lambda: True, "vl:2", "%42",
-                    str(proof), str(audit), secret, commitment, 4242, 999,
+                    "%42",
+                    lambda: True,
+                    "vl:2",
+                    "%42",
+                    str(proof),
+                    str(audit),
+                    secret,
+                    commitment,
+                    4242,
+                    999,
                     proof_operation="done-live-no-mail-close",
                     proof_audit_sha256=audit_sha256,
                 )
@@ -1950,12 +1949,48 @@ class CodexStopTests(unittest.TestCase):
                 self.assertRaisesRegex(RuntimeError, "exact audit and process binding"),
             ):
                 codex_stop.close_bound_tmux_target(
-                    "%42", lambda: True, "vl:2", "%42",
-                    str(proof), str(audit), secret, commitment,
+                    "%42",
+                    lambda: True,
+                    "vl:2",
+                    "%42",
+                    str(proof),
+                    str(audit),
+                    secret,
+                    commitment,
                     proof_operation="done-live-no-mail-close",
                     proof_audit_sha256="b" * 64,
                 )
         guarded.assert_not_called()
+
+    def test_stale_predecessor_bound_close_passes_registered_operation_to_child(self) -> None:
+        secret = "a" * 64
+        commitment = hashlib.sha256(secret.encode()).hexdigest()
+        audit_sha256 = "b" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = Path(tmp) / "stale-predecessor.json.prepared"
+            proof = Path(tmp) / ".stale-predecessor.json.prepared.owner-stopped"
+            with (
+                patch("omo_manager.omo_codex_stop.guarded_current_command", return_value="zsh"),
+                patch("omo_manager.omo_codex_stop.guarded_tmux_sequence", return_value="") as guarded,
+            ):
+                codex_stop.close_bound_tmux_target(
+                    "%756",
+                    lambda: True,
+                    "dw8:0",
+                    "%756",
+                    str(proof),
+                    str(audit),
+                    secret,
+                    commitment,
+                    1890387,
+                    26503216,
+                    proof_operation=codex_stop.STALE_PREDECESSOR_CLOSE_OPERATION,
+                    proof_audit_sha256=audit_sha256,
+                )
+        command = guarded.call_args.args[2][0]
+        self.assertEqual("run-shell", command[0])
+        self.assertIn(codex_stop.STALE_PREDECESSOR_CLOSE_OPERATION, command[1])
+        self.assertIn(audit_sha256, command[1])
 
     def test_done_live_bound_child_accepts_only_complete_v2_consumed_receipt_binding(self) -> None:
         commitment = "a" * 64
@@ -1963,7 +1998,12 @@ class CodexStopTests(unittest.TestCase):
         record = json.loads(text)
         self.assertTrue(
             codex_stop.done_live_close_audit_authorizes(
-                text, record, commitment, target="vl:2", pane_id_value="%42", pane_pid=4242,
+                text,
+                record,
+                commitment,
+                target="vl:2",
+                pane_id_value="%42",
+                pane_pid=4242,
                 pane_start_ticks=999,
             )
         )
@@ -1971,7 +2011,12 @@ class CodexStopTests(unittest.TestCase):
         changed = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
         self.assertFalse(
             codex_stop.done_live_close_audit_authorizes(
-                changed, record, commitment, target="vl:2", pane_id_value="%42", pane_pid=4242,
+                changed,
+                record,
+                commitment,
+                target="vl:2",
+                pane_id_value="%42",
+                pane_pid=4242,
                 pane_start_ticks=999,
             )
         )
@@ -1993,8 +2038,16 @@ class CodexStopTests(unittest.TestCase):
                 self.assertRaisesRegex(RuntimeError, "audit drifted"),
             ):
                 codex_stop.kill_bound_and_write_close_proof(
-                    "vl:2", "%42", 4242, 999, proof, audit, secret, commitment,
-                    "done-live-no-mail-close", hashlib.sha256(audit_text.encode()).hexdigest(),
+                    "vl:2",
+                    "%42",
+                    4242,
+                    999,
+                    proof,
+                    audit,
+                    secret,
+                    commitment,
+                    "done-live-no-mail-close",
+                    hashlib.sha256(audit_text.encode()).hexdigest(),
                 )
         tmux.assert_not_called()
         writer.assert_not_called()
@@ -2019,12 +2072,250 @@ class CodexStopTests(unittest.TestCase):
                 self.assertRaisesRegex(RuntimeError, "audit drifted"),
             ):
                 codex_stop.kill_bound_and_write_close_proof(
-                    "vl:2", "%42", 4242, 999, proof, audit, secret, commitment,
-                    "done-live-no-mail-close", hashlib.sha256(original.encode()).hexdigest(),
+                    "vl:2",
+                    "%42",
+                    4242,
+                    999,
+                    proof,
+                    audit,
+                    secret,
+                    commitment,
+                    "done-live-no-mail-close",
+                    hashlib.sha256(original.encode()).hexdigest(),
                 )
             self.assertFalse(done_live_close_started_path(audit).exists())
         pane.assert_not_called()
         guarded.assert_not_called()
+
+    def test_stale_predecessor_audit_registration_binds_operation_and_identity(self) -> None:
+        commitment = "a" * 64
+        audit_record = {
+            "schema": "omo-stale-predecessor-close/v1",
+            "operation": codex_stop.STALE_PREDECESSOR_CLOSE_OPERATION,
+            "state": "prepared",
+        }
+        audit_text = json.dumps(audit_record, sort_keys=True, separators=(",", ":")) + "\n"
+        audit_sha256 = hashlib.sha256(audit_text.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp)
+            private.chmod(0o700)
+            audit = private / "stale-predecessor.json.prepared"
+            audit.write_text(audit_text, encoding="utf-8")
+            audit.chmod(0o600)
+
+            def authorizes(
+                observed_text: str,
+                observed_audit: object,
+                observed_commitment: str,
+                target: str,
+                pane: str,
+                pid: int,
+                ticks: int,
+                path: Path,
+            ) -> bool:
+                return (
+                    observed_text == audit_text
+                    and observed_audit == audit_record
+                    and observed_commitment == commitment
+                    and (target, pane, pid, ticks, path) == ("dw8:0", "%756", 1890387, 26503216, audit)
+                )
+
+            with patch("omo_manager.omo_stale_predecessor_close.audit_authorizes", side_effect=authorizes) as validator:
+                codex_stop.validate_bound_close_audit_file(
+                    codex_stop.STALE_PREDECESSOR_CLOSE_OPERATION,
+                    audit,
+                    commitment,
+                    "dw8:0",
+                    "%756",
+                    1890387,
+                    26503216,
+                    audit_sha256,
+                )
+                with self.assertRaisesRegex(RuntimeError, "audit drifted"):
+                    codex_stop.validate_bound_close_audit_file(
+                        codex_stop.STALE_PREDECESSOR_CLOSE_OPERATION,
+                        audit,
+                        commitment,
+                        "dw8:9",
+                        "%756",
+                        1890387,
+                        26503216,
+                        audit_sha256,
+                    )
+            self.assertEqual(2, validator.call_count)
+
+    def test_stale_predecessor_audit_registration_rejects_changed_bytes_and_resumed_predecessor(self) -> None:
+        commitment = "a" * 64
+        audit_record = {
+            "schema": "omo-stale-predecessor-close/v1",
+            "operation": codex_stop.STALE_PREDECESSOR_CLOSE_OPERATION,
+            "state": "prepared",
+        }
+        audit_text = json.dumps(audit_record, sort_keys=True, separators=(",", ":")) + "\n"
+        audit_sha256 = hashlib.sha256(audit_text.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp)
+            private.chmod(0o700)
+            audit = private / "stale-predecessor.json.prepared"
+            audit.write_text(audit_text, encoding="utf-8")
+            audit.chmod(0o600)
+            audit.write_text(audit_text.replace('"prepared"', '"changed"'), encoding="utf-8")
+            with (
+                patch("omo_manager.omo_stale_predecessor_close.audit_authorizes") as validator,
+                self.assertRaisesRegex(RuntimeError, "audit drifted"),
+            ):
+                codex_stop.validate_bound_close_audit_file(
+                    codex_stop.STALE_PREDECESSOR_CLOSE_OPERATION,
+                    audit,
+                    commitment,
+                    "dw8:0",
+                    "%756",
+                    1890387,
+                    26503216,
+                    audit_sha256,
+                )
+            validator.assert_not_called()
+            audit.write_text(audit_text, encoding="utf-8")
+            with (
+                patch("omo_manager.omo_stale_predecessor_close.audit_authorizes", return_value=False) as validator,
+                self.assertRaisesRegex(RuntimeError, "audit drifted"),
+            ):
+                codex_stop.validate_bound_close_audit_file(
+                    codex_stop.STALE_PREDECESSOR_CLOSE_OPERATION,
+                    audit,
+                    commitment,
+                    "dw8:0",
+                    "%756",
+                    1890387,
+                    26503216,
+                    audit_sha256,
+                )
+            validator.assert_called_once()
+
+    def test_stale_predecessor_bound_child_promotes_only_after_exact_kill(self) -> None:
+        secret = "a" * 64
+        commitment = hashlib.sha256(secret.encode()).hexdigest()
+        audit_record = {
+            "schema": "omo-stale-predecessor-close/v1",
+            "operation": codex_stop.STALE_PREDECESSOR_CLOSE_OPERATION,
+            "state": "prepared",
+        }
+        audit_text = json.dumps(audit_record, sort_keys=True, separators=(",", ":")) + "\n"
+        audit_sha256 = hashlib.sha256(audit_text.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp)
+            private.chmod(0o700)
+            audit = private / "stale-predecessor.json.prepared"
+            audit.write_text(audit_text, encoding="utf-8")
+            audit.chmod(0o600)
+            proof = private / ".stale-predecessor.json.prepared.owner-stopped"
+            state = {"live": True}
+
+            def target_pane(_target: str) -> str:
+                return "%756" if state["live"] else ""
+
+            def start_ticks(_pid: int) -> int | None:
+                return 26503216 if state["live"] else None
+
+            def kill(*_values: object) -> str:
+                state["live"] = False
+                return ""
+
+            def pre_kill(*_values: object) -> bool:
+                return state["live"]
+
+            def post_kill(*_values: object) -> bool:
+                return not state["live"]
+
+            with (
+                patch("omo_manager.omo_codex_stop.pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_codex_stop.process_start_ticks", side_effect=start_ticks),
+                patch("omo_manager.omo_codex_stop.guarded_tmux_sequence", side_effect=kill) as guarded,
+                patch("omo_manager.omo_stale_predecessor_close.audit_authorizes", side_effect=pre_kill) as pre_validator,
+                patch("omo_manager.omo_stale_predecessor_close.audit_authorizes_after_close", side_effect=post_kill) as post_validator,
+            ):
+                codex_stop.kill_bound_and_write_close_proof(
+                    "dw8:0",
+                    "%756",
+                    1890387,
+                    26503216,
+                    proof,
+                    audit,
+                    secret,
+                    commitment,
+                    codex_stop.STALE_PREDECESSOR_CLOSE_OPERATION,
+                    audit_sha256,
+                )
+            self.assertTrue(
+                codex_stop.has_bound_close_proof(
+                    proof,
+                    commitment,
+                    audit_sha256,
+                    codex_stop.STALE_PREDECESSOR_CLOSE_OPERATION,
+                )
+            )
+            self.assertFalse(codex_stop.done_live_close_started_path(audit).exists())
+        self.assertGreaterEqual(pre_validator.call_count, 3)
+        self.assertGreaterEqual(post_validator.call_count, 2)
+        guarded.assert_called_once_with("dw8:0", "%756", [["kill-pane", "-t", "%756"]], 1890387)
+
+    def test_stale_predecessor_promotion_recovers_durable_started_marker(self) -> None:
+        secret = "a" * 64
+        commitment = hashlib.sha256(secret.encode()).hexdigest()
+        audit_record = {
+            "schema": "omo-stale-predecessor-close/v1",
+            "operation": codex_stop.STALE_PREDECESSOR_CLOSE_OPERATION,
+            "state": "prepared",
+        }
+        audit_text = json.dumps(audit_record, sort_keys=True, separators=(",", ":")) + "\n"
+        audit_sha256 = hashlib.sha256(audit_text.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp)
+            private.chmod(0o700)
+            audit = private / "stale-predecessor.json.prepared"
+            audit.write_text(audit_text, encoding="utf-8")
+            audit.chmod(0o600)
+            proof = private / ".stale-predecessor.json.prepared.owner-stopped"
+            with patch("omo_manager.omo_stale_predecessor_close.audit_authorizes", return_value=True):
+                started = codex_stop.write_done_live_close_started(
+                    proof,
+                    audit,
+                    secret,
+                    commitment,
+                    audit_sha256,
+                    "dw8:0",
+                    "%756",
+                    1890387,
+                    26503216,
+                    codex_stop.STALE_PREDECESSOR_CLOSE_OPERATION,
+                )
+            with (
+                patch("omo_manager.omo_codex_stop.pane_id", return_value=""),
+                patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=None),
+                patch("omo_manager.omo_stale_predecessor_close.audit_authorizes_after_close", return_value=True) as validator,
+            ):
+                recovered = codex_stop.promote_done_live_close_started(
+                    proof,
+                    audit,
+                    commitment,
+                    audit_sha256,
+                    "dw8:0",
+                    "%756",
+                    1890387,
+                    26503216,
+                    codex_stop.STALE_PREDECESSOR_CLOSE_OPERATION,
+                )
+            self.assertEqual(secret, recovered)
+            self.assertTrue(
+                codex_stop.has_bound_close_proof(
+                    proof,
+                    commitment,
+                    audit_sha256,
+                    codex_stop.STALE_PREDECESSOR_CLOSE_OPERATION,
+                )
+            )
+            self.assertFalse(started.exists())
+        self.assertGreaterEqual(validator.call_count, 2)
 
     def test_done_live_bound_child_recovers_kill_before_final_proof(self) -> None:
         secret = "a" * 64
@@ -2058,8 +2349,16 @@ class CodexStopTests(unittest.TestCase):
                 self.assertRaises(KeyboardInterrupt),
             ):
                 codex_stop.kill_bound_and_write_close_proof(
-                    "vl:2", "%42", 4242, 999, proof, audit, secret, commitment,
-                    "done-live-no-mail-close", audit_sha256,
+                    "vl:2",
+                    "%42",
+                    4242,
+                    999,
+                    proof,
+                    audit,
+                    secret,
+                    commitment,
+                    "done-live-no-mail-close",
+                    audit_sha256,
                 )
             started = done_live_close_started_path(audit)
             self.assertTrue(started.is_file())
@@ -2069,7 +2368,14 @@ class CodexStopTests(unittest.TestCase):
                 patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=None),
             ):
                 recovered = codex_stop.promote_done_live_close_started(
-                    proof, audit, commitment, audit_sha256, "vl:2", "%42", 4242, 999,
+                    proof,
+                    audit,
+                    commitment,
+                    audit_sha256,
+                    "vl:2",
+                    "%42",
+                    4242,
+                    999,
                 )
             self.assertEqual(secret, recovered)
             self.assertTrue(codex_stop.has_bound_close_proof(proof, commitment, audit_sha256))
@@ -2088,7 +2394,15 @@ class CodexStopTests(unittest.TestCase):
             audit.chmod(0o600)
             proof = private / ".done-live.json.owner-stopped"
             started = codex_stop.write_done_live_close_started(
-                proof, audit, secret, commitment, audit_sha256, "vl:2", "%42", 4242, 999,
+                proof,
+                audit,
+                secret,
+                commitment,
+                audit_sha256,
+                "vl:2",
+                "%42",
+                4242,
+                999,
             )
             os.link(started, proof)
             with (
@@ -2096,7 +2410,14 @@ class CodexStopTests(unittest.TestCase):
                 patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=None),
             ):
                 recovered = codex_stop.promote_done_live_close_started(
-                    proof, audit, commitment, audit_sha256, "vl:2", "%42", 4242, 999,
+                    proof,
+                    audit,
+                    commitment,
+                    audit_sha256,
+                    "vl:2",
+                    "%42",
+                    4242,
+                    999,
                 )
             self.assertEqual(secret, recovered)
             self.assertTrue(codex_stop.has_bound_close_proof(proof, commitment, audit_sha256))
@@ -2132,8 +2453,16 @@ class CodexStopTests(unittest.TestCase):
                 patch("omo_manager.omo_codex_stop.tmux") as raw_tmux,
             ):
                 codex_stop.kill_bound_and_write_close_proof(
-                    "vl:2", "%42", 4242, 999, proof, audit, secret, commitment,
-                    "done-live-no-mail-close", hashlib.sha256(audit_text.encode()).hexdigest(),
+                    "vl:2",
+                    "%42",
+                    4242,
+                    999,
+                    proof,
+                    audit,
+                    secret,
+                    commitment,
+                    "done-live-no-mail-close",
+                    hashlib.sha256(audit_text.encode()).hexdigest(),
                 )
             self.assertTrue(codex_stop.has_bound_close_proof(proof, commitment, hashlib.sha256(audit_text.encode()).hexdigest()))
             self.assertFalse(done_live_close_started_path(audit).exists())

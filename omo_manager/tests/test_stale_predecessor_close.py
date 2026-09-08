@@ -1,0 +1,276 @@
+from __future__ import annotations
+
+import argparse
+import base64
+import contextlib
+import hashlib
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from typing import cast
+from unittest.mock import patch
+
+from omo_manager.omo_repository_custody import canonical_json
+from omo_manager.omo_stale_predecessor_close import (
+    AUDIT_KEYS,
+    OPERATION,
+    SCHEMA,
+    PanePin,
+    audit_authorizes,
+    audit_authorizes_after_close,
+    bound_receipt_id,
+    execute,
+    packet_bytes,
+    parse_pin,
+    predecessor_snapshots,
+    reconstruct_predecessor,
+    sha256,
+    validate_inputs,
+    validate_ready_predecessor,
+    validate_packet,
+)
+from omo_manager.omo_task_metadata import TaskFrontmatterError
+
+
+def task_text(body: str = "first\n(done)\nnew work\n") -> bytes:
+    return (f"---\nversion: v1.0.0\nstatus: running\nrunat: dw8:1\ntool: codex\nmanagerat: dw:0\nis_manager: false\npending_task_items:\n  - follow up\n---\n{body}").encode()
+
+
+def manager_text() -> str:
+    return "---\nversion: v1.0.0\nstatus: running\nrunat: dw:0\ntool: codex\nmanagerat: wl:1\nis_manager: true\npending_task_items: []\n---\n"
+
+
+def packet_record(tmp: Path) -> dict[str, object]:
+    running = ("---\nversion: v1.0.0\nstatus: running\nrunat: dw8:0\ntool: codex\nmanagerat: dw:0\nis_manager: false\npending_task_items: []\n---\nfirst\n(done)\n").encode()
+    done = running.replace(b"status: running\n", b"status: done\n")
+    secret = "a" * 64
+    helper = Path(__file__).parents[1] / "omo_stale_predecessor_close.py"
+    record: dict[str, object] = {
+        "schema": SCHEMA,
+        "root": str(tmp),
+        "task": str(tmp / "worker.md"),
+        "todo": str(tmp / "TODO.md"),
+        "manager_task": str(tmp / "manager.md"),
+        "manager_target": "dw:0",
+        "predecessor_target": "dw8:0",
+        "predecessor_pane": {"target": "dw8:0", "pane_id": "%1", "pane_pid": 101, "pane_start_ticks": 201},
+        "predecessor_session_id": "01a07f0f-ffbd-7f13-89f1-4936c50be5c2",
+        "protected_target": "dw8:1",
+        "protected_pane": {"target": "dw8:1", "pane_id": "%2", "pane_pid": 102, "pane_start_ticks": 202},
+        "protected_session_id": "01a07faa-011d-7983-86bb-978cf5a25169",
+        "task_sha256": "b" * 64,
+        "todo_sha256": "c" * 64,
+        "manager_task_sha256": "d" * 64,
+        "consumed_export": str(tmp / "consumed.json"),
+        "consumed_export_sha256": "e" * 64,
+        "predecessor_running_base64": base64.b64encode(running).decode(),
+        "predecessor_running_sha256": sha256(running),
+        "predecessor_done_base64": base64.b64encode(done).decode(),
+        "predecessor_done_sha256": sha256(done),
+        "report_replay_id": "1" * 64,
+        "report_attestation_id": "2" * 64,
+        "helper": str(helper),
+        "helper_sha256": sha256(helper.read_bytes()),
+        "close_proof_secret": secret,
+        "close_proof_commitment": sha256(secret.encode()),
+        "audit": str(tmp / "audit.json"),
+        "inputs": [],
+    }
+    return record
+
+
+class StalePredecessorCloseTests(unittest.TestCase):
+    def test_reconstructs_unique_predecessor_prefix(self) -> None:
+        root = Path("/tmp/work-logs")
+        active = task_text()
+        header, body = predecessor_snapshots(active, root, "dw8:0")
+        running = header + body[: len(b"first\n(done)\n")]
+        done = running.replace(b"status: running\n", b"status: done\n")
+        self.assertEqual(
+            (running, done),
+            reconstruct_predecessor(active, root, "dw8:0", sha256(running), len(running), sha256(done), len(done)),
+        )
+
+    def test_reconstruction_rejects_unpreserved_body(self) -> None:
+        active = task_text("changed\n")
+        with self.assertRaisesRegex(TaskFrontmatterError, "preserve one exact"):
+            reconstruct_predecessor(active, Path("/tmp/work-logs"), "dw8:0", "0" * 64, 100, "1" * 64, 97)
+
+    def test_packet_round_trip_binds_secret_and_images(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            record = packet_record(Path(directory))
+            data = packet_bytes(record)
+            parsed = validate_packet(data, sha256(data))
+            self.assertEqual(SCHEMA, parsed["schema"])
+            self.assertEqual(bound_receipt_id({key: value for key, value in parsed.items() if key != "binding_id"}), parsed["binding_id"])
+
+    def test_packet_rejects_target_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            record = packet_record(Path(directory))
+            record["protected_target"] = "dw8:0"
+            protected = dict(cast(dict[str, object], record["protected_pane"]))
+            protected["target"] = "dw8:0"
+            record["protected_pane"] = protected
+            data = packet_bytes(record)
+            with self.assertRaisesRegex(TaskFrontmatterError, "target scope"):
+                validate_packet(data, sha256(data))
+
+    def test_packet_rejects_image_tamper(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            record = packet_record(Path(directory))
+            record["predecessor_done_base64"] = base64.b64encode(b"forged").decode()
+            data = packet_bytes(record)
+            with self.assertRaisesRegex(TaskFrontmatterError, "done image"):
+                validate_packet(data, sha256(data))
+
+    def test_parse_pin_rejects_boolean_pid(self) -> None:
+        with self.assertRaisesRegex(TaskFrontmatterError, "process identity"):
+            parse_pin({"target": "dw8:0", "pane_id": "%1", "pane_pid": True, "pane_start_ticks": 2}, "pane")
+
+    def test_input_set_rejects_omission_and_replacement(self) -> None:
+        expected: list[dict[str, object]] = [
+            {"file": {"path": "/tmp/a"}, "ancestors": []},
+            {"file": {"path": "/tmp/b"}, "ancestors": []},
+        ]
+        validate_inputs(expected, expected)
+        for recorded in (expected[:-1], [expected[0], {"file": {"path": "/tmp/c"}, "ancestors": []}]):
+            with self.assertRaisesRegex(TaskFrontmatterError, "exact complete input set"):
+                validate_inputs(recorded, expected)
+
+    def test_child_audit_requires_unchanged_protected_files_and_pane(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            task, todo = tmp / "worker.md", tmp / "TODO.md"
+            task.write_bytes(task_text())
+            todo.write_text("worker.md dw8:1\n")
+            (tmp / "manager.md").write_text(manager_text())
+            record = packet_record(tmp)
+            record = validate_packet(packet_bytes(record))
+            audit = {key: record[key] for key in AUDIT_KEYS if key in record}
+            audit.update({"schema": SCHEMA, "operation": OPERATION, "state": "prepared", "packet_sha256": "3" * 64})
+            audit["task_sha256"] = hashlib.sha256(task.read_bytes()).hexdigest()
+            audit["todo_sha256"] = hashlib.sha256(todo.read_bytes()).hexdigest()
+            audit["manager_task_sha256"] = hashlib.sha256((tmp / "manager.md").read_bytes()).hexdigest()
+            text = canonical_json(audit).decode()
+            predecessor = PanePin("dw8:0", "%1", 101, 201)
+            with (
+                patch("omo_manager.omo_stale_predecessor_close.current_pin", return_value=True),
+                patch("omo_manager.omo_stale_predecessor_close.codex_status", return_value="ready"),
+                patch("omo_manager.omo_stale_predecessor_close.pinned_current_command", return_value="zsh"),
+                patch("omo_manager.omo_stale_predecessor_close.session_from_process", side_effect=lambda pin: record[f"{'predecessor' if pin.target == 'dw8:0' else 'protected'}_session_id"]),
+                patch(
+                    "omo_manager.omo_stale_predecessor_close.validate_consumed_export",
+                    return_value=(
+                        {"replay_id": record["report_replay_id"], "attestation_id": record["report_attestation_id"]},
+                        base64.b64decode(cast(str, record["predecessor_running_base64"])),
+                        base64.b64decode(cast(str, record["predecessor_done_base64"])),
+                        tmp / "manager.md",
+                        (),
+                    ),
+                ),
+                patch("omo_manager.omo_stale_predecessor_close.authoritative_active_target_task_paths", side_effect=lambda _root, target: (task,) if target == "dw8:1" else ()),
+                patch("omo_manager.omo_stale_predecessor_close.file_input", return_value={}),
+            ):
+                audit["inputs"] = [{}] * 5
+                text = canonical_json(audit).decode()
+                self.assertTrue(
+                    audit_authorizes(
+                        text,
+                        audit,
+                        str(record["close_proof_commitment"]),
+                        predecessor.target,
+                        predecessor.pane_id,
+                        predecessor.pane_pid,
+                        predecessor.pane_start_ticks,
+                        tmp / "audit.json.prepared",
+                    )
+                )
+                with (
+                    patch("omo_manager.omo_stale_predecessor_close.exact_pane_id", return_value=""),
+                    patch("omo_manager.omo_stale_predecessor_close.resolve_pane_id", return_value=""),
+                    patch("omo_manager.omo_stale_predecessor_close.process_start_ticks", return_value=None),
+                ):
+                    self.assertTrue(
+                        audit_authorizes_after_close(
+                            text,
+                            audit,
+                            str(record["close_proof_commitment"]),
+                            predecessor.target,
+                            predecessor.pane_id,
+                            predecessor.pane_pid,
+                            predecessor.pane_start_ticks,
+                            tmp / "audit.json.prepared",
+                        )
+                    )
+            task.write_text("drift\n")
+            with patch("omo_manager.omo_stale_predecessor_close.current_pin", return_value=True):
+                self.assertFalse(
+                    audit_authorizes(
+                        text,
+                        audit,
+                        str(record["close_proof_commitment"]),
+                        predecessor.target,
+                        predecessor.pane_id,
+                        predecessor.pane_pid,
+                        predecessor.pane_start_ticks,
+                        tmp / "audit.json.prepared",
+                    )
+                )
+
+    def test_predecessor_ready_check_rejects_resumed_work(self) -> None:
+        predecessor = PanePin("dw8:0", "%1", 101, 201)
+        with (
+            patch("omo_manager.omo_stale_predecessor_close.current_pin", return_value=True),
+            patch("omo_manager.omo_stale_predecessor_close.codex_status", return_value="running"),
+            self.assertRaisesRegex(TaskFrontmatterError, "resumed or changed"),
+        ):
+            validate_ready_predecessor(predecessor)
+
+    def test_child_audit_rejects_extra_field(self) -> None:
+        record: dict[str, object] = {key: "" for key in AUDIT_KEYS}
+        record["extra"] = True
+        self.assertFalse(audit_authorizes(json.dumps(record), record, "0" * 64, "dw8:0", "%1", 1, 1, Path("/tmp/audit.prepared")))
+
+    def test_execute_recovers_exact_shell_after_exit_before_started_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            record = packet_record(tmp)
+            predecessor = PanePin("dw8:0", "%1", 101, 201)
+            protected = PanePin("dw8:1", "%2", 102, 202)
+            args = argparse.Namespace(
+                packet=tmp / "packet.json",
+                packet_sha256="f" * 64,
+                review_report=tmp / "review.json",
+                review_report_sha256="e" * 64,
+            )
+            with (
+                patch("omo_manager.omo_stale_predecessor_close.read_private", return_value=b"packet"),
+                patch("omo_manager.omo_stale_predecessor_close.validate_packet", return_value=record),
+                patch("omo_manager.omo_stale_predecessor_close.validate_review"),
+                patch("omo_manager.omo_stale_predecessor_close.task_target_lock", side_effect=lambda *_args: contextlib.nullcontext()),
+                patch("omo_manager.omo_stale_predecessor_close.task_file_lock", side_effect=lambda *_args: contextlib.nullcontext()),
+                patch("omo_manager.omo_stale_predecessor_close.pin_is_absent", return_value=False),
+                patch("omo_manager.omo_stale_predecessor_close.path_entry_exists", return_value=True),
+                patch("omo_manager.omo_stale_predecessor_close.current_pin", return_value=True),
+                patch("omo_manager.omo_stale_predecessor_close.pinned_current_command", return_value="zsh"),
+                patch("omo_manager.omo_stale_predecessor_close.live_evidence", return_value=(predecessor, protected)) as evidence,
+                patch("omo_manager.omo_stale_predecessor_close.prepared_audit", return_value=b"{}\n"),
+                patch("omo_manager.omo_stale_predecessor_close.publish_or_validate") as publish,
+                patch("omo_manager.omo_stale_predecessor_close.has_bound_close_proof", side_effect=[False, True]),
+                patch("omo_manager.omo_stale_predecessor_close.exact_pane_id", side_effect=["%1", "%1", ""]),
+                patch("omo_manager.omo_stale_predecessor_close.session_from_process", return_value=record["protected_session_id"]),
+                patch("omo_manager.omo_stale_predecessor_close.process_start_ticks", return_value=None),
+                patch("omo_manager.omo_stale_predecessor_close.close_bound_tmux_target") as close_shell,
+                patch("omo_manager.omo_stale_predecessor_close.guarded_codex_stop") as stop_codex,
+            ):
+                execute(args)
+            evidence.assert_called_once_with(record, predecessor_absent=False, predecessor_shell=True)
+            stop_codex.assert_not_called()
+            close_shell.assert_called_once()
+            self.assertEqual(OPERATION, close_shell.call_args.args[-2])
+            self.assertEqual(2, publish.call_count)
+
+
+if __name__ == "__main__":
+    unittest.main()

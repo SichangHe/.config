@@ -1,0 +1,24 @@
+# stale predecessor close
+
+- purpose
+  - close one completed Codex pane whose task record was reused by a live successor
+  - preserve the live successor and its current task and TODO ownership
+- prepare
+  - authenticate the consumed-report chain and reconstruct exact predecessor bytes
+  - bind task, TODO, manager, helper, evidence files, both panes, processes, and sessions
+  - emit one immutable packet with a hidden close-proof secret
+- review
+  - independently revalidate the packet and every live binding
+  - emit a packet-specific PASS record
+- execute
+  - hold all bound files open and revalidate them under lifecycle locks
+  - publish a prepared audit before the guarded no-mail stop
+  - require the exact predecessor shell before kill, then exact predecessor absence during proof promotion
+  - keep revalidating the protected successor and immutable evidence after the kill
+  - recover an exact exited shell from the already-published prepared audit without sending it more input
+  - recover a durable started marker without requiring the closed predecessor to reappear
+- assumptions
+  - the reused task retains the completed predecessor body as one exact prefix
+  - the predecessor has no current lifecycle owner and is ready
+  - the protected successor has singular current task and TODO ownership
+  - shared stop registration delegates child-side audit validation to this module
