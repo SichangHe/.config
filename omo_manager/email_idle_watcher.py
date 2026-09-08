@@ -1948,10 +1948,27 @@ def reviewed_total_cleanup_baseline(root: Path) -> ReviewedCleanupBaseline | Non
         r"manager email watcher threshold: retained manager mail (\d+) exceeds \d+$",
         re.MULTILINE,
     )
-    # Cleanup owners conventionally carry "mail" in their root-level task
-    # name. Keep this periodic scan bounded rather than reparsing every task.
-    for path in root.glob("*mail*.md"):
+    # Cleanup owners conventionally carry "mail" in their task name. Scan only
+    # root tasks and owned, non-symlink canonical monthly archive directories.
+    task_paths = [(path, None, None) for path in root.glob("*mail*.md")]
+    try:
+        root_entries = tuple(root.iterdir())
+    except OSError:
+        root_entries = ()
+    for archive in root_entries:
+        if re.fullmatch(r"[0-9]{6}", archive.name) is None:
+            continue
         try:
+            archive_state = archive.lstat()
+            if not stat.S_ISDIR(archive_state.st_mode) or archive_state.st_uid != os.getuid():
+                continue
+            task_paths.extend((path, archive, archive_state) for path in archive.glob("*mail*.md"))
+        except OSError:
+            continue
+    for path, archive, archive_state in task_paths:
+        try:
+            if archive is not None and archive.lstat() != archive_state:
+                continue
             state = path.lstat()
             text = path.read_text(encoding="utf-8")
             after = path.lstat()
@@ -1961,6 +1978,7 @@ def reviewed_total_cleanup_baseline(root: Path) -> ReviewedCleanupBaseline | Non
                 or state.st_uid != os.getuid()
                 or (state.st_dev, state.st_ino, state.st_size, state.st_mtime_ns, state.st_ctime_ns)
                 != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+                or (archive is not None and archive.lstat() != archive_state)
             ):
                 continue
             metadata = parse_task_metadata(text, root)

@@ -2907,6 +2907,44 @@ with exclusive_watcher_root(root):
             task.write_text(task_frontmatter(status="running", runat="wl:13", managerat="wl:12") + body, encoding="utf-8")
             self.assertIsNone(watcher.reviewed_total_cleanup_baseline(root))
 
+    def test_email_watcher_reviewed_retain_all_checkpoint_survives_monthly_archive(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            archive = root / "202608"
+            archive.mkdir(parents=True)
+            task = archive / "mail_cleanup_new.md"
+            task.write_text(
+                task_frontmatter(status="done", runat="wl:13", managerat="wl:12")
+                + "(verified removed pending item: 82 accepted; independently reviewed retain-all/no-op.)\n"
+                + "Fold threshold id 329b2c7cb5a77698abc96cefb436531d; retained manager mail is 82, with 4 unread and 36 recent.\n",
+                encoding="utf-8",
+            )
+
+            baseline = watcher.reviewed_total_cleanup_baseline(root)
+
+            self.assertIsNotNone(baseline)
+            self.assertEqual(82, baseline.count if baseline is not None else None)
+
+    def test_email_watcher_reviewed_retain_all_ignores_symlinked_monthly_archive(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            outside = Path(tmp) / "outside"
+            root.mkdir()
+            outside.mkdir()
+            (outside / "mail_cleanup_new.md").write_text(
+                task_frontmatter(status="done", runat="wl:13", managerat="wl:12")
+                + "(verified removed pending item: 82 accepted; independently reviewed retain-all/no-op.)\n"
+                + "Fold threshold id 329b2c7cb5a77698abc96cefb436531d; retained manager mail is 82, with 4 unread and 36 recent.\n",
+                encoding="utf-8",
+            )
+            (root / "202608").symlink_to(outside, target_is_directory=True)
+
+            self.assertIsNone(watcher.reviewed_total_cleanup_baseline(root))
+
     def test_email_watcher_reviewed_retain_all_suppresses_after_threshold_state_loss(self) -> None:
         from omo_manager import email_idle_watcher as watcher
 
