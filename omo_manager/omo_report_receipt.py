@@ -1216,6 +1216,29 @@ def frontmatter_snapshot(payload: bytes) -> tuple[dict[str, str], str] | None:
     return values, digest
 
 
+def frontmatter_top_level_key_count(payload: bytes, key: str) -> int:
+    """Count one key using the same grammar as frontmatter_snapshot."""
+
+    try:
+        lines = payload.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        return 0
+    if not lines or lines[0].strip() != "---":
+        return 0
+    try:
+        end = next(index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+    except StopIteration:
+        return 0
+    return sum(
+        1
+        for line in lines[1:end]
+        if line
+        and not line.startswith("  - ")
+        and line.partition(":")[1]
+        and line.partition(":")[0].strip() == key
+    )
+
+
 def manager_route_selection_matches(
     payload: bytes,
     *,
@@ -3960,6 +3983,14 @@ def archived_task_custody(plan: Plan) -> dict[str, object]:
     if inferred_task != task:
         raise ReceiptError("archived consumed export task provenance changed")
     task_payload = regular_file_bytes(task, maximum=MAX_ROUTE_FILE_BYTES, field="task")
+    commitment_binding = git_provenance.get("commitment_binding")
+    if isinstance(commitment_binding, dict) and commitment_binding.get(
+        "kind"
+    ) == "r100-terminal-status-transition" and (
+        commitment_binding.get("done_sha256") != hashlib.sha256(task_payload).hexdigest()
+        or commitment_binding.get("done_size_bytes") != len(task_payload)
+    ):
+        raise ReceiptError("archived task changed after Git provenance verification")
     snapshot = frontmatter_snapshot(task_payload)
     todo_path = plan.root / "TODO.md"
     todo_payload = regular_file_bytes(todo_path, maximum=MAX_ROUTE_FILE_BYTES, field="TODO")
@@ -5088,6 +5119,8 @@ def infer_archived_task_path(
                 "current_done_size_bytes": len(current_payload),
                 "todo_previous_row": expected_row,
             }
+    if os.path.lexists(original_task):
+        raise ReceiptError("archived task Git rename provenance is missing or ambiguous")
 
     def git(*arguments: str, text: bool = False) -> bytes | str:
         try:
@@ -5109,6 +5142,9 @@ def infer_archived_task_path(
     repository = str(git("rev-parse", "--show-toplevel", text=True)).strip()
     if Path(repository).resolve(strict=True) != root.resolve(strict=True):
         raise ReceiptError("archived task root is not the exact Git worktree")
+    head_commit = str(git("rev-parse", "--verify", "HEAD", text=True)).strip()
+    if git_object_re.fullmatch(head_commit) is None:
+        raise ReceiptError("archived task Git snapshot is invalid")
     candidates: list[Path] = []
     for month in root.iterdir():
         if re.fullmatch(r"20[0-9]{4}", month.name) is None:
@@ -5129,7 +5165,7 @@ def infer_archived_task_path(
         history = str(
             git(
                 "log", "--follow", "--format=commit:%H", "--name-status",
-                "--find-renames", "HEAD", "--", candidate_ref, text=True,
+                "--find-renames", head_commit, "--", candidate_ref, text=True,
             )
         ).splitlines()
         current_commit = ""
@@ -5156,13 +5192,35 @@ def infer_archived_task_path(
     rename_parent = parents[1]
     source_blob = str(git("rev-parse", f"{rename_parent}:{original_ref}", text=True)).strip()
     destination_blob = str(git("rev-parse", f"{rename_commit}:{candidate_ref}", text=True)).strip()
-    head_blob = str(git("rev-parse", f"HEAD:{candidate_ref}", text=True)).strip()
+    head_blob = str(git("rev-parse", f"{head_commit}:{candidate_ref}", text=True)).strip()
     if not all(git_object_re.fullmatch(value) for value in (source_blob, destination_blob, head_blob)):
         raise ReceiptError("archived task Git blob identity is invalid")
     current_payload = regular_file_bytes(candidate, maximum=MAX_ROUTE_FILE_BYTES, field="archived task")
-    head_payload = bytes(git("cat-file", "blob", head_blob))
+    raw_head_payload = git("cat-file", "blob", head_blob)
+    if not isinstance(raw_head_payload, bytes):
+        raise AssertionError("binary Git command returned text")
+    head_payload = raw_head_payload
     if destination_blob != head_blob or current_payload != head_payload:
         raise ReceiptError("archived task differs from its authenticated Git rename destination")
+    current_sha256 = hashlib.sha256(current_payload).hexdigest()
+
+    restored_running, terminal_replacements = re.subn(
+        rb"(?m)^status: done$",
+        b"status: running",
+        current_payload,
+    )
+    current_snapshot = frontmatter_snapshot(current_payload)
+    terminal_transition_matches = (
+        Path(original_ref).parent == Path(".")
+        and similarity == "100"
+        and source_blob == destination_blob == head_blob
+        and current_snapshot is not None
+        and current_snapshot[0].get("status") == "done"
+        and frontmatter_top_level_key_count(current_payload, "status") == 1
+        and terminal_replacements == 1
+        and len(restored_running) == source_size
+        and hashlib.sha256(restored_running).hexdigest() == source_sha256
+    )
 
     committed_blobs: set[str] = set()
     raw_history = str(
@@ -5177,7 +5235,9 @@ def infer_archived_task_path(
         if git_object_re.fullmatch(blob) is not None and blob != zero_object
     }
     for blob in history_blobs:
-        payload = bytes(git("cat-file", "blob", blob))
+        payload = git("cat-file", "blob", blob)
+        if not isinstance(payload, bytes):
+            raise AssertionError("binary Git command returned text")
         if len(payload) == source_size and hashlib.sha256(payload).hexdigest() == source_sha256:
             committed_blobs.add(blob)
     if committed_blobs:
@@ -5205,14 +5265,48 @@ def infer_archived_task_path(
             and match.group("replay") == replay_id
             and match.group("manager") == manager_target
         ]
-        if len(records) != 1 or len(matching_records) != 1:
+        if records and (len(records) != 1 or len(matching_records) != 1):
             raise ReceiptError("archived task Git history does not authenticate its committed report source")
-        record = matching_records[0].group(0)
-        commitment_binding = {
-            "kind": "archived-task-record",
-            "blob": head_blob,
-            "record_sha256": hashlib.sha256(record.encode()).hexdigest(),
-        }
+        if matching_records:
+            record = matching_records[0].group(0)
+            commitment_binding = {
+                "kind": "archived-task-record",
+                "blob": head_blob,
+                "record_sha256": hashlib.sha256(record.encode()).hexdigest(),
+            }
+        elif terminal_transition_matches:
+            commitment_binding = {
+                "kind": "r100-terminal-status-transition",
+                "from_status": "running",
+                "to_status": "done",
+                "transition_count": terminal_replacements,
+                "done_sha256": current_sha256,
+                "done_size_bytes": len(current_payload),
+            }
+        else:
+            raise ReceiptError("archived task Git history does not authenticate its committed report source")
+    if regular_file_bytes(
+        candidate,
+        maximum=MAX_ROUTE_FILE_BYTES,
+        field="archived task",
+    ) != current_payload:
+        raise ReceiptError("archived task changed during Git provenance verification")
+    worktree_status = str(
+        git(
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            original_ref,
+            candidate_ref,
+            text=True,
+        )
+    )
+    if worktree_status:
+        raise ReceiptError("archived task Git custody paths are not clean")
+    current_head = str(git("rev-parse", "--verify", "HEAD", text=True)).strip()
+    if current_head != head_commit:
+        raise ReceiptError("archived task Git snapshot changed during provenance verification")
     return candidate, {
         "schema": "omo-report-archived-task-git-provenance/v1",
         "original_ref": original_ref,
@@ -5411,8 +5505,11 @@ def export_archived_consumed_report(report_path: Path, output_path: Path) -> byt
         output = canonical_json(attestation)
         if path_state(message_path) != submitted:
             raise ReceiptError("archived report allocation changed during verification")
+        consumed_output = arguments.consumed_attestation_output
+        if consumed_output is None:
+            raise AssertionError("archived consumed export has no output path")
         persist_consumed_closure_attestation(
-            arguments.consumed_attestation_output,
+            consumed_output,
             canonical_json(consumed_closure_export(plan, attestation, archived=True)),
         )
         return output

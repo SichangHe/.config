@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from omo_manager import omo_report_receipt
 from omo_manager.omo_report_receipt import OwnerPrefixBinding, ReceiptError, canonical_json, persist_consumed_closure_attestation, regular_file_tail, validate_committed_route_evidence, validate_consumed_closure_export
 from omo_manager.omo_task_status import Args as TaskStatusArgs
 from omo_manager.omo_task_status import validate_manager_consumed_report
@@ -250,6 +251,30 @@ def archive_report_task(case: ReportFixture) -> Path:
     archived = month / task.name
     task.rename(archived)
     subprocess.run(["git", "-C", str(case.root), "add", "-A", "--", "TODO.md", "worker.md", "202608/worker.md"], check=True)
+    subprocess.run(["git", "-C", str(case.root), "commit", "-qm", "archive done task"], check=True)
+    return archived
+
+
+def archive_uncommitted_report_task(case: ReportFixture, *, committed_body: str = "") -> Path:
+    """Archive a done task whose exact running report snapshot was never in Git."""
+
+    task = case.root / "worker.md"
+    task.write_text(
+        task.read_text(encoding="utf-8").replace("status: running", "status: done", 1)
+        + committed_body,
+        encoding="utf-8",
+    )
+    (case.root / "TODO.md").write_text("current:\nmanager.md vl:2\n\nprevious:\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(case.root)], check=True)
+    subprocess.run(["git", "-C", str(case.root), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(case.root), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(case.root), "add", "--", "TODO.md", "worker.md", "manager.md"], check=True)
+    subprocess.run(["git", "-C", str(case.root), "commit", "-qm", "record done task"], check=True)
+    month = case.root / "202608"
+    month.mkdir()
+    archived = month / task.name
+    task.rename(archived)
+    subprocess.run(["git", "-C", str(case.root), "add", "-A", "--", "worker.md", "202608/worker.md"], check=True)
     subprocess.run(["git", "-C", str(case.root), "commit", "-qm", "archive done task"], check=True)
     return archived
 
@@ -3095,6 +3120,279 @@ return 75
                 validated = validate_export_from(case, exported)
                 self.assertEqual(0, validated.returncode, validated.stderr)
                 self.assertEqual(attestation, json.loads(validated.stdout))
+
+    def test_archived_consumed_export_authenticates_uncommitted_running_task_across_r100_rename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, _owner = active_manager_fixture(tmp_path)
+            report_time_task = (case.root / "worker.md").read_bytes()
+            draft = allocate_report_draft(case, b"uncommitted report-time task\n")
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            pending = run_report_from(case, draft, status="done")
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+            transfer = json.loads(pending.stdout)["transfer_receipt"]
+            envelope = Path(str(transfer["queue_item"]["pointer"]).rsplit(" ", 1)[1][:-1])
+            archived = archive_uncommitted_report_task(case)
+            exported = tmp_path / "r100-terminal-transition.json"
+
+            result = export_archived_report(case, envelope, exported)
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            attestation = json.loads(result.stdout)
+            provenance = attestation["archive_custody"]["git_provenance"]
+            self.assertEqual(
+                "r100-terminal-status-transition",
+                provenance["commitment_binding"]["kind"],
+            )
+            self.assertEqual("100", provenance["rename_similarity"])
+            self.assertEqual(
+                hashlib.sha256(report_time_task).hexdigest(),
+                provenance["commitment_source_sha256"],
+            )
+            self.assertEqual(
+                hashlib.sha256(archived.read_bytes()).hexdigest(),
+                provenance["commitment_binding"]["done_sha256"],
+            )
+            self.assertEqual(0, validate_export_from(case, exported).returncode)
+
+    def test_archived_r100_terminal_transition_rejects_nonterminal_task_change(self) -> None:
+        for committed_body in ("\npost-report task body\n", "\nstatus: done\n"):
+            with self.subTest(committed_body=committed_body), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                case, manager, _owner = active_manager_fixture(tmp_path)
+                draft = allocate_report_draft(case, b"changed report-time task\n")
+                case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+                pending = run_report_from(case, draft, status="done")
+                self.assertEqual(0, pending.returncode, pending.stderr)
+                self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+                transfer = json.loads(pending.stdout)["transfer_receipt"]
+                envelope = Path(str(transfer["queue_item"]["pointer"]).rsplit(" ", 1)[1][:-1])
+                archive_uncommitted_report_task(case, committed_body=committed_body)
+
+                rejected = export_archived_report(case, envelope, tmp_path / "rejected.json")
+
+                self.assertEqual(2, rejected.returncode)
+                self.assertIn("does not authenticate", rejected.stderr)
+
+    def test_archived_r100_terminal_transition_rejects_duplicate_frontmatter_status(self) -> None:
+        for first_status in ("status: running", "status : running", " status: running"):
+            with self.subTest(first_status=first_status), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                case, manager, _owner = active_manager_fixture(tmp_path)
+                task = case.root / "worker.md"
+                task.write_text(
+                    task.read_text(encoding="utf-8").replace(
+                        "status: running",
+                        f"{first_status}\nstatus: running",
+                        1,
+                    ),
+                    encoding="utf-8",
+                )
+                draft = allocate_report_draft(case, b"duplicate status report-time task\n")
+                case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+                pending = run_report_from(case, draft, status="done")
+                self.assertEqual(0, pending.returncode, pending.stderr)
+                self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+                transfer = json.loads(pending.stdout)["transfer_receipt"]
+                envelope = Path(str(transfer["queue_item"]["pointer"]).rsplit(" ", 1)[1][:-1])
+                task_text = task.read_text(encoding="utf-8")
+                final_status = task_text.rfind("status: running")
+                self.assertGreaterEqual(final_status, 0)
+                task.write_text(
+                    task_text[:final_status] + "status: done" + task_text[final_status + len("status: running") :],
+                    encoding="utf-8",
+                )
+                (case.root / "TODO.md").write_text(
+                    "current:\nmanager.md vl:2\n\nprevious:\n",
+                    encoding="utf-8",
+                )
+                subprocess.run(["git", "init", "-q", str(case.root)], check=True)
+                subprocess.run(["git", "-C", str(case.root), "config", "user.name", "Test"], check=True)
+                subprocess.run(["git", "-C", str(case.root), "config", "user.email", "test@example.com"], check=True)
+                subprocess.run(["git", "-C", str(case.root), "add", "--", "TODO.md", "worker.md", "manager.md"], check=True)
+                subprocess.run(["git", "-C", str(case.root), "commit", "-qm", "record done task"], check=True)
+                month = case.root / "202608"
+                month.mkdir()
+                task.rename(month / task.name)
+                subprocess.run(["git", "-C", str(case.root), "add", "-A"], check=True)
+                subprocess.run(["git", "-C", str(case.root), "commit", "-qm", "archive done task"], check=True)
+
+                rejected = export_archived_report(case, envelope, tmp_path / "duplicate-status.json")
+
+                self.assertEqual(2, rejected.returncode)
+                self.assertIn("does not authenticate", rejected.stderr)
+
+    def test_archived_r100_terminal_transition_requires_root_level_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            source = root / "nested" / "worker.md"
+            todo = root / "TODO.md"
+            source.parent.mkdir(parents=True)
+            source.write_text(frontmatter(runat="cfg:7", managerat="vl:2"), encoding="utf-8")
+            todo.write_text("current:\nnested/worker.md cfg:7\n", encoding="utf-8")
+            source_record = {
+                "exists": True,
+                "path": str(source),
+                "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "size_bytes": len(source.read_bytes()),
+            }
+            todo_record = {
+                "exists": True,
+                "path": str(todo),
+                "sha256": hashlib.sha256(todo.read_bytes()).hexdigest(),
+                "size_bytes": len(todo.read_bytes()),
+            }
+            source.write_text(
+                source.read_text(encoding="utf-8").replace("status: running", "status: done", 1),
+                encoding="utf-8",
+            )
+            todo.write_text("current:\n\nprevious:\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.com"], check=True)
+            subprocess.run(["git", "-C", str(root), "add", "--", "TODO.md", "nested/worker.md"], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "record nested done task"], check=True)
+            month = root / "202608"
+            month.mkdir()
+            source.rename(month / source.name)
+            subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "archive nested task"], check=True)
+
+            with self.assertRaisesRegex(ReceiptError, "does not authenticate"):
+                omo_report_receipt.infer_archived_task_path(
+                    root,
+                    source,
+                    [source_record, todo_record],
+                    "0" * 64,
+                    "vl:2",
+                )
+
+    def test_archived_r100_terminal_transition_rejects_task_read_race(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, _owner = active_manager_fixture(tmp_path)
+            draft = allocate_report_draft(case, b"racing report-time task\n")
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            pending = run_report_from(case, draft, status="done")
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+            transfer = json.loads(pending.stdout)["transfer_receipt"]
+            commitment = json.loads(
+                Path(str(transfer["commitment_path"])).read_text(encoding="utf-8")
+            )
+            archived = archive_uncommitted_report_task(case)
+            original_reader = omo_report_receipt.regular_file_bytes
+            archived_reads = 0
+
+            def racing_reader(
+                path: Path,
+                *,
+                maximum: int,
+                field: str,
+                require_owner: bool = True,
+            ) -> bytes:
+                nonlocal archived_reads
+                payload = original_reader(
+                    path,
+                    maximum=maximum,
+                    field=field,
+                    require_owner=require_owner,
+                )
+                if path == archived and field == "archived task":
+                    archived_reads += 1
+                    if archived_reads == 2:
+                        return payload + b"\nraced\n"
+                return payload
+
+            with patch.object(omo_report_receipt, "regular_file_bytes", side_effect=racing_reader):
+                with self.assertRaisesRegex(ReceiptError, "changed during Git provenance"):
+                    omo_report_receipt.infer_archived_task_path(
+                        case.root,
+                        case.root / "worker.md",
+                        commitment["preflight"]["routing_sources"],
+                        str(commitment["replay_id"]),
+                        "vl:2",
+                    )
+
+    def test_archived_r100_terminal_transition_rejects_head_advance_race(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, _owner = active_manager_fixture(tmp_path)
+            draft = allocate_report_draft(case, b"Git snapshot race\n")
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            pending = run_report_from(case, draft, status="done")
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+            transfer = json.loads(pending.stdout)["transfer_receipt"]
+            commitment = json.loads(
+                Path(str(transfer["commitment_path"])).read_text(encoding="utf-8")
+            )
+            archive_uncommitted_report_task(case)
+            original_run = subprocess.run
+            head_reads = 0
+
+            def racing_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                nonlocal head_reads
+                command = args[0]
+                if isinstance(command, list) and command[-3:] == ["rev-parse", "--verify", "HEAD"]:
+                    head_reads += 1
+                    if head_reads == 2:
+                        unrelated = case.root / "unrelated.txt"
+                        unrelated.write_text("advanced HEAD without task changes\n", encoding="utf-8")
+                        original_run(["git", "-C", str(case.root), "add", "--", unrelated.name], check=True)
+                        original_run(
+                            ["git", "-C", str(case.root), "commit", "-qm", "advance unrelated HEAD"],
+                            check=True,
+                        )
+                return original_run(*args, **kwargs)  # type: ignore[return-value]
+
+            with patch.object(omo_report_receipt.subprocess, "run", side_effect=racing_run):
+                with self.assertRaisesRegex(ReceiptError, "Git snapshot changed"):
+                    omo_report_receipt.infer_archived_task_path(
+                        case.root,
+                        case.root / "worker.md",
+                        commitment["preflight"]["routing_sources"],
+                        str(commitment["replay_id"]),
+                        "vl:2",
+                    )
+
+    def test_archived_r100_terminal_transition_rejects_task_path_git_drift(self) -> None:
+        for defect in ("untracked source", "ignored source", "staged archive"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                case, manager, _owner = active_manager_fixture(tmp_path)
+                draft = allocate_report_draft(case, b"Git task-path drift\n")
+                case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+                pending = run_report_from(case, draft, status="done")
+                self.assertEqual(0, pending.returncode, pending.stderr)
+                self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+                transfer = json.loads(pending.stdout)["transfer_receipt"]
+                envelope = Path(str(transfer["queue_item"]["pointer"]).rsplit(" ", 1)[1][:-1])
+                archived = archive_uncommitted_report_task(case)
+                if defect in {"untracked source", "ignored source"}:
+                    if defect == "ignored source":
+                        (case.root / ".git" / "info" / "exclude").write_text(
+                            "worker.md\n",
+                            encoding="utf-8",
+                        )
+                    (case.root / "worker.md").write_text("untracked source name\n", encoding="utf-8")
+                else:
+                    tracked = archived.read_bytes()
+                    archived.write_bytes(tracked + b"\nstaged drift\n")
+                    subprocess.run(
+                        ["git", "-C", str(case.root), "add", "--", "202608/worker.md"],
+                        check=True,
+                    )
+                    archived.write_bytes(tracked)
+
+                rejected = export_archived_report(case, envelope, tmp_path / "git-drift.json")
+
+                self.assertEqual(2, rejected.returncode)
+                self.assertRegex(
+                    rejected.stderr,
+                    "rename provenance is missing or ambiguous|Git custody paths are not clean",
+                )
 
     def test_archived_consumed_export_covers_root_retained_done_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
