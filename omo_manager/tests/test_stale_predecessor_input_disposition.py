@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import io
 import json
@@ -53,6 +54,37 @@ def disposition_packet(tmp: Path) -> dict[str, object]:
 
 
 class StalePredecessorInputDispositionTests(unittest.TestCase):
+    def todo_recovery_fixture(self, tmp: Path) -> tuple[dict[str, object], dict[str, object], Path]:
+        task = tmp / "worker.md"
+        todo = tmp / "TODO.md"
+        manager = tmp / "manager.md"
+        task.write_text("worker\n")
+        manager.write_text("manager\n")
+        todo.write_bytes(b"current:\nworker.md dw8:1\nother.md config:2\n")
+        packet = disposition_packet(tmp)
+        packet.update({"todo_sha256": "a" * 64, "helper": str(Path(subject.__file__).resolve(strict=True))})
+        row, chunks = subject.partition_todo(todo.read_bytes(), subject.owned_todo_row(packet))
+        unsigned: dict[str, object] = {
+            "schema": subject.TODO_RECOVERY_SCHEMA,
+            "operation": subject.TODO_RECOVERY_OPERATION,
+            "packet": str(tmp / "packet.json"),
+            "packet_sha256": subject.RECOVERABLE_PACKET_SHA256,
+            "review_report": str(tmp / "review.json"),
+            "review_report_sha256": subject.RECOVERABLE_REVIEW_SHA256,
+            "prepared_audit": str(tmp / "disposition.json.prepared"),
+            "prepared_audit_sha256": subject.RECOVERABLE_PREPARED_AUDIT_SHA256,
+            "task": str(task),
+            "todo": str(todo),
+            "original_todo_sha256": packet["todo_sha256"],
+            "owned_rows_base64": [base64.b64encode(row).decode()],
+            "unrelated_todo_base64": base64.b64encode(b"".join(chunks)).decode(),
+            "unrelated_todo_sha256": subject.sha256(b"".join(chunks)),
+            "current_todo_input": subject.file_input(todo, "rebound TODO"),
+            "current_manager_input": subject.file_input(manager, "rebound manager task"),
+            "recovery_helper_input": subject.file_input(Path(subject.__file__).resolve(strict=True), "TODO recovery helper"),
+        }
+        return packet, {**unsigned, "binding_id": subject.bound_receipt_id(unsigned)}, todo
+
     def execute_states(
         self,
         states: list[str],
@@ -74,8 +106,10 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
                 *,
                 require_original_menu: bool,
                 rebind_recoverable_helper: bool = False,
+                todo_recovery: dict[str, object] | None = None,
             ) -> tuple[PanePin, PanePin, str, bytes]:
                 self.assertEqual(recoverable, rebind_recoverable_helper)
+                self.assertIsNone(todo_recovery)
                 state = states.pop(0)
                 events.append(f"state:{state}:{require_original_menu}")
                 return predecessor, protected, state, state.encode()
@@ -88,8 +122,10 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
                 _stack: contextlib.ExitStack,
                 *,
                 rebind_recoverable_helper: bool = False,
+                todo_recovery: dict[str, object] | None = None,
             ) -> list[object]:
                 self.assertEqual(recoverable, rebind_recoverable_helper)
+                self.assertIsNone(todo_recovery)
                 return []
 
             def send_key(
@@ -169,6 +205,113 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         )
         self.assertTrue(all(token in report_body for token in required_text))
         self.assertNotIn("not safe-stop evidence", report_body)
+
+    def test_todo_recovery_authenticates_owned_row_and_all_unrelated_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, _todo = self.todo_recovery_fixture(Path(directory))
+            current, manager = subject.validate_todo_recovery_current(packet, recovery)
+            self.assertEqual(b"current:\nworker.md dw8:1\nother.md config:2\n", current)
+            self.assertEqual(b"manager\n", manager)
+
+    def test_todo_recovery_rejects_owned_row_drift_even_with_fresh_file_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, todo = self.todo_recovery_fixture(Path(directory))
+            todo.write_bytes(b"current:\nworker.md dw8:2\nother.md config:2\n")
+            recovery["current_todo_input"] = subject.file_input(todo, "rebound TODO")
+            with self.assertRaisesRegex(TaskFrontmatterError, "one exact transaction-owned row"):
+                subject.validate_todo_recovery_current(packet, recovery)
+
+    def test_todo_recovery_rejects_unrelated_row_drift_even_with_fresh_file_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, todo = self.todo_recovery_fixture(Path(directory))
+            todo.write_bytes(b"current:\nworker.md dw8:1\nother.md config:3\n")
+            recovery["current_todo_input"] = subject.file_input(todo, "rebound TODO")
+            with self.assertRaisesRegex(TaskFrontmatterError, "unrelated bytes changed"):
+                subject.validate_todo_recovery_current(packet, recovery)
+
+    def test_todo_recovery_rejects_read_to_identity_race(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, todo = self.todo_recovery_fixture(Path(directory))
+            original_read_bound = subject.read_bound
+
+            def raced_read(path: Path, expected_sha256: str, label: str, *, private: bool = False) -> bytes:
+                data = original_read_bound(path, expected_sha256, label, private=private)
+                todo.write_bytes(data + b"raced.md config:7\n")
+                return data
+
+            with (
+                patch.object(subject, "read_bound", side_effect=raced_read),
+                self.assertRaisesRegex(TaskFrontmatterError, "current TODO recovery input changed"),
+            ):
+                subject.validate_todo_recovery_current(packet, recovery)
+
+    def test_prepare_todo_recovery_is_idempotent_and_rolls_back_before_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            packet, _recovery, _todo = self.todo_recovery_fixture(tmp)
+            packet.update({"audit": str(tmp / "disposition.json")})
+            packet_path = tmp / "packet.json"
+            review_path = tmp / "review.json"
+            prepared_path = tmp / "disposition.json.prepared"
+            close_prepared_path = Path(str(packet["prepared_close_audit"]))
+            for path in (packet_path, review_path, prepared_path, close_prepared_path):
+                path.write_text("immutable\n")
+            output = tmp / "todo-recovery.json"
+            args = argparse.Namespace(
+                packet=packet_path,
+                packet_sha256=subject.RECOVERABLE_PACKET_SHA256,
+                review_report=review_path,
+                review_report_sha256=subject.RECOVERABLE_REVIEW_SHA256,
+                todo_recovery_output=output,
+            )
+            with (
+                patch.object(subject, "load_exact_failed_disposition", return_value=(packet, packet_path, review_path, prepared_path)),
+                patch.object(subject, "validate_todo_recovery_packet"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                subject.prepare_todo_recovery(args)
+                first = output.read_bytes()
+                subject.prepare_todo_recovery(args)
+                self.assertEqual(first, output.read_bytes())
+            rollback_output = tmp / "rollback.json"
+            args.todo_recovery_output = rollback_output
+            with (
+                patch.object(subject, "load_exact_failed_disposition", return_value=(packet, packet_path, review_path, prepared_path)),
+                patch.object(subject, "validate_todo_recovery_packet"),
+                patch.object(subject, "validate_held_absolute", side_effect=TaskFrontmatterError("race")),
+                self.assertRaisesRegex(TaskFrontmatterError, "race"),
+            ):
+                subject.prepare_todo_recovery(args)
+            self.assertFalse(rollback_output.exists())
+
+    def test_prepare_todo_recovery_reserves_every_absent_prior_close_control_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            packet, _recovery, _todo = self.todo_recovery_fixture(tmp)
+            packet.update({"audit": str(tmp / "disposition.json"), "inputs": []})
+            packet_path = tmp / "packet.json"
+            review_path = tmp / "review.json"
+            prepared_path = tmp / "disposition.json.prepared"
+            prior_prepared = Path(str(packet["prepared_close_audit"]))
+            for path in (packet_path, review_path, prepared_path, prior_prepared):
+                path.write_text("immutable\n")
+            prior_complete = Path(str(prior_prepared)[: -len(".prepared")])
+            absent_controls = subject.prior_close_control_paths(prior_complete, prior_prepared) - {prior_prepared}
+            for output in absent_controls:
+                with self.subTest(output=output):
+                    args = argparse.Namespace(
+                        packet=packet_path,
+                        packet_sha256=subject.RECOVERABLE_PACKET_SHA256,
+                        review_report=review_path,
+                        review_report_sha256=subject.RECOVERABLE_REVIEW_SHA256,
+                        todo_recovery_output=output,
+                    )
+                    with (
+                        patch.object(subject, "load_exact_failed_disposition", return_value=(packet, packet_path, review_path, prepared_path)),
+                        self.assertRaisesRegex(TaskFrontmatterError, "overlaps immutable or lifecycle evidence"),
+                    ):
+                        subject.prepare_todo_recovery(args)
+                    self.assertFalse(output.exists())
 
     def test_execute_dismisses_menu_then_cancels_only_status_input(self) -> None:
         events: list[str] = []
@@ -293,8 +436,10 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             *,
             require_original_menu: bool,
             rebind_recoverable_helper: bool = False,
+            todo_recovery: dict[str, object] | None = None,
         ) -> tuple[PanePin, PanePin, str, bytes]:
             self.assertFalse(rebind_recoverable_helper)
+            self.assertIsNone(todo_recovery)
             calls = sum(event.startswith("state:") for event in events)
             events.append(f"state:{calls}:{require_original_menu}")
             if calls == 2:
