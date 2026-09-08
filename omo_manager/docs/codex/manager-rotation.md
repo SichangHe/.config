@@ -88,4 +88,42 @@ First run the complete command with `--dry-run`. Supply either every ordered que
 
 Remove only `--dry-run` after independent review and immediately before containment. The mutation is one tmux-server-guarded `respawn-pane -k` against the pinned non-`h*` pane and process. It preserves the pane, window, and working directory but replaces Codex with `sleep infinity`, verifies that the entire old process session/group disappeared, rechecks task/TODO/ownership/watcher bindings, and finalizes the owner-private receipt. The completed receipt says explicitly that the legacy audit was not reconciled and post-failure work was not accepted. A failed or incomplete receipt does not authorize resumption. Start a fresh, task-bound manager only through a separately reviewed lifecycle operation after the containment receipt is complete.
 
+## Launch after successful containment
+
+Use `~/.config/omo_manager/omo_manager_containment_launch.py` only for the inert `sleep infinity` sentinel created by a complete `omo-manager-rotation-containment/v1` receipt. The bridge consumes that exact receipt by SHA-256 and independently revalidates its original failed audit, launch executable, prompt, old and failed-successor transcripts, task bytes, ordered queue, sole task owner, canonical `current:` TODO row, reporting parent, canonical root watcher, same pane/window/working directory, failed-process absence, exact sentinel PID/start/argv, and complete protected-target set. An identical task rewrite may change inode/mtime, and unrelated TODO rows may change, but bound task bytes or the bound TODO row may not.
+
+Supply every receipt-derived identity explicitly and first run the complete command with `--dry-run`:
+
+```bash
+~/.config/omo_manager/omo_manager_containment_launch.py \
+  --launch-contained-successor \
+  --root ROOT \
+  --task-file MANAGER_TASK.md \
+  --target SESSION:WINDOW \
+  --containment-receipt PRIVATE_COMPLETE_CONTAINMENT_RECEIPT \
+  --containment-receipt-sha256 CONTAINMENT_SHA256 \
+  --session-root REAL_CODEX_SESSION_ROOT \
+  --expected-contained-pane-id %PANE \
+  --expected-contained-window-id @WINDOW \
+  --expected-contained-pid SENTINEL_PID \
+  --expected-contained-start-ticks SENTINEL_START_TICKS \
+  --expected-contained-argv-sha256 SENTINEL_ARGV_SHA256 \
+  --expected-failed-successor-command bunx \
+  --expected-task-sha256 TASK_SHA256 \
+  --expected-blocker BLOCKER_TASK.md \
+  --expected-manager-target PARENT_TARGET \
+  --expect-empty-queue \
+  --expected-watcher-pid WATCHER_PID \
+  --expected-watcher-start-ticks WATCHER_START_TICKS \
+  --protected-target PROTECTED_TARGET \
+  --ownership-receipt PRIVATE_NEW_OWNERSHIP_RECEIPT \
+  --dry-run
+```
+
+Use repeated `--expected-pending-item` instead of `--expect-empty-queue` for a nonempty queue, preserving order. Repeat `--protected-target` for the exact receipt-bound set. After independent review, re-run the digest-bound preflight and remove only `--dry-run` for one execution. The bridge takes the manager-rotation lock, membership lock, target/protected-target locks, and task/TODO locks; writes a prepared receipt; and performs one tmux-server-guarded same-pane replacement of the exact sentinel. It reuses the receipt-bound prompt, model, reasoning effort, and verified resolved target of the absolute `bunx` path while retaining the original `bunx` process argv, disables the startup update prompt, and verifies the existing canonical watcher instead of starting another watcher.
+
+The ownership receipt path is deterministic: replace the containment receipt's `.receipt` suffix with `-successor-ownership.receipt` in the same private rotations directory. The helper rejects any other output path and any pre-existing output, making the bridge a one-shot operation for that containment receipt.
+
+Success requires one supported Codex launcher process group, the exact target/root/state environment, `ready` or `running` status, unchanged task/queue/TODO/watcher/protected bindings, and one new rollout transcript held open by that process tree. The transcript must be under the asserted session root, postdate the bridge attempt, match the exact launch prompt and working directory, and contain a UUID different from both historical sessions. The final owner-private receipt records that UUID, its process-held file descriptor, the fresh pane/process tree, environment hash, final task/watcher/protected evidence, and sole-owner counts. If launch or any later proof is uncertain, the helper attempts an exact guarded rollback to a new inert sentinel and writes a failed receipt; it never adopts an unverified session. A failed, prepared, or missing ownership receipt does not authorize task unblocking or downstream work.
+
 Automatic email recovery does not invoke this helper yet.
