@@ -13,7 +13,9 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shlex
+import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterable
@@ -32,6 +34,7 @@ from omo_manager.omo_codex_stop import (
     done_live_close_started_path,
     guarded_tmux_sequence,
     path_entry_exists,
+    tmux,
     tmux_guard_condition,
 )
 from omo_manager.omo_report_receipt import bound_receipt_id
@@ -74,6 +77,8 @@ REVIEW_SCHEMA = "omo-stale-predecessor-input-disposition-review/v1"
 OPERATION = "cancel-proven-stale-status-input"
 AUTHORIZED_INPUT = "/status"
 MAX_FILE_BYTES = 64 * 1024 * 1024
+MAX_TMUX_BUFFER_INVENTORY = 4096
+TEMPORARY_TMUX_BUFFER_LIMIT = 2_147_483_647
 EXPECTED_PRIOR_PACKET_SHA256 = "530dde7d9fbb46b46b1997153dc839b2e5a5f58dd86af6ee87f20fd0f40dce65"
 EXPECTED_PRIOR_REVIEW_SHA256 = "e0cca46f3a8f4ac8046dbabdae9436091cb9bdc80cfeae8295c83974bb6a350a"
 EXPECTED_PREPARED_CLOSE_SHA256 = "e83329cb11bcf2645cb4ce0a3e4ff979edb6f1fb177b863ebeb38276d5907d45"
@@ -88,6 +93,10 @@ RECOVERY_REPORT_REQUIRED_TEXT = (
     "menu visible",
     "This supplies no safe-stop evidence.",
 )
+RECOVERABLE_PACKET_SHA256 = "e7350f2b8ce7d28d9e5480837b5a1985242c43cccfecb62ab2fa2fbc0ceae176"
+RECOVERABLE_REVIEW_SHA256 = "feb306c06dd5fb0cef6614b0e6a78866a9fd46d35f3b94f2359e8249b00ddc38"
+RECOVERABLE_PREPARED_AUDIT_SHA256 = "ea0cc462c460598775244919ee913448e1f0655008e0a4420c8d03cbf44fc9fd"
+RECOVERABLE_HELPER_SHA256 = "ab4c54f5cdc06823ce8d36333e7ee928b82e9813bb7de1da76df526e7f90cb85"
 EXPECTED_SCOPE = {
     "manager_target": "dw:0",
     "predecessor_target": "dw8:0",
@@ -241,6 +250,67 @@ def capture_lines(data: bytes) -> list[str]:
         raise TaskFrontmatterError("bound pane capture is not UTF-8.") from exc
 
 
+def restore_temporary_capture_state(
+    pin: PanePin,
+    *,
+    lease_option: str,
+    capture_option: str,
+    original_buffer_limit: str,
+) -> None:
+    """Conditionally restore only this invocation's temporary tmux state."""
+
+    token = lease_option.removeprefix("@omo-disposition-buffer-limit-")
+    owned = f"OMO_DISPOSITION_STATE_RELEASED_{token}"
+    foreign = f"OMO_DISPOSITION_STATE_FOREIGN_{token}"
+    lease_condition = f"#{{==:#{{{lease_option}}},{token}}}"
+    temporary_limit_condition = f"#{{==:#{{buffer-limit}},{TEMPORARY_TMUX_BUFFER_LIMIT}}}"
+    unset_lease = shlex.join(["set-option", "-s", "-q", "-u", lease_option])
+    restore = " ; ".join(
+        (
+            shlex.join(["set-option", "-g", "buffer-limit", original_buffer_limit]),
+            unset_lease,
+            f"display-message -p {owned}",
+        )
+    )
+    leave_external_limit = " ; ".join((unset_lease, f"display-message -p {owned}"))
+    release_owned = shlex.join(["if-shell", "-F", temporary_limit_condition, restore, leave_external_limit])
+    result = tmux(
+        [
+            "if-shell",
+            "-F",
+            lease_condition,
+            release_owned,
+            f"display-message -p {foreign}",
+        ]
+    )
+    if result.returncode != 0 or result.stdout not in {f"{owned}\n", f"{foreign}\n"}:
+        raise TaskFrontmatterError("temporary tmux buffer limit could not be restored.")
+    if result.stdout == f"{foreign}\n":
+        return
+
+    option_cleared = f"OMO_DISPOSITION_OPTION_CLEARED_{token}"
+    identity = tmux_guard_condition(pin.target, pin.pane_id, pin.pane_pid)
+    unset_capture = " ; ".join(
+        (
+            shlex.join(["set-option", "-p", "-q", "-u", "-t", pin.pane_id, capture_option]),
+            f"display-message -p {option_cleared}",
+        )
+    )
+    pane_result = tmux(
+        [
+            "if-shell",
+            "-F",
+            "-t",
+            pin.pane_id,
+            identity,
+            unset_capture,
+            f"display-message -p {option_cleared}",
+        ]
+    )
+    if pane_result.returncode == 0 and pane_result.stdout != f"{option_cleared}\n":
+        raise TaskFrontmatterError("temporary tmux capture option could not be cleared.")
+
+
 def guarded_tmux_command_for_capture(
     pin: PanePin,
     command: list[str],
@@ -264,55 +334,106 @@ def guarded_tmux_command_for_capture(
     ).strip()
     foreground, separator, remainder = foreground_record.partition("|")
     dead, limit_separator, raw_buffer_limit = remainder.partition("|")
-    buffers = bound_guarded_read(
+    if (
+        not separator
+        or not limit_separator
+        or dead != "0"
+        or not raw_buffer_limit.isdecimal()
+        or not 1 <= int(raw_buffer_limit) <= TEMPORARY_TMUX_BUFFER_LIMIT
+        or foreground in SHELL_COMMANDS
+        or re.fullmatch(r"[A-Za-z0-9_.+-]{1,128}", foreground) is None
+    ):
+        raise TaskFrontmatterError("bound pane lacks one live non-shell foreground command.")
+    buffer_inventory = bound_guarded_read(
         pin.target,
         pin.pane_id,
-        ["list-buffers", "-F", "#{buffer_name}"],
+        ["list-buffers", "-F", "1"],
         pin.pane_pid,
     ).splitlines()
-    if not separator or not limit_separator or dead != "0" or not raw_buffer_limit.isdecimal() or foreground in SHELL_COMMANDS or re.fullmatch(r"[A-Za-z0-9_.+-]{1,128}", foreground) is None:
-        raise TaskFrontmatterError("bound pane lacks one live non-shell foreground command.")
-    automatic_buffers = [name for name in buffers if re.fullmatch(r"buffer[0-9]+", name)]
-    if len(automatic_buffers) >= int(raw_buffer_limit):
-        raise TaskFrontmatterError("tmux has no non-destructive automatic capture-buffer slot.")
+    if len(buffer_inventory) > MAX_TMUX_BUFFER_INVENTORY or any(item != "1" for item in buffer_inventory):
+        raise TaskFrontmatterError("tmux buffer inventory exceeds the bounded capture allowance.")
+    token = secrets.token_hex(16)
+    option = f"@omo-disposition-capture-{token}"
+    lease_option = f"@omo-disposition-buffer-limit-{token}"
+    if bound_guarded_read(
+        pin.target,
+        pin.pane_id,
+        ["show-options", "-p", "-q", "-t", pin.pane_id, option],
+        pin.pane_pid,
+    ):
+        raise TaskFrontmatterError("tmux capture guard option already exists.")
+    if bound_guarded_read(
+        pin.target,
+        pin.pane_id,
+        ["show-options", "-s", "-q", lease_option],
+        pin.pane_pid,
+    ):
+        raise TaskFrontmatterError("tmux capture lease option already exists.")
     _state, capture = validate_before()
     try:
         expected = capture.decode()
     except UnicodeDecodeError as exc:
         raise TaskFrontmatterError("bound pane capture is not UTF-8.") from exc
-    token = f"{os.getpid()}-{time.monotonic_ns()}"
-    option = f"@omo-disposition-capture-{token}"
     accepted = f"OMO_DISPOSITION_CAPTURE_ACCEPTED_{token}"
     rejected = f"OMO_DISPOSITION_CAPTURE_REJECTED_{token}"
     identity = tmux_guard_condition(pin.target, pin.pane_id, pin.pane_pid)
-    predicates = (
+
+    def all_of(predicates: tuple[str, ...]) -> str:
+        condition = predicates[-1]
+        for predicate in reversed(predicates[:-1]):
+            condition = f"#{{&&:{predicate},{condition}}}"
+        return condition
+
+    stable_pane = (
         identity,
         "#{==:#{pane_dead},0}",
         f"#{{==:#{{pane_current_command}},{foreground}}}",
-        f"#{{==:#{{buffer_full}},#{{{option}}}}}",
     )
-    condition = predicates[-1]
-    for predicate in reversed(predicates[:-1]):
-        condition = f"#{{&&:{predicate},{condition}}}"
-    cleanup = ("delete-buffer", shlex.join(["set-option", "-p", "-u", "-t", pin.pane_id, option]))
+    initial_condition = all_of((*stable_pane, f"#{{==:#{{buffer-limit}},{raw_buffer_limit}}}"))
+    capture_condition = all_of(
+        (
+            *stable_pane,
+            f"#{{==:#{{buffer-limit}},{raw_buffer_limit}}}",
+            f"#{{==:#{{buffer_full}},#{{{option}}}}}",
+        )
+    )
+    cleanup = (
+        "delete-buffer",
+        shlex.join(["set-option", "-p", "-u", "-t", pin.pane_id, option]),
+    )
     success = " ; ".join((*cleanup, shlex.join(command), f"display-message -p {accepted}"))
     failure = " ; ".join((*cleanup, f"display-message -p {rejected}"))
+    guarded_capture = " ; ".join(
+        (
+            shlex.join(["set-option", "-s", "-o", lease_option, token]),
+            shlex.join(["set-option", "-p", "-o", "-t", pin.pane_id, option, expected]),
+            shlex.join(["set-option", "-g", "buffer-limit", str(TEMPORARY_TMUX_BUFFER_LIMIT)]),
+            shlex.join(["capture-pane", "-J", "-N", "-t", pin.pane_id]),
+            shlex.join(["set-option", "-g", "buffer-limit", raw_buffer_limit]),
+            shlex.join(["set-option", "-s", "-u", lease_option]),
+            shlex.join(["if-shell", "-F", "-t", pin.pane_id, capture_condition, success, failure]),
+        )
+    )
     try:
         output = guarded_tmux_sequence(
             pin.target,
             pin.pane_id,
             [
-                ["set-option", "-p", "-t", pin.pane_id, option, expected],
-                # An unnamed capture becomes tmux's top automatic buffer,
-                # which makes ``buffer_full`` expose its exact bytes to the
-                # next format; explicitly named buffers are not selected as
-                # the top buffer.
-                ["capture-pane", "-J", "-N", "-t", pin.pane_id],
-                ["if-shell", "-F", "-t", pin.pane_id, condition, success, failure],
+                # Raising to tmux's accepted numeric maximum provides a
+                # bounded non-evicting slot.  Lowering the option does not
+                # prune existing buffers; cleanup then removes only the new
+                # top automatic buffer before any key can be sent.
+                ["if-shell", "-F", "-t", pin.pane_id, initial_condition, guarded_capture, f"display-message -p {rejected}"],
             ],
             pin.pane_pid,
         )
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        restore_temporary_capture_state(
+            pin,
+            lease_option=lease_option,
+            capture_option=option,
+            original_buffer_limit=raw_buffer_limit,
+        )
         validate_after()
         raise TaskFrontmatterError("guarded input disposition did not complete.") from exc
     if output != f"{accepted}\n":
@@ -509,6 +630,12 @@ def validate_disposition_output_paths(output: Path, audit: Path, reserved: set[P
         raise TaskFrontmatterError("disposition output paths overlap immutable evidence.")
 
 
+def is_recoverable_prepared_packet(packet: dict[str, object]) -> bool:
+    """Recognize only the exact packet stranded by the first guarded attempt."""
+
+    return packet.get("helper") == str(Path(__file__).resolve(strict=True)) and packet.get("helper_sha256") == RECOVERABLE_HELPER_SHA256 and sha256(packet_bytes(packet)) == RECOVERABLE_PACKET_SHA256
+
+
 def validate_incident_digests(packet: dict[str, object]) -> None:
     expected = {
         "prior_packet_sha256": EXPECTED_PRIOR_PACKET_SHA256,
@@ -560,7 +687,11 @@ def validate_lifecycle(packet: dict[str, object]) -> None:
         raise TaskFrontmatterError("current predecessor/successor lifecycle custody is invalid.")
 
 
-def static_evidence(packet: dict[str, object]) -> tuple[PanePin, PanePin]:
+def static_evidence(
+    packet: dict[str, object],
+    *,
+    rebind_recoverable_helper: bool = False,
+) -> tuple[PanePin, PanePin]:
     validate_incident_digests(packet)
     prior = validate_close_artifacts(
         Path(str(packet["prior_packet"])),
@@ -643,13 +774,30 @@ def static_evidence(packet: dict[str, object]) -> tuple[PanePin, PanePin]:
             (Path(str(packet["helper"])), "input disposition helper", False),
         )
     ]
+    if rebind_recoverable_helper:
+        raw_inputs = packet.get("inputs")
+        if not is_recoverable_prepared_packet(packet) or not isinstance(raw_inputs, list) or len(raw_inputs) != len(expected_inputs):
+            raise TaskFrontmatterError("prepared disposition helper recovery binding is invalid.")
+        prior_helper_input = object_map(raw_inputs[-1], "recoverable input disposition helper")
+        prior_helper_identity = file_identity_from(prior_helper_input.get("file"), "recoverable input disposition helper")
+        if prior_helper_identity.path != str(packet["helper"]) or prior_helper_identity.sha256 != RECOVERABLE_HELPER_SHA256:
+            raise TaskFrontmatterError("prepared disposition helper recovery binding is invalid.")
+        expected_inputs[-1] = prior_helper_input
     if packet.get("inputs") != expected_inputs:
         raise TaskFrontmatterError("disposition packet does not bind its exact complete input set.")
     return predecessor, protected
 
 
-def live_state(packet: dict[str, object], *, require_original_menu: bool) -> tuple[PanePin, PanePin, str, bytes]:
-    predecessor, protected = static_evidence(packet)
+def live_state(
+    packet: dict[str, object],
+    *,
+    require_original_menu: bool,
+    rebind_recoverable_helper: bool = False,
+) -> tuple[PanePin, PanePin, str, bytes]:
+    predecessor, protected = static_evidence(
+        packet,
+        rebind_recoverable_helper=rebind_recoverable_helper,
+    )
     if not current_pin(predecessor) or not current_pin(protected):
         raise TaskFrontmatterError("predecessor or protected pane identity changed.")
     predecessor_session = session_from_process(predecessor)
@@ -901,11 +1049,19 @@ def complete_disposition_audit(packet: dict[str, object], packet_sha256: str, pr
     )
 
 
-def hold_inputs(packet: dict[str, object], stack: ExitStack) -> list[HeldAbsolute]:
+def hold_inputs(
+    packet: dict[str, object],
+    stack: ExitStack,
+    *,
+    rebind_recoverable_helper: bool = False,
+) -> list[HeldAbsolute]:
     raw_inputs = packet.get("inputs")
     if not isinstance(raw_inputs, list):
         raise TaskFrontmatterError("disposition packet input set is invalid.")
+    if rebind_recoverable_helper and not is_recoverable_prepared_packet(packet):
+        raise TaskFrontmatterError("prepared disposition helper recovery binding is invalid.")
     held: list[HeldAbsolute] = []
+    helper_rebound = False
     for value in raw_inputs:
         item = object_map(value, "disposition packet input")
         identity = file_identity_from(item.get("file"), "disposition packet input")
@@ -913,12 +1069,52 @@ def hold_inputs(packet: dict[str, object], stack: ExitStack) -> list[HeldAbsolut
         if not isinstance(raw_ancestors, Iterable) or isinstance(raw_ancestors, (str, bytes, dict)):
             raise TaskFrontmatterError("disposition packet input ancestors are invalid.")
         ancestors = tuple(directory_identity_from(entry, "disposition packet input ancestor") for entry in cast(Iterable[object], raw_ancestors))
-        current = hold_absolute(identity, ancestors)
+        if rebind_recoverable_helper and identity.path == str(packet["helper"]):
+            if helper_rebound or identity.sha256 != RECOVERABLE_HELPER_SHA256:
+                raise TaskFrontmatterError("prepared disposition helper recovery binding is invalid.")
+            helper = Path(__file__).resolve(strict=True)
+            _data, current_identity, current_ancestors = absolute_file_binding(
+                helper,
+                "current input disposition recovery helper",
+            )
+            current = hold_absolute(current_identity, current_ancestors)
+            helper_rebound = True
+        else:
+            current = hold_absolute(identity, ancestors)
         held.append(current)
         stack.callback(os.close, current.descriptor)
         for descriptor in reversed(current.directories):
             stack.callback(os.close, descriptor)
+    if rebind_recoverable_helper and not helper_rebound:
+        raise TaskFrontmatterError("prepared disposition helper recovery binding is absent.")
     return held
+
+
+def authorize_prepared_helper_recovery(
+    packet: dict[str, object],
+    packet_sha256: str,
+    review_sha256: str,
+    prepared_path: Path,
+    prepared_data: bytes,
+) -> bool:
+    """Rebind the helper only for the exact immutable failed execution."""
+
+    if (
+        packet_sha256 != RECOVERABLE_PACKET_SHA256
+        or review_sha256 != RECOVERABLE_REVIEW_SHA256
+        or sha256(prepared_data) != RECOVERABLE_PREPARED_AUDIT_SHA256
+        or not is_recoverable_prepared_packet(packet)
+    ):
+        return False
+    observed = read_bound(
+        prepared_path,
+        RECOVERABLE_PREPARED_AUDIT_SHA256,
+        "recoverable prepared disposition audit",
+        private=True,
+    )
+    if observed != prepared_data:
+        raise TaskFrontmatterError("recoverable prepared disposition audit changed.")
+    return True
 
 
 def execute(args: argparse.Namespace) -> None:
@@ -956,7 +1152,19 @@ def execute(args: argparse.Namespace) -> None:
     ):
         for path in sorted({Path(str(packet[key])) for key in ("task", "todo", "manager_task")}, key=str):
             stack.enter_context(task_file_lock(path))
-        held = hold_inputs(packet, stack)
+        prepared_exists = path_entry_exists(prepared_path)
+        rebind_recoverable_helper = prepared_exists and authorize_prepared_helper_recovery(
+            packet,
+            args.packet_sha256,
+            args.review_report_sha256,
+            prepared_path,
+            prepared_data,
+        )
+        held = hold_inputs(
+            packet,
+            stack,
+            rebind_recoverable_helper=rebind_recoverable_helper,
+        )
 
         def current_state(*, allowed: set[str], require_original_menu: bool = False) -> tuple[str, bytes]:
             for item in held:
@@ -964,6 +1172,7 @@ def execute(args: argparse.Namespace) -> None:
             _predecessor, _protected, state, capture = live_state(
                 packet,
                 require_original_menu=require_original_menu,
+                rebind_recoverable_helper=rebind_recoverable_helper,
             )
             for item in held:
                 validate_held_absolute(item)
@@ -973,7 +1182,6 @@ def execute(args: argparse.Namespace) -> None:
                 raise TaskFrontmatterError("status-menu recovery entered an unsupported state.")
             return state, capture
 
-        prepared_exists = path_entry_exists(prepared_path)
         complete_exists = path_entry_exists(complete_path)
         if complete_exists:
             if not prepared_exists:

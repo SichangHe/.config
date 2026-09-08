@@ -14,11 +14,13 @@
   - hold every bound input open under target, task-file, and tmux-input locks
   - publish a separate prepared disposition audit before any key
   - immediately bracket each one-queue key action with full held-file, lifecycle, pane-process, and Codex-session validation
-  - send `Escape` only while tmux also sees the reviewed menu capture byte-identically on the same live pane PID and non-shell foreground command
+  - raise `buffer-limit` to tmux's bounded numeric maximum in the guarded server queue, capture one new automatic buffer without eviction, restore the prior limit, compare full bytes, and delete only that new top buffer
+  - send `Escape` only while tmux also sees the reviewed menu capture byte-identically on the same symbolic/numeric pane, live pane PID, and non-shell foreground command
   - send `Ctrl+C` only while the same tmux guards hold after the complete parser proves the remaining input is exactly `/status`
   - require a complete ready view before publishing the disposition result
 - recovery
   - accept only the recorded menu, exact `/status` input, or ready state after a prepared disposition audit exists
+  - permit the released helper to supersede its predecessor helper binding only for the exact immutable packet, PASS review, old helper digest, and prepared disposition audit left by the first failed guarded attempt
   - validate an existing complete disposition only when its prepared audit matches and the pane is ready
 - exclusions
   - never send `Enter`, stop either pane, change lifecycle files, or modify the prior prepared close audit
