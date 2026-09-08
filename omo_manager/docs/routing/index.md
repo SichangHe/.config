@@ -12,6 +12,8 @@
   - main-manager-owned project registry helper reference
 - `task-file-frontmatter.md`
   - draft structured metadata contract for task Markdown files
+- `omnigent-migration.md`
+  - incremental runtime-target migration while tmux remains compatible
 - `task-launch.md`
   - task file creation and worker launch helper reference
 - `ops-manager-cursor-replace.md`

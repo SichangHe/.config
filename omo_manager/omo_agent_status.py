@@ -48,6 +48,7 @@ from omo_manager.omo_task_metadata import TaskMetadata
 from omo_manager.omo_task_metadata import UniqueKeyLoader
 from omo_manager.omo_task_metadata import frontmatter_parts
 from omo_manager.omo_task_metadata import parse_task_metadata
+from omo_manager.omo_task_metadata import runat_kind
 
 
 def default_state_dir() -> Path:
@@ -1701,6 +1702,11 @@ def classify_target(task_file: str, target: str, persistent_role: bool = False, 
     """
     if not target:
         return StatusRow(task_file, "missing", "target=", persistent_role, task_status)
+    if runat_kind(target) == "omnigent":
+        evidence = f"target={target} runtime=omnigent status_adapter=unsupported"
+        if task_status:
+            evidence += f" task_status={task_status}"
+        return StatusRow(task_file, "error", evidence, persistent_role, task_status, target)
     report = recover_capacity_error(report or inspect(StatusArgs(target, 80)))
     evidence = f"target={target}"
     unstick = ""

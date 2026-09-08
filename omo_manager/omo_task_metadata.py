@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 from uuid import UUID
 
 import yaml
@@ -17,6 +17,7 @@ TASK_FRONTMATTER_VERSION = TASK_FRONTMATTER_V1
 TASK_FRONTMATTER_STATUSES = {"running", "long_running", "blocked", "done"}
 RETIRED_RUNAT = "retired"
 TARGET_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
+OMNIGENT_RUNAT_RE = re.compile(r"^omnigent://([A-Za-z0-9._-]+)$")
 ID_RE = re.compile(r"^(task|pi|wake)_([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$")
 RFC3339_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
 V1_REQUIRED_FIELDS = {"version", "status", "runat", "tool", "managerat", "is_manager", "pending_task_items"}
@@ -126,6 +127,7 @@ class LegacyBlocker:
 
 
 TaskBlockerEntry: TypeAlias = PendingItemsBlocker | HumanBlocker | PersistentBlocker | TaskBlocker | LegacyBlocker
+RunatKind: TypeAlias = Literal["tmux", "omnigent", "retired"]
 
 
 @dataclass(frozen=True)
@@ -376,8 +378,9 @@ def parse_common(values: Mapping[str, object], allowed: set[str]) -> tuple[str, 
         raise TaskFrontmatterError("`blocked_on` must only exist when `status` is `blocked` or `long_running`.")
     runat = require_text(values["runat"], "runat")
     managerat = require_text(values["managerat"], "managerat")
-    if TARGET_RE.fullmatch(runat) is None and runat != RETIRED_RUNAT:
-        raise TaskFrontmatterError("`runat` must be a tmux target or `retired`.")
+    target_kind = runat_kind(runat)
+    if target_kind is None:
+        raise TaskFrontmatterError("`runat` must be a tmux target, an `omnigent://SESSION_ID` target, or `retired`.")
     if runat == RETIRED_RUNAT and status != "blocked":
         raise TaskFrontmatterError("`runat: retired` is only valid when `status` is `blocked`.")
     if TARGET_RE.fullmatch(managerat) is None:
@@ -385,6 +388,8 @@ def parse_common(values: Mapping[str, object], allowed: set[str]) -> tuple[str, 
     if canonical_target(runat) == canonical_target(managerat):
         raise TaskFrontmatterError("`managerat` must be different from `runat`.")
     tool = require_text(values["tool"], "tool")
+    if target_kind == "omnigent" and tool != "omnigent":
+        raise TaskFrontmatterError("an OmniGent `runat` requires `tool: omnigent`.")
     if "session_id" in values and tool != "codex":
         raise TaskFrontmatterError("`session_id` is only valid for ordinary Codex tasks.")
     is_manager = values["is_manager"]
@@ -394,7 +399,19 @@ def parse_common(values: Mapping[str, object], allowed: set[str]) -> tuple[str, 
 
 
 def canonical_target(target: str) -> str:
-    return target.removesuffix(".0")
+    return target.removesuffix(".0") if runat_kind(target) == "tmux" else target
+
+
+# 🧑 "My suggestion is to add Omnigent session as a valid runat while keeping backwards compatibility for tmux somehow"
+def runat_kind(target: str) -> RunatKind | None:
+    """Classify a task run target, preserving tmux meaning on syntax overlap."""
+    if target == RETIRED_RUNAT:
+        return "retired"
+    if TARGET_RE.fullmatch(target) is not None:
+        return "tmux"
+    if OMNIGENT_RUNAT_RE.fullmatch(target) is not None:
+        return "omnigent"
+    return None
 
 
 def require_mapping(value: object, field: str, keys: set[str]) -> dict[str, object]:

@@ -400,7 +400,7 @@ resolved_task_items: []
             parse_task_metadata(task_frontmatter("running", runat="retired"))
 
     def test_fake_blocked_runat_is_invalid(self) -> None:
-        with self.assertRaisesRegex(TaskFrontmatterError, "tmux target or `retired`"):
+        with self.assertRaisesRegex(TaskFrontmatterError, "tmux target, an `omnigent://SESSION_ID` target, or `retired`"):
             parse_task_metadata(task_frontmatter("blocked", runat="pb:blocked", blocked_on="waiting"))
 
     def test_persistent_blocked_task_lines_marks_role_from_latest_blocked_note(self) -> None:

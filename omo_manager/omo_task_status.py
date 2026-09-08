@@ -74,6 +74,7 @@ from omo_manager.omo_task_lock import process_start_ticks
 from omo_manager.omo_task_metadata import frontmatter_parts
 from omo_manager.omo_task_metadata import TARGET_RE
 from omo_manager.omo_task_metadata import UniqueKeyLoader
+from omo_manager.omo_task_metadata import runat_kind
 from omo_manager.omo_blocking_actor import request as blocking_request
 from omo_manager.omo_completion_email import require_owner_completion
 from omo_manager.omo_report_receipt import ReceiptError
@@ -6242,6 +6243,8 @@ def run(args: Args) -> int:
         before = path.stat()
         text = path.read_text(encoding="utf-8")
         initial_metadata = parse_manager_child_metadata(text, args.root) if args.restore_terminal_target or args.close_retired_done else parse_task_metadata(text, args.root)
+        if initial_metadata is not None and runat_kind(initial_metadata.runat) == "omnigent":
+            raise TaskFrontmatterError("task status operations do not yet support an OmniGent `runat`")
         if initial_metadata is not None and initial_metadata.version == V2_VERSION and not v2_enabled(args.root):
             raise BlockingError("v2 task writes are disabled until reviewed migration enablement")
         if initial_metadata is not None and initial_metadata.version != V2_VERSION and v2_enabled(args.root):

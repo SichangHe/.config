@@ -2033,6 +2033,8 @@ def _run_tmux_payload(
     probe_message: str | None = None,
     dedupe_delivery: bool = True,
 ) -> None:
+    if TMUX_DELIVERY_TARGET_RE.fullmatch(target) is None:
+        raise RuntimeError("tmux delivery requires a tmux target")
     verification_message = message if probe_message is None else probe_message
     bypass_checks = options.dangerously_bypass_all_sender_safety_checks
     if not options.dry_run and dedupe_delivery and not bypass_checks and has_recent_tmux_delivery(target, verification_message):
