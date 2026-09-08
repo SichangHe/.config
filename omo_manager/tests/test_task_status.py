@@ -2454,6 +2454,37 @@ class TaskStatusTests(unittest.TestCase):
             with self.assertRaisesRegex(TaskFrontmatterError, "requires archived custody"):
                 validate_manager_consumed_report(non_archived_args, archived, non_archived, text.encode())
 
+    def test_root_retained_consumed_custody_rejects_todo_drift_during_post_note_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_done_live_close_case(root)
+            args = self.write_consumed_attestation(root, task, args)
+            evidence = args.manager_consumed_report_receipt
+            assert evidence is not None
+            attestation = json.loads(evidence.read_text(encoding="utf-8"))["attestation"]
+            attestation["archive_custody"] = {
+                "git_provenance": {"schema": "omo-report-terminal-task-transition/v1"},
+                "original_task": str(task),
+                "schema": "omo-report-terminal-task-custody/v1",
+                "task": str(task),
+                "task_ref": "task.md",
+                "task_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                "todo": str(todo),
+                "todo_reference_count": 1,
+                "todo_sha256": hashlib.sha256(todo_text.encode()).hexdigest(),
+            }
+            unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
+            attestation["attestation_id"] = hashlib.sha256(
+                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            args = replace(args, terminal_evidence=attestation["attestation_id"])
+            validate_consumed_closure_attestation(args, task, attestation, text.encode())
+
+            todo.write_text(todo_text.replace("task.md wl:2\n", ""), encoding="utf-8")
+
+            with self.assertRaisesRegex(TaskFrontmatterError, "archive custody changed"):
+                validate_consumed_closure_attestation(args, task, attestation, text.encode())
+
     def test_done_live_evidence_collects_guarded_current_close_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

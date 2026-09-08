@@ -5266,6 +5266,16 @@ def validate_consumed_closure_attestation(
         }:
             raise TaskFrontmatterError("manager-consumed report archive custody is invalid.")
         git_provenance = archive.get("git_provenance")
+        terminal_transition = (
+            archive.get("schema") == "omo-report-terminal-task-custody/v1"
+            and isinstance(git_provenance, dict)
+            and git_provenance.get("schema") == "omo-report-terminal-task-transition/v1"
+        )
+        monthly_archive = (
+            archive.get("schema") == "omo-report-archived-task-custody/v1"
+            and isinstance(git_provenance, dict)
+            and git_provenance.get("schema") == "omo-report-archived-task-git-provenance/v1"
+        )
         todo_path = args.root / "TODO.md"
         try:
             task_payload = archived_task_payload if archived_task_payload is not None else path.read_bytes()
@@ -5273,17 +5283,15 @@ def validate_consumed_closure_attestation(
         except OSError as exc:
             raise TaskFrontmatterError("manager-consumed report archive custody is unavailable.") from exc
         if (
-            archive.get("schema") != "omo-report-archived-task-custody/v1"
-            or not isinstance(git_provenance, dict)
-            or git_provenance.get("schema") != "omo-report-archived-task-git-provenance/v1"
+            not (terminal_transition or monthly_archive)
             or not Path(original_task).is_absolute()
             or archive.get("task") != str(path)
             or archive.get("task_ref") != relative_task_ref(args.root, path)
             or archive.get("task_sha256") != hashlib.sha256(task_payload).hexdigest()
             or archive.get("todo") != str(todo_path)
-            or archive.get("todo_reference_count") != 0
+            or archive.get("todo_reference_count") != (1 if terminal_transition else 0)
             or (
-                archived_task_payload is None
+                (archived_task_payload is None or terminal_transition)
                 and archive.get("todo_sha256") != hashlib.sha256(todo_payload).hexdigest()
             )
         ):
@@ -5463,7 +5471,11 @@ def describe_done_live_no_mail(args: Args, path: Path, text: str, before: os.sta
     )
     if prevalidated_attestation is None or manager_path is None:
         raise TaskFrontmatterError("done-live evidence requires one exported consumed-closure attestation.")
-    archived = prevalidated_attestation.get("archive_custody") is not None
+    custody = prevalidated_attestation.get("archive_custody")
+    monthly_archive = (
+        isinstance(custody, dict)
+        and custody.get("schema") == "omo-report-archived-task-custody/v1"
+    )
     terminal_evidence = bound_json_id(prevalidated_attestation, "attestation_id")
     with root_membership_lock(args.root), task_target_lock(args.root, args.active_target):
         with ExitStack() as locks:
@@ -5521,7 +5533,7 @@ def describe_done_live_no_mail(args: Args, path: Path, text: str, before: os.sta
                     path,
                     todo_text,
                     args.active_target,
-                    archived=archived,
+                    archived=monthly_archive,
                 )
                 validate_done_live_ownership(args.root, path, args.active_target)
                 _ = validate_manager_consumed_report(bound_args, path, prevalidated_attestation)
@@ -5661,6 +5673,11 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
         prevalidated_attestation is not None
         and prevalidated_attestation.get("archive_custody") is not None
     )
+    custody = prevalidated_attestation.get("archive_custody") if prevalidated_attestation is not None else None
+    monthly_archive = (
+        isinstance(custody, dict)
+        and custody.get("schema") == "omo-report-archived-task-custody/v1"
+    )
     locked_paths = {path, todo}
     if manager_path is not None:
         locked_paths.add(manager_path)
@@ -5674,7 +5691,10 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
             todo_text = todo.read_text(encoding="utf-8")
             if not same_file_state(before, current_before) or current_text != text:
                 raise TaskFrontmatterError("done-live close task changed while the operation was being prepared; retry.")
-            if archived_task_payload is None and hashlib.sha256(todo_text.encode()).hexdigest() != args.expected_todo_sha256:
+            if (
+                (archived_task_payload is None or not monthly_archive)
+                and hashlib.sha256(todo_text.encode()).hexdigest() != args.expected_todo_sha256
+            ):
                 raise TaskFrontmatterError("done-live close TODO bytes do not match --expected-todo-sha256.")
             manager_consumed = validate_manager_consumed_report(args, path, prevalidated_attestation, archived_task_payload)
             audit_text = read_private_audit(audit_path)
@@ -5685,7 +5705,7 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                 path,
                 todo_text,
                 args.active_target,
-                archived=archived,
+                archived=monthly_archive,
             )
             validate_done_live_ownership(args.root, path, args.active_target)
             if audit is None:
@@ -5739,7 +5759,7 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                     path,
                     todo_text,
                     args.active_target,
-                    archived=archived,
+                    archived=monthly_archive,
                 )
                 validate_done_live_ownership(args.root, path, args.active_target)
                 if manager_consumed:

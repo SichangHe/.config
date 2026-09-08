@@ -3945,7 +3945,7 @@ def plan_for_historical_commitment(
 
 
 def archived_task_custody(plan: Plan) -> dict[str, object]:
-    """Bind an archived done task and the exact TODO bytes that omit it."""
+    """Bind an archived or canonically completed task to current lifecycle custody."""
 
     if plan.archived_task is None:
         raise ReceiptError("archived consumed export has no archived task path")
@@ -3970,17 +3970,23 @@ def archived_task_custody(plan: Plan) -> dict[str, object]:
             if (plan.root / match).resolve(strict=False) == task:
                 references += 1
     metadata = snapshot[0] if snapshot is not None else {}
+    terminal_transition = git_provenance.get("schema") == "omo-report-terminal-task-transition/v1"
+    expected_references = 1 if terminal_transition else 0
     if (
         metadata.get("status") != "done"
         or canonical_target(metadata.get("runat", ""), required=True, field="task run target")
         != plan.routing["producer_target"]
         or canonical_target(metadata.get("managerat", ""), required=True, field="task manager target")
         != plan.routing["requested_manager_target"]
-        or references != 0
+        or references != expected_references
     ):
-        raise ReceiptError("archived consumed export requires one done task absent from TODO")
+        raise ReceiptError("consumed export requires one canonically placed done task")
     return {
-        "schema": "omo-report-archived-task-custody/v1",
+        "schema": (
+            "omo-report-terminal-task-custody/v1"
+            if terminal_transition
+            else "omo-report-archived-task-custody/v1"
+        ),
         "original_task": str(plan.task),
         "task": str(task),
         "task_ref": task_ref,
@@ -5031,6 +5037,57 @@ def infer_archived_task_path(
     ):
         raise ReceiptError("archived task commitment source is invalid")
     git_object_re = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+
+    if validate_optional_regular(original_task, "completed task"):
+        current_payload = regular_file_bytes(
+            original_task,
+            maximum=MAX_ROUTE_FILE_BYTES,
+            field="completed task",
+        )
+        restored_running, replacements = re.subn(
+            rb"(?m)^status: done$",
+            b"status: running",
+            current_payload,
+            count=1,
+        )
+        todo_path = root / "TODO.md"
+        todo_payload = regular_file_bytes(todo_path, maximum=MAX_ROUTE_FILE_BYTES, field="TODO")
+        expected_row = ""
+        snapshot = frontmatter_snapshot(current_payload)
+        if snapshot is not None:
+            source_target = canonical_target(
+                str(snapshot[0].get("runat", "")),
+                required=True,
+                field="task run target",
+            )
+            expected_row = f"{original_ref} {source_target}"
+        section = ""
+        previous_headers = 0
+        matching_rows: list[tuple[str, str]] = []
+        for line in todo_payload.decode("utf-8").splitlines():
+            stripped = line.strip()
+            if line.endswith(":"):
+                section = line[:-1]
+                if line == "previous:":
+                    previous_headers += 1
+            elif original_ref in stripped.split():
+                matching_rows.append((section, line))
+        if (
+            replacements == 1
+            and len(restored_running) == source_size
+            and hashlib.sha256(restored_running).hexdigest() == source_sha256
+            and previous_headers == 1
+            and matching_rows == [("previous", expected_row)]
+        ):
+            return original_task, {
+                "schema": "omo-report-terminal-task-transition/v1",
+                "task_ref": original_ref,
+                "committed_running_sha256": source_sha256,
+                "committed_running_size_bytes": source_size,
+                "current_done_sha256": hashlib.sha256(current_payload).hexdigest(),
+                "current_done_size_bytes": len(current_payload),
+                "todo_previous_row": expected_row,
+            }
 
     def git(*arguments: str, text: bool = False) -> bytes | str:
         try:

@@ -3096,6 +3096,74 @@ return 75
                 self.assertEqual(0, validated.returncode, validated.stderr)
                 self.assertEqual(attestation, json.loads(validated.stdout))
 
+    def test_archived_consumed_export_covers_root_retained_done_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, _owner = active_manager_fixture(tmp_path)
+            draft = allocate_report_draft(case, b"root retained done report\n")
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            pending = run_report_from(case, draft, status="done")
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+            transfer = json.loads(pending.stdout)["transfer_receipt"]
+            envelope = Path(str(transfer["queue_item"]["pointer"]).rsplit(" ", 1)[1][:-1])
+            task = case.root / "worker.md"
+            task.write_text(
+                task.read_text(encoding="utf-8").replace("status: running", "status: done", 1),
+                encoding="utf-8",
+            )
+            (case.root / "TODO.md").write_text(
+                "current:\nmanager.md vl:2\n\nprevious:\nworker.md cfg:7\n",
+                encoding="utf-8",
+            )
+            exported = tmp_path / "root-retained.json"
+
+            result = export_archived_report(case, envelope, exported)
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            attestation = json.loads(result.stdout)
+            custody = attestation["archive_custody"]
+            self.assertEqual("omo-report-terminal-task-custody/v1", custody["schema"])
+            self.assertEqual("omo-report-terminal-task-transition/v1", custody["git_provenance"]["schema"])
+            self.assertEqual(str(task), custody["task"])
+            self.assertEqual(1, custody["todo_reference_count"])
+            self.assertEqual(0, validate_export_from(case, exported).returncode)
+
+    def test_root_retained_done_export_rejects_noncanonical_task_or_todo_custody(self) -> None:
+        for defect in ("task body", "TODO section", "capitalized header", "indented row", "duplicate header"):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                case, manager, _owner = active_manager_fixture(tmp_path)
+                initialize_report_git(case)
+                draft = allocate_report_draft(case, b"root retained reject\n")
+                case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+                pending = run_report_from(case, draft, status="done")
+                self.assertEqual(0, pending.returncode, pending.stderr)
+                self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+                transfer = json.loads(pending.stdout)["transfer_receipt"]
+                envelope = Path(str(transfer["queue_item"]["pointer"]).rsplit(" ", 1)[1][:-1])
+                task = case.root / "worker.md"
+                completed = task.read_text(encoding="utf-8").replace("status: running", "status: done", 1)
+                if defect == "task body":
+                    completed += "uncommitted note\n"
+                task.write_text(completed, encoding="utf-8")
+                section = "current" if defect == "TODO section" else "previous"
+                current_row = "worker.md cfg:7" if section == "current" else ""
+                previous_row = "worker.md cfg:7" if section == "previous" else ""
+                if defect == "indented row":
+                    previous_row = f"  {previous_row}"
+                previous_header = "Previous:" if defect == "capitalized header" else "previous:"
+                duplicate_header = "previous:" if defect == "duplicate header" else ""
+                todo_text = "\n".join(
+                    ("current:", "manager.md vl:2", current_row, "", previous_header, previous_row, duplicate_header, "")
+                )
+                (case.root / "TODO.md").write_text(todo_text, encoding="utf-8")
+
+                result = export_archived_report(case, envelope, tmp_path / "rejected.json")
+
+                self.assertEqual(2, result.returncode)
+                self.assertIn("rename provenance is missing or ambiguous", result.stderr)
+
     def test_archived_consumed_export_fails_closed_without_unique_git_rename(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
