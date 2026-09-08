@@ -74,6 +74,12 @@ class ManagerHelperHelpTests(unittest.TestCase):
         self.assertIn("lower-level stop helper", stop_help)
         self.assertIn("normal task closure", stop_help)
 
+        containment_close_help = helper_help("omo_manager_containment_close.py")
+        self.assertIn("exact Human authority", containment_close_help)
+        self.assertIn("one-pane non-h* window", containment_close_help)
+        self.assertIn("never starts, resumes, or replaces an agent", containment_close_help)
+        self.assertIn("--dry-run is read-only", containment_close_help)
+
         delegate_help = helper_help("omo_task_edit.py", "delegate-message")
         self.assertIn("delivery by omo_pending_watch.py", delegate_help)
 
