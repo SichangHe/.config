@@ -328,29 +328,8 @@ def restore_temporary_capture_state(
     )
     if result.returncode != 0 or result.stdout not in {f"{owned}\n", f"{foreign}\n"}:
         raise TaskFrontmatterError("temporary tmux buffer limit could not be restored.")
-    if result.stdout == f"{foreign}\n":
-        return
-
-    option_cleared = f"OMO_DISPOSITION_OPTION_CLEARED_{token}"
-    identity = tmux_guard_condition(pin.target, pin.pane_id, pin.pane_pid)
-    unset_capture = " ; ".join(
-        (
-            shlex.join(["set-option", "-p", "-q", "-u", "-t", pin.pane_id, capture_option]),
-            f"display-message -p {option_cleared}",
-        )
-    )
-    pane_result = tmux(
-        [
-            "if-shell",
-            "-F",
-            "-t",
-            pin.pane_id,
-            identity,
-            unset_capture,
-            f"display-message -p {option_cleared}",
-        ]
-    )
-    if pane_result.returncode == 0 and pane_result.stdout != f"{option_cleared}\n":
+    option_result = tmux(["set-option", "-s", "-q", "-u", capture_option])
+    if option_result.returncode != 0:
         raise TaskFrontmatterError("temporary tmux capture option could not be cleared.")
 
 
@@ -401,7 +380,7 @@ def guarded_tmux_command_for_capture(
     if bound_guarded_read(
         pin.target,
         pin.pane_id,
-        ["show-options", "-p", "-q", "-t", pin.pane_id, option],
+        ["show-options", "-s", "-q", option],
         pin.pane_pid,
     ):
         raise TaskFrontmatterError("tmux capture guard option already exists.")
@@ -417,6 +396,25 @@ def guarded_tmux_command_for_capture(
         expected = capture.decode()
     except UnicodeDecodeError as exc:
         raise TaskFrontmatterError("bound pane capture is not UTF-8.") from exc
+    try:
+        option_result = tmux(["set-option", "-s", "-o", option, expected])
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise TaskFrontmatterError("exact tmux capture guard option could not be created.") from exc
+    if option_result.returncode != 0:
+        raise TaskFrontmatterError("exact tmux capture guard option could not be created.")
+    try:
+        stored_option = bound_guarded_read(
+            pin.target,
+            pin.pane_id,
+            ["show-options", "-s", "-v", option],
+            pin.pane_pid,
+        )
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        _ = tmux(["set-option", "-s", "-q", "-u", option])
+        raise TaskFrontmatterError("exact tmux capture guard option could not be verified.") from exc
+    if stored_option != expected + "\n":
+        _ = tmux(["set-option", "-s", "-q", "-u", option])
+        raise TaskFrontmatterError("tmux capture guard option did not preserve exact bytes.")
     accepted = f"OMO_DISPOSITION_CAPTURE_ACCEPTED_{token}"
     rejected = f"OMO_DISPOSITION_CAPTURE_REJECTED_{token}"
     identity = tmux_guard_condition(pin.target, pin.pane_id, pin.pane_pid)
@@ -442,14 +440,13 @@ def guarded_tmux_command_for_capture(
     )
     cleanup = (
         "delete-buffer",
-        shlex.join(["set-option", "-p", "-u", "-t", pin.pane_id, option]),
+        shlex.join(["set-option", "-s", "-q", "-u", option]),
     )
     success = " ; ".join((*cleanup, shlex.join(command), f"display-message -p {accepted}"))
     failure = " ; ".join((*cleanup, f"display-message -p {rejected}"))
     guarded_capture = " ; ".join(
         (
             shlex.join(["set-option", "-s", "-o", lease_option, token]),
-            shlex.join(["set-option", "-p", "-o", "-t", pin.pane_id, option, expected]),
             shlex.join(["set-option", "-g", "buffer-limit", str(TEMPORARY_TMUX_BUFFER_LIMIT)]),
             shlex.join(["capture-pane", "-J", "-N", "-t", pin.pane_id]),
             shlex.join(["set-option", "-g", "buffer-limit", raw_buffer_limit]),
@@ -457,6 +454,7 @@ def guarded_tmux_command_for_capture(
             shlex.join(["if-shell", "-F", "-t", pin.pane_id, capture_condition, success, failure]),
         )
     )
+    reject_before_capture = " ; ".join((shlex.join(["set-option", "-s", "-q", "-u", option]), f"display-message -p {rejected}"))
     try:
         output = guarded_tmux_sequence(
             pin.target,
@@ -466,7 +464,7 @@ def guarded_tmux_command_for_capture(
                 # bounded non-evicting slot.  Lowering the option does not
                 # prune existing buffers; cleanup then removes only the new
                 # top automatic buffer before any key can be sent.
-                ["if-shell", "-F", "-t", pin.pane_id, initial_condition, guarded_capture, f"display-message -p {rejected}"],
+                ["if-shell", "-F", "-t", pin.pane_id, initial_condition, guarded_capture, reject_before_capture],
             ],
             pin.pane_pid,
         )
@@ -480,6 +478,7 @@ def guarded_tmux_command_for_capture(
         validate_after()
         raise TaskFrontmatterError("guarded input disposition did not complete.") from exc
     if output != f"{accepted}\n":
+        _ = tmux(["set-option", "-s", "-q", "-u", option])
         raise TaskFrontmatterError("bound pane capture changed before guarded input disposition.")
     return validate_after()
 

@@ -849,7 +849,16 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
 
         with (
             patch.object(subject.secrets, "token_hex", return_value="a" * 32),
-            patch.object(subject, "bound_guarded_read", side_effect=["bunx|0|50\n", "", "", ""]),
+            patch.object(
+                subject,
+                "bound_guarded_read",
+                side_effect=["bunx|0|50\n", "", "", "", capture.decode() + "\n"],
+            ),
+            patch.object(
+                subject,
+                "tmux",
+                return_value=subprocess.CompletedProcess(["tmux"], 0, "", ""),
+            ),
             patch.object(subject, "tmux_guard_condition", return_value="PANE_IDENTITY"),
             patch.object(subject, "guarded_tmux_sequence", side_effect=guarded_sequence),
         ):
@@ -868,12 +877,17 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         self.assertIn("#{==:#{pane_dead},0}", observed[0][4])
         self.assertIn("#{==:#{pane_current_command},bunx}", observed[0][4])
         self.assertIn("#{==:#{buffer-limit},50}", observed[0][4])
-        self.assertIn(f"set-option -p -o -t %1 {option}", observed[0][5])
+        self.assertNotIn(capture.decode(), observed[0][5])
         self.assertIn(f"set-option -g buffer-limit {subject.TEMPORARY_TMUX_BUFFER_LIMIT}", observed[0][5])
         self.assertIn("capture-pane -J -N -t %1", observed[0][5])
         self.assertIn("set-option -g buffer-limit 50", observed[0][5])
         self.assertIn(f"#{{==:#{{buffer_full}},#{{{option}}}}}", observed[0][5])
         self.assertIn("send-keys -t %1 Escape", observed[0][5])
+        self.assertNotIn("tmux -S", observed[0][5])
+        self.assertNotIn("run-shell", observed[0][5])
+        self.assertEqual(1, observed[0][5].count("if-shell -F"))
+        self.assertLess(observed[0][5].index("capture-pane"), observed[0][5].index("#{buffer_full}"))
+        self.assertLess(observed[0][5].index("#{buffer_full}"), observed[0][5].index("send-keys"))
         self.assertLess(observed[0][5].index("delete-buffer"), observed[0][5].index("send-keys"))
         self.assertNotIn("send-keys", observed[0][6])
         self.assertEqual(1, len(observed))
@@ -882,7 +896,16 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         pin = PanePin("dw8:0", "%1", 101, 201)
         with (
             patch.object(subject.secrets, "token_hex", return_value="a" * 32),
-            patch.object(subject, "bound_guarded_read", side_effect=["bunx|0|50\n", "", "", ""]),
+            patch.object(
+                subject,
+                "bound_guarded_read",
+                side_effect=["bunx|0|50\n", "", "", "", "reviewed capture\n"],
+            ),
+            patch.object(
+                subject,
+                "tmux",
+                return_value=subprocess.CompletedProcess(["tmux"], 0, "", ""),
+            ),
             patch.object(subject, "tmux_guard_condition", return_value="PANE_IDENTITY"),
             patch.object(
                 subject,
@@ -914,7 +937,16 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         buffers = "1\n" * 95
         with (
             patch.object(subject.secrets, "token_hex", return_value="b" * 32),
-            patch.object(subject, "bound_guarded_read", side_effect=["bunx|0|50\n", buffers, "", ""]),
+            patch.object(
+                subject,
+                "bound_guarded_read",
+                side_effect=["bunx|0|50\n", buffers, "", "", "reviewed capture\n"],
+            ),
+            patch.object(
+                subject,
+                "tmux",
+                return_value=subprocess.CompletedProcess(["tmux"], 0, "", ""),
+            ),
             patch.object(
                 subject,
                 "guarded_tmux_sequence",
@@ -938,7 +970,10 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             patch.object(
                 subject,
                 "bound_guarded_read",
-                side_effect=["bunx|0|50\n", "1\n" * (subject.MAX_TMUX_BUFFER_INVENTORY + 1)],
+                side_effect=[
+                    "bunx|0|50\n",
+                    "".join(f"buffer-{index}\n" for index in range(subject.MAX_TMUX_BUFFER_INVENTORY + 1)),
+                ],
             ),
             patch.object(subject, "guarded_tmux_sequence") as guarded,
             self.assertRaisesRegex(TaskFrontmatterError, "inventory exceeds"),
@@ -975,7 +1010,16 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         pin = PanePin("dw8:0", "%1", 101, 201)
         with (
             patch.object(subject.secrets, "token_hex", return_value="d" * 32),
-            patch.object(subject, "bound_guarded_read", side_effect=["bunx|0|50\n", "", "", ""]),
+            patch.object(
+                subject,
+                "bound_guarded_read",
+                side_effect=["bunx|0|50\n", "", "", "", "reviewed capture\n"],
+            ),
+            patch.object(
+                subject,
+                "tmux",
+                return_value=subprocess.CompletedProcess(["tmux"], 0, "", ""),
+            ),
             patch.object(subject, "tmux_guard_condition", return_value="PANE_IDENTITY"),
             patch.object(
                 subject,
@@ -1013,7 +1057,17 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
                     timeout=5,
                 )
 
-            run("new-session", "-d", "-s", "guard", "-x", "80", "-y", "24", "sleep 30")
+            run(
+                "new-session",
+                "-d",
+                "-s",
+                "guard",
+                "-x",
+                "80",
+                "-y",
+                "24",
+                "printf 'héllø 世界\\n#{literal}, braces and backslash \\\\\\ here\\nsecond line\\n'; sleep 30",
+            )
             try:
                 run("set-option", "-g", "buffer-limit", "100")
                 for index in range(95):
@@ -1035,6 +1089,8 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
                 pane_id, raw_pid = identity.split("|", 1)
                 pin = PanePin("guard:0.0", pane_id, int(raw_pid), 1)
                 capture = run("capture-pane", "-p", "-J", "-N", "-t", pane_id).stdout.encode()
+                self.assertIn("héllø 世界\n#{literal}, braces and backslash \\\\ here\nsecond line\n".encode(), capture)
+                self.assertTrue(capture.endswith(b"\n"))
 
                 def isolated_tmux(args: list[str], check: bool = False) -> subprocess.CompletedProcess[str]:
                     return subprocess.run(
@@ -1045,7 +1101,10 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
                         timeout=5,
                     )
 
-                with patch.object(omo_codex_stop, "tmux", side_effect=isolated_tmux):
+                with (
+                    patch.object(omo_codex_stop, "tmux", side_effect=isolated_tmux),
+                    patch.object(subject, "tmux", side_effect=isolated_tmux),
+                ):
                     state, _after = subject.guarded_tmux_command_for_capture(
                         pin,
                         ["send-keys", "-t", pane_id, "Escape"],
@@ -1241,6 +1300,7 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
 
                 with (
                     patch.object(omo_codex_stop, "tmux", side_effect=isolated_tmux),
+                    patch.object(subject, "tmux", side_effect=isolated_tmux),
                     patch.object(subject, "guarded_tmux_sequence", side_effect=raced_sequence),
                     self.assertRaisesRegex(TaskFrontmatterError, "capture changed"),
                 ):
