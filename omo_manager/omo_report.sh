@@ -203,6 +203,14 @@ validate_consumed_export_requested=0
 validate_consumed_export_sha256_requested=0
 export_archived_consumed=""
 export_archived_consumed_requested=0
+root_retained_session_transcript=""
+root_retained_session_transcript_requested=0
+root_retained_lifecycle_transcript=""
+root_retained_lifecycle_transcript_requested=0
+ownership_acknowledgment_message_id=""
+ownership_acknowledgment_message_id_requested=0
+published_result_commit=""
+published_result_commit_requested=0
 agent="${OMO_AGENT_NAME:-agent}"
 agent_explicit=0
 usage() {
@@ -210,7 +218,7 @@ usage() {
     "Usage: omo_report.sh --status STATUS --message-file FILE [--agent NAME] [--recover-moved REPLAY_ID]" \
     "       omo_report.sh --describe --status STATUS --message-file FILE [--agent NAME]" \
     "       omo_report.sh --verify-consumed [--consumed-attestation-output FILE] --status STATUS --message-file FILE [--agent NAME]" \
-    "       omo_report.sh --export-archived-consumed REPORT --consumed-attestation-output FILE" \
+    "       omo_report.sh --export-archived-consumed REPORT --consumed-attestation-output FILE [--root-retained-session-transcript FILE --root-retained-lifecycle-transcript FILE --ownership-acknowledgment-message-id MESSAGE_ID --published-result-commit COMMIT]" \
     "       omo_report.sh --validate-consumed-export FILE --expected-sha256 SHA256" \
     "       omo_report.sh --alloc-message-file" \
     "" \
@@ -220,7 +228,7 @@ usage() {
 }
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --status|--message-file|--agent|--recover-moved|--consumed-attestation-output|--validate-consumed-export|--expected-sha256|--export-archived-consumed)
+    --status|--message-file|--agent|--recover-moved|--consumed-attestation-output|--validate-consumed-export|--expected-sha256|--export-archived-consumed|--root-retained-session-transcript|--root-retained-lifecycle-transcript|--ownership-acknowledgment-message-id|--published-result-commit)
       if [ "$#" -lt 2 ]; then echo "missing value for $1" >&2; usage >&2; exit 2; fi
       option="$1"
       value="$2"
@@ -233,6 +241,10 @@ while [ "$#" -gt 0 ]; do
         --validate-consumed-export) validate_consumed_export="$value"; validate_consumed_export_requested=$((validate_consumed_export_requested + 1)) ;;
         --expected-sha256) validate_consumed_export_sha256="$value"; validate_consumed_export_sha256_requested=$((validate_consumed_export_sha256_requested + 1)) ;;
         --export-archived-consumed) export_archived_consumed="$value"; export_archived_consumed_requested=$((export_archived_consumed_requested + 1)) ;;
+        --root-retained-session-transcript) root_retained_session_transcript="$value"; root_retained_session_transcript_requested=$((root_retained_session_transcript_requested + 1)) ;;
+        --root-retained-lifecycle-transcript) root_retained_lifecycle_transcript="$value"; root_retained_lifecycle_transcript_requested=$((root_retained_lifecycle_transcript_requested + 1)) ;;
+        --ownership-acknowledgment-message-id) ownership_acknowledgment_message_id="$value"; ownership_acknowledgment_message_id_requested=$((ownership_acknowledgment_message_id_requested + 1)) ;;
+        --published-result-commit) published_result_commit="$value"; published_result_commit_requested=$((published_result_commit_requested + 1)) ;;
       esac
       shift 2
       ;;
@@ -243,6 +255,11 @@ while [ "$#" -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+root_retained_evidence_requested=$((root_retained_session_transcript_requested + root_retained_lifecycle_transcript_requested + ownership_acknowledgment_message_id_requested + published_result_commit_requested))
+if [ "$export_archived_consumed_requested" -eq 0 ] && [ "$root_retained_evidence_requested" -ne 0 ]; then
+  echo "root-retained session evidence options require --export-archived-consumed" >&2
+  exit 2
+fi
 if [ "$alloc_message_file" -eq 1 ] && [ -n "$message_file" ]; then echo "--alloc-message-file cannot be combined with --message-file" >&2; exit 2; fi
 if [ "$alloc_message_file" -eq 1 ] && [ -n "$recover_moved" ]; then echo "--alloc-message-file cannot be combined with --recover-moved" >&2; exit 2; fi
 if [ "$alloc_message_file" -eq 1 ] && [ "$describe" -eq 1 ]; then echo "--alloc-message-file cannot be combined with --describe" >&2; exit 2; fi
@@ -250,7 +267,7 @@ if [ "$alloc_message_file" -eq 1 ] && [ "$verify_consumed" -eq 1 ]; then echo "-
 if [ "$describe" -eq 1 ] && [ "$verify_consumed" -eq 1 ]; then echo "--describe cannot be combined with --verify-consumed" >&2; exit 2; fi
 if [ -n "$consumed_attestation_output" ] && [ "$verify_consumed" -ne 1 ] && [ -z "$export_archived_consumed" ]; then echo "--consumed-attestation-output requires --verify-consumed or --export-archived-consumed" >&2; exit 2; fi
 if [ "$validate_consumed_export_requested" -ne 0 ] || [ "$validate_consumed_export_sha256_requested" -ne 0 ]; then
-  if [ "$validate_consumed_export_requested" -ne 1 ] || [ "$validate_consumed_export_sha256_requested" -ne 1 ] || [ -z "$validate_consumed_export" ] || [ -z "$validate_consumed_export_sha256" ] || [ -n "$status$message_file$recover_moved$consumed_attestation_output$export_archived_consumed" ] || [ "$alloc_message_file" -ne 0 ] || [ "$describe" -ne 0 ] || [ "$verify_consumed" -ne 0 ] || [ "$agent_explicit" -ne 0 ]; then
+  if [ "$validate_consumed_export_requested" -ne 1 ] || [ "$validate_consumed_export_sha256_requested" -ne 1 ] || [ -z "$validate_consumed_export" ] || [ -z "$validate_consumed_export_sha256" ] || [ -n "$status$message_file$recover_moved$consumed_attestation_output$export_archived_consumed" ] || [ "$alloc_message_file" -ne 0 ] || [ "$describe" -ne 0 ] || [ "$verify_consumed" -ne 0 ] || [ "$agent_explicit" -ne 0 ] || [ "$root_retained_evidence_requested" -ne 0 ]; then
     echo "--validate-consumed-export requires only an absolute FILE and --expected-sha256" >&2
     exit 2
   fi
@@ -319,16 +336,21 @@ raise SystemExit(receiver.main())
 PY
 fi
 if [ "$export_archived_consumed_requested" -ne 0 ]; then
-  if [ "$export_archived_consumed_requested" -ne 1 ] || [ -z "$export_archived_consumed" ] || [ -z "$consumed_attestation_output" ] || [ -n "$status$message_file$recover_moved$validate_consumed_export$validate_consumed_export_sha256" ] || [ "$alloc_message_file" -ne 0 ] || [ "$describe" -ne 0 ] || [ "$verify_consumed" -ne 0 ] || [ "$agent_explicit" -ne 0 ]; then
-    echo "--export-archived-consumed requires only REPORT and --consumed-attestation-output FILE" >&2
+  evidence_requested="$root_retained_evidence_requested"
+  if [ "$export_archived_consumed_requested" -ne 1 ] || [ -z "$export_archived_consumed" ] || [ -z "$consumed_attestation_output" ] || [ -n "$status$message_file$recover_moved$validate_consumed_export$validate_consumed_export_sha256" ] || [ "$alloc_message_file" -ne 0 ] || [ "$describe" -ne 0 ] || [ "$verify_consumed" -ne 0 ] || [ "$agent_explicit" -ne 0 ] || { [ "$evidence_requested" -ne 0 ] && [ "$evidence_requested" -ne 4 ]; } || { [ "$evidence_requested" -eq 4 ] && { [ -z "$root_retained_session_transcript" ] || [ -z "$root_retained_lifecycle_transcript" ] || [ -z "$ownership_acknowledgment_message_id" ] || [ -z "$published_result_commit" ]; }; }; then
+    echo "--export-archived-consumed requires only REPORT, --consumed-attestation-output FILE, and either all or none of the root-retained session evidence options" >&2
     exit 2
   fi
   helper_path="${OMO_REPORT_HELPER_PATH:?}"
   receiver_path="$(dirname "$helper_path")/omo_report_receipt.py"
   pending_digest_path="$(dirname "$helper_path")/omo_pending_digest.py"
   task_lock_path="$(dirname "$helper_path")/omo_task_lock.py"
+  root_retained_arguments=()
+  if [ "$evidence_requested" -eq 4 ]; then
+    root_retained_arguments=("$root_retained_session_transcript" "$root_retained_lifecycle_transcript" "$ownership_acknowledgment_message_id" "$published_result_commit")
+  fi
   exec env OMO_REPORT_RECEIVER_BOOTSTRAP=1 PYTHONDONTWRITEBYTECODE=1 python3 -I -S - "$receiver_path" "$pending_digest_path" "$task_lock_path" "$helper_path" \
-    --export-archived-consumed "$export_archived_consumed" "$consumed_attestation_output" <<'PY'
+    --export-archived-consumed "$export_archived_consumed" "$consumed_attestation_output" "${root_retained_arguments[@]}" <<'PY'
 from __future__ import annotations
 
 import hashlib

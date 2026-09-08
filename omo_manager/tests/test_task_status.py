@@ -2724,6 +2724,24 @@ class TaskStatusTests(unittest.TestCase):
             ).hexdigest()
             args = replace(args, terminal_evidence=attestation["attestation_id"])
             validate_consumed_closure_attestation(args, task, attestation, text.encode())
+            provenance = attestation["archive_custody"]["git_provenance"]
+            provenance["commitment_binding"] = {
+                "kind": "codex-session-prefix",
+                "session_id": args.expected_session_id,
+            }
+            unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
+            attestation["attestation_id"] = hashlib.sha256(
+                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            args = replace(args, terminal_evidence=attestation["attestation_id"])
+            validate_consumed_closure_attestation(args, task, attestation, text.encode())
+            with self.assertRaisesRegex(TaskFrontmatterError, "archive custody changed"):
+                validate_consumed_closure_attestation(
+                    replace(args, expected_session_id="11111111-2222-3333-4444-555555555555"),
+                    task,
+                    attestation,
+                    text.encode(),
+                )
 
             todo.write_text(todo_text.replace("task.md wl:2\n", ""), encoding="utf-8")
 

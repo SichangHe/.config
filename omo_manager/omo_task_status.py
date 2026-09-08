@@ -5400,6 +5400,13 @@ def validate_consumed_closure_attestation(
             and isinstance(git_provenance, dict)
             and git_provenance.get("schema") == "omo-report-terminal-task-transition/v1"
         )
+        commitment_binding = git_provenance.get("commitment_binding") if isinstance(git_provenance, dict) else None
+        session_binding = (
+            commitment_binding
+            if isinstance(commitment_binding, dict)
+            and commitment_binding.get("kind") == "codex-session-prefix"
+            else None
+        )
         monthly_archive = (
             archive.get("schema") == "omo-report-archived-task-custody/v1"
             and isinstance(git_provenance, dict)
@@ -5419,6 +5426,16 @@ def validate_consumed_closure_attestation(
             or archive.get("task_sha256") != hashlib.sha256(task_payload).hexdigest()
             or archive.get("todo") != str(todo_path)
             or archive.get("todo_reference_count") != (1 if terminal_transition else 0)
+            or (
+                session_binding is not None
+                and (
+                    CODEX_SESSION_RE.fullmatch(str(session_binding.get("session_id", ""))) is None
+                    or (
+                        bool(args.expected_session_id)
+                        and session_binding.get("session_id") != args.expected_session_id
+                    )
+                )
+            )
             or (
                 (archived_task_payload is None or terminal_transition)
                 and archive.get("todo_sha256") != hashlib.sha256(todo_payload).hexdigest()

@@ -29,6 +29,7 @@ task custody
 - require either one exact unannotated `TASK.md TARGET` row under canonical `previous:`, or an export that binds the current done task to its report-time snapshot
   - a monthly archive requires its Git-authenticated original path and exact TODO bytes containing no reference
   - a root-retained task requires the exact report-time bytes after only reversing `status: done` to `status: running`, plus exactly one literal `previous:` header and one exact unindented row
+  - a root-retained task whose ordered queue was removed after report time may instead use the transcript-prefix custody contract in `root-retained-session-custody.md`; the described live Codex session must match that transcript
 - keep the TODO bytes unchanged
 
 pane closure

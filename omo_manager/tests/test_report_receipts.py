@@ -283,21 +283,373 @@ def export_archived_report(
     case: ReportFixture,
     envelope: Path,
     output: Path,
+    *,
+    session_evidence: tuple[Path, Path, str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    command = [
+        str(REPORT),
+        "--export-archived-consumed",
+        str(envelope),
+        "--consumed-attestation-output",
+        str(output),
+    ]
+    if session_evidence is not None:
+        transcript, lifecycle_transcript, message_id, published_commit = session_evidence
+        command.extend(
+            (
+                "--root-retained-session-transcript",
+                str(transcript),
+                "--root-retained-lifecycle-transcript",
+                str(lifecycle_transcript),
+                "--ownership-acknowledgment-message-id",
+                message_id,
+                "--published-result-commit",
+                published_commit,
+            )
+        )
     return subprocess.run(
-        [
-            str(REPORT),
-            "--export-archived-consumed",
-            str(envelope),
-            "--consumed-attestation-output",
-            str(output),
-        ],
+        command,
         cwd=case.root.parent,
         env=case.env,
         text=True,
         capture_output=True,
         timeout=30,
         check=False,
+    )
+
+
+def root_retained_session_fixture(
+    tmp_path: Path,
+) -> tuple[ReportFixture, Path, Path, tuple[Path, Path, str, str], str]:
+    case, manager, _owner = active_manager_fixture(tmp_path)
+    task = case.root / "worker.md"
+    pending_item = "Finish the bounded classification and report it."
+    report_time_task = (
+        frontmatter(runat="cfg:7", managerat="vl:2").replace(
+            "pending_task_items: []",
+            f"pending_task_items:\n  - {pending_item}",
+        )
+        + "<manager_delegation from=\"vl:2\">\nClassify the current TODO state.\n</manager_delegation>\n"
+    )
+    task.write_text(report_time_task, encoding="utf-8")
+    initialize_report_git(case)
+    base_commit = subprocess.run(
+        ["git", "-C", str(case.root), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    draft = allocate_report_draft(case, b"root-retained queue-completion report\n")
+    case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+    pending = run_report_from(case, draft, status="done")
+    if pending.returncode != 0:
+        raise AssertionError(pending.stderr)
+    if run_manager_watcher_once(case, manager).returncode != 0:
+        raise AssertionError("manager watcher did not consume the report")
+    transfer = json.loads(pending.stdout)["transfer_receipt"]
+    replay_id = Path(str(transfer["commitment_path"])).stem
+    envelope = Path(str(transfer["queue_item"]["pointer"]).rsplit(" ", 1)[1][:-1])
+    result = case.root / "classification-result.txt"
+    result.write_text("published classification result\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(case.root), "add", "--", result.name], check=True)
+    subprocess.run(["git", "-C", str(case.root), "commit", "-qm", "publish result"], check=True)
+    published_commit = subprocess.run(
+        ["git", "-C", str(case.root), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "-C", str(case.root), "update-ref", "refs/remotes/origin/main", published_commit],
+        check=True,
+    )
+    completed = report_time_task.replace("status: running", "status: done", 1).replace(
+        "pending_task_items:\n  - Finish the bounded classification and report it.\n",
+        "pending_task_items: []\n",
+        1,
+    )
+    removal_evidence = f"Completed the classification; private report routed under replay {replay_id}."
+    completed += f"(verified removed pending item: {removal_evidence})\n"
+    task.write_text(completed, encoding="utf-8")
+    (case.root / "TODO.md").write_text(
+        "current:\nmanager.md vl:2\n\nprevious:\nworker.md cfg:7\n",
+        encoding="utf-8",
+    )
+    session_id = "11111111-2222-3333-4444-555555555555"
+    turn_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    call_id = "call_acknowledgment"
+    lifecycle_id = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+    lifecycle_turn_id = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+    lifecycle_link_turn_id = "cccccccc-dddd-eeee-ffff-000000000000"
+    lifecycle_path = "/root/custody_reviewer"
+    message_id = "<1234567890.12345@example.com>"
+    acknowledgment_output = f"Email sent.\nMessage-ID: {message_id}\n"
+    transcript = tmp_path / f"rollout-2026-09-08T00-00-00-{session_id}.jsonl"
+    records: list[dict[str, object]] = [
+        {
+            "ordinal": 0,
+            "type": "session_meta",
+            "payload": {
+                "session_id": session_id,
+                "id": session_id,
+                "cwd": str(case.root),
+                "originator": "codex-tui",
+                "source": "cli",
+                "git": {"commit_hash": base_commit},
+            },
+        },
+        {
+            "ordinal": 1,
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": call_id,
+                "input": "email_me.py --subject 'TODO classification' --message-file /tmp/ack.md",
+                "internal_chat_message_metadata_passthrough": {"turn_id": turn_id},
+            },
+        },
+        {
+            "ordinal": 2,
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": session_id,
+                "turn_id": turn_id,
+                "item": {
+                    "type": "CommandExecution",
+                    "command": [
+                        "/bin/sh",
+                        "-lc",
+                        "email_me.py --subject 'TODO classification' --message-file /tmp/ack.md",
+                    ],
+                    "cwd": f"file://{case.root}",
+                    "status": "completed",
+                    "stdout": acknowledgment_output,
+                    "stderr": "",
+                    "aggregated_output": acknowledgment_output,
+                    "formatted_output": acknowledgment_output,
+                    "exit_code": 0,
+                    "source": "unified_exec_startup",
+                },
+            },
+        },
+        {
+            "ordinal": 3,
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": call_id,
+                "output": [{"type": "input_text", "text": acknowledgment_output}],
+                "internal_chat_message_metadata_passthrough": {"turn_id": turn_id},
+            },
+        },
+        {
+            "ordinal": 4,
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": "call_task_snapshot",
+                "output": [{"type": "input_text", "text": report_time_task + "later command output\n"}],
+            },
+        },
+        {
+            "ordinal": 5,
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": session_id,
+                "turn_id": lifecycle_link_turn_id,
+                "item": {
+                    "type": "SubAgentActivity",
+                    "kind": "started",
+                    "agent_thread_id": lifecycle_id,
+                    "agent_path": lifecycle_path,
+                },
+            },
+        },
+        {
+            "ordinal": 6,
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": session_id,
+                "turn_id": lifecycle_link_turn_id,
+                "item": {
+                    "type": "SubAgentActivity",
+                    "kind": "completed",
+                    "agent_thread_id": lifecycle_id,
+                    "agent_path": lifecycle_path,
+                },
+            },
+        },
+        {
+            "ordinal": 7,
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": session_id,
+                "turn_id": lifecycle_link_turn_id,
+                "item": {
+                    "type": "SubAgentActivity",
+                    "kind": "interacted",
+                    "agent_thread_id": lifecycle_id,
+                    "agent_path": lifecycle_path,
+                },
+            },
+        },
+        {
+            "ordinal": 8,
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": session_id,
+                "turn_id": lifecycle_link_turn_id,
+                "item": {
+                    "type": "SubAgentActivity",
+                    "kind": "completed",
+                    "agent_thread_id": lifecycle_id,
+                    "agent_path": lifecycle_path,
+                },
+            },
+        },
+    ]
+    transcript.write_bytes(b"".join(canonical_json(record) for record in records))
+    transcript.chmod(0o600)
+    report_call_id = "call_report"
+    removal_call_id = "call_remove"
+    report_command = f"omo_report.sh --status done --message-file {draft}"
+    removal_command = (
+        f"omo_pending.py remove --item {shlex.quote(pending_item)} "
+        f"--evidence {shlex.quote(removal_evidence)} --no-email"
+    )
+    removed_output = "removed 1 pending item(s) without email; verify each item was actually done or cancelled\n"
+    lifecycle_transcript = tmp_path / f"rollout-2026-09-08T00-00-01-{lifecycle_id}.jsonl"
+    lifecycle_records: list[dict[str, object]] = [
+        {
+            "ordinal": 0,
+            "type": "session_meta",
+            "payload": {
+                "session_id": session_id,
+                "id": lifecycle_id,
+                "forked_from_id": session_id,
+                "parent_thread_id": session_id,
+                "cwd": str(case.root),
+                "originator": "codex-tui",
+                "thread_source": "subagent",
+                "agent_role": "reviewer",
+                "agent_path": lifecycle_path,
+                "git": {"commit_hash": base_commit},
+                "source": {
+                    "subagent": {
+                        "thread_spawn": {
+                            "parent_thread_id": session_id,
+                            "depth": 1,
+                            "agent_role": "reviewer",
+                            "agent_path": lifecycle_path,
+                        }
+                    }
+                },
+            },
+        },
+        {
+            "ordinal": 1,
+            "type": "session_meta",
+            "payload": records[0]["payload"],
+        },
+        {
+            "ordinal": 2,
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": report_call_id,
+                "input": report_command,
+                "internal_chat_message_metadata_passthrough": {"turn_id": lifecycle_turn_id},
+            },
+        },
+        {
+            "ordinal": 3,
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": lifecycle_id,
+                "turn_id": lifecycle_turn_id,
+                "item": {
+                    "type": "CommandExecution",
+                    "command": ["/bin/sh", "-lc", report_command],
+                    "cwd": f"file://{case.root}",
+                    "status": "completed",
+                    "stdout": pending.stdout,
+                    "stderr": "",
+                    "aggregated_output": pending.stdout,
+                    "formatted_output": pending.stdout,
+                    "exit_code": 0,
+                    "source": "unified_exec_startup",
+                },
+            },
+        },
+        {
+            "ordinal": 4,
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": report_call_id,
+                "output": [{"type": "input_text", "text": pending.stdout}],
+                "internal_chat_message_metadata_passthrough": {"turn_id": lifecycle_turn_id},
+            },
+        },
+        {
+            "ordinal": 5,
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": removal_call_id,
+                "input": removal_command,
+                "internal_chat_message_metadata_passthrough": {"turn_id": lifecycle_turn_id},
+            },
+        },
+        {
+            "ordinal": 6,
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": lifecycle_id,
+                "turn_id": lifecycle_turn_id,
+                "item": {
+                    "type": "CommandExecution",
+                    "command": ["/bin/sh", "-lc", removal_command],
+                    "cwd": f"file://{case.root}",
+                    "status": "completed",
+                    "stdout": removed_output,
+                    "stderr": "",
+                    "aggregated_output": removed_output,
+                    "formatted_output": removed_output,
+                    "exit_code": 0,
+                    "source": "unified_exec_startup",
+                },
+            },
+        },
+        {
+            "ordinal": 7,
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": removal_call_id,
+                "output": [{"type": "input_text", "text": removed_output}],
+                "internal_chat_message_metadata_passthrough": {"turn_id": lifecycle_turn_id},
+            },
+        },
+    ]
+    lifecycle_transcript.write_bytes(b"".join(canonical_json(record) for record in lifecycle_records))
+    lifecycle_transcript.chmod(0o600)
+    return (
+        case,
+        envelope,
+        task,
+        (transcript, lifecycle_transcript, message_id, published_commit),
+        session_id,
     )
 
 
@@ -3426,6 +3778,216 @@ return 75
             self.assertEqual(str(task), custody["task"])
             self.assertEqual(1, custody["todo_reference_count"])
             self.assertEqual(0, validate_export_from(case, exported).returncode)
+
+    def test_root_retained_session_custody_authenticates_queue_completion_and_later_appends(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, envelope, task, session_evidence, session_id = root_retained_session_fixture(tmp_path)
+            exported = tmp_path / "root-retained-session.json"
+
+            result = export_archived_report(
+                case,
+                envelope,
+                exported,
+                session_evidence=session_evidence,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            attestation = json.loads(result.stdout)
+            custody = attestation["archive_custody"]
+            binding = custody["git_provenance"]["commitment_binding"]
+            self.assertEqual("codex-session-prefix", binding["kind"])
+            self.assertEqual(session_id, binding["session_id"])
+            self.assertEqual(str(session_evidence[1]), binding["lifecycle_transcript"])
+            self.assertEqual(session_evidence[2], binding["ownership_acknowledgment_message_id"])
+            self.assertEqual(session_evidence[3], binding["published_result_commit"])
+            self.assertEqual(hashlib.sha256(task.read_bytes()).hexdigest(), custody["task_sha256"])
+            with session_evidence[0].open("ab") as stream:
+                stream.write(canonical_json({"ordinal": 9, "type": "event_msg", "payload": {"type": "task_complete"}}))
+            with session_evidence[1].open("ab") as stream:
+                stream.write(canonical_json({"ordinal": 8, "type": "event_msg", "payload": {"type": "task_complete"}}))
+            validated = validate_export_from(case, exported)
+            self.assertEqual(0, validated.returncode, validated.stderr)
+            self.assertEqual(attestation, json.loads(validated.stdout))
+
+    def test_root_retained_session_custody_rejects_changed_prefix_ack_task_and_publication(self) -> None:
+        defects = ("prefix", "parent header", "ack", "report task", "removal note", "task", "publication")
+        for defect in defects:
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                case, envelope, task, session_evidence, session_id = root_retained_session_fixture(tmp_path)
+                transcript, lifecycle_transcript, message_id, published_commit = session_evidence
+                exported = tmp_path / "root-retained-session.json"
+                if defect == "ack":
+                    message_id = "<different@example.com>"
+                elif defect == "parent header":
+                    lifecycle_transcript.write_text(
+                        lifecycle_transcript.read_text(encoding="utf-8").replace(
+                            f'"id":"{session_id}"',
+                            '"id":"00000000-0000-0000-0000-000000000000"',
+                            1,
+                        ),
+                        encoding="utf-8",
+                    )
+                elif defect == "report task":
+                    transcript.write_text(
+                        transcript.read_text(encoding="utf-8").replace(
+                            "Classify the current TODO state.",
+                            "Classify a changed TODO state.",
+                            1,
+                        ),
+                        encoding="utf-8",
+                    )
+                elif defect == "removal note":
+                    task.write_text(
+                        task.read_text(encoding="utf-8").replace(
+                            "Completed the classification;",
+                            "Unrelated fabricated evidence;",
+                            1,
+                        ),
+                        encoding="utf-8",
+                    )
+                elif defect == "task":
+                    task.write_text(task.read_text(encoding="utf-8") + "unverified task growth\n", encoding="utf-8")
+                elif defect == "publication":
+                    published_commit = "0" * 40
+                result = export_archived_report(
+                    case,
+                    envelope,
+                    exported,
+                    session_evidence=(transcript, lifecycle_transcript, message_id, published_commit),
+                )
+                if defect == "prefix" and result.returncode == 0:
+                    prefix = bytearray(transcript.read_bytes())
+                    prefix[0] = ord("[")
+                    transcript.write_bytes(prefix)
+                    result = validate_export_from(case, exported)
+
+                self.assertEqual(2, result.returncode)
+                self.assertRegex(
+                    result.stderr,
+                    "session transcript prefix|ownership acknowledgment|committed report-time task|lifecycle transcript|noncanonical post-report|published result",
+                )
+
+    def test_archived_export_requires_all_root_retained_session_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, envelope, _task, session_evidence, _session_id = root_retained_session_fixture(tmp_path)
+            rejected = subprocess.run(
+                [
+                    str(REPORT),
+                    "--export-archived-consumed",
+                    str(envelope),
+                    "--consumed-attestation-output",
+                    str(tmp_path / "incomplete.json"),
+                    "--root-retained-session-transcript",
+                    str(session_evidence[0]),
+                ],
+                cwd=case.root.parent,
+                env=case.env,
+                text=True,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("either all or none", rejected.stderr)
+
+    def test_root_retained_session_custody_rejects_origin_main_race(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, envelope, _task, session_evidence, _session_id = root_retained_session_fixture(tmp_path)
+            transcript, lifecycle_transcript, message_id, published_commit = session_evidence
+            evidence = omo_report_receipt.capture_root_retained_evidence(
+                transcript,
+                lifecycle_transcript,
+                message_id,
+                published_commit,
+            )
+            transfer_line = envelope.read_text(encoding="utf-8").splitlines()[3]
+            transfer = json.loads(transfer_line.removeprefix("[omo-transfer: ").removesuffix("]"))
+            commitment_path = Path(str(transfer["commitment_path"]))
+            commitment = json.loads(
+                commitment_path.read_text(encoding="utf-8")
+            )
+            race_file = case.root / "race-result.txt"
+            race_file.write_text("advance origin/main during validation\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(case.root), "add", "--", race_file.name], check=True)
+            subprocess.run(["git", "-C", str(case.root), "commit", "-qm", "advance result"], check=True)
+            advanced_commit = subprocess.run(
+                ["git", "-C", str(case.root), "rev-parse", "HEAD"],
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.strip()
+            original_run = subprocess.run
+            tip_reads = 0
+
+            def racing_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                nonlocal tip_reads
+                command = args[0]
+                if isinstance(command, list) and command[-3:] == [
+                    "rev-parse",
+                    "--verify",
+                    "refs/remotes/origin/main",
+                ]:
+                    tip_reads += 1
+                    if tip_reads == 2:
+                        original_run(
+                            [
+                                "git",
+                                "-C",
+                                str(case.root),
+                                "update-ref",
+                                "refs/remotes/origin/main",
+                                advanced_commit,
+                            ],
+                            check=True,
+                        )
+                return original_run(*args, **kwargs)  # type: ignore[return-value]
+
+            with patch.object(omo_report_receipt.subprocess, "run", side_effect=racing_run):
+                with self.assertRaisesRegex(ReceiptError, "not stable on origin/main"):
+                    omo_report_receipt.infer_archived_task_path(
+                        case.root,
+                        case.root / "worker.md",
+                        commitment["preflight"]["routing_sources"],
+                        str(commitment["replay_id"]),
+                        "vl:2",
+                        evidence,
+                    )
+
+    def test_root_retained_session_custody_rejects_prefix_rewrite_race(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            _case, _envelope, _task, session_evidence, _session_id = root_retained_session_fixture(tmp_path)
+            transcript, lifecycle_transcript, message_id, published_commit = session_evidence
+            evidence = omo_report_receipt.capture_root_retained_evidence(
+                transcript,
+                lifecycle_transcript,
+                message_id,
+                published_commit,
+            )
+            original_read = os.read
+            observed = 0
+            rewrote_prefix = False
+
+            def racing_read(fd: int, size: int) -> bytes:
+                nonlocal observed, rewrote_prefix
+                chunk = original_read(fd, size)
+                observed += len(chunk)
+                if observed == evidence.transcript_prefix_size_bytes and not rewrote_prefix:
+                    rewrote_prefix = True
+                    with transcript.open("r+b") as stream:
+                        stream.write(b"[")
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                return chunk
+
+            with patch.object(omo_report_receipt.os, "read", side_effect=racing_read):
+                with self.assertRaisesRegex(ReceiptError, "prefix changed or is invalid"):
+                    omo_report_receipt.read_append_only_session_prefix(evidence)
 
     def test_root_retained_done_export_rejects_noncanonical_task_or_todo_custody(self) -> None:
         for defect in ("task body", "TODO section", "capitalized header", "indented row", "duplicate header"):
