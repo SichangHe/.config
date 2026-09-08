@@ -5,8 +5,8 @@
   - preserve the earlier prepared close audit as immutable evidence
 - prepare
   - authenticate the prior close packet, PASS review, prepared audit, executor reports, and literal `/status` authorization
-  - bind both pane, process, and session identities plus unchanged task, TODO, manager, helper, and report bytes
-  - capture only the bottom-anchored two-row `/status` completion menu
+  - authenticate the exact committed Source-1485 `dw:0` to `dw:15` manager migration, then bind current protected-task, TODO, successor-manager, helper, and report bytes
+  - require the protected successor to remain ready before and after two identical captures of the predecessor's bottom-anchored two-row `/status` completion menu
 - review
   - independently revalidate every static and live binding
   - bind the exact menu capture to a packet-specific PASS record

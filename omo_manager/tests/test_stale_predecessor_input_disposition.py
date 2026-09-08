@@ -122,6 +122,7 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         )
         root_audit.chmod(0o600)
         self.enterContext(patch.object(subject, "SOURCE1485_ROOT_AUDIT_SHA256", subject.sha256(root_audit.read_bytes())))
+        self.enterContext(patch.object(subject, "SOURCE1485_ORIGINAL_TASK_SHA256", subject.sha256(before_task)))
         row, chunks = subject.partition_todo(todo.read_bytes(), subject.owned_todo_row(packet))
         unsigned: dict[str, object] = {
             "schema": subject.TODO_RECOVERY_SCHEMA,
@@ -275,6 +276,112 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             packet, recovery, _todo = self.todo_recovery_fixture(Path(directory))
             current, _task, _manager, _target, _parent = subject.validate_todo_recovery_current(packet, recovery)
             self.assertEqual(b"current:\nworker.md dw8:1\nother.md config:2\n", current)
+
+    def test_fresh_packet_authenticates_source1485_migration_custody(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, _todo = self.todo_recovery_fixture(Path(directory))
+            prior = {
+                "task": packet["task"],
+                "task_sha256": packet["task_sha256"],
+                "manager_task": packet["manager_task"],
+                "manager_target": packet["manager_target"],
+            }
+            task = Path(str(packet["task"]))
+            fresh = {
+                **packet,
+                "schema": subject.SOURCE1485_SCHEMA,
+                "task_sha256": subject.sha256(task.read_bytes()),
+                "original_task_sha256": packet["task_sha256"],
+                "manager_task": recovery["current_manager_task"],
+                "manager_target": recovery["current_manager_target"],
+                "original_manager_task": packet["manager_task"],
+                "original_manager_target": packet["manager_target"],
+                "source1485_root_audit": recovery["source1485_root_audit"],
+                "source1485_root_audit_sha256": recovery["source1485_root_audit_sha256"],
+            }
+            task_data, manager, target, parent = subject.validate_source1485_packet(fresh, prior)
+            self.assertEqual(task.read_bytes(), task_data)
+            self.assertEqual(Path(str(recovery["current_manager_task"])), manager)
+            self.assertEqual(("dw:15", "config:1"), (target, parent))
+
+    def test_fresh_packet_rejects_stale_pre_source1485_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, _todo = self.todo_recovery_fixture(Path(directory))
+            prior = {
+                "task": packet["task"],
+                "task_sha256": packet["task_sha256"],
+                "manager_task": packet["manager_task"],
+                "manager_target": packet["manager_target"],
+            }
+            fresh = {
+                **packet,
+                "schema": subject.SOURCE1485_SCHEMA,
+                "task_sha256": subject.sha256(Path(str(packet["task"])).read_bytes()),
+                "original_task_sha256": "f" * 64,
+                "manager_task": recovery["current_manager_task"],
+                "manager_target": recovery["current_manager_target"],
+                "original_manager_task": packet["manager_task"],
+                "original_manager_target": packet["manager_target"],
+                "source1485_root_audit": recovery["source1485_root_audit"],
+                "source1485_root_audit_sha256": recovery["source1485_root_audit_sha256"],
+            }
+            with self.assertRaisesRegex(TaskFrontmatterError, "pre-Source-1485 custody"):
+                subject.validate_source1485_packet(fresh, prior)
+
+    def test_fresh_prepare_rejects_capture_race(self) -> None:
+        predecessor = PanePin("dw8:0", "%1", 101, 201)
+        protected = PanePin("dw8:1", "%2", 102, 202)
+        ready = b"\xe2\x80\xba Ask Codex to do anything\n\n  gpt-5.5\n"
+        menu = "\n".join(MENU_LINES).encode()
+        with (
+            patch.object(subject, "capture_pinned", side_effect=[ready, menu, menu + b"changed\n"]),
+            self.assertRaisesRegex(TaskFrontmatterError, "capture raced"),
+        ):
+            subject.capture_fresh_preparation_menu(predecessor, protected)
+
+    def test_fresh_prepare_rejects_nonready_or_changed_protected_successor(self) -> None:
+        predecessor = PanePin("dw8:0", "%1", 101, 201)
+        protected = PanePin("dw8:1", "%2", 102, 202)
+        ready = b"\xe2\x80\xba Ask Codex to do anything\n\n  gpt-5.5\n"
+        busy = b"\xe2\x80\xba /status\n"
+        menu = "\n".join(MENU_LINES).encode()
+        with (
+            patch.object(subject, "capture_pinned", return_value=busy),
+            self.assertRaisesRegex(TaskFrontmatterError, "not in its preserved ready state"),
+        ):
+            subject.capture_fresh_preparation_menu(predecessor, protected)
+        with (
+            patch.object(subject, "capture_pinned", side_effect=[ready, menu, menu, busy]),
+            self.assertRaisesRegex(TaskFrontmatterError, "successor changed"),
+        ):
+            subject.capture_fresh_preparation_menu(predecessor, protected)
+
+    def test_v2_review_and_execute_state_reject_protected_successor_drift(self) -> None:
+        packet = disposition_packet(Path("/tmp"))
+        packet.update(
+            {
+                "schema": subject.SOURCE1485_SCHEMA,
+                "authorized_input": "/status",
+                "menu_capture_base64": base64.b64encode("\n".join(MENU_LINES).encode()).decode(),
+                "menu_capture_sha256": subject.sha256("\n".join(MENU_LINES).encode()),
+            }
+        )
+        predecessor = PanePin("dw8:0", "%1", 101, 201)
+        protected = PanePin("dw8:1", "%2", 102, 202)
+        menu = "\n".join(MENU_LINES).encode()
+        busy = b"\xe2\x80\xba /status\n"
+        with (
+            patch.object(subject, "static_evidence", return_value=(predecessor, protected)),
+            patch.object(subject, "current_pin", return_value=True),
+            patch.object(
+                subject,
+                "session_from_process",
+                side_effect=[packet["predecessor_session_id"], packet["protected_session_id"]],
+            ),
+            patch.object(subject, "capture_pinned", side_effect=[menu, busy]),
+            self.assertRaisesRegex(TaskFrontmatterError, "left its preserved ready state"),
+        ):
+            subject.live_state(packet, require_original_menu=True)
 
     def test_todo_recovery_rejects_owned_row_drift_even_with_fresh_file_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

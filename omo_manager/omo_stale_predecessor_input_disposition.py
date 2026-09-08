@@ -73,6 +73,7 @@ from omo_manager.omo_tmux_input_lock import tmux_input_lock
 from omo_manager.omo_tmux_send import CODEX_PLACEHOLDER_INPUT_TEXTS, exact_complete_input_text
 
 SCHEMA = "omo-stale-predecessor-input-disposition/v1"
+SOURCE1485_SCHEMA = "omo-stale-predecessor-input-disposition/v2"
 REVIEW_SCHEMA = "omo-stale-predecessor-input-disposition-review/v1"
 TODO_RECOVERY_SCHEMA = "omo-stale-predecessor-input-disposition-todo-recovery/v2"
 TODO_RECOVERY_REVIEW_SCHEMA = "omo-stale-predecessor-input-disposition-todo-recovery-review/v2"
@@ -101,6 +102,7 @@ RECOVERABLE_REVIEW_SHA256 = "feb306c06dd5fb0cef6614b0e6a78866a9fd46d35f3b94f2359
 RECOVERABLE_PREPARED_AUDIT_SHA256 = "ea0cc462c460598775244919ee913448e1f0655008e0a4420c8d03cbf44fc9fd"
 RECOVERABLE_HELPER_SHA256 = "ab4c54f5cdc06823ce8d36333e7ee928b82e9813bb7de1da76df526e7f90cb85"
 SOURCE1485_ROOT_AUDIT_SHA256 = "dd2cd04c1c6cd6c4050c7cd537d893e3c24aec45c504c1db3dbe0e4c0c792f2b"
+SOURCE1485_ORIGINAL_TASK_SHA256 = "b79fb58c6b1409dfce202f0f05105e8e3d88887cde77d69e2fc810687148094e"
 EXPECTED_SCOPE = {
     "manager_target": "dw:0",
     "predecessor_target": "dw8:0",
@@ -164,6 +166,13 @@ PACKET_KEYS = {
     "audit",
     "inputs",
     "binding_id",
+}
+SOURCE1485_PACKET_KEYS = PACKET_KEYS | {
+    "source1485_root_audit",
+    "source1485_root_audit_sha256",
+    "original_task_sha256",
+    "original_manager_task",
+    "original_manager_target",
 }
 AUDIT_KEYS = {
     "schema",
@@ -256,6 +265,11 @@ def exact_recovery_state(lines: list[str], authorized_input: str = AUTHORIZED_IN
     if input_text in CODEX_PLACEHOLDER_INPUT_TEXTS and input_text in CODEX_EMPTY_INPUT_TEXTS and report.status == "ready":
         return "ready"
     return "other"
+
+
+def exact_ready_capture(data: bytes) -> bool:
+    report = report_from_lines(capture_lines(data))
+    return report.status == "ready" and report.input_text in CODEX_PLACEHOLDER_INPUT_TEXTS and report.input_text in CODEX_EMPTY_INPUT_TEXTS
 
 
 def capture_pinned(pin: PanePin) -> bytes:
@@ -674,7 +688,13 @@ def validate_incident_digests(packet: dict[str, object]) -> None:
         "recovery_report_sha256": EXPECTED_RECOVERY_REPORT_SHA256,
         "input_authorization_sha256": EXPECTED_INPUT_AUTHORIZATION_SHA256,
     }
-    if any(packet.get(key) != value for key, value in expected.items()) or any(packet.get(key) != value for key, value in EXPECTED_SCOPE.items()):
+    scope = dict(EXPECTED_SCOPE)
+    if packet.get("schema") == SOURCE1485_SCHEMA:
+        scope.pop("manager_target")
+        source1485_scope_ok = packet.get("manager_target") == "dw:15" and packet.get("original_manager_target") == EXPECTED_SCOPE["manager_target"]
+    else:
+        source1485_scope_ok = True
+    if any(packet.get(key) != value for key, value in expected.items()) or any(packet.get(key) != value for key, value in scope.items()) or not source1485_scope_ok:
         raise TaskFrontmatterError("disposition evidence is outside the exact dw8 incident.")
 
 
@@ -943,7 +963,7 @@ def static_evidence(
     predecessor = parse_pin(packet["predecessor_pane"], "predecessor pane")
     protected = parse_pin(packet["protected_pane"], "protected pane")
     if (
-        packet.get("schema") != SCHEMA
+        packet.get("schema") not in {SCHEMA, SOURCE1485_SCHEMA}
         or packet.get("operation") != OPERATION
         or packet.get("predecessor_pane") != prior.get("predecessor_pane")
         or packet.get("predecessor_session_id") != prior.get("predecessor_session_id")
@@ -951,10 +971,10 @@ def static_evidence(
         or packet.get("protected_session_id") != prior.get("protected_session_id")
         or packet.get("predecessor_target") != prior.get("predecessor_target")
         or packet.get("protected_target") != prior.get("protected_target")
-        or packet.get("manager_target") != prior.get("manager_target")
+        or (packet.get("schema") == SCHEMA and packet.get("manager_target") != prior.get("manager_target"))
         or packet.get("task") != prior.get("task")
         or packet.get("todo") != prior.get("todo")
-        or packet.get("manager_task") != prior.get("manager_task")
+        or (packet.get("schema") == SCHEMA and packet.get("manager_task") != prior.get("manager_task"))
         or packet.get("execution_report_replay_id") != execution_replay
         or packet.get("recovery_report_replay_id") != recovery_replay
         or execution_commitment == recovery_commitment
@@ -966,13 +986,14 @@ def static_evidence(
     ):
         raise TaskFrontmatterError("disposition packet scope is inconsistent.")
     recovered = validate_todo_recovery_current(packet, todo_recovery) if todo_recovery is not None else None
+    migrated = validate_source1485_packet(packet, prior) if packet.get("schema") == SOURCE1485_SCHEMA else None
     validate_lifecycle(
         packet,
         rebound_todo_data=None if recovered is None else recovered[0],
-        rebound_task_data=None if recovered is None else recovered[1],
-        current_manager_task=None if recovered is None else recovered[2],
-        current_manager_target=None if recovered is None else recovered[3],
-        current_manager_parent=None if recovered is None else recovered[4],
+        rebound_task_data=(recovered[1] if recovered is not None else None if migrated is None else migrated[0]),
+        current_manager_task=(recovered[2] if recovered is not None else None if migrated is None else migrated[1]),
+        current_manager_target=(recovered[3] if recovered is not None else None if migrated is None else migrated[2]),
+        current_manager_parent=(recovered[4] if recovered is not None else None if migrated is None else migrated[3]),
     )
     expected_inputs = [
         file_input(path, label, private=private)
@@ -992,6 +1013,11 @@ def static_evidence(
             (Path(str(packet["helper"])), "input disposition helper", False),
         )
     ]
+    if packet.get("schema") == SOURCE1485_SCHEMA:
+        expected_inputs.insert(
+            -1,
+            file_input(Path(str(packet["source1485_root_audit"])), "Source-1485 root audit", private=True),
+        )
     raw_inputs = packet.get("inputs")
     if todo_recovery is not None:
         if not is_recoverable_prepared_packet(packet) or not isinstance(raw_inputs, list) or len(raw_inputs) != len(expected_inputs):
@@ -1045,6 +1071,8 @@ def live_state(
     if predecessor_session != packet["predecessor_session_id"] or protected_session != packet["protected_session_id"]:
         raise TaskFrontmatterError("predecessor or protected Codex session changed.")
     capture = capture_pinned(predecessor)
+    if packet.get("schema") == SOURCE1485_SCHEMA and not exact_ready_capture(capture_pinned(protected)):
+        raise TaskFrontmatterError("protected successor left its preserved ready state.")
     state = exact_recovery_state(capture_lines(capture), str(packet["authorized_input"]))
     expected_capture = base64.b64decode(str(packet["menu_capture_base64"]), validate=True)
     if sha256(expected_capture) != packet["menu_capture_sha256"]:
@@ -1066,7 +1094,8 @@ def validate_packet(data: bytes, expected_sha256: str = "") -> dict[str, object]
     packet = canonical_object(data, "input disposition packet")
     unsigned = dict(packet)
     observed_binding = unsigned.pop("binding_id", None)
-    if set(packet) != PACKET_KEYS or observed_binding != bound_receipt_id(unsigned):
+    expected_keys = SOURCE1485_PACKET_KEYS if packet.get("schema") == SOURCE1485_SCHEMA else PACKET_KEYS
+    if set(packet) != expected_keys or observed_binding != bound_receipt_id(unsigned):
         raise TaskFrontmatterError("input disposition packet schema is invalid.")
     validate_incident_digests(packet)
     if not Path(str(packet["audit"])).is_absolute():
@@ -1074,9 +1103,51 @@ def validate_packet(data: bytes, expected_sha256: str = "") -> dict[str, object]
     return packet
 
 
+def validate_source1485_packet(packet: dict[str, object], prior: dict[str, object]) -> tuple[bytes, Path, str, str]:
+    """Validate a fresh packet's migration against the immutable pre-migration close packet."""
+
+    if (
+        packet.get("schema") != SOURCE1485_SCHEMA
+        or packet.get("task") != prior.get("task")
+        or packet.get("original_task_sha256") != SOURCE1485_ORIGINAL_TASK_SHA256
+        or packet.get("original_manager_task") != prior.get("manager_task")
+        or packet.get("original_manager_target") != prior.get("manager_target")
+    ):
+        raise TaskFrontmatterError("fresh disposition does not bind its pre-Source-1485 custody.")
+    legacy_packet = {**packet, "task_sha256": packet["original_task_sha256"]}
+    recovery_view = {
+        "task": packet["task"],
+        "original_task_sha256": packet["original_task_sha256"],
+        "current_task_input": file_input(Path(str(packet["task"])), "fresh protected task"),
+        "source1485_root_audit": packet["source1485_root_audit"],
+        "source1485_root_audit_sha256": packet["source1485_root_audit_sha256"],
+        "current_manager_task": packet["manager_task"],
+        "current_manager_target": packet["manager_target"],
+    }
+    task_data, manager_task, manager_target, manager_parent = validate_source1485_transition(legacy_packet, recovery_view)
+    if sha256(task_data) != packet.get("task_sha256") or manager_task != Path(str(packet["manager_task"])):
+        raise TaskFrontmatterError("fresh disposition current Source-1485 custody is invalid.")
+    return task_data, manager_task, manager_target, manager_parent
+
+
 def file_input(path: Path, label: str, *, private: bool = False) -> dict[str, object]:
     _data, identity, ancestors = absolute_file_binding(path, label, private=private)
     return {"file": asdict(identity), "ancestors": [asdict(item) for item in ancestors]}
+
+
+def capture_fresh_preparation_menu(predecessor: PanePin, protected: PanePin) -> bytes:
+    """Bind stable predecessor-menu bytes while preserving a ready successor."""
+
+    if not exact_ready_capture(capture_pinned(protected)):
+        raise TaskFrontmatterError("protected successor is not in its preserved ready state.")
+    menu_capture = capture_pinned(predecessor)
+    if not exact_status_menu(capture_lines(menu_capture)):
+        raise TaskFrontmatterError("predecessor does not show the exact /status completion menu.")
+    if capture_pinned(predecessor) != menu_capture:
+        raise TaskFrontmatterError("predecessor status-menu capture raced during preparation.")
+    if not exact_ready_capture(capture_pinned(protected)):
+        raise TaskFrontmatterError("protected successor changed during preparation.")
+    return menu_capture
 
 
 def prepare(args: argparse.Namespace) -> None:
@@ -1097,7 +1168,12 @@ def prepare(args: argparse.Namespace) -> None:
     root = Path(str(prior["root"])).resolve(strict=True)
     task = Path(str(prior["task"])).resolve(strict=True)
     todo = Path(str(prior["todo"])).resolve(strict=True)
-    manager_task = Path(str(prior["manager_task"])).resolve(strict=True)
+    original_manager_task = Path(str(prior["manager_task"])).resolve(strict=True)
+    root_audit = args.source1485_root_audit.resolve(strict=True)
+    if args.source1485_root_audit_sha256 != SOURCE1485_ROOT_AUDIT_SHA256:
+        raise TaskFrontmatterError("fresh preparation requires the exact Source-1485 root audit.")
+    read_bound(root_audit, SOURCE1485_ROOT_AUDIT_SHA256, "Source-1485 root audit", private=True)
+    manager_task = (root / "dw_root_new.md").resolve(strict=True)
     executor_task = root / "dw_rotate_exec.md"
     execution_report = args.execution_report.resolve(strict=True)
     recovery_report = args.recovery_report.resolve(strict=True)
@@ -1152,12 +1228,14 @@ def prepare(args: argparse.Namespace) -> None:
         Path(str(prior["helper"])).resolve(strict=True),
         task,
         todo,
+        original_manager_task,
         manager_task,
+        root_audit,
         helper,
     } | prior_close_control_paths(Path(str(prior["audit"])), prepared_close_audit)
     validate_disposition_output_paths(output, audit, reserved)
     provisional: dict[str, object] = {
-        "schema": SCHEMA,
+        "schema": SOURCE1485_SCHEMA,
         "operation": OPERATION,
         "root": str(root),
         "prior_packet": str(args.prior_packet.resolve(strict=True)),
@@ -1177,11 +1255,16 @@ def prepare(args: argparse.Namespace) -> None:
         "authorized_input": AUTHORIZED_INPUT,
         "task": str(task),
         "task_sha256": task_identity.sha256,
+        "original_task_sha256": SOURCE1485_ORIGINAL_TASK_SHA256,
         "todo": str(todo),
         "todo_sha256": todo_identity.sha256,
         "manager_task": str(manager_task),
         "manager_task_sha256": manager_identity.sha256,
-        "manager_target": prior["manager_target"],
+        "manager_target": "dw:15",
+        "original_manager_task": str(original_manager_task),
+        "original_manager_target": prior["manager_target"],
+        "source1485_root_audit": str(root_audit),
+        "source1485_root_audit_sha256": SOURCE1485_ROOT_AUDIT_SHA256,
         "predecessor_target": prior["predecessor_target"],
         "predecessor_pane": prior["predecessor_pane"],
         "predecessor_session_id": prior["predecessor_session_id"],
@@ -1208,19 +1291,25 @@ def prepare(args: argparse.Namespace) -> None:
                 (task, "protected task", False),
                 (todo, "TODO", False),
                 (manager_task, "manager task", False),
+                (root_audit, "Source-1485 root audit", True),
                 (helper, "input disposition helper", False),
             )
         ],
     }
     validate_incident_digests(provisional)
-    validate_lifecycle(provisional)
+    migrated = validate_source1485_packet(provisional, prior)
+    validate_lifecycle(
+        provisional,
+        rebound_task_data=migrated[0],
+        current_manager_task=migrated[1],
+        current_manager_target=migrated[2],
+        current_manager_parent=migrated[3],
+    )
     if not current_pin(predecessor) or not current_pin(protected):
         raise TaskFrontmatterError("predecessor or protected pane identity changed.")
     if session_from_process(predecessor) != prior["predecessor_session_id"] or session_from_process(protected) != prior["protected_session_id"]:
         raise TaskFrontmatterError("predecessor or protected Codex session changed.")
-    menu_capture = capture_pinned(predecessor)
-    if not exact_status_menu(capture_lines(menu_capture)):
-        raise TaskFrontmatterError("predecessor does not show the exact /status completion menu.")
+    menu_capture = capture_fresh_preparation_menu(predecessor, protected)
     record = {
         **provisional,
         "menu_capture_base64": base64.b64encode(menu_capture).decode(),
@@ -1477,7 +1566,14 @@ def review_todo_recovery(args: argparse.Namespace) -> None:
 
 def prepared_disposition_audit(packet: dict[str, object], packet_sha256: str) -> bytes:
     fields = {key: packet[key] for key in AUDIT_KEYS if key in packet}
-    fields.update({"schema": SCHEMA, "operation": OPERATION, "state": "prepared", "packet_sha256": packet_sha256})
+    fields.update(
+        {
+            "schema": packet.get("schema", SCHEMA),
+            "operation": OPERATION,
+            "state": "prepared",
+            "packet_sha256": packet_sha256,
+        }
+    )
     return canonical_json(fields)
 
 
@@ -1822,9 +1918,10 @@ def main() -> int:
                 args.input_authorization,
                 args.audit,
                 args.output,
+                args.source1485_root_audit,
             )
-            if any(value is None for value in required) or not args.audit.is_absolute() or not args.output.is_absolute():
-                raise TaskFrontmatterError("prepare requires every evidence path and absolute audit/output paths.")
+            if any(value is None for value in required) or not args.audit.is_absolute() or not args.output.is_absolute() or not args.source1485_root_audit.is_absolute():
+                raise TaskFrontmatterError("prepare requires every evidence path and absolute audit/output/root-audit paths.")
             prepare(args)
         elif args.review:
             if args.packet is None:
