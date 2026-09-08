@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import io
 import subprocess
 import tempfile
@@ -10,6 +12,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from omo_manager.omo_task_edit import REMOVE_REMINDER
+from omo_manager.omo_task_edit import SOURCE1503_SHA256
+from omo_manager.omo_task_edit import SOURCE1506_SHA256
 from omo_manager.omo_task_edit import Args
 from omo_manager.omo_task_edit import normalize_duplicate_frontmatter
 from omo_manager.omo_task_edit import parse_args
@@ -37,6 +41,162 @@ def task_frontmatter(*, status: str = "running", pending_items: tuple[str, ...] 
 
 
 class TaskEditTests(unittest.TestCase):
+    def test_human_envelope_record_binds_exact_source_and_active_closure_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "dw_rotate_exec.md"
+            prior_envelope = '<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1485.txt:1-12">\nPrior Human direction\n</human_instruction>\n'
+            text = task_frontmatter().replace("runat: wl:2", "runat: config:4") + "closure body\n" + prior_envelope
+            task.write_text(text, encoding="utf-8")
+            manager_mail = root / "manager_mail"
+            manager_mail.mkdir(mode=0o700)
+            source = manager_mail / "85c5dff58359-1503.txt"
+            source.write_bytes(
+                base64.b64decode(
+                    "U3ViamVjdDogUmU6IENsb3NlIG9ic29sZXRlIERlZXBXaWtpIHBsYW5uZXI/CgpDbG9zZSB0aGVtIGFsbA0K"
+                    "DQpPbiBNb24sIFNlcCA3LCAyMDI2IGF0IDIxOjMxIDxzaWNoYW5naGVhZ2VudEBnbWFpbC5jb20+IHdyb3Rl"
+                    "Og0KDQo+IFRoZSBvbGQgRGVlcFdpa2kgcGxhbm5pbmctbWFuYWdlciBzZXNzaW9uIG5vIGxvbmdlciBleGlz"
+                    "dHMsIGl0cyBxdWV1ZSBpcw0KPiBlbXB0eSwgYW5kIGl0cyB3b3JrIGlzIGFzc2lnbmVkIGVsc2V3aGVyZS4g"
+                    "SXQgaXMgc2FmZWx5IGJsb2NrZWQgYW5kIGNhbm5vdA0KPiBkbyB3b3JrLg0KPg0KPiBZb3VyIGVhcmxpZXIg"
+                    "aW5zdHJ1Y3Rpb24gZXhwbGljaXRseSBuYW1lZCBjb25maWc6NywgY29uZmlnOjIsIGFuZA0KPiBjb25maWc6"
+                    "MywgYnV0IG5vdCB0aGUgcGxhbm5pbmctbWFuYWdlciB0YXJnZXQgZHdwbGFuOjAuIFNob3VsZCBJIGZvcm1h"
+                    "bGx5DQo+IGNsb3NlIHRoZSBvYnNvbGV0ZSBkd3BsYW46MCByZWNvcmQ/DQo+DQo="
+                )
+            )
+            source.chmod(0o600)
+            self.assertEqual(SOURCE1503_SHA256, hashlib.sha256(source.read_bytes()).hexdigest())
+            args = Args(
+                root,
+                Path("dw_rotate_exec.md"),
+                "human-envelope-record",
+                expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                authority_file=Path("manager_mail/85c5dff58359-1503.txt"),
+                authority_lines=(1, 3),
+                authority_sha256=SOURCE1503_SHA256,
+            )
+
+            self.assertEqual(0, run(args))
+
+            updated = task.read_text(encoding="utf-8")
+            self.assertIn(
+                '<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1503.txt:1-3">\nSubject: Re: Close obsolete DeepWiki planner?\n\nClose them all\n</human_instruction>\n',
+                updated.replace("\r\n", "\n"),
+            )
+            self.assertEqual(2, updated.count('<human_instruction authoritative="true"'))
+            self.assertIn(prior_envelope, updated)
+
+    def test_human_envelope_record_rejects_wrong_task_digest_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "dw_rotate_exec.md"
+            text = task_frontmatter().replace("runat: wl:2", "runat: config:4")
+            task.write_text(text, encoding="utf-8")
+            args = Args(
+                root,
+                Path("dw_rotate_exec.md"),
+                "human-envelope-record",
+                expected_task_sha256="0" * 64,
+                authority_file=Path("manager_mail/85c5dff58359-1503.txt"),
+                authority_lines=(1, 3),
+                authority_sha256=SOURCE1503_SHA256,
+            )
+            self.assertEqual(2, run(args))
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+
+    def test_human_envelope_record_supports_exact_source1506_stale_mail_record(self) -> None:
+        source1506 = base64.b64decode(
+            "U3ViamVjdDogUmU6IFdpeCBhbmQgQjEyIGN1cnJlbnQgY291bnRzIGFuZCBsYXRlc3Qgc2l0ZQoKd2w6MTEN"
+            "Cg0KPiBPbiBTZXAgNywgMjAyNiwgYXQgMjI6MjQsIHNpY2hhbmdoZWFnZW50QGdtYWlsLmNvbSB3cm90ZToN"
+            "Cj4gDQo+IEkgcmVjZWl2ZWQgeW91ciByZXF1ZXN0IHRvIGNsb3NlIHRoZSBXTCBhZ2VudCBkb2luZyBEVyB3"
+            "b3JrLiBUaGUgbWVzc2FnZSBkb2VzIG5vdCBpZGVudGlmeSB0aGUgZXhhY3QgV0wgc2Vzc2lvbiwgc28gSSBo"
+            "YXZlIGVzY2FsYXRlZCBpdCB0byB0aGUgbWFpbiBtYW5hZ2VyIGZvciBhdXRob3JpdGF0aXZlIHRhcmdldCBy"
+            "ZXNvbHV0aW9uIHJhdGhlciB0aGFuIHJpc2sgY2xvc2luZyB0aGUgd3JvbmcgYWdlbnQuDQo+IA0KPiBXaGlj"
+            "aCBXTCBzZXNzaW9uIHNob3VsZCBiZSBjbG9zZWQ/DQo+IA0KDQo="
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager_mail = root / "manager_mail"
+            manager_mail.mkdir(mode=0o700)
+            source = manager_mail / "85c5dff58359-1506.txt"
+            source.write_bytes(source1506)
+            source.chmod(0o600)
+            self.assertEqual(SOURCE1506_SHA256, hashlib.sha256(source1506).hexdigest())
+            task = root / "mail_stale_cleanup.md"
+            text = (
+                task_frontmatter(status="blocked")
+                .replace("status: blocked\n", "status: blocked\nblocked_on: human\n")
+                .replace("runat: wl:2", "runat: wl:11")
+                .replace("managerat: wl:1", "managerat: wl:12")
+                + '<human_instruction authoritative="true" source="202608/manager_mail/85c5dff58359-1433.txt:1-26">\nprior one\n</human_instruction>\n'
+                + '<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1438.txt:1-22">\nprior two\n</human_instruction>\n'
+            )
+            task.write_text(text, encoding="utf-8")
+            args = Args(
+                root,
+                Path("mail_stale_cleanup.md"),
+                "human-envelope-record",
+                expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                authority_file=Path("manager_mail/85c5dff58359-1506.txt"),
+                authority_lines=(1, 3),
+                authority_sha256=SOURCE1506_SHA256,
+            )
+
+            self.assertEqual(0, run(args))
+
+            updated = task.read_text(encoding="utf-8").replace("\r\n", "\n")
+            self.assertIn(
+                '<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1506.txt:1-3">\n'
+                "Subject: Re: Wix and B12 current counts and latest site\n\nwl:11\n</human_instruction>\n",
+                updated,
+            )
+            self.assertEqual(3, updated.count('<human_instruction authoritative="true"'))
+
+    def test_human_envelope_record_rejects_source1506_with_open_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "mail_stale_cleanup.md"
+            text = (
+                task_frontmatter(status="blocked", pending_items=("still open",))
+                .replace("status: blocked\n", "status: blocked\nblocked_on: human\n")
+                .replace("runat: wl:2", "runat: wl:11")
+                .replace("managerat: wl:1", "managerat: wl:12")
+            )
+            task.write_text(text, encoding="utf-8")
+            args = Args(
+                root,
+                Path("mail_stale_cleanup.md"),
+                "human-envelope-record",
+                expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                authority_file=Path("manager_mail/85c5dff58359-1506.txt"),
+                authority_lines=(1, 3),
+                authority_sha256=SOURCE1506_SHA256,
+            )
+            self.assertEqual(2, run(args))
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+
+    def test_human_envelope_record_rejects_source1506_wrong_owner_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "mail_stale_cleanup.md"
+            text = (
+                task_frontmatter(status="blocked")
+                .replace("status: blocked\n", "status: blocked\nblocked_on: human\n")
+                .replace("runat: wl:2", "runat: wl:11")
+                .replace("managerat: wl:1", "managerat: wl:99")
+            )
+            task.write_text(text, encoding="utf-8")
+            args = Args(
+                root,
+                Path("mail_stale_cleanup.md"),
+                "human-envelope-record",
+                expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                authority_file=Path("manager_mail/85c5dff58359-1506.txt"),
+                authority_lines=(1, 3),
+                authority_sha256=SOURCE1506_SHA256,
+            )
+            self.assertEqual(2, run(args))
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+
     def test_normalizes_one_empty_later_frontmatter_without_changing_record_or_body(self) -> None:
         authoritative = task_frontmatter(pending_items=("keep broad owner item",))
         duplicate = task_frontmatter()

@@ -185,6 +185,12 @@ which maintains its own queue through `omo_pending.py`. A message selected by a
 case-insensitive, whitespace- and punctuation-insensitive manager edge marker prompts the manager to use `omo_record_pending.py` when it creates work. If it creates no new item, the manager uses
 `omo_task_edit.py pending-marker-clear`.
 
+`omo_task_edit.py human-envelope-record` is a deliberately one-shot operation for
+recording a registered, exact authenticated Human envelope in its assigned
+closure task. Each registration binds the source bytes, line range, task and
+lifecycle shape, and current task digest; all other source/task/owner
+combinations fail closed. The operation performs no pane mutation.
+
 Keep existing `list`, `add`, `replace`/`update`, `remove`, and `comment` names
 as compatibility aliases if already shipped, but docs should use the canonical
 names above.

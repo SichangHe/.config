@@ -38,4 +38,5 @@
 
 - cleanup trigger
   - when `omo_pending_watch.py` reports that `TODO.md` is too long, move done material out before doing unrelated manager work
+  - the watcher validates the preview's `TODO baseline` and `retention plan`, then records the exact operation-set identity after a no-op or accepted delivery; restarts and unrelated line-count/index drift do not repeat the same operations, while changed operations rearm the reminder
   - after archiving, leave `TODO.md` with its preserved sections, all blocked rows, and the newest 20 `previous` rows

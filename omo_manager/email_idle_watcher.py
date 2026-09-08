@@ -13,6 +13,7 @@ import re
 import secrets
 import select
 import shlex
+import stat
 import subprocess
 import sys
 import threading
@@ -174,6 +175,7 @@ DEFAULT_MANAGER_UNREAD_COMPRESSION_THRESHOLD = int(os.environ.get("OMO_MANAGER_E
 DEFAULT_MANAGER_TOTAL_CLEANUP_THRESHOLD = int(os.environ.get("OMO_MANAGER_EMAIL_TOTAL_CLEANUP_THRESHOLD", "29"))
 DEFAULT_MANAGER_RECENT_CLEANUP_THRESHOLD = int(os.environ.get("OMO_MANAGER_EMAIL_RECENT_CLEANUP_THRESHOLD", "64"))
 DEFAULT_MANAGER_RECENT_CLEANUP_WINDOW_S = float(os.environ.get("OMO_MANAGER_EMAIL_RECENT_CLEANUP_WINDOW_S", str(24 * 60 * 60)))
+REVIEWED_RETAIN_ALL_GROWTH_STEP = max(1, int(os.environ.get("OMO_MANAGER_EMAIL_REVIEWED_RETAIN_ALL_GROWTH_STEP", "8")))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
@@ -215,6 +217,12 @@ class ThresholdLifecycle:
 class ThresholdRecord:
     identity: str
     pending_line: int | None
+
+
+@dataclass(frozen=True)
+class ReviewedCleanupBaseline:
+    count: int
+    identity: str
 
 
 @dataclass(frozen=True)
@@ -912,6 +920,10 @@ def manager_mail_threshold_watermarks_path(args: Args) -> Path:
 
 def manager_mail_threshold_lifecycles_path(args: Args) -> Path:
     return email_uid_state_path(args, "email-manager-mail-threshold-lifecycles")
+
+
+def manager_mail_review_invalidation_path(args: Args) -> Path:
+    return email_uid_state_path(args, "email-manager-mail-review-invalidated")
 
 
 def load_processed_uids(path: Path) -> set[str]:
@@ -1926,6 +1938,93 @@ def manager_mail_counts(
     return ManagerMailCounts(len(total_uids), len(unread_uids), recent_window_s, recent_total, True)
 
 
+def reviewed_total_cleanup_baseline(root: Path) -> ReviewedCleanupBaseline | None:
+    """Find the newest completed, independently reviewed retain-all baseline."""
+
+    candidates: list[tuple[int, int, ReviewedCleanupBaseline]] = []
+    threshold_re = re.compile(
+        rf"^{re.escape(threshold_marker('total-cleanup'))}\n"
+        rf"{re.escape('(email_idle_watcher manager-mail-threshold-id kind=total-cleanup id=')}[0-9a-f]{{32}}\)\n"
+        r"manager email watcher threshold: retained manager mail (\d+) exceeds \d+$",
+        re.MULTILINE,
+    )
+    # Cleanup owners conventionally carry "mail" in their root-level task
+    # name. Keep this periodic scan bounded rather than reparsing every task.
+    for path in root.glob("*mail*.md"):
+        try:
+            state = path.lstat()
+            text = path.read_text(encoding="utf-8")
+            after = path.lstat()
+            if (
+                not stat.S_ISREG(state.st_mode)
+                or stat.S_ISLNK(state.st_mode)
+                or state.st_uid != os.getuid()
+                or (state.st_dev, state.st_ino, state.st_size, state.st_mtime_ns, state.st_ctime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            ):
+                continue
+            metadata = parse_task_metadata(text, root)
+        except (OSError, TaskFrontmatterError):
+            continue
+        if (
+            metadata is None
+            or getattr(metadata, "status", "") != "done"
+            or getattr(metadata, "pending_task_items", ())
+            or any(line.strip() == "(pending)" for line in text.splitlines())
+        ):
+            continue
+        reviewed_evidence: list[tuple[int, int, str]] = []
+        lines = text.splitlines()
+        for line_index, line in enumerate(lines):
+            folded = line.casefold()
+            if not line.startswith("(verified removed pending item:"):
+                continue
+            if not ("independent reviewer" in folded or "independently reviewed" in folded):
+                continue
+            if "retain-all" not in folded and "no-op" not in folded:
+                continue
+            reviewed_evidence.extend(
+                (line_index, int(value), line) for value in re.findall(r"\b(\d+) accepted\b", line, re.IGNORECASE)
+            )
+        threshold_evidence: dict[int, list[tuple[int, str]]] = {}
+        for match in threshold_re.finditer(text):
+            line_index = text.count("\n", 0, match.start())
+            threshold_evidence.setdefault(int(match.group(1)), []).append((line_index, match.group(0)))
+        routed_threshold_re = re.compile(
+            r"\bthreshold id [0-9a-f]{32}; retained manager mail is (\d+),",
+            re.IGNORECASE,
+        )
+        for line_index, line in enumerate(lines):
+            match = routed_threshold_re.search(line)
+            if match is not None:
+                threshold_evidence.setdefault(int(match.group(1)), []).append((line_index, line))
+        for review_line_index, count, review_line in reviewed_evidence:
+            proofs = threshold_evidence.get(count, ())
+            if not proofs:
+                continue
+            _proof_line_index, proof = min(proofs, key=lambda candidate: abs(candidate[0] - review_line_index))
+            identity = hashlib.sha256(f"{path.name}\0{review_line}\0{proof}".encode()).hexdigest()
+            candidates.append((state.st_mtime_ns, review_line_index, ReviewedCleanupBaseline(count, identity)))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda candidate: candidate[:2])[2]
+
+
+def invalidated_review_identity(args: Args) -> str:
+    path = manager_mail_review_invalidation_path(args)
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    return value if re.fullmatch(r"[0-9a-f]{64}", value) else ""
+
+
+def invalidate_reviewed_total_cleanup(args: Args, identity: str) -> None:
+    if re.fullmatch(r"[0-9a-f]{64}", identity) is None:
+        raise ValueError("reviewed cleanup identity must be lowercase SHA-256")
+    write_private_state(manager_mail_review_invalidation_path(args), identity + "\n")
+
+
 def handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) -> bool:
     recipient = args.manager_mail_recipient or args.self_email
     ignored_uids = load_processed_uids(ignored_uids_path(args)) if recipient.casefold() == args.self_email.casefold() else set()
@@ -1951,6 +2050,17 @@ def handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) -> boo
     next_lifecycles = dict(lifecycles)
     triggered = False
     state_changed = False
+    reviewed_total_baseline = reviewed_total_cleanup_baseline(args.root)
+    reviewed_total_valid = (
+        reviewed_total_baseline is not None and reviewed_total_baseline.identity != invalidated_review_identity(args)
+    )
+    if (
+        reviewed_total_valid
+        and reviewed_total_baseline is not None
+        and abs(counts.total - reviewed_total_baseline.count) >= REVIEWED_RETAIN_ALL_GROWTH_STEP
+    ):
+        invalidate_reviewed_total_cleanup(args, reviewed_total_baseline.identity)
+        reviewed_total_valid = False
     checks = (
         ("total-cleanup", args.total_cleanup_threshold, counts.total, 1),
         ("unread-compression", args.unread_compression_threshold, counts.unread, args.unread_compression_threshold),
@@ -1976,13 +2086,18 @@ def handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) -> boo
                 next_lifecycles[kind] = ThresholdLifecycle(lifecycle.identity, ThresholdLifecycleState.CONSUMED_EXECUTION_BLOCKED, count)
             else:
                 next_lifecycles[kind] = ThresholdLifecycle(lifecycle.identity, ThresholdLifecycleState.COMPLETED, count)
+        growth_base = watermarks.get(kind, threshold)
+        if kind == "total-cleanup" and reviewed_total_valid and reviewed_total_baseline is not None:
+            growth_base = max(growth_base, reviewed_total_baseline.count)
+            growth_step = REVIEWED_RETAIN_ALL_GROWTH_STEP
         growth_retrigger = (
             exceeded
             and kind in active
             and pending_line is None
-            and count >= watermarks.get(kind, threshold) + growth_step
+            and count >= growth_base + growth_step
         )
-        if exceeded and (kind not in active or growth_retrigger):
+        reviewed_total_suppresses = kind == "total-cleanup" and exceeded and reviewed_total_valid
+        if exceeded and not reviewed_total_suppresses and (kind not in active or growth_retrigger):
             if pending_line is None:
                 line_no, created = ensure_manager_mail_threshold_pending(args, kind, counts)
             else:

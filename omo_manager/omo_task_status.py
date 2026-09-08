@@ -113,6 +113,16 @@ DONE_LIVE_CONSUMED_RECEIPT_KEYS = frozenset(
     }
 )
 MAX_AUTHORITY_BYTES = 1_000_000
+SOURCE1503_DWPLAN_AUTHORITY = "manager_mail/85c5dff58359-1503.txt:1-3"
+SOURCE1503_SHA256 = "0eb6cfde4d5ef1160806e36b7077ad49f06c5e17f17248fdfec012f89d1a13eb"
+SOURCE1503_EXCERPT = "Subject: Re: Close obsolete DeepWiki planner?\n\nClose them all\n"
+SOURCE1506_WL11_AUTHORITY = "manager_mail/85c5dff58359-1506.txt:1-3"
+SOURCE1506_SHA256 = "a9dc947ccaf3be2a05af6b09a6092000b4ae9d7046352f4aa39850a0d96f7bcb"
+SOURCE1506_EXCERPT = "Subject: Re: Wix and B12 current counts and latest site\n\nwl:11\n"
+SOURCE1506_ENVELOPE_LOCATORS = (
+    "202608/manager_mail/85c5dff58359-1433.txt:1-26",
+    "manager_mail/85c5dff58359-1438.txt:1-22",
+)
 AUTHORITATIVE_HUMAN_ENVELOPE_RE = re.compile(
     r'<human_instruction[ \t]+authoritative="true"[ \t]+source="([^"\r\n]+)">\r?\n(.*?)</human_instruction>',
     re.DOTALL,
@@ -2073,6 +2083,92 @@ def has_export_then_close_authority(excerpt: str) -> bool:
     return prohibited is None
 
 
+def has_source1503_dwplan_close_authority(
+    args: Args,
+    path: Path,
+    text: str,
+    excerpt: str,
+    authority_locator: str,
+) -> bool:
+    """Recognize Source-1503 only for the obsolete, empty dwplan record."""
+
+    metadata = parse_task_metadata(text, args.root)
+    return (
+        authority_locator == SOURCE1503_DWPLAN_AUTHORITY
+        and args.authority_sha256 == SOURCE1503_SHA256
+        and excerpt.replace("\r\n", "\n") == SOURCE1503_EXCERPT
+        and args.authority_envelope == Path("dw_rotate_exec.md")
+        and path == args.root / "dw_planning_mgr.md"
+        and args.missing_target == "dwplan:0"
+        and metadata is not None
+        and metadata.version != V2_VERSION
+        and metadata.status == "blocked"
+        and metadata.runat == "dwplan:0"
+        and metadata.is_manager
+        and not metadata.pending_task_items
+        and not has_pending_marker(text)
+    )
+
+
+def has_source1506_wl11_close_authority(
+    args: Args,
+    path: Path,
+    text: str,
+    excerpt: str,
+    authority_locator: str,
+) -> bool:
+    """Recognize the Human's exact bare-target reply for the stale wl:11 record."""
+
+    metadata = parse_task_metadata(text, args.root)
+    return (
+        authority_locator == SOURCE1506_WL11_AUTHORITY
+        and args.authority_sha256 == SOURCE1506_SHA256
+        and excerpt.replace("\r\n", "\n") == SOURCE1506_EXCERPT
+        and args.authority_envelope == Path("mail_stale_cleanup.md")
+        and path == args.root / "mail_stale_cleanup.md"
+        and args.missing_target == "wl:11"
+        and metadata is not None
+        and metadata.version != V2_VERSION
+        and metadata.status == "blocked"
+        and metadata.blocked_on == "human"
+        and metadata.runat == "wl:11"
+        and metadata.managerat == "wl:12"
+        and not metadata.is_manager
+        and not metadata.pending_task_items
+        and not has_pending_marker(text)
+    )
+
+
+def validate_source1506_replacement(root: Path) -> tuple[Path, str, os.stat_result]:
+    """Bind the completed wl:13 replacement record that this reconciliation must preserve."""
+
+    replacement = root / "mail_cleanup_new.md"
+    try:
+        before = replacement.lstat()
+        text = replacement.read_text(encoding="utf-8")
+        after = replacement.lstat()
+    except OSError as exc:
+        raise TaskFrontmatterError(f"Source-1506 reconciliation requires the completed wl:13 replacement record: {exc}") from exc
+    metadata = parse_task_metadata(text, root)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) & 0o022
+        or not same_file_state(before, after)
+        or metadata is None
+        or metadata.version == V2_VERSION
+        or metadata.status != "done"
+        or metadata.runat != "wl:13"
+        or metadata.managerat != "wl:12"
+        or metadata.is_manager
+        or metadata.pending_task_items
+        or has_pending_marker(text)
+    ):
+        raise TaskFrontmatterError("Source-1506 reconciliation requires the unchanged completed queue-empty wl:13 replacement record.")
+    return replacement, text, after
+
+
 def close_missing_target(args: Args, path: Path, text: str, before: os.stat_result) -> None:
     """Close one exact absent blocked record without starting or stopping tmux."""
 
@@ -2108,8 +2204,12 @@ def close_missing_target(args: Args, path: Path, text: str, before: os.stat_resu
         )
         return not uncertain and re.search(direct_close, stripped, re.IGNORECASE) is not None
 
-    explicit_authority = has_export_then_close_authority(normalized_excerpt) or any(
-        unambiguous_close_authority(sentence) for sentence in sentences
+    source1506_authority = has_source1506_wl11_close_authority(args, path, text, excerpt, authority_locator)
+    explicit_authority = (
+        has_source1503_dwplan_close_authority(args, path, text, excerpt, authority_locator)
+        or source1506_authority
+        or has_export_then_close_authority(normalized_excerpt)
+        or any(unambiguous_close_authority(sentence) for sentence in sentences)
     )
     prohibited_authority = re.search(
         r"\b(?:do not|don't|must not|never|refuse to|should not)\s+(?:[A-Za-z-]+\s+){0,4}clos(?:e|ed|ing)\b"
@@ -2128,10 +2228,19 @@ def close_missing_target(args: Args, path: Path, text: str, before: os.stat_resu
         protected_paths.add((args.root / args.authority_envelope).resolve())
     if args.audit_output.resolve() in protected_paths:
         raise TaskFrontmatterError("missing-target closure audit output must be distinct from task, TODO, and authority files.")
+    preserved_replacement = validate_source1506_replacement(args.root) if source1506_authority else None
     with root_membership_lock(args.root), task_target_lock(args.root, args.missing_target):
         with ExitStack() as locks:
-            for locked_path in sorted({path, todo}, key=str):
+            locked_paths = {path, todo}
+            if preserved_replacement is not None:
+                locked_paths.add(preserved_replacement[0])
+            for locked_path in sorted(locked_paths, key=str):
                 locks.enter_context(task_file_lock(locked_path))
+            if preserved_replacement is not None:
+                replacement_path, replacement_text, replacement_before = preserved_replacement
+                current_replacement = replacement_path.read_text(encoding="utf-8")
+                if current_replacement != replacement_text or not same_file_state(replacement_before, replacement_path.lstat()):
+                    raise TaskFrontmatterError("completed wl:13 replacement record changed before Source-1506 reconciliation acquired its locks.")
             task_before = path.stat()
             current_task = path.read_text(encoding="utf-8")
             if not same_file_state(task_before, path.stat()):
@@ -2144,6 +2253,10 @@ def close_missing_target(args: Args, path: Path, text: str, before: os.stat_resu
                 raise TaskFrontmatterError("authority changed while missing-target closure was prepared.")
             if read_park_authority_envelope(args, excerpt, authority_locator) != authority_envelope:
                 raise TaskFrontmatterError("authority envelope changed while missing-target closure was prepared.")
+            if preserved_replacement is not None:
+                replacement_path, replacement_text, replacement_before = preserved_replacement
+                if replacement_path.read_text(encoding="utf-8") != replacement_text or not same_file_state(replacement_before, replacement_path.lstat()):
+                    raise TaskFrontmatterError("completed wl:13 replacement record changed while Source-1506 reconciliation was prepared.")
             audit_text = read_private_audit(args.audit_output)
             if audit_text is None:
                 if current_task_sha256 != args.expected_task_sha256 or not same_file_state(before, path.stat()):
@@ -2422,7 +2535,22 @@ def read_park_authority_envelope(args: Args, excerpt: str, locator: str) -> str:
         (match_locator, match_excerpt.replace("\r\n", "\n"))
         for match_locator, match_excerpt in matches
     ]
-    if normalized_matches != [(locator, excerpt.replace("\r\n", "\n"))]:
+    expected_match = (locator, excerpt.replace("\r\n", "\n"))
+    source1503_matches = (
+        relative == Path("dw_rotate_exec.md")
+        and locator == SOURCE1503_DWPLAN_AUTHORITY
+        and len(normalized_matches) == 2
+        and normalized_matches[0][0] == "manager_mail/85c5dff58359-1485.txt:1-12"
+        and normalized_matches[1] == expected_match
+    )
+    source1506_matches = (
+        relative == Path("mail_stale_cleanup.md")
+        and locator == SOURCE1506_WL11_AUTHORITY
+        and len(normalized_matches) == 3
+        and tuple(match_locator for match_locator, _match_excerpt in normalized_matches[:2]) == SOURCE1506_ENVELOPE_LOCATORS
+        and normalized_matches[2] == expected_match
+    )
+    if normalized_matches != [expected_match] and not source1503_matches and not source1506_matches:
         raise TaskFrontmatterError(
             "park-unlinked authority envelope must contain exactly the selected authoritative human text."
         )

@@ -2825,6 +2825,126 @@ with exclusive_watcher_root(root):
 
             self.assertEqual([(2, "total-cleanup"), (10, "total-cleanup")], calls)
 
+    def test_email_watcher_reviewed_retain_all_suppresses_small_growth_and_rearms_materially(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = Path(tmp) / "state"
+            state.mkdir()
+            manager = root / "work_manager_today.md"
+            reviewed_task = root / "mail_cleanup_new.md"
+            reviewed_task.write_text(
+                task_frontmatter(status="done", runat="wl:13", managerat="wl:12")
+                + "(verified removed pending item: Fresh later-arrival view has 82 accepted and 4 unread with identity PASS; independent reviewer confirmed the arrivals are recent and unread, so retain-all/no-op.)\n"
+                + "Fold threshold id 329b2c7cb5a77698abc96cefb436531d; retained manager mail is 82, with 4 unread and 36 recent.\n",
+                encoding="utf-8",
+            )
+            args = watcher.Args(
+                root,
+                "",
+                root / "manager_mail",
+                state,
+                manager,
+                True,
+                "me@example.com",
+                0,
+                Path("/bin/false"),
+                manager_target="wl:1.0",
+                unread_compression_threshold=0,
+                recent_cleanup_threshold=0,
+            )
+            watcher.save_active_manager_mail_thresholds(watcher.manager_mail_threshold_state_path(args), {"total-cleanup"})
+            watcher.save_manager_mail_threshold_watermarks(watcher.manager_mail_threshold_watermarks_path(args), {"total-cleanup": 81})
+            manager.write_text(
+                "\n".join(
+                    (
+                        "(done: consumed)",
+                        watcher.threshold_marker("total-cleanup"),
+                        watcher.threshold_identity_marker("total-cleanup", "0" * 32),
+                        "manager email watcher threshold: retained manager mail 81 exceeds 29",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            counts = iter(
+                (
+                    watcher.ManagerMailCounts(83, 5, 86400, 37, True),
+                    watcher.ManagerMailCounts(89, 5, 86400, 37, True),
+                    watcher.ManagerMailCounts(90, 5, 86400, 37, True),
+                )
+            )
+            calls: list[tuple[int, str]] = []
+            with (
+                patch.object(watcher, "manager_mail_counts", side_effect=lambda *_args, **_kwargs: next(counts)),
+                patch.object(watcher, "push_manager_mail_threshold_ref", side_effect=lambda _args, line, kind: calls.append((line, kind)) or True),
+            ):
+                self.assertFalse(watcher.handle_manager_mail_thresholds(object(), args))
+                self.assertFalse(watcher.handle_manager_mail_thresholds(object(), args))
+                self.assertTrue(watcher.handle_manager_mail_thresholds(object(), args))
+            self.assertEqual(1, len(calls))
+            self.assertEqual("total-cleanup", calls[0][1])
+
+    def test_email_watcher_reviewed_retain_all_checkpoint_invalidates_when_task_reopens(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            task = root / "mail_cleanup_new.md"
+            body = (
+                "(verified removed pending item: 82 accepted; independently reviewed retain-all/no-op.)\n"
+                "Fold threshold id 329b2c7cb5a77698abc96cefb436531d; retained manager mail is 82, with 4 unread and 36 recent.\n"
+            )
+            task.write_text(task_frontmatter(status="done", runat="wl:13", managerat="wl:12") + body, encoding="utf-8")
+            baseline = watcher.reviewed_total_cleanup_baseline(root)
+            self.assertIsNotNone(baseline)
+            self.assertEqual(82, baseline.count if baseline is not None else None)
+            task.write_text(task.read_text(encoding="utf-8") + "unrelated later lifecycle note\n", encoding="utf-8")
+            self.assertEqual(baseline, watcher.reviewed_total_cleanup_baseline(root))
+            task.write_text(task_frontmatter(status="running", runat="wl:13", managerat="wl:12") + body, encoding="utf-8")
+            self.assertIsNone(watcher.reviewed_total_cleanup_baseline(root))
+
+    def test_email_watcher_reviewed_retain_all_suppresses_after_threshold_state_loss(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = Path(tmp) / "state"
+            state.mkdir()
+            manager = root / "work_manager_today.md"
+            manager.write_text("", encoding="utf-8")
+            (root / "mail_cleanup_new.md").write_text(
+                task_frontmatter(status="done", runat="wl:13", managerat="wl:12")
+                + "(verified removed pending item: 82 accepted; independently reviewed retain-all/no-op.)\n"
+                + "Fold threshold id 329b2c7cb5a77698abc96cefb436531d; retained manager mail is 82, with 4 unread and 36 recent.\n",
+                encoding="utf-8",
+            )
+            args = watcher.Args(
+                root,
+                "",
+                root / "manager_mail",
+                state,
+                manager,
+                True,
+                "me@example.com",
+                0,
+                Path("/bin/false"),
+                manager_target="wl:1.0",
+                unread_compression_threshold=0,
+                recent_cleanup_threshold=0,
+            )
+            with (
+                patch.object(watcher, "manager_mail_counts", return_value=watcher.ManagerMailCounts(83, 5, 86400, 37, True)),
+                patch.object(watcher, "push_manager_mail_threshold_ref") as push,
+            ):
+                self.assertFalse(watcher.handle_manager_mail_thresholds(object(), args))
+            push.assert_not_called()
+            self.assertEqual("", manager.read_text(encoding="utf-8"))
+
     def test_email_watcher_growth_retrigger_waits_while_marker_is_pending(self) -> None:
         from omo_manager import email_idle_watcher as watcher
 
@@ -9793,7 +9913,8 @@ resolved_task_items: []
             todo.write_text("\n".join(f"line {idx}" for idx in range(209)) + "\n", encoding="utf-8")
             args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, True)
             out = StringIO()
-            with patch.object(watcher, "todo_archive_preview_actionable", return_value=False) as preview, redirect_stdout(out):
+            result = watcher.TodoArchivePreview(False, "a" * 64, "b" * 64, "c" * 64)
+            with patch.object(watcher, "todo_archive_preview", return_value=result) as preview, redirect_stdout(out):
                 self.assertFalse(watcher.scan_once(args, {}, [todo]))
             preview.assert_called_once_with(root)
             self.assertEqual("", out.getvalue())
@@ -9803,18 +9924,98 @@ resolved_task_items: []
 
         zero = "\n".join(
             (
+                f"TODO baseline: {'a' * 64}",
+                f"retention plan: {'b' * 64}",
                 "stale archived TODO rows reconciled: 0",
                 "moved: 0",
+                "task moves: 0",
                 "artifact moves: 0",
                 "markdown rewrites: 0",
             )
         )
         with patch.object(watcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, zero, "")):
-            self.assertFalse(watcher.todo_archive_preview_actionable(Path("/tmp/root")))
-        with patch.object(watcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, zero.replace("moved: 0", "moved: 1"), "")):
+            preview = watcher.todo_archive_preview(Path("/tmp/root"))
+            self.assertIsNotNone(preview)
+            self.assertFalse(preview.actionable if preview is not None else True)
+            changed_hashes = zero.replace("a" * 64, "c" * 64).replace("b" * 64, "d" * 64)
+            with patch.object(watcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, changed_hashes, "")):
+                changed_preview = watcher.todo_archive_preview(Path("/tmp/root"))
+            self.assertIsNotNone(changed_preview)
+            self.assertEqual(preview.identity if preview is not None else "", changed_preview.identity if changed_preview is not None else "changed")
+        actionable = zero.replace("moved: 0\ntask moves: 0", "moved: 1\ntask moves: 1\n  task.md -> 202608/task.md status=done fallback=202608")
+        with patch.object(watcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, actionable, "")):
             self.assertTrue(watcher.todo_archive_preview_actionable(Path("/tmp/root")))
         with patch.object(watcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "moved: 0\n", "")):
             self.assertIsNone(watcher.todo_archive_preview_actionable(Path("/tmp/root")))
+
+    def test_todo_archive_plan_identity_survives_restart_and_rearms_on_material_change(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            todo = root / "TODO.md"
+            todo.write_text("\n".join(f"line {idx}" for idx in range(214)) + "\n", encoding="utf-8")
+            state = root / "state" / "consumed.tsv"
+            args = Args(root, "", state, 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, manager_target="wl:1")
+            first = watcher.TodoArchivePreview(True, "a" * 64, "b" * 64, "c" * 64)
+            changed = watcher.TodoArchivePreview(True, "d" * 64, "e" * 64, "f" * 64)
+            events: list[watcher.DeliverySuccessEvent] = []
+
+            def push(_args: object, _text: str, event: watcher.DeliverySuccessEvent) -> int:
+                events.append(event)
+                return watcher.ASYNC_DELIVERY_STARTED
+
+            with patch.object(watcher, "todo_archive_preview", return_value=first), patch.object(watcher, "push_manager_text", side_effect=push):
+                self.assertTrue(watcher.scan_once(args, {}, [todo]))
+                self.assertEqual(1, len(events))
+                watcher.DELIVERY_SUCCESS_EVENTS.put(events.pop())
+                self.assertTrue(watcher.drain_delivery_successes(args, {}, 1000.0))
+                self.assertFalse(watcher.scan_once(args, {}, [todo]))
+
+            with patch.object(watcher, "todo_archive_preview", return_value=changed), patch.object(watcher, "push_manager_text", side_effect=push):
+                self.assertTrue(watcher.scan_once(args, {}, [todo]))
+            self.assertEqual(1, len(events))
+
+    def test_todo_archive_noop_plan_persists_without_dispatch_and_changed_plan_rearms(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            todo = root / "TODO.md"
+            todo.write_text("\n".join(f"line {idx}" for idx in range(214)) + "\n", encoding="utf-8")
+            args = Args(root, "", root / "state" / "consumed.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, manager_target="wl:1")
+            noop = watcher.TodoArchivePreview(False, "a" * 64, "b" * 64, "c" * 64)
+            actionable = watcher.TodoArchivePreview(True, "a" * 64, "d" * 64, "e" * 64)
+            with patch.object(watcher, "todo_archive_preview", return_value=noop), patch.object(watcher, "push_manager_text") as push:
+                self.assertFalse(watcher.scan_once(args, {}, [todo]))
+                self.assertFalse(watcher.scan_once(args, {}, [todo]))
+                push.assert_not_called()
+            self.assertEqual(noop.identity, watcher.read_todo_archive_plan_identity(watcher.todo_archive_plan_state_path(args)))
+            with patch.object(watcher, "todo_archive_preview", return_value=actionable), patch.object(watcher, "push_manager_text", return_value=0) as push:
+                self.assertTrue(watcher.scan_once(args, {}, [todo]))
+                push.assert_called_once()
+            self.assertEqual(actionable.identity, watcher.read_todo_archive_plan_identity(watcher.todo_archive_plan_state_path(args)))
+
+    def test_todo_archive_state_write_failure_is_bounded_and_retryable(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            todo = root / "TODO.md"
+            todo.write_text("\n".join(f"line {idx}" for idx in range(214)) + "\n", encoding="utf-8")
+            args = Args(root, "", root / "state" / "consumed.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False)
+            noop = watcher.TodoArchivePreview(False, "a" * 64, "b" * 64, "c" * 64)
+            seen: dict[str, float] = {}
+            error = StringIO()
+            with (
+                patch.object(watcher, "todo_archive_preview", return_value=noop),
+                patch.object(watcher, "write_todo_archive_plan_identity", side_effect=OSError("read-only state")),
+                redirect_stderr(error),
+            ):
+                self.assertTrue(watcher.scan_once(args, seen, [todo]))
+                self.assertFalse(watcher.scan_once(args, seen, [todo]))
+            self.assertEqual(1, len(seen))
+            self.assertIn("failed to retain no-op TODO archive plan", error.getvalue())
 
     def test_pending_delivery_launch_failure_is_retryable(self) -> None:
         from omo_manager import omo_pending_watch as watcher

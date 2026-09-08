@@ -469,6 +469,18 @@ class CommandOutput:
 
 
 @dataclass(frozen=True)
+class TodoArchivePreview:
+    actionable: bool
+    todo_sha256: str
+    plan_sha256: str
+    operation_sha256: str
+
+    @property
+    def identity(self) -> str:
+        return hashlib.sha256(f"{self.operation_sha256}\0{int(self.actionable)}".encode()).hexdigest()
+
+
+@dataclass(frozen=True)
 class DeliveryResult:
     status: int
     error: str = ""
@@ -711,6 +723,8 @@ class DeliverySuccessEvent:
     consume_on_unknown_outcome: bool = False
     guest_owner: GuestHeesOwner | None = None
     guest_source: str = ""
+    todo_archive_plan_state: Path | None = None
+    todo_archive_plan_identity: str = ""
 
 
 @dataclass(frozen=True)
@@ -1132,6 +1146,13 @@ def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: flo
         if event.guest_owner is not None and not guest_hees_owner_is_current(args.root, event.guest_owner):
             print("omo_pending_watch: guest owner changed after delivery; retaining marker for the current owner", file=sys.stderr)
             clear_ok = False
+        if event.todo_archive_plan_state is not None and event.todo_archive_plan_identity:
+            try:
+                write_todo_archive_plan_identity(event.todo_archive_plan_state, event.todo_archive_plan_identity)
+            except (OSError, ValueError) as exc:
+                print(f"omo_pending_watch: failed to retain delivered TODO archive plan: {exc}", file=sys.stderr)
+            else:
+                changed = True
         if clear_ok and event.guest_owner is not None and event.guest_source:
             clear_ok = record_guest_hees_intake_delivery(args.state.parent, event.guest_source, event.guest_owner)
         if event.clear_root is not None and event.clear_marker is not None and event.clear_report_key:
@@ -6973,8 +6994,8 @@ def queue_blocking_wakes(
     return queued
 
 
-def todo_archive_preview_actionable(root: Path) -> bool | None:
-    """Return whether the authoritative read-only retention preview finds work."""
+def todo_archive_preview(root: Path) -> TodoArchivePreview | None:
+    """Return the material identity and verdict of the read-only retention preview."""
     helper = root / "scripts" / "manager-monthly-archive"
     try:
         result = subprocess.run(
@@ -6989,13 +7010,89 @@ def todo_archive_preview_actionable(root: Path) -> bool | None:
         return None
     if result.returncode != 0:
         return None
+    todo_matches = re.findall(r"^TODO baseline: ([0-9a-f]{64})$", result.stdout, re.MULTILINE)
+    plan_matches = re.findall(r"^retention plan: ([0-9a-f]{64})$", result.stdout, re.MULTILINE)
+    if len(todo_matches) != 1 or len(plan_matches) != 1:
+        return None
+    labels = ("stale archived TODO rows reconciled", "moved", "artifact moves", "markdown rewrites")
     counts: list[int] = []
-    for label in ("stale archived TODO rows reconciled", "moved", "artifact moves", "markdown rewrites"):
+    for label in labels:
         matches = re.findall(rf"^{re.escape(label)}: (\d+)$", result.stdout, re.MULTILINE)
         if len(matches) != 1:
             return None
         counts.append(int(matches[0]))
-    return any(counts)
+    lines = result.stdout.splitlines()
+    operation_rows: list[str] = []
+    for label, count in zip(labels, counts, strict=True):
+        header = f"{label}: {count}"
+        try:
+            header_index = lines.index(header)
+        except ValueError:
+            return None
+        detail_index = header_index + 1
+        if label == "moved":
+            task_header = f"task moves: {count}"
+            if detail_index >= len(lines) or lines[detail_index] != task_header:
+                return None
+            detail_index += 1
+        details = lines[detail_index : detail_index + count]
+        if len(details) != count or any(not detail.startswith("  ") for detail in details):
+            return None
+        operation_rows.extend((header, *details))
+    operation_sha256 = hashlib.sha256("\n".join(operation_rows).encode()).hexdigest()
+    return TodoArchivePreview(any(counts), todo_matches[0], plan_matches[0], operation_sha256)
+
+
+def todo_archive_preview_actionable(root: Path) -> bool | None:
+    """Compatibility wrapper returning only the preview's mutation verdict."""
+
+    preview = todo_archive_preview(root)
+    return None if preview is None else preview.actionable
+
+
+def todo_archive_plan_state_path(args: Args) -> Path:
+    return args.state.with_name(f"{args.state.name}.todo-archive-plan")
+
+
+def read_todo_archive_plan_identity(path: Path) -> str:
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+        state = path.lstat()
+    except OSError:
+        return ""
+    if not stat.S_ISREG(state.st_mode) or stat.S_ISLNK(state.st_mode) or state.st_uid != os.getuid() or stat.S_IMODE(state.st_mode) & 0o077:
+        return ""
+    return value if re.fullmatch(r"[0-9a-f]{64}", value) else ""
+
+
+def write_todo_archive_plan_identity(path: Path, identity: str) -> None:
+    """Atomically retain the last delivered or proven-no-op archive plan identity."""
+
+    if re.fullmatch(r"[0-9a-f]{64}", identity) is None:
+        raise ValueError("TODO archive plan identity must be lowercase SHA-256.")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    with task_file_lock(path):
+        if path.exists():
+            state = path.lstat()
+            if not stat.S_ISREG(state.st_mode) or stat.S_ISLNK(state.st_mode) or state.st_uid != os.getuid() or stat.S_IMODE(state.st_mode) & 0o077:
+                raise OSError("TODO archive plan state is unsafe.")
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        temporary = Path(temporary_name)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(identity + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def scan_once(
@@ -7012,21 +7109,51 @@ def scan_once(
     todo = args.root / "TODO.md"
     if todo in files or not files:
         n_todo_lines = markdown_line_count(todo)
-        key = f"{args.root}:TODO.md:line-warning"
-        if n_todo_lines <= TODO_LINE_WARNING_THRESHOLD and seen_contains(seen, key, now_s):
-            del seen[key]
-            changed = True
-        elif n_todo_lines > TODO_LINE_WARNING_THRESHOLD and not seen_contains(seen, key, now_s):
-            actionable = todo_archive_preview_actionable(args.root)
-            if actionable is not False:
+        key_prefix = f"{args.root}:TODO.md:line-warning"
+        if n_todo_lines <= TODO_LINE_WARNING_THRESHOLD:
+            expired_keys = [key for key in seen if key == key_prefix or key.startswith(f"{key_prefix}:")]
+            for key in expired_keys:
+                del seen[key]
+                changed = True
+        else:
+            preview = todo_archive_preview(args.root)
+            plan_state = todo_archive_plan_state_path(args)
+            plan_identity = preview.identity if preview is not None else ""
+            key = f"{key_prefix}:{plan_identity or 'preview-unavailable'}"
+            if preview is not None and not preview.actionable:
+                if (
+                    not args.dry_run
+                    and not seen_contains(seen, key, now_s)
+                    and read_todo_archive_plan_identity(plan_state) != plan_identity
+                ):
+                    try:
+                        write_todo_archive_plan_identity(plan_state, plan_identity)
+                    except (OSError, ValueError) as exc:
+                        print(f"omo_pending_watch: failed to retain no-op TODO archive plan: {exc}", file=sys.stderr)
+                        remember_seen(seen, key, now_s)
+                        changed = True
+            elif (
+                not seen_contains(seen, key, now_s)
+                and (not plan_identity or read_todo_archive_plan_identity(plan_state) != plan_identity)
+            ):
                 status = push_manager_text(
                     args,
                     TODO_LENGTH_REMINDER.format(n_lines=n_todo_lines),
-                    DeliverySuccessEvent(seen_keys=(key,), seen_at_s=now_s),
+                    DeliverySuccessEvent(
+                        seen_keys=(key,),
+                        seen_at_s=now_s,
+                        todo_archive_plan_state=plan_state if plan_identity else None,
+                        todo_archive_plan_identity=plan_identity,
+                    ),
                 )
                 if delivery_accepted(status):
                     if status == 0:
                         remember_seen(seen, key, now_s)
+                        if plan_identity and not args.dry_run:
+                            try:
+                                write_todo_archive_plan_identity(plan_state, plan_identity)
+                            except (OSError, ValueError) as exc:
+                                print(f"omo_pending_watch: failed to retain delivered TODO archive plan: {exc}", file=sys.stderr)
                     changed = True
     for marker in find_markers(args.root, files):
         attachments = marker_attachments(args, marker)

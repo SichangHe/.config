@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import base64
 import io
 import json
 import os
@@ -38,6 +39,7 @@ from omo_manager.omo_task_status import park_audit_record
 from omo_manager.omo_task_status import park_target_pane_id
 from omo_manager.omo_task_status import park_unlinked
 from omo_manager.omo_task_status import reattest_park_unlinked
+from omo_manager.omo_task_status import validate_source1506_replacement
 from omo_manager.omo_task_status import finish_done_transaction
 from omo_manager.omo_task_status import finish_shared_target_done
 from omo_manager.omo_task_status import finish_private_audit
@@ -73,6 +75,26 @@ from omo_manager.omo_report_receipt import ReceiptError
 from omo_manager.omo_task_metadata import frontmatter_parts
 from omo_manager.omo_blocking import ENABLE_FILE, load_yaml_mapping, render_task, split_task_text, sync_generated_blocker
 from omo_manager.tests.test_task_metadata_v2 import v2_task
+
+SOURCE1503_BYTES = base64.b64decode(
+    "U3ViamVjdDogUmU6IENsb3NlIG9ic29sZXRlIERlZXBXaWtpIHBsYW5uZXI/CgpDbG9zZSB0aGVtIGFsbA0K"
+    "DQpPbiBNb24sIFNlcCA3LCAyMDI2IGF0IDIxOjMxIDxzaWNoYW5naGVhZ2VudEBnbWFpbC5jb20+IHdyb3Rl"
+    "Og0KDQo+IFRoZSBvbGQgRGVlcFdpa2kgcGxhbm5pbmctbWFuYWdlciBzZXNzaW9uIG5vIGxvbmdlciBleGlz"
+    "dHMsIGl0cyBxdWV1ZSBpcw0KPiBlbXB0eSwgYW5kIGl0cyB3b3JrIGlzIGFzc2lnbmVkIGVsc2V3aGVyZS4g"
+    "SXQgaXMgc2FmZWx5IGJsb2NrZWQgYW5kIGNhbm5vdA0KPiBkbyB3b3JrLg0KPg0KPiBZb3VyIGVhcmxpZXIg"
+    "aW5zdHJ1Y3Rpb24gZXhwbGljaXRseSBuYW1lZCBjb25maWc6NywgY29uZmlnOjIsIGFuZA0KPiBjb25maWc6"
+    "MywgYnV0IG5vdCB0aGUgcGxhbm5pbmctbWFuYWdlciB0YXJnZXQgZHdwbGFuOjAuIFNob3VsZCBJIGZvcm1h"
+    "bGx5DQo+IGNsb3NlIHRoZSBvYnNvbGV0ZSBkd3BsYW46MCByZWNvcmQ/DQo+DQo="
+)
+SOURCE1506_BYTES = base64.b64decode(
+    "U3ViamVjdDogUmU6IFdpeCBhbmQgQjEyIGN1cnJlbnQgY291bnRzIGFuZCBsYXRlc3Qgc2l0ZQoKd2w6MTEN"
+    "Cg0KPiBPbiBTZXAgNywgMjAyNiwgYXQgMjI6MjQsIHNpY2hhbmdoZWFnZW50QGdtYWlsLmNvbSB3cm90ZToN"
+    "Cj4gDQo+IEkgcmVjZWl2ZWQgeW91ciByZXF1ZXN0IHRvIGNsb3NlIHRoZSBXTCBhZ2VudCBkb2luZyBEVyB3"
+    "b3JrLiBUaGUgbWVzc2FnZSBkb2VzIG5vdCBpZGVudGlmeSB0aGUgZXhhY3QgV0wgc2Vzc2lvbiwgc28gSSBo"
+    "YXZlIGVzY2FsYXRlZCBpdCB0byB0aGUgbWFpbiBtYW5hZ2VyIGZvciBhdXRob3JpdGF0aXZlIHRhcmdldCBy"
+    "ZXNvbHV0aW9uIHJhdGhlciB0aGFuIHJpc2sgY2xvc2luZyB0aGUgd3JvbmcgYWdlbnQuDQo+IA0KPiBXaGlj"
+    "aCBXTCBzZXNzaW9uIHNob3VsZCBiZSBjbG9zZWQ/DQo+IA0KDQo="
+)
 
 
 def task_frontmatter(
@@ -593,6 +615,229 @@ class TaskStatusTests(unittest.TestCase):
             with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
                 close_missing_target(args, task, text, task.stat())
             self.assertEqual("done", parse_task_metadata(task.read_text(), root).status)
+
+    def test_close_missing_target_accepts_source1503_only_for_empty_dwplan_record(self) -> None:
+        source1503 = SOURCE1503_BYTES.decode()
+        source1503_sha256 = "0eb6cfde4d5ef1160806e36b7077ad49f06c5e17f17248fdfec012f89d1a13eb"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, _todo, _todo_text, args = self.write_close_missing_case(
+                root,
+                blocker="obsolete manager transferred",
+                is_manager=True,
+            )
+            task = task.rename(root / "dw_planning_mgr.md")
+            text = (
+                task_frontmatter(
+                    status="blocked",
+                    blocked_on="obsolete manager transferred",
+                    pending_items=(),
+                    runat="dwplan:0",
+                    is_manager=True,
+                )
+                + "existing evidence\n"
+            )
+            task.write_text(text)
+            todo = root / "TODO.md"
+            todo_text = todo.read_text().replace("missing.md vl:8", "dw_planning_mgr.md dwplan:0")
+            todo.write_text(todo_text)
+            authority = root / "manager_mail/85c5dff58359-1503.txt"
+            authority.write_bytes(source1503.encode())
+            authority.chmod(0o600)
+            envelope = root / "dw_rotate_exec.md"
+            prior_envelope = '<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1485.txt:1-12">\nPrior Human direction\n</human_instruction>\n'
+            envelope_text = (
+                prior_envelope + '<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1503.txt:1-3">\n'
+                "Subject: Re: Close obsolete DeepWiki planner?\r\n\r\nClose them all\r\n"
+                "</human_instruction>\n"
+            )
+            envelope.write_text(envelope_text)
+            args = replace(
+                args,
+                task_file=Path("dw_planning_mgr.md"),
+                missing_target="dwplan:0",
+                expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                authority_file=Path("manager_mail/85c5dff58359-1503.txt"),
+                authority_lines=(1, 3),
+                authority_sha256=source1503_sha256,
+                authority_envelope=Path("dw_rotate_exec.md"),
+                authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                close_missing_target(args, task, text, task.stat())
+            self.assertEqual("done", parse_task_metadata(task.read_text(), root).status)
+
+    def test_close_missing_target_rejects_source1503_for_any_other_record_shape(self) -> None:
+        mutations = {
+            "wrong_task": {"task_file": "another.md"},
+            "nonempty_queue": {"pending_items": ("still open",)},
+            "worker": {"is_manager": False},
+            "wrong_target": {"runat": "other:0"},
+            "wrong_envelope": {"authority_envelope": "copy.md"},
+        }
+        for case, mutation in mutations.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task_name = mutation.get("task_file", "dw_planning_mgr.md")
+                text = task_frontmatter(
+                    status="blocked",
+                    blocked_on="obsolete manager transferred",
+                    pending_items=mutation.get("pending_items", ()),
+                    runat=mutation.get("runat", "dwplan:0"),
+                    is_manager=mutation.get("is_manager", True),
+                )
+                task = root / task_name
+                task.write_text(text)
+                todo_text = f"current:\n{task_name} dwplan:0\n\nlow priority:\n\nhuman pending:\n\nprevious:\n"
+                (root / "TODO.md").write_text(todo_text)
+                manager_mail = root / "manager_mail"
+                manager_mail.mkdir(mode=0o700)
+                source = manager_mail / "85c5dff58359-1503.txt"
+                source1503 = SOURCE1503_BYTES.decode()
+                source.write_bytes(source1503.encode())
+                source.chmod(0o600)
+                envelope_text = f'<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1503.txt:1-3">\n{source1503}</human_instruction>\n'
+                envelope_name = mutation.get("authority_envelope", "dw_rotate_exec.md")
+                (root / envelope_name).write_text(envelope_text)
+                args = StatusArgs(
+                    root,
+                    Path(task_name),
+                    "",
+                    "",
+                    close_missing_target=True,
+                    missing_target="dwplan:0",
+                    expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                    expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                    authority_file=Path("manager_mail/85c5dff58359-1503.txt"),
+                    authority_lines=(1, 3),
+                    authority_sha256="0eb6cfde4d5ef1160806e36b7077ad49f06c5e17f17248fdfec012f89d1a13eb",
+                    authority_envelope=Path(envelope_name),
+                    authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+                    audit_output=(root / "audit.yaml").resolve(),
+                )
+                with (
+                    patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""),
+                    self.assertRaisesRegex(TaskFrontmatterError, "does not explicitly authorize"),
+                ):
+                    close_missing_target(args, task, text, task.stat())
+                self.assertEqual(text, task.read_text())
+
+    def test_close_missing_target_accepts_source1506_and_preserves_completed_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager_mail = root / "manager_mail"
+            manager_mail.mkdir(mode=0o700)
+            source = manager_mail / "85c5dff58359-1506.txt"
+            source.write_bytes(SOURCE1506_BYTES)
+            source.chmod(0o600)
+            source_excerpt = "".join(SOURCE1506_BYTES.decode().splitlines(keepends=True)[:3]).replace("\r\n", "\n")
+            task = root / "mail_stale_cleanup.md"
+            task_text = (
+                task_frontmatter(status="blocked", blocked_on="human", runat="wl:11", managerat="wl:12")
+                + '<human_instruction authoritative="true" source="202608/manager_mail/85c5dff58359-1433.txt:1-26">\nprior one\n</human_instruction>\n'
+                + '<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1438.txt:1-22">\nprior two\n</human_instruction>\n'
+                + '<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1506.txt:1-3">\n'
+                + source_excerpt
+                + "</human_instruction>\n"
+            )
+            task.write_text(task_text, encoding="utf-8")
+            replacement = root / "mail_cleanup_new.md"
+            replacement_text = task_frontmatter(status="done", runat="wl:13", managerat="wl:12") + "reviewed retain-all result\n"
+            replacement.write_text(replacement_text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\nmail_cleanup_new.md wl:13\n\nlow priority:\n\nhuman pending:\n\nprevious:\nmail_stale_cleanup.md wl:11\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            args = StatusArgs(
+                root,
+                Path("mail_stale_cleanup.md"),
+                "",
+                "",
+                close_missing_target=True,
+                missing_target="wl:11",
+                expected_task_sha256=hashlib.sha256(task_text.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                authority_file=Path("manager_mail/85c5dff58359-1506.txt"),
+                authority_lines=(1, 3),
+                authority_sha256=hashlib.sha256(SOURCE1506_BYTES).hexdigest(),
+                authority_envelope=Path("mail_stale_cleanup.md"),
+                authority_envelope_sha256=hashlib.sha256(task_text.encode()).hexdigest(),
+                audit_output=(root / "source1506-close.yaml").resolve(),
+            )
+
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value="") as pane_lookup:
+                close_missing_target(args, task, task_text, task.stat())
+
+            self.assertEqual("done", parse_task_metadata(task.read_text(), root).status)
+            self.assertEqual(replacement_text, replacement.read_text(encoding="utf-8"))
+            self.assertGreaterEqual(pane_lookup.call_count, 2)
+            pane_lookup.assert_called_with("wl:11")
+            self.assertNotIn("mail_stale_cleanup.md wl:11", todo.read_text(encoding="utf-8"))
+            self.assertIn("previous:\nmail_stale_cleanup.md\n", todo.read_text(encoding="utf-8"))
+
+    def test_close_missing_target_rejects_source1506_without_completed_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager_mail = root / "manager_mail"
+            manager_mail.mkdir(mode=0o700)
+            source = manager_mail / "85c5dff58359-1506.txt"
+            source.write_bytes(SOURCE1506_BYTES)
+            source.chmod(0o600)
+            source_excerpt = "".join(SOURCE1506_BYTES.decode().splitlines(keepends=True)[:3]).replace("\r\n", "\n")
+            task = root / "mail_stale_cleanup.md"
+            task_text = (
+                task_frontmatter(status="blocked", blocked_on="human", runat="wl:11", managerat="wl:12")
+                + '<human_instruction authoritative="true" source="202608/manager_mail/85c5dff58359-1433.txt:1-26">\nprior one\n</human_instruction>\n'
+                + '<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1438.txt:1-22">\nprior two\n</human_instruction>\n'
+                + '<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1506.txt:1-3">\n'
+                + source_excerpt
+                + "</human_instruction>\n"
+            )
+            task.write_text(task_text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\nmail_stale_cleanup.md wl:11\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            args = StatusArgs(
+                root,
+                Path("mail_stale_cleanup.md"),
+                "",
+                "",
+                close_missing_target=True,
+                missing_target="wl:11",
+                expected_task_sha256=hashlib.sha256(task_text.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                authority_file=Path("manager_mail/85c5dff58359-1506.txt"),
+                authority_lines=(1, 3),
+                authority_sha256=hashlib.sha256(SOURCE1506_BYTES).hexdigest(),
+                authority_envelope=Path("mail_stale_cleanup.md"),
+                authority_envelope_sha256=hashlib.sha256(task_text.encode()).hexdigest(),
+                audit_output=(root / "source1506-close.yaml").resolve(),
+            )
+
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""),
+                self.assertRaisesRegex(TaskFrontmatterError, "completed wl:13 replacement"),
+            ):
+                close_missing_target(args, task, task_text, task.stat())
+            self.assertEqual(task_text, task.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_source1506_replacement_rejects_symlink_and_writable_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            replacement_text = task_frontmatter(status="done", runat="wl:13", managerat="wl:12")
+            target = root / "replacement-target.md"
+            target.write_text(replacement_text, encoding="utf-8")
+            replacement = root / "mail_cleanup_new.md"
+            replacement.symlink_to(target)
+            with self.assertRaisesRegex(TaskFrontmatterError, "wl:13 replacement"):
+                validate_source1506_replacement(root)
+
+            replacement.unlink()
+            replacement.write_text(replacement_text, encoding="utf-8")
+            replacement.chmod(0o666)
+            with self.assertRaisesRegex(TaskFrontmatterError, "wl:13 replacement"):
+                validate_source1506_replacement(root)
 
     def test_close_missing_target_rejects_unsafe_export_then_close_questions(self) -> None:
         decisions = (
