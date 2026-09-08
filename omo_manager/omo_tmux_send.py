@@ -372,6 +372,8 @@ def parse_args(argv: list[str]) -> Args:
         )
     if not parsed.target:
         parser.error("--target is required.")
+    if TMUX_DELIVERY_TARGET_RE.fullmatch(parsed.target) is None:
+        parser.error("--target must be a tmux target.")
     submit_existing = parsed.submit_existing_file is not None or bool(parsed.submit_existing_sha256)
     cancel_existing = parsed.cancel_existing_file is not None or bool(parsed.cancel_existing_sha256)
     partial_cursor_recovery = parsed.describe_partial_cursor or bool(parsed.clear_partial_cursor_sha256)

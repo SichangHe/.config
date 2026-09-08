@@ -1040,7 +1040,7 @@ def is_human_token_quota_pause(root: Path, task: TaskLine, state: TaskState) -> 
 
 
 def canonical_target(target: str) -> str:
-    return target[:-2] if target.endswith(".0") else target
+    return target[:-2] if runat_kind(target) == "tmux" and target.endswith(".0") else target
 
 
 def target_session(target: str) -> str:

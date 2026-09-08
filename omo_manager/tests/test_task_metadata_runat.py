@@ -5,9 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_agent_status import TaskLine, classify_task
+from omo_manager.omo_agent_status import TaskLine, canonical_target as canonical_status_target, classify_task
 from omo_manager.omo_task_metadata import TARGET_RE, TaskFrontmatterError, canonical_target, parse_task_metadata, runat_kind
-from omo_manager.omo_tmux_send import CodexSendOptions, send_to_codex
+from omo_manager.omo_tmux_send import CodexSendOptions, main as tmux_send_main, send_to_codex
 from omo_manager.omo_task_status import main as task_status_main
 
 
@@ -51,6 +51,7 @@ class TaskMetadataRunatTests(unittest.TestCase):
         target = "omnigent://session.0"
         self.assertEqual("omnigent", runat_kind(target))
         self.assertEqual(target, canonical_target(target))
+        self.assertEqual(target, canonical_status_target(target))
         self.assertIsNone(TARGET_RE.search(target))
 
     def test_rejects_malformed_omnigent_runat(self) -> None:
@@ -81,6 +82,12 @@ class TaskMetadataRunatTests(unittest.TestCase):
         with patch("omo_manager.omo_tmux_send.write_private_temp") as write_temp, self.assertRaisesRegex(RuntimeError, "requires a tmux target"):
             send_to_codex("omnigent://session-123", "message", CodexSendOptions(1, 0, False))
         write_temp.assert_not_called()
+
+    def test_async_tmux_delivery_rejects_omnigent_before_launch(self) -> None:
+        with patch("omo_manager.omo_tmux_send.launch_async") as launch_async, self.assertRaises(SystemExit) as raised:
+            _ = tmux_send_main(["--target", "omnigent://session-123", "--message-file", "unused", "--async"])
+        self.assertEqual(2, raised.exception.code)
+        launch_async.assert_not_called()
 
     def test_task_status_rejects_omnigent_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
