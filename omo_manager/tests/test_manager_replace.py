@@ -84,6 +84,17 @@ SOURCE1477_AUTHORITY = (
     "> Accessible Travel's publication and crawl status is now reported separately\r\n"
     "> by the Wix/B12 owner.\r\n>\r\n"
 )
+SOURCE1485_AUTHORITY = (
+    "Subject: Re: Wix read-only check — pb_wix_inventory_041.md\n\n"
+    "For manager: I did not hear back from this, so the agent has drifted. Replace them and every agent they manage. New agents should be maximally responsive\r\n\r\n"
+    "> On Sep 7, 2026, at 13:51, Steven Sīchàng Hé <stevensichanghe@gmail.com> wrote:\r\n"
+    "> \r\n"
+    "> Reread MANAGER.md\r\n"
+    "> Who is responsible for Wix/B12 site generation? Let them report to me directly the current status and our generation speed\r\n"
+    "> Similar for body swap websites\r\n"
+    "> What else is going on for dw work?\r\n"
+    "> You are the main dw manager, right?\r\n\r\n"
+)
 
 
 def sha(data: str) -> str:
@@ -104,20 +115,7 @@ def task_text(
     blocker = "blocked_on: fixture blocker\n" if status == "blocked" else ""
     session = f"session_id: {session_id}\n" if session_id else ""
     queue = "pending_task_items: []" if not pending else "pending_task_items:\n" + "\n".join(f"  - {item}" for item in pending)
-    return (
-        "---\n"
-        "version: v1.0.0\n"
-        f"status: {status}\n"
-        f"{blocker}"
-        f"runat: {runat}\n"
-        f"tool: {tool}\n"
-        f"managerat: {managerat}\n"
-        f"is_manager: {str(is_manager).lower()}\n"
-        f"{queue}\n"
-        f"{session}"
-        "---\n"
-        f"{body}"
-    )
+    return f"---\nversion: v1.0.0\nstatus: {status}\n{blocker}runat: {runat}\ntool: {tool}\nmanagerat: {managerat}\nis_manager: {str(is_manager).lower()}\n{queue}\n{session}---\n{body}"
 
 
 def parsed(path: Path, root: Path) -> TaskMetadata:
@@ -178,14 +176,7 @@ class ManagerReplaceTests(unittest.TestCase):
                 is_manager=False,
                 pending=("Remain unchanged.",),
             ),
-            "TODO.md": (
-                "current:\n"
-                "failed_manager.md private_mgr:1\n"
-                "unrelated.md other:1\n\n"
-                "human pending:\n\n"
-                "low priority:\n\n"
-                "previous:\n"
-            ),
+            "TODO.md": ("current:\nfailed_manager.md private_mgr:1\nunrelated.md other:1\n\nhuman pending:\n\nlow priority:\n\nprevious:\n"),
         }
         for name, data in files.items():
             (root / name).write_text(data, encoding="utf-8")
@@ -194,11 +185,7 @@ class ManagerReplaceTests(unittest.TestCase):
         authority.write_text("".join(AUTHORITY_LINES), encoding="utf-8")
         authority.chmod(0o600)
         files["manager_mail/source-1220.txt"] = "".join(AUTHORITY_LINES)
-        envelope_text = (
-            '<human_instruction authoritative="true" source="manager_mail/source-1220.txt:1-5">\n'
-            f'{"".join(AUTHORITY_LINES)}'
-            "</human_instruction>\n"
-        )
+        envelope_text = f'<human_instruction authoritative="true" source="manager_mail/source-1220.txt:1-5">\n{"".join(AUTHORITY_LINES)}</human_instruction>\n'
         (root / "authority_envelope.md").write_text(envelope_text, encoding="utf-8")
         files["authority_envelope.md"] = envelope_text
         args = Args(
@@ -232,13 +219,9 @@ class ManagerReplaceTests(unittest.TestCase):
         def inventory() -> dict[str, PaneIdentity]:
             result: dict[str, PaneIdentity] = {}
             if state.get("old_live", True):
-                result[manager_replace.canonical_target(old_target)] = PaneIdentity(
-                    manager_replace.canonical_target(old_target), "%42", 4242, 999
-                )
+                result[manager_replace.canonical_target(old_target)] = PaneIdentity(manager_replace.canonical_target(old_target), "%42", 4242, 999)
             if state.get("new_live", False):
-                result[manager_replace.canonical_target(new_target)] = PaneIdentity(
-                    manager_replace.canonical_target(new_target), "%77", 7777, 1001
-                )
+                result[manager_replace.canonical_target(new_target)] = PaneIdentity(manager_replace.canonical_target(new_target), "%77", 7777, 1001)
             return result
 
         def stopped(_args: object) -> str:
@@ -280,10 +263,7 @@ class ManagerReplaceTests(unittest.TestCase):
         authority_path.write_bytes(SOURCE1477_AUTHORITY.encode())
         authority_path.chmod(0o600)
         canonical_excerpt = "\n".join(SOURCE1477_AUTHORITY.splitlines()[:6])
-        envelope = (
-            f'<human_instruction authoritative="true" source="{manager_replace.SOURCE1477_FILE}:1-6">\n'
-            f"{canonical_excerpt}\n</human_instruction>\n"
-        )
+        envelope = f'<human_instruction authoritative="true" source="{manager_replace.SOURCE1477_FILE}:1-6">\n{canonical_excerpt}\n</human_instruction>\n'
         (root / args.authority_envelope_task).write_text(envelope, encoding="utf-8")
         return root, replace(
             args,
@@ -301,6 +281,231 @@ class ManagerReplaceTests(unittest.TestCase):
             successor_item_lines=(LineRange(*manager_replace.SOURCE1477_SUCCESSOR_LINES),),
         )
 
+    def source1485_root_fixture(self, base: Path) -> tuple[Path, Args, dict[str, PaneIdentity]]:
+        root = base / "work_logs"
+        root.mkdir(mode=0o700)
+        private = base / "private"
+        private.mkdir(mode=0o700)
+        old = task_text(
+            status="long_running",
+            runat="dw:0",
+            managerat="config:1",
+            is_manager=True,
+            pending=(),
+            session_id=SESSION_ID,
+        )
+        child_specs = (
+            ("dw_fpr_mgr_replacement2.md", "long_running", "dw:14", ("Preserve FPR work.",), True),
+            ("dw_cc_sampling.md", "running", "dw2:0", ("Preserve Archive work.",), False),
+            (manager_replace.SOURCE1485_UMBRELLA_TASK, "long_running", "wl:7", (), True),
+            ("dw_bodyswap_pr.md", "running", "dw8:1", (), False),
+        )
+        children: list[ChildPin] = []
+        for task, status, target, queue, is_manager in child_specs:
+            data = task_text(
+                status=status,
+                runat=target,
+                managerat="dw:0",
+                is_manager=is_manager,
+                pending=queue,
+                session_id=("aaaaaaaa-2222-4333-8444-555555555555" if task == "dw_fpr_mgr_replacement2.md" else ""),
+            )
+            (root / task).write_text(data, encoding="utf-8")
+            children.append(ChildPin(task, sha(data), manager_replace.json_digest(list(queue))))
+        nested = task_text(
+            status="long_running",
+            runat="dw11:1",
+            managerat="dw:14",
+            is_manager=True,
+            pending=(),
+            session_id="bbbbbbbb-2222-4333-8444-555555555555",
+        )
+        (root / "dw_present_mgr_replacement.md").write_text(nested, encoding="utf-8")
+        coordinator = task_text(
+            status="long_running",
+            runat="config:1",
+            managerat="wl:1",
+            is_manager=True,
+            pending=("Coordinate the DW replacement.",),
+        )
+        (root / "coordinator.md").write_text(coordinator, encoding="utf-8")
+        (root / manager_replace.SOURCE1485_ROOT_TASK).write_text(old, encoding="utf-8")
+        todo = (
+            "current:\n"
+            "dw_manager.md dw:0\n"
+            "dw_fpr_mgr_replacement2.md dw:14\n"
+            "dw_cc_sampling.md dw2:0\n"
+            "dw_bodyswap_pr.md dw8:1\n"
+            "dw_present_mgr_replacement.md dw11:1\n\n"
+            "human pending:\n\n"
+            "low priority:\n\n"
+            "previous:\n"
+            "resume_dw_work.md wl:7\n"
+        )
+        (root / "TODO.md").write_text(todo, encoding="utf-8")
+        authority = root / manager_replace.SOURCE1485_FILE
+        authority.parent.mkdir(mode=0o700)
+        authority.write_bytes(SOURCE1485_AUTHORITY.encode())
+        authority.chmod(0o600)
+        source_lines = SOURCE1485_AUTHORITY.splitlines()
+        envelope_body = "\n".join((manager_replace.SOURCE1485_ENVELOPE_SUBJECT, *source_lines[1:]))
+        envelope = f'<human_instruction authoritative="true" source="{manager_replace.SOURCE1485_FILE}:1-12">\n{envelope_body}\n</human_instruction>\n'
+        envelope_path = root / "dw_rotate_repair.md"
+        envelope_path.write_text(envelope, encoding="utf-8")
+        self.assertEqual(manager_replace.SOURCE1485_SHA256, sha(SOURCE1485_AUTHORITY))
+        self.assertEqual(manager_replace.SOURCE1485_ENVELOPE_SHA256, sha(envelope))
+        identities = {
+            "dw:0.0": PaneIdentity("dw:0.0", "%42", 4242, 999),
+            "config:1.0": PaneIdentity("config:1.0", "%43", 4243, 1000),
+            "dw:14.0": PaneIdentity("dw:14.0", "%44", 4244, 1001),
+            "dw2:0.0": PaneIdentity("dw2:0.0", "%45", 4245, 1002),
+            "wl:7.0": PaneIdentity("wl:7.0", "%46", 4246, 1003),
+            "dw8:1.0": PaneIdentity("dw8:1.0", "%47", 4247, 1004),
+            "dw11:1.0": PaneIdentity("dw11:1.0", "%48", 4248, 1005),
+        }
+        protected = tuple(sorted(target for target in identities if target != "dw:0.0"))
+        provisional = Args(
+            root=root,
+            old_task=manager_replace.SOURCE1485_ROOT_TASK,
+            successor_task="dw_manager_replacement.md",
+            old_target="dw:0",
+            new_target="dw:15",
+            parent_target="config:1",
+            old_sha256=sha(old),
+            todo_sha256=sha(todo),
+            children=tuple(sorted(children, key=lambda child: child.task)),
+            old_pane_id="%42",
+            old_pane_pid=4242,
+            old_pane_start_ticks=999,
+            old_session_id=SESSION_ID,
+            authority_file=manager_replace.SOURCE1485_FILE,
+            authority_lines=LineRange(*manager_replace.SOURCE1485_CARRIER_LINES),
+            authority_sha256=manager_replace.SOURCE1485_SHA256,
+            authority_envelope_task="dw_rotate_repair.md",
+            authority_envelope_sha256=manager_replace.SOURCE1485_ENVELOPE_SHA256,
+            successor_item_lines=(LineRange(*manager_replace.SOURCE1485_SUCCESSOR_LINES),),
+            protected_targets=protected,
+            audit_output=private / "source1485-root.json",
+            preparer="setup-agent",
+            reviewer="independent-reviewer",
+            old_queue_sha256=manager_replace.json_digest([]),
+            authority_envelope_file_sha256=sha(envelope),
+        )
+        protected_sha = manager_replace.protected_inventory_digest(provisional, identities)
+        return root, replace(provisional, protected_targets_sha256=protected_sha), identities
+
+    def source1485_nonroot_fixture(
+        self,
+        base: Path,
+        replacement: tuple[str, str, str, str, str],
+    ) -> tuple[Path, Args, dict[str, PaneIdentity]]:
+        old_task, old_canonical, successor_task, new_canonical, parent_canonical = replacement
+        root = base / "work_logs"
+        root.mkdir(mode=0o700)
+        private = base / "private"
+        private.mkdir(mode=0o700)
+        old_target = old_canonical.removesuffix(".0")
+        new_target = new_canonical.removesuffix(".0")
+        parent_target = parent_canonical.removesuffix(".0")
+        old_queue = (f"Preserve {old_task} work.",)
+        old = task_text(
+            status="long_running",
+            runat=old_target,
+            managerat=parent_target,
+            is_manager=True,
+            pending=old_queue,
+            session_id=SESSION_ID,
+        )
+        (root / old_task).write_text(old, encoding="utf-8")
+        parent_owner = task_text(
+            status="long_running",
+            runat=parent_target,
+            managerat=("wl:7" if parent_target == "dw:13" else "dw:0"),
+            is_manager=True,
+            pending=("Preserve parent coordination.",),
+            session_id="cccccccc-2222-4333-8444-555555555555",
+        )
+        (root / "parent_manager.md").write_text(parent_owner, encoding="utf-8")
+        if old_task == "dw_present_mgr.md":
+            child_specs = (("dw_present_worker.md", "running", "dwp:2", ("Preserve presentation work.",), False),)
+            nested_specs: tuple[tuple[str, str, str, tuple[str, ...], bool], ...] = ()
+        else:
+            child_specs = (
+                ("dw_present_mgr_replacement.md", "long_running", "dw11:1", (), True),
+                ("dw_fpr_worker.md", "running", "dw9:0", ("Preserve FPR work.",), False),
+            )
+            nested_specs = (("dw_present_worker.md", "running", "dwp:2", ("Preserve presentation work.",), False),)
+        children: list[ChildPin] = []
+        for task, status, target, queue, is_manager in child_specs:
+            data = task_text(
+                status=status,
+                runat=target,
+                managerat=old_target,
+                is_manager=is_manager,
+                pending=queue,
+                session_id=("bbbbbbbb-2222-4333-8444-555555555555" if is_manager else ""),
+            )
+            (root / task).write_text(data, encoding="utf-8")
+            children.append(ChildPin(task, sha(data), manager_replace.json_digest(list(queue))))
+        for task, status, target, queue, is_manager in nested_specs:
+            data = task_text(
+                status=status,
+                runat=target,
+                managerat="dw11:1",
+                is_manager=is_manager,
+                pending=queue,
+            )
+            (root / task).write_text(data, encoding="utf-8")
+        todo_rows = [f"{old_task} {old_target}"]
+        todo_rows.extend(f"{task} {target}" for task, _status, target, _queue, _is_manager in (*child_specs, *nested_specs))
+        todo = "current:\n" + "\n".join(todo_rows) + "\n\nhuman pending:\n\nlow priority:\n\nprevious:\n"
+        (root / "TODO.md").write_text(todo, encoding="utf-8")
+        authority = root / manager_replace.SOURCE1485_FILE
+        authority.parent.mkdir(mode=0o700)
+        authority.write_bytes(SOURCE1485_AUTHORITY.encode())
+        authority.chmod(0o600)
+        source_lines = SOURCE1485_AUTHORITY.splitlines()
+        envelope_body = "\n".join((manager_replace.SOURCE1485_ENVELOPE_SUBJECT, *source_lines[1:]))
+        envelope = f'<human_instruction authoritative="true" source="{manager_replace.SOURCE1485_FILE}:1-12">\n{envelope_body}\n</human_instruction>\n'
+        envelope_path = root / "dw_rotate_repair.md"
+        envelope_path.write_text(envelope, encoding="utf-8")
+        identities: dict[str, PaneIdentity] = {}
+        for index, target in enumerate(
+            (old_canonical, parent_canonical, *(manager_replace.canonical_target(spec[2]) for spec in (*child_specs, *nested_specs))),
+            start=42,
+        ):
+            identities[target] = PaneIdentity(target, f"%{index}", 4200 + index, 900 + index)
+        protected = tuple(sorted(target for target in identities if target != old_canonical))
+        provisional = Args(
+            root=root,
+            old_task=old_task,
+            successor_task=successor_task,
+            old_target=old_target,
+            new_target=new_target,
+            parent_target=parent_target,
+            old_sha256=sha(old),
+            todo_sha256=sha(todo),
+            children=tuple(sorted(children, key=lambda child: child.task)),
+            old_pane_id=identities[old_canonical].pane_id,
+            old_pane_pid=identities[old_canonical].pid,
+            old_pane_start_ticks=identities[old_canonical].start_ticks,
+            old_session_id=SESSION_ID,
+            authority_file=manager_replace.SOURCE1485_FILE,
+            authority_lines=LineRange(*manager_replace.SOURCE1485_CARRIER_LINES),
+            authority_sha256=manager_replace.SOURCE1485_SHA256,
+            authority_envelope_task="dw_rotate_repair.md",
+            authority_envelope_sha256=manager_replace.SOURCE1485_ENVELOPE_SHA256,
+            successor_item_lines=(LineRange(*manager_replace.SOURCE1485_SUCCESSOR_LINES),),
+            protected_targets=protected,
+            audit_output=private / f"{old_task}.json",
+            preparer="setup-agent",
+            reviewer="independent-reviewer",
+            old_queue_sha256=manager_replace.json_digest(list(old_queue)),
+            authority_envelope_file_sha256=sha(envelope),
+        )
+        protected_sha = manager_replace.protected_inventory_digest(provisional, identities)
+        return root, replace(provisional, protected_targets_sha256=protected_sha), identities
+
     def whole_tree_fixture(self, base: Path) -> tuple[Path, Args, dict[str, str]]:
         root, args, files = self.fixture(base)
         sessions = (
@@ -317,9 +522,7 @@ class ManagerReplaceTests(unittest.TestCase):
             child_sha = sha(text)
             updated_children.append(ChildPin(task, child_sha))
             queue = parsed(root / task, root).pending_task_items
-            descendants.append(
-                DescendantPin(task, child_sha, target, f"%{50 + index}", 5000 + index, 900 + index, session, manager_replace.json_digest(list(queue)))
-            )
+            descendants.append(DescendantPin(task, child_sha, target, f"%{50 + index}", 5000 + index, 900 + index, session, manager_replace.json_digest(list(queue))))
         return root, replace(args, children=tuple(updated_children), descendants=tuple(descendants)), files
 
     def whole_tree_authority(self, args: Args) -> contextlib.ExitStack:
@@ -360,11 +563,7 @@ class ManagerReplaceTests(unittest.TestCase):
         source_path.chmod(0o600)
         source_lines = SOURCE1289_AUTHORITY.splitlines()
         carrier = "\n".join(source_lines[:13])
-        envelope = (
-            f'<human_instruction authoritative="true" source="{manager_replace.SOURCE1289_FILE}:1-13">\n'
-            f"{carrier}\n"
-            "</human_instruction>\n"
-        )
+        envelope = f'<human_instruction authoritative="true" source="{manager_replace.SOURCE1289_FILE}:1-13">\n{carrier}\n</human_instruction>\n'
         envelope_path = root / args.authority_envelope_task
         envelope_path.write_text(envelope, encoding="utf-8")
         changed = replace(
@@ -385,19 +584,13 @@ class ManagerReplaceTests(unittest.TestCase):
             *(manager_replace.canonical_target(item.target) for item in args.descendants),
         }
         identities = {
-            manager_replace.canonical_target(args.old_target): PaneIdentity(
-                manager_replace.canonical_target(args.old_target), "%42", 4242, 999
-            ),
+            manager_replace.canonical_target(args.old_target): PaneIdentity(manager_replace.canonical_target(args.old_target), "%42", 4242, 999),
             **{
-                manager_replace.canonical_target(item.target): PaneIdentity(
-                    manager_replace.canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks
-                )
+                manager_replace.canonical_target(item.target): PaneIdentity(manager_replace.canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks)
                 for item in args.descendants
             },
         }
-        sessions = {item.target: item.session_id for item in args.descendants} | {
-            args.old_target: args.old_session_id
-        }
+        sessions = {item.target: item.session_id for item in args.descendants} | {args.old_target: args.old_session_id}
         stopped_targets: list[str] = []
 
         def inventory() -> dict[str, PaneIdentity]:
@@ -406,9 +599,7 @@ class ManagerReplaceTests(unittest.TestCase):
         def stopped(stop_args) -> str:
             stopped_targets.append(stop_args.target)
             live.remove(manager_replace.canonical_target(stop_args.target))
-            Path(stop_args.bound_close_proof_path).write_text(
-                f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8"
-            )
+            Path(stop_args.bound_close_proof_path).write_text(f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8")
             Path(stop_args.bound_close_proof_path).chmod(0o600)
             return sessions[stop_args.target]
 
@@ -462,9 +653,7 @@ class ManagerReplaceTests(unittest.TestCase):
         source_path.chmod(0o600)
         original = (root / args.authority_envelope_task).read_text(encoding="utf-8")
         second = (
-            f'<human_instruction authoritative="true" source="{manager_replace.SOURCE1292_FILE}:1-4">\n'
-            "Subject: close tree\n\nClose either way. Directly use tmux if needed\n"
-            "</human_instruction>\n"
+            f'<human_instruction authoritative="true" source="{manager_replace.SOURCE1292_FILE}:1-4">\nSubject: close tree\n\nClose either way. Directly use tmux if needed\n</human_instruction>\n'
         )
         (root / args.authority_envelope_task).write_text(original + second, encoding="utf-8")
         changed = replace(args, descendant_authority_envelope_sha256=sha(second))
@@ -479,20 +668,19 @@ class ManagerReplaceTests(unittest.TestCase):
         carrier_text = (root / carrier).read_text(encoding="utf-8") + envelope
         (root / carrier).write_text(carrier_text, encoding="utf-8")
         files[carrier] = carrier_text
-        children = tuple(
-            ChildPin(child.task, sha(carrier_text) if child.task == carrier else child.sha256)
-            for child in args.children
+        children = tuple(ChildPin(child.task, sha(carrier_text) if child.task == carrier else child.sha256) for child in args.children)
+        descendants = tuple(replace(item, sha256=sha(carrier_text)) if item.task == carrier else item for item in args.descendants)
+        return (
+            root,
+            replace(
+                args,
+                children=children,
+                descendants=descendants,
+                authority_envelope_task=carrier,
+            ),
+            files,
+            authority,
         )
-        descendants = tuple(
-            replace(item, sha256=sha(carrier_text)) if item.task == carrier else item
-            for item in args.descendants
-        )
-        return root, replace(
-            args,
-            children=children,
-            descendants=descendants,
-            authority_envelope_task=carrier,
-        ), files, authority
 
     def run_replacement(self, args: Args, state: dict[str, bool]) -> str:
         inventory, stopped, proof = self.runtime(state, args.old_target, args.new_target)
@@ -539,28 +727,28 @@ class ManagerReplaceTests(unittest.TestCase):
         authority_path = root / authority_file
         authority_path.write_text(authority, encoding="utf-8")
         authority_path.chmod(0o600)
-        envelope = (
-            f'<human_instruction authoritative="true" source="{authority_file}:3-9">\n'
-            f'{"".join(authority.splitlines(keepends=True)[2:9])}'
-            "</human_instruction>\n"
-        )
+        envelope = f'<human_instruction authoritative="true" source="{authority_file}:3-9">\n{"".join(authority.splitlines(keepends=True)[2:9])}</human_instruction>\n'
         (root / args.authority_envelope_task).write_text(envelope, encoding="utf-8")
         files[authority_file] = authority
         files[args.authority_envelope_task] = envelope
-        return root, replace(
-            args,
-            old_task=old_task,
-            old_target=old_target,
-            old_sha256=sha(old),
-            todo_sha256=sha(todo),
-            children=tuple(children),
-            authority_file=authority_file,
-            authority_lines=LineRange(3, 9),
-            authority_sha256=sha(authority),
-            authority_envelope_sha256=sha(envelope),
-            successor_item_lines=(LineRange(3, 9),),
-            old_queue_sha256=manager_replace.json_digest(list(OLD_QUEUE)),
-        ), files
+        return (
+            root,
+            replace(
+                args,
+                old_task=old_task,
+                old_target=old_target,
+                old_sha256=sha(old),
+                todo_sha256=sha(todo),
+                children=tuple(children),
+                authority_file=authority_file,
+                authority_lines=LineRange(3, 9),
+                authority_sha256=sha(authority),
+                authority_envelope_sha256=sha(envelope),
+                successor_item_lines=(LineRange(3, 9),),
+                old_queue_sha256=manager_replace.json_digest(list(OLD_QUEUE)),
+            ),
+            files,
+        )
 
     def pcodx_fixture(self, base: Path) -> tuple[Path, Args, dict[str, str], dict[str, str]]:
         root, args, files = self.fixture(base)
@@ -605,10 +793,7 @@ class ManagerReplaceTests(unittest.TestCase):
         authority = "".join(authority_lines)
         authority_path = root / args.authority_file
         authority_path.write_text(authority, encoding="utf-8")
-        envelope = (
-            f'<human_instruction authoritative="true" source="{args.authority_file}:1-4">\n'
-            f"{authority}</human_instruction>\n"
-        )
+        envelope = f'<human_instruction authoritative="true" source="{args.authority_file}:1-4">\n{authority}</human_instruction>\n'
         (root / args.authority_envelope_task).write_text(envelope, encoding="utf-8")
         ledger = base / "pcodx-run" / "ledger.json"
         ledger.parent.mkdir(mode=0o700)
@@ -622,11 +807,16 @@ class ManagerReplaceTests(unittest.TestCase):
         Path(pcodx["PCODX_POC_ROOT"]).mkdir(mode=0o700)
         identity = PaneIdentity(f"{old_target}.0", "%42", 4242, 999)
         wrapper = Path(manager_replace.__file__).resolve().with_name("pcodx").read_bytes()
-        children = tuple(sorted((
-            ChildPin("child_a.md", sha(files["child_a.md"])),
-            ChildPin("child_b.md", sha(files["child_b.md"])),
-            *extra_children,
-        ), key=lambda child: child.task))
+        children = tuple(
+            sorted(
+                (
+                    ChildPin("child_a.md", sha(files["child_a.md"])),
+                    ChildPin("child_b.md", sha(files["child_b.md"])),
+                    *extra_children,
+                ),
+                key=lambda child: child.task,
+            )
+        )
         changed = replace(
             args,
             old_target=old_target,
@@ -643,9 +833,7 @@ class ManagerReplaceTests(unittest.TestCase):
             old_pcodx_state_sha256=manager_replace.json_digest(pcodx),
             old_pcodx_ledger_sha256=hashlib.sha256(ledger.read_bytes()).hexdigest(),
             old_pcodx_wrapper_sha256=hashlib.sha256(wrapper).hexdigest(),
-            protected_targets_sha256=manager_replace.json_digest(
-                [{"target": identity.target, "pane_id": identity.pane_id, "pid": identity.pid, "start_ticks": identity.start_ticks}]
-            ),
+            protected_targets_sha256=manager_replace.json_digest([{"target": identity.target, "pane_id": identity.pane_id, "pid": identity.pid, "start_ticks": identity.start_ticks}]),
             authority_envelope_file_sha256=sha(envelope),
         )
         return root, changed, files, pcodx
@@ -728,10 +916,7 @@ class ManagerReplaceTests(unittest.TestCase):
                 "with one fresh plain-Codex manager inheriting all tasks and comments.\n"
                 "Just do it\n"
             )
-            envelope = (
-                f'<human_instruction authoritative="true" source="{args.authority_file}:1-4">\n'
-                f"{source}</human_instruction>\n"
-            )
+            envelope = f'<human_instruction authoritative="true" source="{args.authority_file}:1-4">\n{source}</human_instruction>\n'
             (root / args.authority_file).write_text(source, encoding="utf-8")
             (root / args.authority_envelope_task).write_text(envelope, encoding="utf-8")
             changed = replace(
@@ -755,10 +940,7 @@ class ManagerReplaceTests(unittest.TestCase):
                 f"Replace the failed PCODX manager {args.old_task} at hwl:4 with one fresh plain-Codex manager inheriting all tasks and comments.\n",
             ):
                 source = "Subject: Re: Low-priority task decisions\n\n" + replacement_text + "Just do it\n"
-                envelope = (
-                    f'<human_instruction authoritative="true" source="{args.authority_file}:1-4">\n'
-                    f"{source}</human_instruction>\n"
-                )
+                envelope = f'<human_instruction authoritative="true" source="{args.authority_file}:1-4">\n{source}</human_instruction>\n'
                 (root / args.authority_file).write_text(source, encoding="utf-8")
                 (root / args.authority_envelope_task).write_text(envelope, encoding="utf-8")
                 changed = replace(
@@ -775,10 +957,7 @@ class ManagerReplaceTests(unittest.TestCase):
     def test_source1240_replacement_sentence_rejects_suffix_and_ambiguity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root, args, _files, pcodx = self.pcodx_fixture(Path(tmp))
-            exact = (
-                f"Replace the failed PCODX manager {args.old_task} at {args.old_target} "
-                "with one fresh plain-Codex manager inheriting all tasks and comments."
-            )
+            exact = f"Replace the failed PCODX manager {args.old_task} at {args.old_target} with one fresh plain-Codex manager inheriting all tasks and comments."
             for selected in (
                 f"{exact} Do not close it.",
                 f"{exact}\n{exact}",
@@ -790,10 +969,7 @@ class ManagerReplaceTests(unittest.TestCase):
                 with self.subTest(selected=selected):
                     source = f"Subject: Re: Low-priority task decisions\n\n{selected}\nJust do it\n"
                     source_line_count = len(source.splitlines())
-                    envelope = (
-                        f'<human_instruction authoritative="true" source="{args.authority_file}:1-{source_line_count}">\n'
-                        f"{source}</human_instruction>\n"
-                    )
+                    envelope = f'<human_instruction authoritative="true" source="{args.authority_file}:1-{source_line_count}">\n{source}</human_instruction>\n'
                     (root / args.authority_file).write_text(source, encoding="utf-8")
                     (root / args.authority_envelope_task).write_text(envelope, encoding="utf-8")
                     changed = replace(
@@ -805,9 +981,7 @@ class ManagerReplaceTests(unittest.TestCase):
                         successor_item_lines=(LineRange(3, source_line_count - 1),),
                     )
                     inventory, state, stopped, proof = self.pcodx_runtime(changed, pcodx)
-                    with inventory, state, stopped as stop_mock, proof, self.assertRaisesRegex(
-                        ReplaceError, "does not explicitly prove"
-                    ):
+                    with inventory, state, stopped as stop_mock, proof, self.assertRaisesRegex(ReplaceError, "does not explicitly prove"):
                         replace_manager(changed)
                     stop_mock.assert_not_called()
 
@@ -836,14 +1010,9 @@ class ManagerReplaceTests(unittest.TestCase):
                     stop_mock.assert_not_called()
                     self.assertFalse(args.audit_output.exists())
 
-            indirect = (root / args.authority_file).read_text(encoding="utf-8").replace(
-                f"Close {args.old_target}.", f"Please consider stopping {args.old_target}."
-            )
+            indirect = (root / args.authority_file).read_text(encoding="utf-8").replace(f"Close {args.old_target}.", f"Please consider stopping {args.old_target}.")
             (root / args.authority_file).write_text(indirect, encoding="utf-8")
-            envelope = (
-                f'<human_instruction authoritative="true" source="{args.authority_file}:1-4">\n'
-                f"{indirect}</human_instruction>\n"
-            )
+            envelope = f'<human_instruction authoritative="true" source="{args.authority_file}:1-4">\n{indirect}</human_instruction>\n'
             (root / args.authority_envelope_task).write_text(envelope, encoding="utf-8")
             indirect_args = replace(
                 args,
@@ -968,12 +1137,7 @@ class ManagerReplaceTests(unittest.TestCase):
             root, args, _files = self.fixture(Path(tmp))
             original = (root / args.authority_envelope_task).read_text(encoding="utf-8")
             block = original.rstrip("\n")
-            wrapped = (
-                "manager-authentication-wrapper: v1\n"
-                "routing-note: unrelated outer text\n\n"
-                f"{block}\n"
-                "postscript: unrelated outer text\n"
-            )
+            wrapped = f"manager-authentication-wrapper: v1\nrouting-note: unrelated outer text\n\n{block}\npostscript: unrelated outer text\n"
             (root / args.authority_envelope_task).write_text(wrapped, encoding="utf-8")
             changed = replace(args, authority_envelope_sha256=sha(block + "\n"))
             plan = manager_replace.prepare(changed, manager_replace.markdown_paths(root))
@@ -987,11 +1151,7 @@ class ManagerReplaceTests(unittest.TestCase):
             authority = root / args.authority_file
             authority.write_text(source, encoding="utf-8")
             body = "".join(AUTHORITY_LINES).rstrip("\n")
-            envelope = (
-                f'<human_instruction authoritative="true" source="{args.authority_file}:1-6">\n'
-                f"{body}\n"
-                "</human_instruction>\n"
-            )
+            envelope = f'<human_instruction authoritative="true" source="{args.authority_file}:1-6">\n{body}\n</human_instruction>\n'
             envelope_path = root / args.authority_envelope_task
             envelope_path.write_text(envelope, encoding="utf-8")
             changed = replace(
@@ -1008,27 +1168,48 @@ class ManagerReplaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = [
-                "--root", str(root),
-                "--old-task", "old.md",
-                "--successor-task", "new.md",
-                "--old-target", "mgr:1.0",
-                "--new-target", "mgr:1.1",
-                "--parent-target", "parent:0",
-                "--old-sha256", "a" * 64,
-                "--todo-sha256", "b" * 64,
-                "--old-pane-id", "%0",
-                "--old-pane-pid", "42",
-                "--old-pane-start-ticks", "99",
-                "--old-session-id", SESSION_ID,
-                "--authority-file", "manager_mail/source.txt",
-                "--authority-lines", "1-1",
-                "--authority-sha256", "c" * 64,
-                "--authority-envelope-task", "envelope.md",
-                "--authority-envelope-sha256", "d" * 64,
-                "--successor-item-lines", "1-1",
-                "--audit-output", str(root / "audit.json"),
-                "--preparer", "a",
-                "--reviewer", "b",
+                "--root",
+                str(root),
+                "--old-task",
+                "old.md",
+                "--successor-task",
+                "new.md",
+                "--old-target",
+                "mgr:1.0",
+                "--new-target",
+                "mgr:1.1",
+                "--parent-target",
+                "parent:0",
+                "--old-sha256",
+                "a" * 64,
+                "--todo-sha256",
+                "b" * 64,
+                "--old-pane-id",
+                "%0",
+                "--old-pane-pid",
+                "42",
+                "--old-pane-start-ticks",
+                "99",
+                "--old-session-id",
+                SESSION_ID,
+                "--authority-file",
+                "manager_mail/source.txt",
+                "--authority-lines",
+                "1-1",
+                "--authority-sha256",
+                "c" * 64,
+                "--authority-envelope-task",
+                "envelope.md",
+                "--authority-envelope-sha256",
+                "d" * 64,
+                "--successor-item-lines",
+                "1-1",
+                "--audit-output",
+                str(root / "audit.json"),
+                "--preparer",
+                "a",
+                "--reviewer",
+                "b",
             ]
             self.assertEqual("%0", parse_args(source).old_pane_id)
 
@@ -1036,34 +1217,118 @@ class ManagerReplaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _root, args, _files = self.guest1269_fixture(Path(tmp))
             source = [
-                "--root", str(args.root),
-                "--old-task", args.old_task,
-                "--successor-task", args.successor_task,
-                "--old-target", args.old_target,
-                "--new-target", args.new_target,
-                "--parent-target", args.parent_target,
-                "--old-sha256", args.old_sha256,
-                "--todo-sha256", args.todo_sha256,
-                "--old-pane-id", args.old_pane_id,
-                "--old-pane-pid", str(args.old_pane_pid),
-                "--old-pane-start-ticks", str(args.old_pane_start_ticks),
-                "--old-session-id", args.old_session_id,
-                "--authority-file", args.authority_file,
-                "--authority-lines", f"{args.authority_lines.start}-{args.authority_lines.end}",
-                "--authority-sha256", args.authority_sha256,
-                "--authority-envelope-task", args.authority_envelope_task,
-                "--authority-envelope-sha256", args.authority_envelope_sha256,
-                "--successor-item-lines", f"{args.successor_item_lines[0].start}-{args.successor_item_lines[0].end}",
-                "--audit-output", str(args.audit_output),
-                "--preparer", args.preparer,
-                "--reviewer", args.reviewer,
-                "--old-queue-sha256", args.old_queue_sha256,
+                "--root",
+                str(args.root),
+                "--old-task",
+                args.old_task,
+                "--successor-task",
+                args.successor_task,
+                "--old-target",
+                args.old_target,
+                "--new-target",
+                args.new_target,
+                "--parent-target",
+                args.parent_target,
+                "--old-sha256",
+                args.old_sha256,
+                "--todo-sha256",
+                args.todo_sha256,
+                "--old-pane-id",
+                args.old_pane_id,
+                "--old-pane-pid",
+                str(args.old_pane_pid),
+                "--old-pane-start-ticks",
+                str(args.old_pane_start_ticks),
+                "--old-session-id",
+                args.old_session_id,
+                "--authority-file",
+                args.authority_file,
+                "--authority-lines",
+                f"{args.authority_lines.start}-{args.authority_lines.end}",
+                "--authority-sha256",
+                args.authority_sha256,
+                "--authority-envelope-task",
+                args.authority_envelope_task,
+                "--authority-envelope-sha256",
+                args.authority_envelope_sha256,
+                "--successor-item-lines",
+                f"{args.successor_item_lines[0].start}-{args.successor_item_lines[0].end}",
+                "--audit-output",
+                str(args.audit_output),
+                "--preparer",
+                args.preparer,
+                "--reviewer",
+                args.reviewer,
+                "--old-queue-sha256",
+                args.old_queue_sha256,
             ]
             for child in args.children:
                 source.extend(("--child", f"{child.task}={child.sha256}"))
             parsed_args = parse_args(source)
             self.assertEqual(args.old_queue_sha256, parsed_args.old_queue_sha256)
             self.assertEqual(args.children, parsed_args.children)
+
+    def test_parse_args_accepts_source1485_child_queue_and_inventory_bindings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _identities = self.source1485_root_fixture(Path(tmp))
+            source = [
+                "--root",
+                str(args.root),
+                "--old-task",
+                args.old_task,
+                "--successor-task",
+                args.successor_task,
+                "--old-target",
+                args.old_target,
+                "--new-target",
+                args.new_target,
+                "--parent-target",
+                args.parent_target,
+                "--old-sha256",
+                args.old_sha256,
+                "--todo-sha256",
+                args.todo_sha256,
+                "--old-pane-id",
+                args.old_pane_id,
+                "--old-pane-pid",
+                str(args.old_pane_pid),
+                "--old-pane-start-ticks",
+                str(args.old_pane_start_ticks),
+                "--old-session-id",
+                args.old_session_id,
+                "--authority-file",
+                args.authority_file,
+                "--authority-lines",
+                f"{args.authority_lines.start}-{args.authority_lines.end}",
+                "--authority-sha256",
+                args.authority_sha256,
+                "--authority-envelope-task",
+                args.authority_envelope_task,
+                "--authority-envelope-sha256",
+                args.authority_envelope_sha256,
+                "--authority-envelope-file-sha256",
+                args.authority_envelope_file_sha256,
+                "--successor-item-lines",
+                f"{args.successor_item_lines[0].start}-{args.successor_item_lines[0].end}",
+                "--protected-targets-sha256",
+                args.protected_targets_sha256,
+                "--old-queue-sha256",
+                args.old_queue_sha256,
+                "--audit-output",
+                str(args.audit_output),
+                "--preparer",
+                args.preparer,
+                "--reviewer",
+                args.reviewer,
+            ]
+            for child in args.children:
+                source.extend(("--child", f"{child.task}={child.sha256}={child.queue_sha256}"))
+            for target in args.protected_targets:
+                source.extend(("--protected-target", target))
+            parsed_args = parse_args(source)
+            self.assertEqual(args.children, parsed_args.children)
+            self.assertEqual(args.protected_targets, parsed_args.protected_targets)
+            self.assertEqual(args.protected_targets_sha256, parsed_args.protected_targets_sha256)
 
     def test_pane_inventory_accepts_tmux_zero_pane_id(self) -> None:
         result = manager_replace.subprocess.CompletedProcess(
@@ -1085,8 +1350,7 @@ class ManagerReplaceTests(unittest.TestCase):
         result = manager_replace.subprocess.CompletedProcess(
             ["tmux", "list-panes"],
             0,
-            "stale:0.0\t%1\t999\t1\n"
-            "mgr:1.0\t%42\t42\t0\n",
+            "stale:0.0\t%1\t999\t1\nmgr:1.0\t%42\t42\t0\n",
             "",
         )
         with (
@@ -1124,10 +1388,7 @@ class ManagerReplaceTests(unittest.TestCase):
                 "Do not replace it.\n",
             )
             source = "".join(benign_lines)
-            envelope = (
-                '<human_instruction authoritative="true" source="manager_mail/source-1220.txt:1-5">\n'
-                f"{source}</human_instruction>\n"
-            )
+            envelope = f'<human_instruction authoritative="true" source="manager_mail/source-1220.txt:1-5">\n{source}</human_instruction>\n'
             (root / args.authority_file).write_text(source, encoding="utf-8")
             (root / args.authority_envelope_task).write_text(envelope, encoding="utf-8")
             changed = replace(args, authority_sha256=sha(source), authority_envelope_sha256=sha(envelope))
@@ -1212,10 +1473,7 @@ class ManagerReplaceTests(unittest.TestCase):
                     source_path.write_text(source, encoding="utf-8")
                     source_path.chmod(0o600)
                     excerpt = "".join(source.splitlines(keepends=True)[2:9])
-                    envelope = (
-                        f'<human_instruction authoritative="true" source="{source_file}:3-9">\n'
-                        f"{excerpt}</human_instruction>\n"
-                    )
+                    envelope = f'<human_instruction authoritative="true" source="{source_file}:3-9">\n{excerpt}</human_instruction>\n'
                     (root / changed.authority_envelope_task).write_text(envelope, encoding="utf-8")
                     changed = replace(
                         changed,
@@ -1270,9 +1528,7 @@ class ManagerReplaceTests(unittest.TestCase):
             identities = {
                 manager_replace.canonical_target(args.old_target): PaneIdentity(manager_replace.canonical_target(args.old_target), "%42", 4242, 999),
                 **{
-                    manager_replace.canonical_target(item.target): PaneIdentity(
-                        manager_replace.canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks
-                    )
+                    manager_replace.canonical_target(item.target): PaneIdentity(manager_replace.canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks)
                     for item in args.descendants
                 },
             }
@@ -1285,9 +1541,7 @@ class ManagerReplaceTests(unittest.TestCase):
             def stopped(stop_args) -> str:
                 order.append(stop_args.target)
                 live.remove(manager_replace.canonical_target(stop_args.target))
-                Path(stop_args.bound_close_proof_path).write_text(
-                    f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8"
-                )
+                Path(stop_args.bound_close_proof_path).write_text(f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8")
                 Path(stop_args.bound_close_proof_path).chmod(0o600)
                 return sessions[stop_args.target]
 
@@ -1306,11 +1560,7 @@ class ManagerReplaceTests(unittest.TestCase):
     def test_whole_tree_descendant_drift_fails_before_any_close(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _root, args, _files = self.whole_tree_fixture(Path(tmp))
-            inventory = {
-                manager_replace.canonical_target(args.old_target): PaneIdentity(
-                    manager_replace.canonical_target(args.old_target), "%42", 4242, 999
-                )
-            }
+            inventory = {manager_replace.canonical_target(args.old_target): PaneIdentity(manager_replace.canonical_target(args.old_target), "%42", 4242, 999)}
             with (
                 self.whole_tree_authority(args),
                 patch.object(manager_replace, "pane_inventory", return_value=inventory),
@@ -1435,14 +1685,10 @@ class ManagerReplaceTests(unittest.TestCase):
                 self.assertEqual("blocked", parsed(root / args.successor_task, root).status)
 
         with tempfile.TemporaryDirectory() as tmp:
-            _root, args = self.source1477_fixture(
-                Path(tmp), "personal_browser_mgr_pb.md", "pb:13.0", "pb"
-            )
+            _root, args = self.source1477_fixture(Path(tmp), "personal_browser_mgr_pb.md", "pb:13.0", "pb")
             state = {"old_live": True, "new_live": True}
             inventory, _stopped, proof = self.runtime(state, args.old_target, args.new_target)
-            with inventory, proof, patch.object(manager_replace, "stop") as stop_mock, self.assertRaisesRegex(
-                ReplaceError, "successor target is already live"
-            ):
+            with inventory, proof, patch.object(manager_replace, "stop") as stop_mock, self.assertRaisesRegex(ReplaceError, "successor target is already live"):
                 replace_manager(args)
             stop_mock.assert_not_called()
 
@@ -1454,15 +1700,285 @@ class ManagerReplaceTests(unittest.TestCase):
             stop_mock.assert_not_called()
 
         with tempfile.TemporaryDirectory() as tmp:
-            _root, args = self.source1477_fixture(
-                Path(tmp), "personal_browser_mgr_pb.md", "pb:13.0", "pb"
-            )
+            _root, args = self.source1477_fixture(Path(tmp), "personal_browser_mgr_pb.md", "pb:13.0", "pb")
             with (
                 patch.object(manager_replace, "pane_inventory", return_value={}),
                 patch.object(manager_replace, "stop") as stop_mock,
                 self.assertRaisesRegex(ReplaceError, "old manager pane identity changed"),
             ):
                 replace_manager(args)
+            stop_mock.assert_not_called()
+
+    def test_source1485_exact_root_replacement_binds_acyclic_custody(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, identities = self.source1485_root_fixture(Path(tmp))
+            state = {"old_live": True}
+
+            def inventory() -> dict[str, PaneIdentity]:
+                return {target: identity for target, identity in identities.items() if target != "dw:0.0" or state["old_live"]}
+
+            def stopped(_args: object) -> str:
+                state["old_live"] = False
+                return SESSION_ID
+
+            with (
+                patch.object(manager_replace, "pane_inventory", side_effect=inventory),
+                patch.object(manager_replace, "stop", side_effect=stopped),
+                patch.object(manager_replace, "has_bound_close_proof", side_effect=lambda *_args: not state["old_live"]),
+            ):
+                result = replace_manager(args)
+            self.assertIn("sole ownership", result)
+            self.assertEqual("done", parsed(root / args.old_task, root).status)
+            successor = parsed(root / args.successor_task, root)
+            self.assertEqual("blocked", successor.status)
+            self.assertEqual("config:1", successor.managerat)
+            self.assertEqual(tuple(child.task for child in args.children), manager_replace.active_child_task_refs(root, root / args.successor_task, args.new_target))
+            audit = json.loads(args.audit_output.read_text(encoding="utf-8"))
+            topology = audit["source1485_topology"]
+            self.assertTrue(topology["acyclic"])
+            self.assertEqual(
+                "replacement-subtree-plus-complete-active-manager-parent-ancestry",
+                topology["acyclic_scope"],
+            )
+            self.assertEqual("coordinator.md", topology["ancestor_rows"][0]["task"])
+            self.assertEqual(manager_replace.json_digest(topology), audit["source1485_topology_sha256"])
+            self.assertEqual(args.protected_targets_sha256, manager_replace.json_digest(audit["protected_inventory"]))
+
+    def test_source1485_authority_and_mapping_are_non_reusable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _identities = self.source1485_root_fixture(Path(tmp))
+            for old_task, old_target, successor_task, new_target, parent_target in manager_replace.SOURCE1485_REPLACEMENTS:
+                exact = replace(
+                    args,
+                    old_task=old_task,
+                    old_target=old_target,
+                    successor_task=successor_task,
+                    new_target=new_target,
+                    parent_target=parent_target,
+                )
+                self.assertTrue(manager_replace.is_source1485_semantic_exception(exact))
+            variants = (
+                {"old_task": "other.md"},
+                {"successor_task": "other.md"},
+                {"old_target": "dw:1"},
+                {"new_target": "dw:16"},
+                {"parent_target": "wl:7"},
+                {"authority_file": "manager_mail/other.txt"},
+                {"authority_sha256": "0" * 64},
+                {"authority_envelope_task": "other.md"},
+                {"authority_envelope_sha256": "0" * 64},
+                {"authority_lines": LineRange(2, 12)},
+                {"successor_item_lines": (LineRange(3, 10),)},
+            )
+            for changes in variants:
+                with self.subTest(changes=changes):
+                    self.assertFalse(manager_replace.is_source1485_semantic_exception(replace(args, **changes)))
+
+    def test_source1485_nonroot_replacements_preserve_exact_discovered_trees(self) -> None:
+        replacements = manager_replace.SOURCE1485_REPLACEMENTS[:2]
+        for index, replacement in enumerate(replacements):
+            with self.subTest(old_task=replacement[0]), tempfile.TemporaryDirectory() as tmp:
+                root, args, identities = self.source1485_nonroot_fixture(Path(tmp), replacement)
+                state = {"old_live": True}
+
+                def inventory() -> dict[str, PaneIdentity]:
+                    return {target: identity for target, identity in identities.items() if target != manager_replace.canonical_target(args.old_target) or state["old_live"]}
+
+                def stopped(_args: object) -> str:
+                    state["old_live"] = False
+                    return SESSION_ID
+
+                with (
+                    patch.object(manager_replace, "pane_inventory", side_effect=inventory),
+                    patch.object(manager_replace, "stop", side_effect=stopped),
+                    patch.object(manager_replace, "has_bound_close_proof", side_effect=lambda *_args: not state["old_live"]),
+                ):
+                    result = replace_manager(args)
+                self.assertIn("sole ownership", result)
+                successor = parsed(root / args.successor_task, root)
+                self.assertEqual("blocked", successor.status)
+                self.assertEqual(args.parent_target, successor.managerat)
+                self.assertEqual(
+                    tuple(child.task for child in args.children),
+                    manager_replace.active_child_task_refs(root, root / args.successor_task, args.new_target),
+                )
+                audit = json.loads(args.audit_output.read_text(encoding="utf-8"))
+                topology = audit["source1485_topology"]
+                self.assertEqual(args.successor_task, topology["root_task"])
+                self.assertEqual(2 + 2 * index, len(topology["rows"]))
+                self.assertEqual(
+                    "replacement-subtree-plus-immediate-parent-owner",
+                    topology["acyclic_scope"],
+                )
+                self.assertEqual(["parent_manager.md"], [row["task"] for row in topology["ancestor_rows"]])
+
+    def test_source1485_nonroot_replacement_requires_unique_reporting_parent_manager(self) -> None:
+        for mode in ("absent", "non_manager", "duplicate"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root, args, identities = self.source1485_nonroot_fixture(
+                    Path(tmp),
+                    manager_replace.SOURCE1485_REPLACEMENTS[0],
+                )
+                if mode == "absent":
+                    (root / "parent_manager.md").unlink()
+                elif mode == "non_manager":
+                    parent = (root / "parent_manager.md").read_text(encoding="utf-8")
+                    (root / "parent_manager.md").write_text(
+                        parent.replace("is_manager: true", "is_manager: false"),
+                        encoding="utf-8",
+                    )
+                else:
+                    duplicate = task_text(
+                        status="running",
+                        runat=args.parent_target,
+                        managerat="wl:7",
+                        is_manager=True,
+                        pending=(),
+                    )
+                    (root / "duplicate_parent.md").write_text(duplicate, encoding="utf-8")
+                with (
+                    patch.object(manager_replace, "pane_inventory", return_value=identities),
+                    patch.object(manager_replace, "stop") as stop_mock,
+                    self.assertRaisesRegex(
+                        ReplaceError,
+                        "requires exactly one active reporting-parent manager owner|multiple active manager owners",
+                    ),
+                ):
+                    replace_manager(args)
+                stop_mock.assert_not_called()
+
+    def test_source1485_requires_old_task_record_session_custody(self) -> None:
+        for recorded_session in ("", "ffffffff-2222-4333-8444-555555555555"):
+            with self.subTest(recorded_session=recorded_session), tempfile.TemporaryDirectory() as tmp:
+                root, args, identities = self.source1485_nonroot_fixture(
+                    Path(tmp),
+                    manager_replace.SOURCE1485_REPLACEMENTS[0],
+                )
+                old_path = root / args.old_task
+                current = old_path.read_text(encoding="utf-8")
+                if recorded_session:
+                    changed = current.replace(f"session_id: {SESSION_ID}", f"session_id: {recorded_session}")
+                else:
+                    changed = current.replace(f"session_id: {SESSION_ID}\n", "")
+                old_path.write_text(changed, encoding="utf-8")
+                changed_args = replace(args, old_sha256=sha(changed))
+                with (
+                    patch.object(manager_replace, "pane_inventory", return_value=identities),
+                    patch.object(manager_replace, "stop") as stop_mock,
+                    self.assertRaisesRegex(ReplaceError, "exact live long-running failed-manager record"),
+                ):
+                    replace_manager(changed_args)
+                stop_mock.assert_not_called()
+
+    def test_source1485_nonroot_replacement_rejects_discovered_child_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, identities = self.source1485_nonroot_fixture(
+                Path(tmp),
+                manager_replace.SOURCE1485_REPLACEMENTS[0],
+            )
+            extra = task_text(
+                status="running",
+                runat="dwp:3",
+                managerat=args.old_target,
+                is_manager=False,
+                pending=("Unexpected active child.",),
+            )
+            (root / "unexpected.md").write_text(extra, encoding="utf-8")
+            identities["dwp:3.0"] = PaneIdentity("dwp:3.0", "%99", 4299, 999)
+            with (
+                patch.object(manager_replace, "pane_inventory", return_value=identities),
+                self.assertRaisesRegex(ReplaceError, "active child set changed"),
+            ):
+                replace_manager(args)
+
+    def test_source1485_reporting_parent_bytes_are_revalidated_before_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, identities = self.source1485_nonroot_fixture(
+                Path(tmp),
+                manager_replace.SOURCE1485_REPLACEMENTS[0],
+            )
+            with patch.object(manager_replace, "pane_inventory", return_value=identities):
+                plan = manager_replace.prepare(args, manager_replace.markdown_paths(root))
+                parent_path = root / "parent_manager.md"
+                parent_path.write_text(
+                    parent_path.read_text(encoding="utf-8").replace(
+                        "Preserve parent coordination.",
+                        "Concurrent parent coordination drift.",
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(ReplaceError, "post-graph changed before guarded manager close"):
+                    manager_replace.require_preclose_eligibility(args, plan)
+
+    def test_source1485_root_rejects_cycle_queue_drift_and_omitted_child(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, identities = self.source1485_root_fixture(Path(tmp))
+            cases = (
+                ("queue", replace(args, children=tuple(replace(child, queue_sha256="0" * 64) if child.task == "dw_cc_sampling.md" else child for child in args.children)), "ordered queue"),
+                ("omitted", replace(args, children=tuple(child for child in args.children if child.task != "dw_cc_sampling.md")), "root-child"),
+            )
+            for _name, changed, error in cases:
+                with self.subTest(case=_name), patch.object(manager_replace, "pane_inventory", return_value=identities), self.assertRaisesRegex(ReplaceError, error):
+                    replace_manager(changed)
+            cycle_child = task_text(status="running", runat="config:1", managerat="wl:7", is_manager=False, pending=())
+            (root / "cycle.md").write_text(cycle_child, encoding="utf-8")
+            with patch.object(manager_replace, "pane_inventory", return_value=identities), self.assertRaisesRegex(ReplaceError, "childless|cycle"):
+                replace_manager(args)
+
+    def test_source1485_root_rejects_reporting_parent_edge_into_retained_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, identities = self.source1485_root_fixture(Path(tmp))
+            coordinator = task_text(
+                status="long_running",
+                runat="config:1",
+                managerat="dw:14",
+                is_manager=True,
+                pending=("Coordinate the DW replacement.",),
+            )
+            (root / "coordinator.md").write_text(coordinator, encoding="utf-8")
+            with (
+                patch.object(manager_replace, "pane_inventory", return_value=identities),
+                patch.object(manager_replace, "stop") as stop_mock,
+                self.assertRaisesRegex(ReplaceError, "repeats task|reporting edge.*cycle"),
+            ):
+                replace_manager(args)
+            stop_mock.assert_not_called()
+
+    def test_source1485_root_rejects_multi_hop_reporting_parent_cycle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, identities = self.source1485_root_fixture(Path(tmp))
+            coordinator = task_text(
+                status="long_running",
+                runat="config:1",
+                managerat="config2:0",
+                is_manager=True,
+                pending=("Coordinate the DW replacement.",),
+            )
+            ancestor = task_text(
+                status="long_running",
+                runat="config2:0",
+                managerat="config:1",
+                is_manager=True,
+                pending=("Retain upstream coordination.",),
+            )
+            (root / "coordinator.md").write_text(coordinator, encoding="utf-8")
+            (root / "ancestor_manager.md").write_text(ancestor, encoding="utf-8")
+            identities["config2:0.0"] = PaneIdentity("config2:0.0", "%99", 4299, 1099)
+            protected = tuple(sorted((*args.protected_targets, "config2:0.0")))
+            provisional = replace(args, protected_targets=protected)
+            changed = replace(
+                provisional,
+                protected_targets_sha256=manager_replace.protected_inventory_digest(
+                    provisional,
+                    identities,
+                ),
+            )
+            with (
+                patch.object(manager_replace, "pane_inventory", return_value=identities),
+                patch.object(manager_replace, "stop") as stop_mock,
+                self.assertRaisesRegex(ReplaceError, "ancestry.*cycle"),
+            ):
+                replace_manager(changed)
             stop_mock.assert_not_called()
 
     def test_other_authority_cannot_request_descendant_closure(self) -> None:
@@ -1562,9 +2078,7 @@ class ManagerReplaceTests(unittest.TestCase):
                 *(manager_replace.canonical_target(item.target) for item in args.descendants),
             }
             identities = {
-                manager_replace.canonical_target(args.old_target): PaneIdentity(
-                    manager_replace.canonical_target(args.old_target), "%42", 4242, 999
-                ),
+                manager_replace.canonical_target(args.old_target): PaneIdentity(manager_replace.canonical_target(args.old_target), "%42", 4242, 999),
                 **{
                     manager_replace.canonical_target(item.target): PaneIdentity(
                         manager_replace.canonical_target(item.target),
@@ -1575,9 +2089,7 @@ class ManagerReplaceTests(unittest.TestCase):
                     for item in args.descendants
                 },
             }
-            sessions = {item.target: item.session_id for item in args.descendants} | {
-                args.old_target: args.old_session_id
-            }
+            sessions = {item.target: item.session_id for item in args.descendants} | {args.old_target: args.old_session_id}
 
             def inventory() -> dict[str, PaneIdentity]:
                 return {target: identity for target, identity in identities.items() if target in live}
@@ -1585,15 +2097,11 @@ class ManagerReplaceTests(unittest.TestCase):
             def stopped(stop_args: object) -> str:
                 target = manager_replace.canonical_target(stop_args.target)
                 live.remove(target)
-                Path(stop_args.bound_close_proof_path).write_text(
-                    f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8"
-                )
+                Path(stop_args.bound_close_proof_path).write_text(f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8")
                 Path(stop_args.bound_close_proof_path).chmod(0o600)
                 if target == manager_replace.canonical_target(args.old_target):
                     source1292 = root / manager_replace.SOURCE1292_FILE
-                    source1292.write_text(
-                        source1292.read_text(encoding="utf-8") + "late drift\n", encoding="utf-8"
-                    )
+                    source1292.write_text(source1292.read_text(encoding="utf-8") + "late drift\n", encoding="utf-8")
                 return sessions[stop_args.target]
 
             with (
@@ -1616,9 +2124,7 @@ class ManagerReplaceTests(unittest.TestCase):
                 *(manager_replace.canonical_target(item.target) for item in args.descendants),
             }
             identities = {
-                manager_replace.canonical_target(args.old_target): PaneIdentity(
-                    manager_replace.canonical_target(args.old_target), "%42", 4242, 999
-                ),
+                manager_replace.canonical_target(args.old_target): PaneIdentity(manager_replace.canonical_target(args.old_target), "%42", 4242, 999),
                 **{
                     manager_replace.canonical_target(item.target): PaneIdentity(
                         manager_replace.canonical_target(item.target),
@@ -1629,18 +2135,14 @@ class ManagerReplaceTests(unittest.TestCase):
                     for item in args.descendants
                 },
             }
-            sessions = {item.target: item.session_id for item in args.descendants} | {
-                args.old_target: args.old_session_id
-            }
+            sessions = {item.target: item.session_id for item in args.descendants} | {args.old_target: args.old_session_id}
 
             def inventory() -> dict[str, PaneIdentity]:
                 return {target: identity for target, identity in identities.items() if target in live}
 
             def stopped(stop_args: object) -> str:
                 live.remove(manager_replace.canonical_target(stop_args.target))
-                Path(stop_args.bound_close_proof_path).write_text(
-                    f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8"
-                )
+                Path(stop_args.bound_close_proof_path).write_text(f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8")
                 Path(stop_args.bound_close_proof_path).chmod(0o600)
                 return sessions[stop_args.target]
 
@@ -1674,9 +2176,7 @@ class ManagerReplaceTests(unittest.TestCase):
                 *(manager_replace.canonical_target(item.target) for item in args.descendants),
             }
             identities = {
-                manager_replace.canonical_target(args.old_target): PaneIdentity(
-                    manager_replace.canonical_target(args.old_target), "%42", 4242, 999
-                ),
+                manager_replace.canonical_target(args.old_target): PaneIdentity(manager_replace.canonical_target(args.old_target), "%42", 4242, 999),
                 **{
                     manager_replace.canonical_target(item.target): PaneIdentity(
                         manager_replace.canonical_target(item.target),
@@ -1687,18 +2187,14 @@ class ManagerReplaceTests(unittest.TestCase):
                     for item in args.descendants
                 },
             }
-            sessions = {item.target: item.session_id for item in args.descendants} | {
-                args.old_target: args.old_session_id
-            }
+            sessions = {item.target: item.session_id for item in args.descendants} | {args.old_target: args.old_session_id}
 
             def inventory() -> dict[str, PaneIdentity]:
                 return {target: identity for target, identity in identities.items() if target in live}
 
             def stopped(stop_args: object) -> str:
                 live.remove(manager_replace.canonical_target(stop_args.target))
-                Path(stop_args.bound_close_proof_path).write_text(
-                    f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8"
-                )
+                Path(stop_args.bound_close_proof_path).write_text(f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8")
                 Path(stop_args.bound_close_proof_path).chmod(0o600)
                 return sessions[stop_args.target]
 
@@ -1738,9 +2234,7 @@ class ManagerReplaceTests(unittest.TestCase):
             inventory, _stopped, _proof = self.runtime({"old_live": True})
             with descendant_authority, inventory:
                 descendant_plan = manager_replace.prepare(descendant_args, manager_replace.markdown_paths(root))
-                descendant_record = manager_replace.audit_record(
-                    descendant_args, descendant_plan, "b" * 64, sha("b" * 64)
-                )
+                descendant_record = manager_replace.audit_record(descendant_args, descendant_plan, "b" * 64, sha("b" * 64))
             self.assertEqual(
                 descendant_args.descendant_authority_envelope_sha256,
                 descendant_record["descendant_authority_envelope_sha256"],
@@ -1751,9 +2245,7 @@ class ManagerReplaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _root, args, _files = self.whole_tree_fixture(Path(tmp))
             malformed = replace(args, descendants=args.descendants[:1])
-            with self.whole_tree_authority(malformed), self.assertRaisesRegex(
-                ReplaceError, "identical descendant pin for every child"
-            ):
+            with self.whole_tree_authority(malformed), self.assertRaisesRegex(ReplaceError, "identical descendant pin for every child"):
                 replace_manager(malformed)
 
     def test_whole_tree_recovers_after_first_descendant_close_without_retargeting_it(self) -> None:
@@ -1763,13 +2255,9 @@ class ManagerReplaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root, args, _files = self.whole_tree_fixture(Path(tmp))
             identities = {
-                manager_replace.canonical_target(args.old_target): PaneIdentity(
-                    manager_replace.canonical_target(args.old_target), "%42", 4242, 999
-                ),
+                manager_replace.canonical_target(args.old_target): PaneIdentity(manager_replace.canonical_target(args.old_target), "%42", 4242, 999),
                 **{
-                    manager_replace.canonical_target(item.target): PaneIdentity(
-                        manager_replace.canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks
-                    )
+                    manager_replace.canonical_target(item.target): PaneIdentity(manager_replace.canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks)
                     for item in args.descendants
                 },
             }
@@ -1782,9 +2270,7 @@ class ManagerReplaceTests(unittest.TestCase):
             def stopped(stop_args) -> str:
                 calls.append(stop_args.target)
                 live.remove(manager_replace.canonical_target(stop_args.target))
-                Path(stop_args.bound_close_proof_path).write_text(
-                    f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8"
-                )
+                Path(stop_args.bound_close_proof_path).write_text(f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8")
                 Path(stop_args.bound_close_proof_path).chmod(0o600)
                 if len(calls) == 1:
                     raise SimulatedCrash()
@@ -1818,13 +2304,9 @@ class ManagerReplaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _root, args, _files = self.whole_tree_fixture(Path(tmp))
             identities = {
-                manager_replace.canonical_target(args.old_target): PaneIdentity(
-                    manager_replace.canonical_target(args.old_target), "%42", 4242, 999
-                ),
+                manager_replace.canonical_target(args.old_target): PaneIdentity(manager_replace.canonical_target(args.old_target), "%42", 4242, 999),
                 **{
-                    manager_replace.canonical_target(item.target): PaneIdentity(
-                        manager_replace.canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks
-                    )
+                    manager_replace.canonical_target(item.target): PaneIdentity(manager_replace.canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks)
                     for item in args.descendants
                 },
             }
@@ -1859,13 +2341,9 @@ class ManagerReplaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root, args, _files = self.whole_tree_fixture(Path(tmp))
             identities = {
-                manager_replace.canonical_target(args.old_target): PaneIdentity(
-                    manager_replace.canonical_target(args.old_target), "%42", 4242, 999
-                ),
+                manager_replace.canonical_target(args.old_target): PaneIdentity(manager_replace.canonical_target(args.old_target), "%42", 4242, 999),
                 **{
-                    manager_replace.canonical_target(item.target): PaneIdentity(
-                        manager_replace.canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks
-                    )
+                    manager_replace.canonical_target(item.target): PaneIdentity(manager_replace.canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks)
                     for item in args.descendants
                 },
             }
@@ -1885,9 +2363,7 @@ class ManagerReplaceTests(unittest.TestCase):
                 else:
                     session = next(item.session_id for item in args.descendants if item.target == stop_args.target)
                 live.remove(manager_replace.canonical_target(stop_args.target))
-                Path(stop_args.bound_close_proof_path).write_text(
-                    f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8"
-                )
+                Path(stop_args.bound_close_proof_path).write_text(f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8")
                 Path(stop_args.bound_close_proof_path).chmod(0o600)
                 return session
 
@@ -1911,13 +2387,9 @@ class ManagerReplaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             _root, args, _files = self.whole_tree_fixture(Path(tmp))
             identities = {
-                manager_replace.canonical_target(args.old_target): PaneIdentity(
-                    manager_replace.canonical_target(args.old_target), "%42", 4242, 999
-                ),
+                manager_replace.canonical_target(args.old_target): PaneIdentity(manager_replace.canonical_target(args.old_target), "%42", 4242, 999),
                 **{
-                    manager_replace.canonical_target(item.target): PaneIdentity(
-                        manager_replace.canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks
-                    )
+                    manager_replace.canonical_target(item.target): PaneIdentity(manager_replace.canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks)
                     for item in args.descendants
                 },
             }
@@ -1930,9 +2402,7 @@ class ManagerReplaceTests(unittest.TestCase):
             def stopped(stop_args) -> str:
                 calls.append(stop_args.target)
                 live.remove(manager_replace.canonical_target(stop_args.target))
-                Path(stop_args.bound_close_proof_path).write_text(
-                    f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8"
-                )
+                Path(stop_args.bound_close_proof_path).write_text(f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8")
                 Path(stop_args.bound_close_proof_path).chmod(0o600)
                 if stop_args.target == args.descendants[-1].target:
                     live.add(manager_replace.canonical_target(args.descendants[0].target))
@@ -2197,9 +2667,13 @@ class ManagerReplaceTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            current_todo = (root / "TODO.md").read_text(encoding="utf-8").replace(
-                "unrelated.md other:1\n",
-                f"unrelated.md other:1\n{concurrent_task} other:8\n",
+            current_todo = (
+                (root / "TODO.md")
+                .read_text(encoding="utf-8")
+                .replace(
+                    "unrelated.md other:1\n",
+                    f"unrelated.md other:1\n{concurrent_task} other:8\n",
+                )
             )
             (root / "TODO.md").write_text(current_todo, encoding="utf-8")
             rebased = replace(
@@ -2305,11 +2779,7 @@ class ManagerReplaceTests(unittest.TestCase):
                     args.audit_output.write_bytes(args.audit_output.read_bytes() + b"drift\n")
                 elif scenario == "authority":
                     authority_path.write_bytes(authority_path.read_bytes() + b"drift\n")
-                inventory_value = (
-                    {"other:1.0": PaneIdentity("other:1.0", args.old_pane_id, 9999, 1000)}
-                    if scenario == "pane"
-                    else {}
-                )
+                inventory_value = {"other:1.0": PaneIdentity("other:1.0", args.old_pane_id, 9999, 1000)} if scenario == "pane" else {}
                 with (
                     patch.object(manager_replace, "pane_inventory", return_value=inventory_value),
                     patch.object(
