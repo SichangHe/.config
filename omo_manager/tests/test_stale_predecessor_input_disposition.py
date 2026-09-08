@@ -252,6 +252,31 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         self.assertEqual("status_input", subject.exact_recovery_state(["› /status", "", "  gpt-5.5"]))
         self.assertEqual("ready", subject.exact_recovery_state(["› Ask Codex to do anything", "", "  gpt-5.5"]))
 
+    def test_post_escape_ready_capture_accepts_exact_tmux_n_footer_spacer(self) -> None:
+        lines = [
+            "│  Warning:                     limits may be stale - run /status again shortly │",
+            "╰──────────────────────────────────────────────────────────────────────────────╯",
+            " ",
+            " ",
+            "› Ask Codex to do anything",
+            " ",
+            "  gpt-5.6-sol high · /workspace/dw8 · weekly 66% left · 6.82M used · …",
+        ]
+        report = subject.report_from_lines(lines)
+        self.assertEqual(("ready", "Ask Codex to do anything"), (report.status, report.input_text))
+        self.assertEqual("ready", subject.exact_recovery_state(lines))
+
+    def test_post_escape_ready_capture_rejects_nonexact_footer_spacers(self) -> None:
+        base = [
+            "› Ask Codex to do anything",
+            " ",
+            "  gpt-5.6-sol high · /workspace/dw8 · weekly 66% left · 6.82M used · …",
+        ]
+        for spacer in ("  ", "\t", " unexpected"):
+            with self.subTest(spacer=repr(spacer)):
+                lines = [base[0], spacer, base[2]]
+                self.assertEqual("other", subject.exact_recovery_state(lines))
+
     def test_recovery_report_requirements_match_immutable_incident_wording(self) -> None:
         report_body = (
             "Supplemental dw8:0 recovery result consumed without a duplicate queue item. "
@@ -763,6 +788,13 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         events: list[str] = []
         with self.assertRaisesRegex(TaskFrontmatterError, "unsupported state"):
             self.execute_states(["status_menu", "status_menu", "other"], events, prepared_exists=False)
+        self.assertEqual(["key:Escape:status_menu"], [event for event in events if event.startswith("key:")])
+        self.assertFalse(any(event.startswith("publish:complete") for event in events))
+
+    def test_post_escape_ready_capture_race_never_publishes_complete(self) -> None:
+        events: list[str] = []
+        with self.assertRaisesRegex(TaskFrontmatterError, "unsupported state"):
+            self.execute_states(["status_menu", "status_menu", "ready", "other"], events, prepared_exists=True)
         self.assertEqual(["key:Escape:status_menu"], [event for event in events if event.startswith("key:")])
         self.assertFalse(any(event.startswith("publish:complete") for event in events))
 

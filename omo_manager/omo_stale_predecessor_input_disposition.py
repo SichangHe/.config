@@ -255,8 +255,18 @@ def exact_status_menu(lines: list[str], authorized_input: str = AUTHORIZED_INPUT
 def exact_recovery_state(lines: list[str], authorized_input: str = AUTHORIZED_INPUT) -> str:
     if exact_status_menu(lines, authorized_input):
         return "status_menu"
+    # ``capture-pane -N`` preserves Codex's rendered one-cell footer spacer as
+    # one ASCII space.  The shared input parser intentionally accepts an empty
+    # footer spacer only, so normalize exactly this renderer-equivalent shape
+    # without relaxing any other whitespace or prompt boundary.
+    input_lines = list(lines)
+    end = len(input_lines)
+    while end and not input_lines[end - 1].strip():
+        end -= 1
+    if end >= 2 and input_lines[end - 2] == " ":
+        input_lines[end - 2] = ""
     try:
-        input_text = exact_complete_input_text(lines, allow_codex_footer_spacer=True)
+        input_text = exact_complete_input_text(input_lines, allow_codex_footer_spacer=True)
     except RuntimeError:
         return "other"
     if input_text == authorized_input:
