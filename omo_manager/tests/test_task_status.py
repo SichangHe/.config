@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 import yaml
+from collections.abc import Iterator
 from contextlib import nullcontext
 from contextlib import contextmanager
 from contextlib import redirect_stderr
@@ -43,6 +44,7 @@ from omo_manager.omo_task_status import finish_private_audit
 from omo_manager.omo_task_status import StopArgs
 from omo_manager.omo_task_status import parse_args
 from omo_manager.omo_task_status import reconcile_blocked_index
+from omo_manager.omo_task_status import reconcile_dependency_blocked_current
 from omo_manager.omo_task_status import reconcile_done_index
 from omo_manager.omo_task_status import reconcile_running_index
 from omo_manager.omo_task_status import reconcile_long_running_human_index
@@ -6585,6 +6587,177 @@ resolved_task_items: []
                 exit_code = run(StatusArgs(Path(tmp), Path("../task.md"), "done", ""))
 
             self.assertEqual(2, exit_code)
+
+    def test_parse_reconcile_dependency_blocked_current_requires_two_digests(self) -> None:
+        args = parse_args(
+            [
+                "--root",
+                "/tmp/work",
+                "--reconcile-dependency-blocked-current",
+                "--source-sha256",
+                "a" * 64,
+                "--dependency-sha256",
+                "b" * 64,
+                "task.md",
+            ]
+        )
+
+        self.assertTrue(args.reconcile_dependency_blocked_current)
+        self.assertEqual("a" * 64, args.source_sha256)
+        self.assertEqual("b" * 64, args.dependency_sha256)
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args(
+                [
+                    "--root",
+                    "/tmp/work",
+                    "--reconcile-dependency-blocked-current",
+                    "--source-sha256",
+                    "a" * 64,
+                    "task.md",
+                ]
+            )
+
+    def write_dependency_blocked_fixture(self, root: Path, *, source_section: str = "human pending") -> tuple[Path, Path, Path, str, str]:
+        source = root / "blocked_manager.md"
+        dependency = root / "repair.md"
+        todo = root / "TODO.md"
+        source_text = task_frontmatter(
+            status="blocked",
+            blocked_on="repair.md",
+            pending_items=("preserve open work",),
+            runat="owner:2",
+            managerat="upper:1",
+            is_manager=True,
+        ) + "source body\n"
+        dependency_text = task_frontmatter(
+            status="running",
+            pending_items=("implement repair",),
+            runat="repair:3",
+            managerat="upper:1",
+        ) + "dependency body\n"
+        source.write_text(source_text, encoding="utf-8")
+        dependency.write_text(dependency_text, encoding="utf-8")
+        source_row = "blocked_manager.md owner:2"
+        current_rows = ["repair.md repair:3", "unrelated.md other:9"]
+        human_rows = ["waiting.md wait:4"]
+        (current_rows if source_section == "current" else human_rows).append(source_row)
+        todo.write_text(
+            "current:\n"
+            + "\n".join(current_rows)
+            + "\n\nlow priority:\n\nhuman pending:\n"
+            + "\n".join(human_rows)
+            + "\n\nprevious:\nold.md retired\n",
+            encoding="utf-8",
+        )
+        return source, dependency, todo, source_text, dependency_text
+
+    def test_reconcile_dependency_blocked_current_moves_only_bound_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, dependency, todo, source_text, dependency_text = self.write_dependency_blocked_fixture(root)
+            before_todo = todo.read_text(encoding="utf-8")
+            args = StatusArgs(
+                root,
+                Path("blocked_manager.md"),
+                "",
+                "",
+                source_sha256=hashlib.sha256(source_text.encode()).hexdigest(),
+                reconcile_dependency_blocked_current=True,
+                dependency_sha256=hashlib.sha256(dependency_text.encode()).hexdigest(),
+            )
+
+            self.assertEqual(0, run(args))
+
+            after_todo = todo.read_text(encoding="utf-8")
+            self.assertIn("current:\nblocked_manager.md owner:2\nrepair.md repair:3\nunrelated.md other:9", after_todo)
+            self.assertIn("human pending:\nwaiting.md wait:4", after_todo)
+            self.assertNotIn("human pending:\nblocked_manager.md owner:2", after_todo)
+            self.assertEqual(source_text, source.read_text(encoding="utf-8"))
+            self.assertEqual(dependency_text, dependency.read_text(encoding="utf-8"))
+            self.assertNotEqual(before_todo, after_todo)
+
+    def test_reconcile_dependency_blocked_current_locks_membership_before_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, _, _, source_text, dependency_text = self.write_dependency_blocked_fixture(root)
+            events: list[str] = []
+            args = StatusArgs(
+                root,
+                Path("blocked_manager.md"),
+                "",
+                "",
+                source_sha256=hashlib.sha256(source_text.encode()).hexdigest(),
+                reconcile_dependency_blocked_current=True,
+                dependency_sha256=hashlib.sha256(dependency_text.encode()).hexdigest(),
+            )
+
+            @contextmanager
+            def recorded(name: str) -> Iterator[None]:
+                events.append(name)
+                yield
+
+            with patch(
+                "omo_manager.omo_task_status.root_membership_lock",
+                side_effect=lambda _root: recorded("membership"),
+            ), patch(
+                "omo_manager.omo_task_status.task_target_lock",
+                side_effect=lambda _root, target: recorded(f"target:{target}"),
+            ), patch(
+                "omo_manager.omo_task_status.task_file_lock",
+                side_effect=lambda path: recorded(f"file:{path.name}"),
+            ):
+                self.assertEqual(0, run(args))
+
+        self.assertEqual("membership", events[0])
+        self.assertTrue(events[1].startswith("target:"))
+        self.assertTrue(events[2].startswith("target:"))
+
+    def test_reconcile_dependency_blocked_current_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, dependency, todo, source_text, dependency_text = self.write_dependency_blocked_fixture(root, source_section="current")
+            before_todo = todo.read_text(encoding="utf-8")
+            args = StatusArgs(
+                root,
+                Path("blocked_manager.md"),
+                "",
+                "",
+                source_sha256=hashlib.sha256(source_text.encode()).hexdigest(),
+                reconcile_dependency_blocked_current=True,
+                dependency_sha256=hashlib.sha256(dependency_text.encode()).hexdigest(),
+            )
+
+            reconcile_dependency_blocked_current(args, source, source_text, source.stat())
+
+            self.assertEqual(before_todo, todo.read_text(encoding="utf-8"))
+
+    def test_reconcile_dependency_blocked_current_rejects_overlap_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, _, todo, source_text, dependency_text = self.write_dependency_blocked_fixture(root)
+            overlap = root / "overlap.md"
+            overlap.write_text(
+                task_frontmatter(status="running", pending_items=("conflict",), runat="owner:2", managerat="upper:1") + "overlap\n",
+                encoding="utf-8",
+            )
+            before_todo = todo.read_text(encoding="utf-8")
+            stderr = io.StringIO()
+            args = StatusArgs(
+                root,
+                Path("blocked_manager.md"),
+                "",
+                "",
+                source_sha256=hashlib.sha256(source_text.encode()).hexdigest(),
+                reconcile_dependency_blocked_current=True,
+                dependency_sha256=hashlib.sha256(dependency_text.encode()).hexdigest(),
+            )
+
+            with redirect_stderr(stderr):
+                exit_code = run(args)
+
+            self.assertEqual(2, exit_code)
+            self.assertIn("exactly one active task owner", stderr.getvalue())
+            self.assertEqual(before_todo, todo.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

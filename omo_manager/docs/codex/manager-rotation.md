@@ -47,4 +47,45 @@ Overrides are rejected when both values can be inferred. When only one value can
 
 An `error` startup classification fails immediately. A transient `not_codex` classification is polled until startup succeeds or times out. For external rotation, a timeout, pane identity change, respawn failure, or watcher failure is returned as an error. For self-rotation, the initial command returns after the verified coordinator handoff; every later failure is written to the reported coordinator log, and an audit is also written once rotation preparation reaches audit creation. A failure after `respawn-pane` does not restore or resume the old Codex session.
 
+## Failed legacy rotation containment
+
+Do not reconcile a legacy manager-rotation audit that omitted task, ordered-queue, ownership, or session-UUID bindings. If its fresh successor is still live, use `~/.config/omo_manager/omo_manager_rotation_contain.py` from a different pane. The helper treats all post-failure work as unauthenticated and never adopts it. It binds the exact failed audit and watcher-failure log by SHA-256; matches the embedded old launch prompt to a hash-bound old Codex transcript; matches the fresh prompt, live launch argv, and explicit new UUID to the current transcript; and requires the same target, pane, window, changed process, blocked manager task, exact ordered queue, reporting parent, sole active target owner, and sole canonical `current:` TODO row.
+
+The helper also proves that the canonical-root pending-watcher flock is currently held by exactly one live supported `omo_pending_watch.py` process whose `--root` resolves to the requested work-log root. An unlocked stale file, another script, an unrelated root, multiple lock owners, or process/lock drift is rejected. This proof is what permits the failed rotation's duplicate-root watcher startup to remain skipped; the legacy failure log alone is not proof of a healthy watcher.
+
+First run the complete command with `--dry-run`. Supply either every ordered queue item with repeated `--expected-pending-item` options or, explicitly, `--expect-empty-queue`. Repeat `--protected-target` for the complete protected set. The audit, watcher log, old transcript, prompt, task, old/new IDs, old/new PIDs, pane/window IDs, blocker, reporting parent, and receipt path are all mandatory assertions:
+
+```bash
+~/.config/omo_manager/omo_manager_rotation_contain.py \
+  --contain-failed-rotation \
+  --root ROOT \
+  --task-file MANAGER_TASK.md \
+  --target SESSION:WINDOW \
+  --failed-audit PRIVATE_FAILED_AUDIT \
+  --failed-audit-sha256 AUDIT_SHA256 \
+  --watcher-failure-log PRIVATE_FAILURE_LOG \
+  --watcher-failure-log-sha256 LOG_SHA256 \
+  --fresh-prompt-sha256 PROMPT_SHA256 \
+  --old-session-transcript REAL_OLD_JSONL_PATH \
+  --old-session-transcript-sha256 OLD_JSONL_SHA256 \
+  --expected-old-session-id OLD_UUID \
+  --current-session-transcript REAL_CURRENT_JSONL_PATH \
+  --expected-current-session-id CURRENT_UUID \
+  --expected-task-sha256 TASK_SHA256 \
+  --expected-blocker BLOCKER_TASK.md \
+  --expected-manager-target PARENT_TARGET \
+  --expect-empty-queue \
+  --expected-old-pane-id %PANE \
+  --expected-old-window-id @WINDOW \
+  --expected-old-pane-pid OLD_PANE_PID \
+  --expected-old-launch-pid OLD_CODEX_PID \
+  --expected-current-pane-pid CURRENT_PANE_PID \
+  --expected-current-command bunx \
+  --protected-target PROTECTED_TARGET \
+  --receipt-output PRIVATE_NEW_RECEIPT \
+  --dry-run
+```
+
+Remove only `--dry-run` after independent review and immediately before containment. The mutation is one tmux-server-guarded `respawn-pane -k` against the pinned non-`h*` pane and process. It preserves the pane, window, and working directory but replaces Codex with `sleep infinity`, verifies that the entire old process session/group disappeared, rechecks task/TODO/ownership/watcher bindings, and finalizes the owner-private receipt. The completed receipt says explicitly that the legacy audit was not reconciled and post-failure work was not accepted. A failed or incomplete receipt does not authorize resumption. Start a fresh, task-bound manager only through a separately reviewed lifecycle operation after the containment receipt is complete.
+
 Automatic email recovery does not invoke this helper yet.

@@ -303,7 +303,11 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--message-file", type=Path, help="Read prompt text from this file.")
     _ = parser.add_argument("--submit-existing-file", type=Path, help="Submit existing input only if it exactly matches this UTF-8 file.")
     _ = parser.add_argument("--submit-existing-sha256", metavar="SHA256", help="Submit existing input only if its exact UTF-8 text has this lowercase SHA-256 digest.")
-    _ = parser.add_argument("--cancel-existing-file", type=Path, help="Cancel existing input only if it exactly matches this UTF-8 file.")
+    _ = parser.add_argument(
+        "--cancel-existing-file",
+        type=Path,
+        help="Cancel existing input only if it exactly matches this UTF-8 file, including bounded padded trailing-blank recovery.",
+    )
     _ = parser.add_argument("--cancel-existing-sha256", metavar="SHA256", help="Cancel existing input only if its exact UTF-8 text has this lowercase SHA-256 digest.")
     _ = parser.add_argument(
         "--describe-partial-cursor",
@@ -1239,6 +1243,42 @@ def exact_file_authorized_trailing_blank_text(lines: list[str], authorized_text:
     return matches.pop()
 
 
+def file_cancel_trailing_blank_candidates(lines: list[str]) -> set[str]:
+    """Decode only a padded spacer and at most one padded final blank."""
+
+    end = len(lines)
+    while end and not lines[end - 1].strip():
+        end -= 1
+    padded_rows: list[int] = []
+    idx = end - 2
+    while idx >= 0 and lines[idx] and not lines[idx].strip(" "):
+        padded_rows.append(idx)
+        idx -= 1
+    if len(padded_rows) not in {1, 2}:
+        raise RuntimeError("target existing input has an ambiguous trailing blank line")
+    candidate_lines = lines.copy()
+    candidates: set[str] = set()
+    for row in padded_rows:
+        candidate_lines[row] = ""
+        try:
+            candidates.add(exact_complete_input_text(candidate_lines, allow_codex_footer_spacer=True))
+        except RuntimeError:
+            continue
+    return candidates
+
+
+def exact_file_authorized_cancel_trailing_blank_text(lines: list[str], authorized_text: str) -> str:
+    """Recover one padded spacer, and at most one padded final blank, for cancellation."""
+
+    matches = {candidate for candidate in file_cancel_trailing_blank_candidates(lines) if candidate == authorized_text}
+    if len(matches) != 1:
+        raise RuntimeError("target existing input does not exactly match the authorized file")
+    result = matches.pop()
+    if not is_real_input_text(result):
+        raise RuntimeError("target existing input is incomplete")
+    return result
+
+
 def require_authorized_existing_input_text(text: str, authorization: ExistingInputAuthorization) -> None:
     if authorization.text is not None and text != authorization.text:
         raise RuntimeError("target existing input does not exactly match the authorized file")
@@ -1254,15 +1294,20 @@ def require_authorized_existing_input(
     allow_codex_footer_spacer: bool = False,
     allow_cursor_agent: bool = False,
     allow_file_authorized_trailing_blank: bool = False,
+    allow_file_authorized_cancel_trailing_blank: bool = False,
 ) -> ExistingInputCapture:
-    recover_trailing_blank = (
+    recover_submit_trailing_blank = (
         allow_file_authorized_trailing_blank
         and authorization.text is not None
         and authorization.text.endswith("\n")
         and not authorization.text.endswith("\r\n")
     )
+    recover_cancel_trailing_blank = allow_file_authorized_cancel_trailing_blank and authorization.text is not None
+    if recover_submit_trailing_blank and recover_cancel_trailing_blank:
+        raise RuntimeError("submit and cancel trailing-blank recovery modes are mutually exclusive")
+    recover_trailing_blank = recover_submit_trailing_blank or recover_cancel_trailing_blank
     pinned_pane_id = expected_pane_id
-    if recover_trailing_blank and pinned_pane_id is None:
+    if recover_submit_trailing_blank and pinned_pane_id is None:
         pinned_pane_id = exact_pane_id(target)
         if not pinned_pane_id:
             raise RuntimeError(f"target cannot be resolved as an exact tmux pane: {target}")
@@ -1281,13 +1326,19 @@ def require_authorized_existing_input(
         ):
             raise
         if pinned_pane_id is None:
-            raise RuntimeError("target pane binding is unavailable for submit-existing") from exc
+            pinned_pane_id = exact_pane_id(target)
+        if not pinned_pane_id:
+            raise RuntimeError("target pane binding is unavailable for existing-input recovery") from exc
         if exact_pane_id(target) != pinned_pane_id:
             raise RuntimeError("target pane changed before submit-existing") from exc
         lines = capture_complete_input_lines(pinned_pane_id)
         if exact_pane_id(target) != pinned_pane_id:
             raise RuntimeError("target pane changed before submit-existing") from exc
-        text = exact_file_authorized_trailing_blank_text(lines, authorization.text)
+        text = (
+            exact_file_authorized_cancel_trailing_blank_text(lines, authorization.text)
+            if recover_cancel_trailing_blank
+            else exact_file_authorized_trailing_blank_text(lines, authorization.text)
+        )
         capture = ExistingInputCapture(pinned_pane_id, text, False)
     if expected_pane_id is not None and capture.pane_id != expected_pane_id:
         raise RuntimeError("target pane changed before submit-existing")
@@ -1451,7 +1502,20 @@ def verify_authorized_existing_cancel(
             raise RuntimeError("target pane changed after cancel-existing")
         validate_error_transition(lines, preexisting_error, target, "after cancel-existing")
         current_status = target_status(target, lines)
-        input_text = exact_complete_input_text(lines, allow_codex_footer_spacer=True)
+        try:
+            input_text = exact_complete_input_text(lines, allow_codex_footer_spacer=True)
+        except RuntimeError as exc:
+            if str(exc) != "target existing input has an ambiguous trailing blank line":
+                raise
+            candidates = file_cancel_trailing_blank_candidates(lines)
+            placeholders = candidates & CODEX_PLACEHOLDER_INPUT_TEXTS
+            authorized = candidates & ({authorization.text} if authorization.text is not None else set())
+            if len(placeholders) == 1:
+                input_text = placeholders.pop()
+            elif len(authorized) == 1:
+                input_text = authorized.pop()
+            else:
+                raise exc
         if input_text in CODEX_PLACEHOLDER_INPUT_TEXTS:
             if current_status not in {"ready", "running", "waiting_subagent", "error"}:
                 raise RuntimeError(f"target is not in a supported Codex state after cancel-existing: {target} status={current_status}")
@@ -1476,12 +1540,23 @@ def cancel_existing_codex_input(target: str, authorization: ExistingInputAuthori
         _ = print(f"would verify existing input is gone at {target}")
         return
     preexisting_error = require_sendable_codex_target(target, EXISTING_INPUT_CAPTURE_LINES)
-    initial_capture = require_authorized_existing_input(target, authorization, allow_codex_footer_spacer=True)
+    initial_capture = require_authorized_existing_input(
+        target,
+        authorization,
+        allow_codex_footer_spacer=True,
+        allow_file_authorized_cancel_trailing_blank=True,
+    )
     lines = tail_pane_id(initial_capture.pane_id, EXISTING_INPUT_CAPTURE_LINES)
     validate_error_transition(lines, preexisting_error, target, "before cancel-existing")
     if has_plan_prompt(lines):
         raise RuntimeError("Codex cancel-existing blocked by unsafe Plan prompt")
-    capture = require_authorized_existing_input(target, authorization, initial_capture.pane_id, allow_codex_footer_spacer=True)
+    capture = require_authorized_existing_input(
+        target,
+        authorization,
+        initial_capture.pane_id,
+        allow_codex_footer_spacer=True,
+        allow_file_authorized_cancel_trailing_blank=True,
+    )
     if exact_pane_id(target) != capture.pane_id:
         raise RuntimeError("target pane changed before cancel-existing")
     send_cancel_input(capture.pane_id)

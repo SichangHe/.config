@@ -31,6 +31,7 @@ from omo_manager.omo_tmux_send import (
     exact_capacity_error,
     exact_cursor_runtime_binding,
     exact_existing_input_text,
+    exact_file_authorized_cancel_trailing_blank_text,
     exact_file_authorized_trailing_blank_text,
     exact_retained_cursor_rendering,
     escape_agent_message_envelope_tags,
@@ -2320,34 +2321,65 @@ class TmuxSendTests(unittest.TestCase):
 
         enter.assert_not_called()
 
-    def test_digest_and_cancel_paths_reject_space_rendered_final_blank(self) -> None:
+    def test_digest_paths_reject_space_rendered_final_blank(self) -> None:
         result = subprocess.CompletedProcess(
             ["tmux"],
             0,
             stdout="› approved prompt\n \n \n  gpt-5.5\n",
         )
-        authorizations = (
-            ExistingInputAuthorization(text_sha256("approved prompt\n")),
-            ExistingInputAuthorization(text_sha256("approved prompt\n"), "approved prompt\n"),
-        )
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt\n"))
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             os.environ,
             {"OMO_MANAGER_STATE_DIR": tmp, "OMO_MANAGER_TMUX_DELIVERY_DEDUPE_S": "300"},
         ):
-            for authorization in authorizations:
-                with self.subTest(file_authorized=authorization.text is not None), patch(
+            for operation in (submit_existing_to_codex, cancel_existing_codex_input):
+                with self.subTest(operation=operation.__name__), patch(
                     "omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None
                 ), patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
                     "omo_manager.omo_tmux_send.subprocess.run", return_value=result
                 ), patch("omo_manager.omo_tmux_send.send_enter") as enter, patch(
                     "omo_manager.omo_tmux_send.send_cancel_input"
                 ) as cancel, self.assertRaisesRegex(RuntimeError, "ambiguous trailing blank"):
-                    if authorization.text is None:
-                        submit_existing_to_codex("cfg:1.0", authorization, options())
-                    else:
-                        cancel_existing_codex_input("cfg:1.0", authorization, options())
+                    operation("cfg:1.0", authorization, options())
                 enter.assert_not_called()
                 cancel.assert_not_called()
+
+    def test_file_cancel_recovers_one_padded_composer_spacer_without_submitting(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("stale duplicate"), "stale duplicate")
+        ambiguous = ["› stale duplicate", " ", "  gpt-5.5"]
+        cleared = ["› Use /skills to list available skills", " ", "  gpt-5.5"]
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_input_lines",
+            side_effect=[ambiguous, ambiguous, ambiguous, ambiguous, cleared],
+        ), patch("omo_manager.omo_tmux_send.tail_pane_id", return_value=ambiguous), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"
+        ), patch("omo_manager.omo_tmux_send.send_cancel_input") as cancel, patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            cancel_existing_codex_input("cfg:1.0", authorization, options())
+
+        cancel.assert_called_once_with("%42")
+        enter.assert_not_called()
+
+    def test_file_cancel_trailing_blank_recovery_remains_exact(self) -> None:
+        two_padded_rows = ["› stale duplicate", " ", " ", "  gpt-5.5"]
+
+        self.assertEqual(
+            "stale duplicate\n",
+            exact_file_authorized_cancel_trailing_blank_text(two_padded_rows, "stale duplicate\n"),
+        )
+        with self.assertRaisesRegex(RuntimeError, "exactly match"):
+            exact_file_authorized_cancel_trailing_blank_text(two_padded_rows, "different\n")
+        with self.assertRaisesRegex(RuntimeError, "ambiguous trailing blank"):
+            exact_file_authorized_cancel_trailing_blank_text(
+                ["› stale duplicate", " ", " ", " ", "  gpt-5.5"],
+                "stale duplicate\n\n",
+            )
+        with self.assertRaisesRegex(RuntimeError, "incomplete"):
+            exact_file_authorized_cancel_trailing_blank_text(
+                ["› Ask Codex to do anything", " ", "  gpt-5.5"],
+                "Ask Codex to do anything",
+            )
 
     def test_submit_existing_digest_sends_exact_authorized_input(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("approved prompt"))

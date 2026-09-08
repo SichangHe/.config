@@ -201,6 +201,8 @@ class Args:
     manager_consumed_report_receipt: Path | None = None
     manager_consumed_report_receipt_sha256: str = ""
     completion_key: str = ""
+    reconcile_dependency_blocked_current: bool = False
+    dependency_sha256: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
@@ -228,6 +230,7 @@ class ParsedArgs(argparse.Namespace):
     retire_blocked_target: bool = False
     reconcile_long_running_human_index: bool = False
     reconcile_blocked_index: bool = False
+    reconcile_dependency_blocked_current: bool = False
     closure_repository: Path | None = None
     dirty_path_handoff: Path | None = None
     restore_terminal_target: bool = False
@@ -253,6 +256,7 @@ class ParsedArgs(argparse.Namespace):
     active_target: str = ""
     manager_target: str = ""
     source_sha256: str = ""
+    dependency_sha256: str = ""
     human_close_authorization_source: str = ""
     human_close_authorization_sha256: str = ""
     park_unlinked: bool = False
@@ -324,6 +328,7 @@ shutdown.""",
     _ = parser.add_argument("--missing-target", default="", help="Exact absent target required with --reconcile-missing-target or --close-missing-target.")
     _ = parser.add_argument("--reconcile-long-running-human-index", action="store_true", help="Move one unchanged long_running task with exact human blocker from TODO current to human pending without changing task or pane state.")
     _ = parser.add_argument("--reconcile-blocked-index", action="store_true", help="Move one digest-bound v1 blocked worker with an open queue from TODO previous or low priority to human pending without changing task or pane state.")
+    _ = parser.add_argument("--reconcile-dependency-blocked-current", action="store_true", help="Move one digest-bound v1 task blocked on one active task from TODO human pending to current without changing task or pane state.")
     _ = parser.add_argument("--session-id", default="", help="Session id captured by the prior close, if available.")
     _ = parser.add_argument("--replacement-task", type=Path, help="Active replacement task file; required with --finish-replaced-done.")
     _ = parser.add_argument("--stale-target", help="Exact stopped target recorded by the stale task; required with --finish-replaced-done.")
@@ -354,6 +359,7 @@ shutdown.""",
     _ = parser.add_argument("--active-target", default="", help="Exact active task target required with --normalize-low-priority-current.")
     _ = parser.add_argument("--manager-target", default="", help="Exact manager owner target required with --normalize-low-priority-current.")
     _ = parser.add_argument("--source-sha256", default="", help="Exact SHA-256 of the source task bytes required with --close-shared-target, --close-retired-done, or --normalize-retired-todo.")
+    _ = parser.add_argument("--dependency-sha256", default="", help="Exact SHA-256 of the active blocker task required with --reconcile-dependency-blocked-current.")
     _ = parser.add_argument("--human-close-authorization-source", default="", help="Exact manager_mail/<id>.txt record that directly authorizes closing this human-owned task target during normal done closure.")
     _ = parser.add_argument("--human-close-authorization-sha256", default="", help="Lowercase SHA-256 of that exact human-close authorization record.")
     _ = parser.add_argument("--expected-task-sha256", default="", help="Exact SHA-256 of unchanged task bytes required with --park-unlinked or --reattest-park-unlinked.")
@@ -397,8 +403,10 @@ shutdown.""",
         parser.error("--closure-repository must be an explicit absolute Git worktree root.")
     if parsed.dirty_path_handoff is not None and parsed.closure_repository is None:
         parser.error("--dirty-path-handoff requires --closure-repository.")
-    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.reattest_park_unlinked, parsed.retire_blocked_target, parsed.reconcile_missing_target, parsed.close_missing_target, parsed.complete_live_no_mail, parsed.close_active_task_tree_no_mail, parsed.close_done_live_no_mail, parsed.describe_done_live_no_mail, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.cancel_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current)) > 1:
+    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.reattest_park_unlinked, parsed.retire_blocked_target, parsed.reconcile_missing_target, parsed.close_missing_target, parsed.complete_live_no_mail, parsed.close_active_task_tree_no_mail, parsed.close_done_live_no_mail, parsed.describe_done_live_no_mail, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.reconcile_dependency_blocked_current, parsed.restore_terminal_target, parsed.close_shared_target, parsed.cancel_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current)) > 1:
         parser.error("finish and recovery modes are mutually exclusive.")
+    if parsed.dependency_sha256 and not parsed.reconcile_dependency_blocked_current:
+        parser.error("--dependency-sha256 requires --reconcile-dependency-blocked-current.")
     if any((parsed.protected_shared_task, parsed.protected_shared_sha256)) and not (parsed.cancel_shared_target or parsed.close_active_task_tree_no_mail):
         parser.error("protected shared-task assertions require --cancel-shared-target or --close-active-task-tree-no-mail.")
     if parsed.active_target and not (parsed.normalize_low_priority_current or parsed.complete_live_no_mail or parsed.close_done_live_no_mail or parsed.describe_done_live_no_mail):
@@ -411,7 +419,7 @@ shutdown.""",
         parser.error("pane process and expected session assertions require --close-done-live-no-mail.")
     if any(human_close_authority) and (
         parsed.status != "done"
-        or any((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current, parsed.close_active_task_tree_no_mail))
+        or any((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.reconcile_dependency_blocked_current, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current, parsed.close_active_task_tree_no_mail))
     ):
         parser.error("human-close authorization is valid only for a normal done transition.")
     if parsed.park_unlinked:
@@ -933,6 +941,44 @@ shutdown.""",
         if any((parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence)):
             parser.error("unrelated lifecycle evidence is not valid with --reconcile-long-running-human-index.")
         return Args(parsed.root.resolve(), parsed.task_file, "", "", reconcile_long_running_human_index=True)
+    if parsed.reconcile_dependency_blocked_current:
+        unrelated = (
+            parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task,
+            parsed.stale_target, parsed.replacement_target, parsed.stale_sha256,
+            parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target,
+            parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output,
+            parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository,
+            parsed.dirty_path_handoff, parsed.historical_target, parsed.task_sha256,
+            parsed.historical_commit, parsed.shared_target, parsed.active_target,
+            parsed.manager_target, parsed.human_close_authorization_source,
+            parsed.human_close_authorization_sha256, parsed.expected_task_sha256,
+            parsed.expected_todo_sha256, parsed.expected_receipt_sha256,
+            parsed.expected_pane_id, parsed.expected_pane_pid,
+            parsed.expected_pane_start_ticks, parsed.expected_session_id,
+            parsed.authority_file, parsed.authority_lines, parsed.authority_sha256,
+            parsed.no_mail_intent, parsed.authority_envelope,
+            parsed.authority_envelope_sha256, parsed.missing_target,
+            parsed.manager_consumed_report_receipt,
+            parsed.manager_consumed_report_receipt_sha256, parsed.completion_key,
+        )
+        if (
+            any(unrelated)
+            or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None
+            or SHA256_RE.fullmatch(parsed.dependency_sha256.strip()) is None
+        ):
+            parser.error(
+                "--reconcile-dependency-blocked-current requires only lowercase "
+                "--source-sha256 and --dependency-sha256 assertions."
+            )
+        return Args(
+            parsed.root.resolve(),
+            parsed.task_file,
+            "",
+            "",
+            source_sha256=parsed.source_sha256.strip(),
+            reconcile_dependency_blocked_current=True,
+            dependency_sha256=parsed.dependency_sha256.strip(),
+        )
     if parsed.reconcile_blocked_index:
         unrelated = (parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository, parsed.dirty_path_handoff, parsed.historical_target, parsed.task_sha256, parsed.historical_commit, parsed.shared_target, parsed.active_target, parsed.manager_target)
         if any(unrelated) or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None:
@@ -3536,6 +3582,7 @@ def complete_live_no_mail(args: Args, path: Path, text: str, before: os.stat_res
         args.close_done_live_no_mail,
         args.reconcile_long_running_human_index,
         args.reconcile_blocked_index,
+        args.reconcile_dependency_blocked_current,
         args.restore_terminal_target,
         args.close_shared_target,
         args.cancel_shared_target,
@@ -3713,6 +3760,7 @@ def close_active_task_tree_no_mail(args: Args, path: Path, text: str, before: os
         args.close_done_live_no_mail,
         args.reconcile_long_running_human_index,
         args.reconcile_blocked_index,
+        args.reconcile_dependency_blocked_current,
         args.restore_terminal_target,
         args.close_shared_target,
         args.cancel_shared_target,
@@ -4358,6 +4406,133 @@ def reconcile_previous_blocked_index(args: Args, path: Path, text: str, before: 
         updated_todo = reconcile_todo_text(args.root, path, todo_text, metadata.runat, "human pending", ("previous", "low priority"))
         if updated_todo == todo_text:
             raise TaskFrontmatterError("blocked index reconciliation requires the sole TODO row to move from previous or low priority to human pending.")
+        replace_if_unchanged_locked(todo, updated_todo, todo_before)
+
+
+def exact_dependency_path(root: Path, source: Path, blocked_on: str) -> Path:
+    """Resolve one canonical task-file blocker beneath the work-log root."""
+
+    match = TASK_RE.fullmatch(blocked_on)
+    if match is None or match.group(1) != blocked_on:
+        raise TaskFrontmatterError("dependency-blocked current reconciliation requires one exact task-file blocker.")
+    dependency = task_path(root, Path(blocked_on))
+    if dependency == source or not dependency.is_file():
+        raise TaskFrontmatterError("dependency-blocked current reconciliation requires a distinct existing blocker task.")
+    return dependency
+
+
+def exact_dependency_todo_rows(
+    root: Path,
+    source: Path,
+    source_target: str,
+    dependency: Path,
+    dependency_target: str,
+    todo_text: str,
+) -> str:
+    """Bind only the two relevant TODO rows while tolerating unrelated row changes."""
+
+    section = ""
+    headers = {"current": 0, "human pending": 0}
+    source_rows: list[tuple[str, str]] = []
+    dependency_rows: list[tuple[str, str]] = []
+    for line in todo_text.splitlines():
+        stripped = line.strip()
+        if stripped.endswith(":"):
+            section = stripped[:-1].casefold()
+            if section in headers:
+                if stripped != f"{section}:":
+                    raise TaskFrontmatterError("dependency-blocked current reconciliation requires canonical TODO lifecycle headers.")
+                headers[section] += 1
+            continue
+        row_paths = todo_row_task_paths(root, line)
+        if source in row_paths:
+            source_rows.append((section, line))
+        if dependency in row_paths:
+            dependency_rows.append((section, line))
+    source_row = f"{relative_task_ref(root, source)} {source_target}"
+    dependency_row = f"{relative_task_ref(root, dependency)} {dependency_target}"
+    if headers != {"current": 1, "human pending": 1}:
+        raise TaskFrontmatterError("dependency-blocked current reconciliation requires one canonical current and human pending TODO section.")
+    if source_rows not in ([('human pending', source_row)], [('current', source_row)]):
+        raise TaskFrontmatterError("dependency-blocked current reconciliation requires one exact source row in human pending or current.")
+    if dependency_rows != [("current", dependency_row)]:
+        raise TaskFrontmatterError("dependency-blocked current reconciliation requires one exact active dependency row in current.")
+    return source_rows[0][0]
+
+
+def reconcile_dependency_blocked_current(args: Args, path: Path, text: str, before: os.stat_result) -> None:
+    """Move one task blocked on an active task from `human pending` to `current`."""
+
+    source_metadata = parse_task_metadata(text, args.root)
+    if source_metadata is None:
+        raise TaskFrontmatterError("dependency-blocked current reconciliation requires v1 task frontmatter.")
+    dependency = exact_dependency_path(args.root, path, source_metadata.blocked_on)
+    dependency_before = dependency.stat()
+    dependency_text = dependency.read_text(encoding="utf-8")
+    dependency_metadata = parse_task_metadata(dependency_text, args.root)
+    if dependency_metadata is None:
+        raise TaskFrontmatterError("dependency-blocked current reconciliation requires task metadata on the blocker.")
+    targets = sorted({source_metadata.runat, dependency_metadata.runat})
+    todo = args.root / "TODO.md"
+    if not todo.is_file() or path == todo:
+        raise TaskFrontmatterError("dependency-blocked current reconciliation requires a separate regular TODO.md.")
+    with ExitStack() as locks:
+        locks.enter_context(root_membership_lock(args.root))
+        for target in targets:
+            locks.enter_context(task_target_lock(args.root, target))
+        for locked_path in sorted({path, dependency, todo}, key=str):
+            locks.enter_context(task_file_lock(locked_path))
+        current_before = path.stat()
+        current_text = path.read_text(encoding="utf-8")
+        current_dependency_before = dependency.stat()
+        current_dependency_text = dependency.read_text(encoding="utf-8")
+        current_metadata = parse_task_metadata(current_text, args.root)
+        current_dependency_metadata = parse_task_metadata(current_dependency_text, args.root)
+        if (
+            not same_file_state(before, current_before)
+            or current_text != text
+            or hashlib.sha256(current_text.encode()).hexdigest() != args.source_sha256
+            or not same_file_state(dependency_before, current_dependency_before)
+            or current_dependency_text != dependency_text
+            or hashlib.sha256(current_dependency_text.encode()).hexdigest() != args.dependency_sha256
+            or current_metadata is None
+            or current_dependency_metadata is None
+        ):
+            raise TaskFrontmatterError("source or dependency task bytes changed or do not match their SHA-256 assertions.")
+        if (
+            current_metadata.version == V2_VERSION
+            or current_metadata.status != "blocked"
+            or not current_metadata.pending_task_items
+            or has_pending_marker(current_text)
+            or current_metadata.blocked_on != relative_task_ref(args.root, dependency)
+            or TARGET_RE.fullmatch(current_metadata.runat) is None
+            or current_metadata.runat.partition(":")[0].startswith("h")
+        ):
+            raise TaskFrontmatterError("source must be one queued v1 non-human task blocked exactly on the asserted dependency.")
+        if (
+            current_dependency_metadata.version == V2_VERSION
+            or current_dependency_metadata.status not in {"running", "long_running"}
+            or TARGET_RE.fullmatch(current_dependency_metadata.runat) is None
+            or current_dependency_metadata.runat.partition(":")[0].startswith("h")
+        ):
+            raise TaskFrontmatterError("dependency must be one active v1 task with a non-human owner target.")
+        if authoritative_active_target_task_paths(args.root, current_metadata.runat) != (path,):
+            raise TaskFrontmatterError("source target does not have exactly one active task owner.")
+        if authoritative_active_target_task_paths(args.root, current_dependency_metadata.runat) != (dependency,):
+            raise TaskFrontmatterError("dependency target does not have exactly one active task owner.")
+        todo_before = todo.stat()
+        todo_text = todo.read_text(encoding="utf-8")
+        source_section = exact_dependency_todo_rows(
+            args.root,
+            path,
+            current_metadata.runat,
+            dependency,
+            current_dependency_metadata.runat,
+            todo_text,
+        )
+        if source_section == "current":
+            return
+        updated_todo = reconcile_todo_text(args.root, path, todo_text, current_metadata.runat, "current", ("human pending",))
         replace_if_unchanged_locked(todo, updated_todo, todo_before)
 
 
@@ -5403,7 +5578,8 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
         args.reconcile_missing_target, args.close_missing_target,
         args.complete_live_no_mail, args.close_active_task_tree_no_mail,
         args.reconcile_long_running_human_index,
-        args.reconcile_blocked_index, args.restore_terminal_target,
+        args.reconcile_blocked_index, args.reconcile_dependency_blocked_current,
+        args.restore_terminal_target,
         args.close_shared_target, args.cancel_shared_target, args.close_retired_done,
         args.normalize_retired_todo, args.normalize_low_priority_current,
         args.describe_done_live_no_mail,
@@ -6077,6 +6253,8 @@ def run(args: Args) -> int:
         elif args.reattest_park_unlinked:
             reattest_park_unlinked(args, path, text, before)
             reattested_park = True
+        elif args.reconcile_dependency_blocked_current:
+            reconcile_dependency_blocked_current(args, path, text, before)
         elif args.reconcile_blocked_index:
             reconcile_previous_blocked_index(args, path, text, before)
         elif args.retire_blocked_target:
