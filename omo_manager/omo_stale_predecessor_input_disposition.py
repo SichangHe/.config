@@ -74,7 +74,10 @@ from omo_manager.omo_tmux_send import CODEX_PLACEHOLDER_INPUT_TEXTS, exact_compl
 
 SCHEMA = "omo-stale-predecessor-input-disposition/v1"
 REVIEW_SCHEMA = "omo-stale-predecessor-input-disposition-review/v1"
+TODO_RECOVERY_SCHEMA = "omo-stale-predecessor-input-disposition-todo-recovery/v1"
+TODO_RECOVERY_REVIEW_SCHEMA = "omo-stale-predecessor-input-disposition-todo-recovery-review/v1"
 OPERATION = "cancel-proven-stale-status-input"
+TODO_RECOVERY_OPERATION = "rebind-exact-held-todo-input"
 AUTHORIZED_INPUT = "/status"
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_TMUX_BUFFER_INVENTORY = 4096
@@ -180,6 +183,26 @@ AUDIT_KEYS = {
     "protected_pane",
     "protected_session_id",
     "menu_capture_sha256",
+    "binding_id",
+}
+TODO_RECOVERY_KEYS = {
+    "schema",
+    "operation",
+    "packet",
+    "packet_sha256",
+    "review_report",
+    "review_report_sha256",
+    "prepared_audit",
+    "prepared_audit_sha256",
+    "task",
+    "todo",
+    "original_todo_sha256",
+    "owned_rows_base64",
+    "unrelated_todo_base64",
+    "unrelated_todo_sha256",
+    "current_todo_input",
+    "current_manager_input",
+    "recovery_helper_input",
     "binding_id",
 }
 
@@ -649,14 +672,92 @@ def validate_incident_digests(packet: dict[str, object]) -> None:
         raise TaskFrontmatterError("disposition evidence is outside the exact dw8 incident.")
 
 
-def validate_lifecycle(packet: dict[str, object]) -> None:
+def owned_todo_row(packet: dict[str, object]) -> bytes:
+    root = Path(str(packet["root"]))
+    task = Path(str(packet["task"]))
+    try:
+        task_ref = task.relative_to(root).as_posix()
+    except ValueError as exc:
+        raise TaskFrontmatterError("protected task is outside the lifecycle root.") from exc
+    return f"{task_ref} {packet['protected_target']}\n".encode()
+
+
+def partition_todo(data: bytes, row: bytes) -> tuple[bytes, tuple[bytes, bytes]]:
+    """Separate one exact transaction-owned row without normalizing other bytes."""
+
+    try:
+        data.decode()
+        row.decode()
+    except UnicodeDecodeError as exc:
+        raise TaskFrontmatterError("current TODO is not UTF-8.") from exc
+    if not row.endswith(b"\n") or data.count(row) != 1:
+        raise TaskFrontmatterError("current TODO does not contain the one exact transaction-owned row.")
+    before, after = data.split(row, 1)
+    return row, (before, after)
+
+
+def todo_recovery_bytes(record: dict[str, object]) -> bytes:
+    unsigned = dict(record)
+    observed_binding = unsigned.pop("binding_id", None)
+    if set(record) != TODO_RECOVERY_KEYS or observed_binding != bound_receipt_id(unsigned):
+        raise TaskFrontmatterError("TODO recovery packet schema is invalid.")
+    return canonical_json(record)
+
+
+def validate_todo_recovery_current(packet: dict[str, object], recovery: dict[str, object]) -> tuple[bytes, bytes]:
+    """Validate the exact current TODO bytes and current recovery helper binding."""
+
+    if (
+        recovery.get("schema") != TODO_RECOVERY_SCHEMA
+        or recovery.get("operation") != TODO_RECOVERY_OPERATION
+        or recovery.get("task") != packet.get("task")
+        or recovery.get("todo") != packet.get("todo")
+        or recovery.get("original_todo_sha256") != packet.get("todo_sha256")
+    ):
+        raise TaskFrontmatterError("TODO recovery packet scope is invalid.")
+    todo_input = object_map(recovery.get("current_todo_input"), "current TODO recovery input")
+    todo_identity = file_identity_from(todo_input.get("file"), "current TODO recovery input")
+    if todo_identity.path != str(packet["todo"]):
+        raise TaskFrontmatterError("TODO recovery packet path is invalid.")
+    current_todo = read_bound(Path(todo_identity.path), todo_identity.sha256, "rebound TODO")
+    if todo_input != file_input(Path(todo_identity.path), "rebound TODO"):
+        raise TaskFrontmatterError("current TODO recovery input changed.")
+    expected_row = owned_todo_row(packet)
+    try:
+        encoded_rows = cast(list[object], recovery["owned_rows_base64"])
+        rows = [base64.b64decode(str(value), validate=True) for value in encoded_rows]
+        unrelated = base64.b64decode(str(recovery["unrelated_todo_base64"]), validate=True)
+    except (KeyError, ValueError) as exc:
+        raise TaskFrontmatterError("TODO recovery row encoding is invalid.") from exc
+    row, chunks = partition_todo(current_todo, expected_row)
+    if rows != [row] or unrelated != b"".join(chunks) or sha256(unrelated) != recovery.get("unrelated_todo_sha256"):
+        raise TaskFrontmatterError("TODO recovery rows or unrelated bytes changed.")
+    helper = Path(__file__).resolve(strict=True)
+    if recovery.get("recovery_helper_input") != file_input(helper, "TODO recovery helper"):
+        raise TaskFrontmatterError("TODO recovery helper changed.")
+    manager_input = object_map(recovery.get("current_manager_input"), "current manager recovery input")
+    manager_identity = file_identity_from(manager_input.get("file"), "current manager recovery input")
+    if manager_identity.path != str(packet["manager_task"]):
+        raise TaskFrontmatterError("manager recovery packet path is invalid.")
+    current_manager = read_bound(Path(manager_identity.path), manager_identity.sha256, "rebound manager task")
+    if manager_input != file_input(Path(manager_identity.path), "rebound manager task"):
+        raise TaskFrontmatterError("current manager recovery input changed.")
+    return current_todo, current_manager
+
+
+def validate_lifecycle(
+    packet: dict[str, object],
+    *,
+    rebound_todo_data: bytes | None = None,
+    rebound_manager_data: bytes | None = None,
+) -> None:
     root = Path(str(packet["root"]))
     task = Path(str(packet["task"]))
     todo = Path(str(packet["todo"]))
     manager_task = Path(str(packet["manager_task"]))
     task_data = read_bound(task, str(packet["task_sha256"]), "protected task")
-    todo_data = read_bound(todo, str(packet["todo_sha256"]), "TODO")
-    manager_data = read_bound(manager_task, str(packet["manager_task_sha256"]), "manager task")
+    todo_data = read_bound(todo, str(packet["todo_sha256"]), "TODO") if rebound_todo_data is None else rebound_todo_data
+    manager_data = read_bound(manager_task, str(packet["manager_task_sha256"]), "manager task") if rebound_manager_data is None else rebound_manager_data
     try:
         task_metadata = parse_task_metadata(task_data.decode(), root)
         manager_metadata = parse_task_metadata(manager_data.decode(), root)
@@ -691,6 +792,7 @@ def static_evidence(
     packet: dict[str, object],
     *,
     rebind_recoverable_helper: bool = False,
+    todo_recovery: dict[str, object] | None = None,
 ) -> tuple[PanePin, PanePin]:
     validate_incident_digests(packet)
     prior = validate_close_artifacts(
@@ -755,7 +857,8 @@ def static_evidence(
         or SESSION_RE.fullmatch(str(packet["protected_session_id"])) is None
     ):
         raise TaskFrontmatterError("disposition packet scope is inconsistent.")
-    validate_lifecycle(packet)
+    rebound = validate_todo_recovery_current(packet, todo_recovery) if todo_recovery is not None else (None, None)
+    validate_lifecycle(packet, rebound_todo_data=rebound[0], rebound_manager_data=rebound[1])
     expected_inputs = [
         file_input(path, label, private=private)
         for path, label, private in (
@@ -774,8 +877,21 @@ def static_evidence(
             (Path(str(packet["helper"])), "input disposition helper", False),
         )
     ]
+    raw_inputs = packet.get("inputs")
+    if todo_recovery is not None:
+        if not is_recoverable_prepared_packet(packet) or not isinstance(raw_inputs, list) or len(raw_inputs) != len(expected_inputs):
+            raise TaskFrontmatterError("prepared disposition TODO recovery binding is invalid.")
+        prior_todo_input = object_map(raw_inputs[-3], "recoverable TODO input")
+        prior_todo_identity = file_identity_from(prior_todo_input.get("file"), "recoverable TODO input")
+        prior_manager_input = object_map(raw_inputs[-2], "recoverable manager input")
+        prior_manager_identity = file_identity_from(prior_manager_input.get("file"), "recoverable manager input")
+        if prior_todo_identity.path != str(packet["todo"]) or prior_todo_identity.sha256 != packet["todo_sha256"]:
+            raise TaskFrontmatterError("prepared disposition TODO recovery binding is invalid.")
+        if prior_manager_identity.path != str(packet["manager_task"]) or prior_manager_identity.sha256 != packet["manager_task_sha256"]:
+            raise TaskFrontmatterError("prepared disposition manager recovery binding is invalid.")
+        expected_inputs[-3] = prior_todo_input
+        expected_inputs[-2] = prior_manager_input
     if rebind_recoverable_helper:
-        raw_inputs = packet.get("inputs")
         if not is_recoverable_prepared_packet(packet) or not isinstance(raw_inputs, list) or len(raw_inputs) != len(expected_inputs):
             raise TaskFrontmatterError("prepared disposition helper recovery binding is invalid.")
         prior_helper_input = object_map(raw_inputs[-1], "recoverable input disposition helper")
@@ -793,10 +909,12 @@ def live_state(
     *,
     require_original_menu: bool,
     rebind_recoverable_helper: bool = False,
+    todo_recovery: dict[str, object] | None = None,
 ) -> tuple[PanePin, PanePin, str, bytes]:
     predecessor, protected = static_evidence(
         packet,
         rebind_recoverable_helper=rebind_recoverable_helper,
+        todo_recovery=todo_recovery,
     )
     if not current_pin(predecessor) or not current_pin(protected):
         raise TaskFrontmatterError("predecessor or protected pane identity changed.")
@@ -1030,6 +1148,182 @@ def validate_review(path: Path, expected_sha256: str, packet: dict[str, object],
         raise TaskFrontmatterError("independent review does not PASS this exact menu disposition.")
 
 
+def validate_todo_recovery_packet(
+    recovery: dict[str, object],
+    recovery_sha256: str,
+    packet: dict[str, object],
+    packet_path: Path,
+    review_path: Path,
+    prepared_path: Path,
+) -> bytes:
+    if sha256(todo_recovery_bytes(recovery)) != recovery_sha256:
+        raise TaskFrontmatterError("TODO recovery packet hash is invalid.")
+    expected = {
+        "packet": str(packet_path),
+        "packet_sha256": RECOVERABLE_PACKET_SHA256,
+        "review_report": str(review_path),
+        "review_report_sha256": RECOVERABLE_REVIEW_SHA256,
+        "prepared_audit": str(prepared_path),
+        "prepared_audit_sha256": RECOVERABLE_PREPARED_AUDIT_SHA256,
+    }
+    if any(recovery.get(key) != value for key, value in expected.items()) or not is_recoverable_prepared_packet(packet):
+        raise TaskFrontmatterError("TODO recovery packet does not bind the exact failed disposition.")
+    prepared_data = prepared_disposition_audit(packet, RECOVERABLE_PACKET_SHA256)
+    if (
+        sha256(prepared_data) != RECOVERABLE_PREPARED_AUDIT_SHA256
+        or read_bound(
+            prepared_path,
+            RECOVERABLE_PREPARED_AUDIT_SHA256,
+            "recoverable prepared disposition audit",
+            private=True,
+        )
+        != prepared_data
+    ):
+        raise TaskFrontmatterError("recoverable prepared disposition audit changed.")
+    validate_review(review_path, RECOVERABLE_REVIEW_SHA256, packet, RECOVERABLE_PACKET_SHA256)
+    current_todo, _current_manager = validate_todo_recovery_current(packet, recovery)
+    static_evidence(packet, rebind_recoverable_helper=True, todo_recovery=recovery)
+    return current_todo
+
+
+def todo_recovery_review_record(recovery: dict[str, object], recovery_sha256: str) -> dict[str, object]:
+    todo_identity = file_identity_from(
+        object_map(recovery["current_todo_input"], "current TODO recovery input").get("file"),
+        "current TODO recovery input",
+    )
+    helper_identity = file_identity_from(
+        object_map(recovery["recovery_helper_input"], "TODO recovery helper").get("file"),
+        "TODO recovery helper",
+    )
+    manager_identity = file_identity_from(
+        object_map(recovery["current_manager_input"], "current manager recovery input").get("file"),
+        "current manager recovery input",
+    )
+    return {
+        "schema": TODO_RECOVERY_REVIEW_SCHEMA,
+        "verdict": "PASS",
+        "recovery_packet_sha256": recovery_sha256,
+        "packet_sha256": recovery["packet_sha256"],
+        "prepared_audit_sha256": recovery["prepared_audit_sha256"],
+        "original_todo_sha256": recovery["original_todo_sha256"],
+        "current_todo_sha256": todo_identity.sha256,
+        "current_manager_sha256": manager_identity.sha256,
+        "unrelated_todo_sha256": recovery["unrelated_todo_sha256"],
+        "recovery_helper_sha256": helper_identity.sha256,
+    }
+
+
+def validate_todo_recovery_review(path: Path, expected_sha256: str, recovery: dict[str, object], recovery_sha256: str) -> None:
+    record = canonical_object(read_bound(path, expected_sha256, "TODO recovery review", private=True), "TODO recovery review")
+    if record != todo_recovery_review_record(recovery, recovery_sha256):
+        raise TaskFrontmatterError("independent review does not PASS this exact TODO recovery.")
+
+
+def load_exact_failed_disposition(args: argparse.Namespace) -> tuple[dict[str, object], Path, Path, Path]:
+    packet_path = args.packet.resolve(strict=True)
+    review_path = args.review_report.resolve(strict=True)
+    packet = validate_packet(read_bound(packet_path, args.packet_sha256, "input disposition packet", private=True), args.packet_sha256)
+    if args.packet_sha256 != RECOVERABLE_PACKET_SHA256 or args.review_report_sha256 != RECOVERABLE_REVIEW_SHA256:
+        raise TaskFrontmatterError("TODO recovery requires the exact failed disposition and review.")
+    validate_review(review_path, args.review_report_sha256, packet, args.packet_sha256)
+    prepared_path = Path(f"{packet['audit']}.prepared").resolve(strict=True)
+    return packet, packet_path, review_path, prepared_path
+
+
+def prepare_todo_recovery(args: argparse.Namespace) -> None:
+    packet, packet_path, review_path, prepared_path = load_exact_failed_disposition(args)
+    output = args.todo_recovery_output.resolve(strict=False)
+    prior_prepared = Path(str(packet["prepared_close_audit"])).resolve(strict=True)
+    if not str(prior_prepared).endswith(".prepared"):
+        raise TaskFrontmatterError("prepared close audit path is malformed.")
+    prior_complete = Path(str(prior_prepared)[: -len(".prepared")])
+    raw_inputs = packet.get("inputs")
+    if not isinstance(raw_inputs, list):
+        raise TaskFrontmatterError("disposition packet input set is invalid.")
+    reserved = {
+        packet_path,
+        review_path,
+        prepared_path,
+        Path(str(packet["audit"])).resolve(strict=False),
+        prior_prepared,
+        Path(str(packet["task"])).resolve(strict=True),
+        Path(str(packet["todo"])).resolve(strict=True),
+        Path(str(packet["manager_task"])).resolve(strict=True),
+    } | prior_close_control_paths(prior_complete, prior_prepared)
+    reserved |= {Path(file_identity_from(object_map(item, "disposition packet input").get("file"), "disposition packet input").path) for item in raw_inputs}
+    if output in reserved:
+        raise TaskFrontmatterError("TODO recovery output overlaps immutable or lifecycle evidence.")
+    with ExitStack() as stack:
+        for path in sorted({Path(str(packet[key])) for key in ("task", "todo", "manager_task")}, key=str):
+            stack.enter_context(task_file_lock(path))
+        todo = Path(str(packet["todo"]))
+        manager = Path(str(packet["manager_task"]))
+        todo_data, todo_identity, todo_ancestors = absolute_file_binding(todo, "rebound TODO")
+        held_todo = hold_absolute(todo_identity, todo_ancestors)
+        stack.callback(os.close, held_todo.descriptor)
+        for descriptor in reversed(held_todo.directories):
+            stack.callback(os.close, descriptor)
+        _manager_data, manager_identity, manager_ancestors = absolute_file_binding(manager, "rebound manager task")
+        held_manager = hold_absolute(manager_identity, manager_ancestors)
+        stack.callback(os.close, held_manager.descriptor)
+        for descriptor in reversed(held_manager.directories):
+            stack.callback(os.close, descriptor)
+        helper = Path(__file__).resolve(strict=True)
+        _helper_data, helper_identity, helper_ancestors = absolute_file_binding(helper, "TODO recovery helper")
+        held_helper = hold_absolute(helper_identity, helper_ancestors)
+        stack.callback(os.close, held_helper.descriptor)
+        for descriptor in reversed(held_helper.directories):
+            stack.callback(os.close, descriptor)
+        row, chunks = partition_todo(todo_data, owned_todo_row(packet))
+        unsigned: dict[str, object] = {
+            "schema": TODO_RECOVERY_SCHEMA,
+            "operation": TODO_RECOVERY_OPERATION,
+            "packet": str(packet_path),
+            "packet_sha256": args.packet_sha256,
+            "review_report": str(review_path),
+            "review_report_sha256": args.review_report_sha256,
+            "prepared_audit": str(prepared_path),
+            "prepared_audit_sha256": RECOVERABLE_PREPARED_AUDIT_SHA256,
+            "task": packet["task"],
+            "todo": packet["todo"],
+            "original_todo_sha256": packet["todo_sha256"],
+            "owned_rows_base64": [base64.b64encode(row).decode()],
+            "unrelated_todo_base64": base64.b64encode(b"".join(chunks)).decode(),
+            "unrelated_todo_sha256": sha256(b"".join(chunks)),
+            "current_todo_input": file_input(todo, "rebound TODO"),
+            "current_manager_input": {
+                "file": asdict(manager_identity),
+                "ancestors": [asdict(item) for item in manager_ancestors],
+            },
+            "recovery_helper_input": {
+                "file": asdict(helper_identity),
+                "ancestors": [asdict(item) for item in helper_ancestors],
+            },
+        }
+        recovery = {**unsigned, "binding_id": bound_receipt_id(unsigned)}
+        data = todo_recovery_bytes(recovery)
+        validate_todo_recovery_packet(recovery, sha256(data), packet, packet_path, review_path, prepared_path)
+        validate_held_absolute(held_todo)
+        validate_held_absolute(held_manager)
+        validate_held_absolute(held_helper)
+        publish_or_validate(output, data, "TODO recovery packet")
+    print(sha256(data))
+
+
+def review_todo_recovery(args: argparse.Namespace) -> None:
+    packet, packet_path, review_path, prepared_path = load_exact_failed_disposition(args)
+    recovery_path = args.todo_recovery_packet.resolve(strict=True)
+    recovery = canonical_object(
+        read_bound(recovery_path, args.todo_recovery_packet_sha256, "TODO recovery packet", private=True),
+        "TODO recovery packet",
+    )
+    with ExitStack() as stack:
+        for path in sorted({Path(str(packet[key])) for key in ("task", "todo", "manager_task")}, key=str):
+            stack.enter_context(task_file_lock(path))
+        validate_todo_recovery_packet(recovery, args.todo_recovery_packet_sha256, packet, packet_path, review_path, prepared_path)
+    print(json.dumps(todo_recovery_review_record(recovery, args.todo_recovery_packet_sha256), sort_keys=True, separators=(",", ":")))
+
+
 def prepared_disposition_audit(packet: dict[str, object], packet_sha256: str) -> bytes:
     fields = {key: packet[key] for key in AUDIT_KEYS if key in packet}
     fields.update({"schema": SCHEMA, "operation": OPERATION, "state": "prepared", "packet_sha256": packet_sha256})
@@ -1054,6 +1348,7 @@ def hold_inputs(
     stack: ExitStack,
     *,
     rebind_recoverable_helper: bool = False,
+    todo_recovery: dict[str, object] | None = None,
 ) -> list[HeldAbsolute]:
     raw_inputs = packet.get("inputs")
     if not isinstance(raw_inputs, list):
@@ -1062,6 +1357,8 @@ def hold_inputs(
         raise TaskFrontmatterError("prepared disposition helper recovery binding is invalid.")
     held: list[HeldAbsolute] = []
     helper_rebound = False
+    todo_rebound = False
+    manager_rebound = False
     for value in raw_inputs:
         item = object_map(value, "disposition packet input")
         identity = file_identity_from(item.get("file"), "disposition packet input")
@@ -1069,14 +1366,44 @@ def hold_inputs(
         if not isinstance(raw_ancestors, Iterable) or isinstance(raw_ancestors, (str, bytes, dict)):
             raise TaskFrontmatterError("disposition packet input ancestors are invalid.")
         ancestors = tuple(directory_identity_from(entry, "disposition packet input ancestor") for entry in cast(Iterable[object], raw_ancestors))
-        if rebind_recoverable_helper and identity.path == str(packet["helper"]):
+        if todo_recovery is not None and identity.path == str(packet["todo"]):
+            if todo_rebound or identity.sha256 != packet["todo_sha256"]:
+                raise TaskFrontmatterError("prepared disposition TODO recovery binding is invalid.")
+            current_input = object_map(todo_recovery.get("current_todo_input"), "current TODO recovery input")
+            current_identity = file_identity_from(current_input.get("file"), "current TODO recovery input")
+            raw_current_ancestors = current_input.get("ancestors")
+            if not isinstance(raw_current_ancestors, Iterable) or isinstance(raw_current_ancestors, (str, bytes, dict)):
+                raise TaskFrontmatterError("current TODO recovery input ancestors are invalid.")
+            current_ancestors = tuple(directory_identity_from(entry, "current TODO recovery input ancestor") for entry in cast(Iterable[object], raw_current_ancestors))
+            current = hold_absolute(current_identity, current_ancestors)
+            todo_rebound = True
+        elif todo_recovery is not None and identity.path == str(packet["manager_task"]):
+            if manager_rebound or identity.sha256 != packet["manager_task_sha256"]:
+                raise TaskFrontmatterError("prepared disposition manager recovery binding is invalid.")
+            current_input = object_map(todo_recovery.get("current_manager_input"), "current manager recovery input")
+            current_identity = file_identity_from(current_input.get("file"), "current manager recovery input")
+            raw_current_ancestors = current_input.get("ancestors")
+            if not isinstance(raw_current_ancestors, Iterable) or isinstance(raw_current_ancestors, (str, bytes, dict)):
+                raise TaskFrontmatterError("current manager recovery input ancestors are invalid.")
+            current_ancestors = tuple(directory_identity_from(entry, "current manager recovery input ancestor") for entry in cast(Iterable[object], raw_current_ancestors))
+            current = hold_absolute(current_identity, current_ancestors)
+            manager_rebound = True
+        elif rebind_recoverable_helper and identity.path == str(packet["helper"]):
             if helper_rebound or identity.sha256 != RECOVERABLE_HELPER_SHA256:
                 raise TaskFrontmatterError("prepared disposition helper recovery binding is invalid.")
-            helper = Path(__file__).resolve(strict=True)
-            _data, current_identity, current_ancestors = absolute_file_binding(
-                helper,
-                "current input disposition recovery helper",
-            )
+            if todo_recovery is None:
+                helper = Path(__file__).resolve(strict=True)
+                _data, current_identity, current_ancestors = absolute_file_binding(
+                    helper,
+                    "current input disposition recovery helper",
+                )
+            else:
+                current_input = object_map(todo_recovery.get("recovery_helper_input"), "TODO recovery helper")
+                current_identity = file_identity_from(current_input.get("file"), "TODO recovery helper")
+                raw_current_ancestors = current_input.get("ancestors")
+                if not isinstance(raw_current_ancestors, Iterable) or isinstance(raw_current_ancestors, (str, bytes, dict)):
+                    raise TaskFrontmatterError("TODO recovery helper ancestors are invalid.")
+                current_ancestors = tuple(directory_identity_from(entry, "TODO recovery helper ancestor") for entry in cast(Iterable[object], raw_current_ancestors))
             current = hold_absolute(current_identity, current_ancestors)
             helper_rebound = True
         else:
@@ -1087,6 +1414,10 @@ def hold_inputs(
             stack.callback(os.close, descriptor)
     if rebind_recoverable_helper and not helper_rebound:
         raise TaskFrontmatterError("prepared disposition helper recovery binding is absent.")
+    if todo_recovery is not None and not todo_rebound:
+        raise TaskFrontmatterError("prepared disposition TODO recovery binding is absent.")
+    if todo_recovery is not None and not manager_rebound:
+        raise TaskFrontmatterError("prepared disposition manager recovery binding is absent.")
     return held
 
 
@@ -1118,10 +1449,12 @@ def authorize_prepared_helper_recovery(
 
 
 def execute(args: argparse.Namespace) -> None:
-    packet = validate_packet(read_bound(args.packet, args.packet_sha256, "input disposition packet", private=True), args.packet_sha256)
+    packet_path = args.packet.resolve(strict=False)
+    packet = validate_packet(read_bound(packet_path, args.packet_sha256, "input disposition packet", private=True), args.packet_sha256)
     if args.review_report is None:
         raise TaskFrontmatterError("execute requires one independent PASS report.")
-    validate_review(args.review_report, args.review_report_sha256, packet, args.packet_sha256)
+    review_path = args.review_report.resolve(strict=False)
+    validate_review(review_path, args.review_report_sha256, packet, args.packet_sha256)
     root = Path(str(packet["root"]))
     predecessor = parse_pin(packet["predecessor_pane"], "predecessor pane")
     protected = parse_pin(packet["protected_pane"], "protected pane")
@@ -1136,13 +1469,26 @@ def execute(args: argparse.Namespace) -> None:
         raise TaskFrontmatterError("prepared close audit path is malformed.")
     prior_complete = Path(str(prior_prepared)[: -len(".prepared")])
     reserved |= prior_close_control_paths(prior_complete, prior_prepared)
-    packet_path = args.packet.resolve(strict=False)
-    review_path = args.review_report.resolve(strict=False)
     if packet_path in {prepared_path, complete_path} or review_path in {prepared_path, complete_path} or {prepared_path, complete_path} & reserved:
         raise TaskFrontmatterError("disposition audit paths overlap immutable evidence.")
     prepared_data = prepared_disposition_audit(packet, args.packet_sha256)
     prepared_sha = sha256(prepared_data)
     complete_data = complete_disposition_audit(packet, args.packet_sha256, prepared_sha)
+    recovery_values = tuple(getattr(args, name, None) for name in ("todo_recovery_packet", "todo_recovery_packet_sha256", "todo_recovery_review", "todo_recovery_review_sha256"))
+    if any(recovery_values) and not all(recovery_values):
+        raise TaskFrontmatterError("execute requires the complete TODO recovery packet and review binding.")
+    todo_recovery: dict[str, object] | None = None
+    recovery_path: Path | None = None
+    recovery_review_path: Path | None = None
+    if all(recovery_values):
+        recovery_path = args.todo_recovery_packet.resolve(strict=True)
+        recovery_review_path = args.todo_recovery_review.resolve(strict=True)
+        if {recovery_path, recovery_review_path} & ({prepared_path, complete_path} | reserved) or recovery_path == recovery_review_path:
+            raise TaskFrontmatterError("TODO recovery paths overlap immutable evidence or disposition outputs.")
+        todo_recovery = canonical_object(
+            read_bound(recovery_path, args.todo_recovery_packet_sha256, "TODO recovery packet", private=True),
+            "TODO recovery packet",
+        )
 
     with (
         tmux_input_lock(predecessor.target),
@@ -1153,6 +1499,23 @@ def execute(args: argparse.Namespace) -> None:
         for path in sorted({Path(str(packet[key])) for key in ("task", "todo", "manager_task")}, key=str):
             stack.enter_context(task_file_lock(path))
         prepared_exists = path_entry_exists(prepared_path)
+        if todo_recovery is not None:
+            if not prepared_exists or recovery_path is None or recovery_review_path is None:
+                raise TaskFrontmatterError("TODO recovery requires the exact prepared disposition.")
+            validate_todo_recovery_packet(
+                todo_recovery,
+                args.todo_recovery_packet_sha256,
+                packet,
+                packet_path,
+                review_path,
+                prepared_path,
+            )
+            validate_todo_recovery_review(
+                recovery_review_path,
+                args.todo_recovery_review_sha256,
+                todo_recovery,
+                args.todo_recovery_packet_sha256,
+            )
         rebind_recoverable_helper = prepared_exists and authorize_prepared_helper_recovery(
             packet,
             args.packet_sha256,
@@ -1164,6 +1527,7 @@ def execute(args: argparse.Namespace) -> None:
             packet,
             stack,
             rebind_recoverable_helper=rebind_recoverable_helper,
+            todo_recovery=todo_recovery,
         )
 
         def current_state(*, allowed: set[str], require_original_menu: bool = False) -> tuple[str, bytes]:
@@ -1173,6 +1537,7 @@ def execute(args: argparse.Namespace) -> None:
                 packet,
                 require_original_menu=require_original_menu,
                 rebind_recoverable_helper=rebind_recoverable_helper,
+                todo_recovery=todo_recovery,
             )
             for item in held:
                 validate_held_absolute(item)
@@ -1230,6 +1595,8 @@ def parser() -> argparse.ArgumentParser:
     modes.add_argument("--prepare", action="store_true")
     modes.add_argument("--review", action="store_true")
     modes.add_argument("--execute", action="store_true")
+    modes.add_argument("--prepare-todo-recovery", action="store_true")
+    modes.add_argument("--review-todo-recovery", action="store_true")
     result.add_argument("--prior-packet", type=Path)
     result.add_argument("--prior-packet-sha256", default="")
     result.add_argument("--prior-review", type=Path)
@@ -1248,6 +1615,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--packet-sha256", default="")
     result.add_argument("--review-report", type=Path)
     result.add_argument("--review-report-sha256", default="")
+    result.add_argument("--todo-recovery-output", type=Path)
+    result.add_argument("--todo-recovery-packet", type=Path)
+    result.add_argument("--todo-recovery-packet-sha256", default="")
+    result.add_argument("--todo-recovery-review", type=Path)
+    result.add_argument("--todo-recovery-review-sha256", default="")
     result.add_argument("--wait-s", type=float, default=3.0)
     return result
 
@@ -1275,6 +1647,14 @@ def main() -> int:
             if args.packet is None:
                 raise TaskFrontmatterError("review requires a packet.")
             review(args)
+        elif args.prepare_todo_recovery:
+            if args.packet is None or args.review_report is None or args.todo_recovery_output is None or not args.todo_recovery_output.is_absolute():
+                raise TaskFrontmatterError("prepare TODO recovery requires packet, review, and absolute output paths.")
+            prepare_todo_recovery(args)
+        elif args.review_todo_recovery:
+            if args.packet is None or args.review_report is None or args.todo_recovery_packet is None:
+                raise TaskFrontmatterError("review TODO recovery requires disposition packet/review and recovery packet.")
+            review_todo_recovery(args)
         else:
             if args.packet is None:
                 raise TaskFrontmatterError("execute requires a packet.")
