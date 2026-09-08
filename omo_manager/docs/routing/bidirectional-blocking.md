@@ -16,8 +16,9 @@
   - `enable` validates that the reviewed plan covers every active v2 task and writes the durable enablement marker
   - v2 writers, dependency edits, wake delivery, and new v2 launches remain disabled before that marker validates
 - agent commands on v2 tasks
-  - `omo_pending.py add --item TEXT`
+  - `omo_pending.py add (--human | --agent) --item TEXT`
     - prints the generated item id
+    - Human items receive a visible `🧑 ` prefix; agent and legacy items keep their text
   - `omo_pending.py list`
     - prints id, text, and `ready`, `waiting`, or `cancelled`
   - `omo_pending.py replace --item-id ID --new-item TEXT`

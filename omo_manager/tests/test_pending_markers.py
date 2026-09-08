@@ -1023,7 +1023,9 @@ with exclusive_watcher_root(root):
             self.assertRegex(delivered, r"…\d+chars…")
             self.assertTrue(delivered.endswith("\n\n(record and delegate manager_mail/11734.txt)\n</human_instruction>"))
             wrapped = delivered.removeprefix(
-                "Immediately record every pending task with `omo_pending.py add`:\n<human_instruction>\n"
+                f"{watcher.PENDING_CONSUMPTION_INSTRUCTION}\n"
+                "Immediately email the Human to acknowledge acceptance. Record every open item with human provenance using `omo_pending.py add`:\n"
+                "<human_instruction>\n"
             ).removesuffix("\n</human_instruction>")
             excerpt, pointer = wrapped.rsplit("\n\n", 1)
             self.assertLessEqual(len(excerpt), watcher.PENDING_CONTENT_CHAR_LIMIT)
@@ -1759,7 +1761,7 @@ with exclusive_watcher_root(root):
             self.assertEqual("wl:2", calls[0][calls[0].index("--manager-target") + 1])
             self.assertEqual(
                 f"{pending_watcher.PENDING_CONSUMPTION_INSTRUCTION}\n"
-                "Immediately record every pending task with `omo_pending.py add`:\n"
+                "Immediately email the Human to acknowledge acceptance. Record every open item with human provenance using `omo_pending.py add`:\n"
                 "<human_instruction>\nPlease inspect the failing shard.\n\n"
                 "(record and delegate manager_mail/42.txt)\n</human_instruction>",
                 calls[0][1],
@@ -3200,8 +3202,8 @@ with exclusive_watcher_root(root):
             self.assertEqual("manager", marker.source)
             self.assertEqual("no-human-ack", marker.action)
             text = watcher.marker_delivery_text(marker)
-            self.assertIn("Do not pass `--ack-human`", text)
-            self.assertNotIn("Use `--ack-human`", text)
+            self.assertIn("agent provenance", text)
+            self.assertNotIn("acknowledge acceptance", text)
             self.assertIn("<snippet file=\"work_manager_today.md:2-8\">", text)
             self.assertIn("manager email watcher threshold: unread manager mail 17 exceeds 16", text)
             self.assertNotIn("[omo-message-source:", text)
@@ -3220,7 +3222,9 @@ with exclusive_watcher_root(root):
 
             marker = watcher.find_markers(root, [manager_path])[0]
             self.assertEqual(("agent", "manager", "no-human-ack"), (marker.origin, marker.source, marker.action))
-            self.assertIn("Do not pass `--ack-human`", watcher.marker_delivery_text(marker))
+            text = watcher.marker_delivery_text(marker)
+            self.assertIn("agent provenance", text)
+            self.assertNotIn("acknowledge acceptance", text)
 
     def test_email_watcher_recent_cleanup_threshold_filters_to_last_24h(self) -> None:
         from datetime import datetime, timedelta
@@ -5658,12 +5662,10 @@ with exclusive_watcher_root(root):
                 self.assertTrue(scan_once(args, seen, [path]))
             text = out.getvalue()
             self.assertIn(pending_watcher.PENDING_CONSUMPTION_INSTRUCTION, text)
-            self.assertIn("Normally record pending items and remove the consumed `(pending)` marker by running:", text)
-            self.assertIn("--ack-human", text)
-            self.assertIn("--email-file manager_mail/4002.txt", text)
-            self.assertIn("Choose `--item` values by quoting the human's words as much as possible.", text)
-            self.assertIn("--clear-kind report-only|duplicate|cancelled|superseded", text)
-            self.assertIn("--clear-kind existing-owner-item --owner-task-file TASK.md --owner-item ITEM", text)
+            self.assertIn("Record every open item with human provenance", text)
+            self.assertIn("using `omo_record_pending.py`", text)
+            self.assertIn("responsible agent must immediately email the Human", text)
+            self.assertNotIn("--help", text)
             self.assertIn("<snippet file=\"work_manager_", text)
             self.assertIn("(from email manager_mail/4002.txt)", text)
 
@@ -5706,9 +5708,9 @@ with exclusive_watcher_root(root):
                 self.assertTrue(scan_once(args, {}, [path]))
             text = out.getvalue()
             self.assertIn(pending_watcher.PENDING_CONSUMPTION_INSTRUCTION, text)
-            self.assertIn("Normally record pending items and remove the consumed `(pending)` marker by running:", text)
-            self.assertIn("--ack-human", text)
-            self.assertIn("--clear-kind report-only|duplicate|cancelled|superseded", text)
+            self.assertIn("Record every open item with human provenance", text)
+            self.assertIn("using `omo_record_pending.py`", text)
+            self.assertNotIn("--help", text)
             self.assertIn("Reminder: stay high level; route concrete work to agents.", text)
 
 
@@ -5738,7 +5740,35 @@ with exclusive_watcher_root(root):
             out = StringIO()
             with redirect_stdout(out):
                 self.assertTrue(scan_once(args, {}, [path]))
-            self.assertIn("Reminder: acknowledge human email first, then delegate.", out.getvalue())
+            self.assertIn(
+                "Reminder: hand off each task completely, then have its responsible agent immediately acknowledge acceptance by email.",
+                out.getvalue(),
+            )
+
+    def test_manager_policy_reminders_include_periodic_manual_refresh(self) -> None:
+        self.assertEqual(0.125, pending_watcher.MANAGER_POLICY_REMINDER_RATE)
+        self.assertIn("Reminder: reread MANAGER.md periodically.", pending_watcher.MANAGER_PERIODIC_POLICY_REMINDERS)
+
+    def test_approved_manager_reminders_have_their_own_one_in_eight_path(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        rolls = iter((1.0, 0.0, 1.0))
+        args = Args(
+            Path("/tmp"),
+            "",
+            Path("/tmp/seen.tsv"),
+            1.0,
+            1.0,
+            30.0,
+            Path("/status.py"),
+            False,
+            True,
+            reminder_random=lambda: next(rolls),
+            reminder_choice=lambda reminders: reminders[0],
+        )
+        text = watcher.with_manager_policy_reminder(args, "base")
+        self.assertNotIn("delegate work", text)
+        self.assertIn("Reminder: reread MANAGER.md periodically.", text)
 
     def test_oversized_pending_task_file_output_includes_continuation_warning(self) -> None:
         from omo_manager.omo_pending_watch import scan_once
@@ -9753,6 +9783,38 @@ resolved_task_items: []
             text = out.getvalue()
             self.assertIn("omo_pending_watch detected TODO.md with 201 lines is too long.", text)
             self.assertIn("keep only the newest 20 `previous` tasks in TODO.md", text)
+
+    def test_oversized_todo_noop_preview_suppresses_alert(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            todo = root / "TODO.md"
+            todo.write_text("\n".join(f"line {idx}" for idx in range(209)) + "\n", encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, True)
+            out = StringIO()
+            with patch.object(watcher, "todo_archive_preview_actionable", return_value=False) as preview, redirect_stdout(out):
+                self.assertFalse(watcher.scan_once(args, {}, [todo]))
+            preview.assert_called_once_with(root)
+            self.assertEqual("", out.getvalue())
+
+    def test_todo_archive_preview_requires_complete_zero_mutation_counts(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        zero = "\n".join(
+            (
+                "stale archived TODO rows reconciled: 0",
+                "moved: 0",
+                "artifact moves: 0",
+                "markdown rewrites: 0",
+            )
+        )
+        with patch.object(watcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, zero, "")):
+            self.assertFalse(watcher.todo_archive_preview_actionable(Path("/tmp/root")))
+        with patch.object(watcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, zero.replace("moved: 0", "moved: 1"), "")):
+            self.assertTrue(watcher.todo_archive_preview_actionable(Path("/tmp/root")))
+        with patch.object(watcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "moved: 0\n", "")):
+            self.assertIsNone(watcher.todo_archive_preview_actionable(Path("/tmp/root")))
 
     def test_pending_delivery_launch_failure_is_retryable(self) -> None:
         from omo_manager import omo_pending_watch as watcher

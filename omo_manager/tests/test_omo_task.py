@@ -2427,7 +2427,7 @@ class OmoTaskTests(unittest.TestCase):
                         ]
                     ),
                 )
-            self.assertIn("launched agent owns its open-work queue through omo_pending.py", out.getvalue())
+            self.assertIn("reminder: the agent owns its queue.", out.getvalue())
             metadata = parse_task_metadata((root / "x.md").read_text(encoding="utf-8"))
             self.assertIsNotNone(metadata)
             assert metadata is not None
@@ -2498,7 +2498,7 @@ class OmoTaskTests(unittest.TestCase):
                 )
             new_window_mock.assert_called_once()
             self.assertEqual(["membership_enter", "ensure_task_file", "link_todo", "start_codex", "membership_exit"], events)
-            self.assertIn("wait patiently for the agent to report instead of eagerly checking its status", out.getvalue())
+            self.assertIn("launch verified; wait for the agent's report", out.getvalue())
 
     def test_main_resume_idle_does_not_promise_agent_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

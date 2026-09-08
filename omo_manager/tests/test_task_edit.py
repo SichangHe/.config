@@ -1094,7 +1094,12 @@ class TaskEditTests(unittest.TestCase):
 
     def test_aliases_parse_to_canonical_commands(self) -> None:
         self.assertEqual("pending-list", parse_args(["list", "task.md"]).command)
-        self.assertEqual("pending-add", parse_args(["add", "task.md", "--item", "new"]).command)
+        with self.assertRaises(SystemExit):
+            parse_args(["add", "task.md", "--item", "new"])
+        human_add = parse_args(["add", "task.md", "--human", "--item", "new"])
+        self.assertEqual("pending-add", human_add.command)
+        self.assertEqual(("🧑 new",), human_add.items)
+        self.assertEqual(("new",), parse_args(["add", "task.md", "--agent", "--item", "new"]).items)
         self.assertEqual(
             "pending-remove",
             parse_args(

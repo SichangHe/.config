@@ -74,7 +74,8 @@ resolved_task_items:
 ## commands
 
 - agent-facing, path-opaque
-  - `omo_pending.py add --item TEXT` generates and prints an id
+  - `omo_pending.py add (--human | --agent) --item TEXT` generates and prints an id
+    - Human items receive a visible `🧑 ` prefix; agent and legacy items keep their text
   - `omo_pending.py list` shows ids, text, and dependency state without task paths
   - `omo_pending.py remove --item-id ID --outcome completed|cancelled --evidence TEXT`
   - `omo_pending.py wake-ack --notice-id ID` atomically acknowledges a wake and prints the ready item

@@ -14,7 +14,6 @@ import os
 import random
 import re
 import secrets
-import shlex
 import select
 import stat
 import struct
@@ -222,14 +221,12 @@ TODO_LENGTH_REMINDER = (
     "omo_pending_watch detected TODO.md with {n_lines} lines is too long. "
     "Archive old completed tasks per docs/monthly-archive.md; keep only the newest 20 `previous` tasks in TODO.md and move older `previous` tasks to YYYYMM/old_todos.md."
 )
+TODO_ARCHIVE_PREVIEW_TIMEOUT_S = 30
 MANAGER_TASK_STATE_REMINDER_HEADER = (
     "manager task-state reminder: each manager-owned task must have a valid frontmatter status while the manager is idle. "
     "Start/resume the task, mark it done, or block it with a reason. Single-tag enforcement is intentionally not checked."
 )
-AGENT_PENDING_ITEMS_REMINDER = (
-    "You have {count} open pending items. To see them, run `omo_pending.py list`. Continue working and complete them, "
-    "and run `omo_pending.py remove` only after verifying an item is complete or cancelled."
-)
+AGENT_PENDING_ITEMS_REMINDER = "You have {count} open pending items. Use `omo_pending.py list`. Continue until each item is complete or cancelled."
 LONG_RUNNING_BLOCKER_REMINDER = "Remove your `blocked_on` if this message unblocks you."
 AGENT_READY_REPORT_REMINDER = (
     "Your latest completed turn did not invoke `email_me.py` or `omo_report.sh`. "
@@ -243,14 +240,18 @@ AGENT_PENDING_ITEM_SECTIONS = MANAGER_TASK_STATE_LIVE_SECTIONS | {"todo:previous
 MANAGER_WORKTREE_REMINDER_LIMIT = 20
 MANAGER_WORKTREE_CHECK_TIMEOUT_S = 10
 MANAGER_POLICY_REMINDER_RATE = 0.125
+# 🧑 "add to manager reminders to reread MANAGER.md once in a while and to fully hand off
+# tasks and let the responsible agent immediately acknowledge task acceptance by email"
 MANAGER_POLICY_REMINDERS = (
     "Reminder: delegate work; do not do worker work in the manager.",
     "Reminder: stay high level; route concrete work to agents.",
 )
-MANAGER_EMAIL_POLICY_REMINDERS = (
-    *MANAGER_POLICY_REMINDERS,
-    "Reminder: acknowledge human email first, then delegate.",
+MANAGER_PERIODIC_POLICY_REMINDERS = (
+    "Reminder: reread MANAGER.md periodically.",
+    "Reminder: hand off each task completely, then have its responsible agent immediately acknowledge acceptance by email.",
 )
+MANAGER_EMAIL_POLICY_REMINDERS = MANAGER_POLICY_REMINDERS
+# 🧑 "shorten the notifications in terms of the commands to use and rely on agents running `--help` to figure out how to use commands themselves"
 PENDING_CONSUMPTION_INSTRUCTION = (
     "A task file may have at most one live `(pending)` marker. Consume it as soon as possible: reroute it or record its open work in `pending_task_items`."
 )
@@ -2723,35 +2724,17 @@ def join_without_outer_blank_lines(lines: Sequence[str]) -> str:
     return "\n".join(lines[start:end])
 
 
-def manager_pending_instruction(marker: Marker, after_recording: str = "Then dispatch the task:") -> str:
-    command_parts = [
-        "omo_record_pending.py",
-        "--pending-file",
-        shlex.quote(str(marker.file)),
-        "--line",
-        str(marker.line),
-        "--item",
-        shlex.quote("PENDING_ITEM_TEXT"),
-        "[--item ...]",
-        "[--task-file TARGET_TASK.md]",
-    ]
-    if marker.origin == "human" and marker.source == "email" and marker.delegate_source:
-        command_parts.extend(["--email-file", shlex.quote(marker.delegate_source)])
+def manager_pending_instruction(marker: Marker) -> str:
     if marker.origin == "human":
-        command_parts.append("--ack-human")
-    command = " ".join(command_parts)
-    if marker.origin == "human":
-        quote_note = "Choose `--item` values by quoting the human's words as much as possible."
-        flag_note = "Use `--ack-human` so the script emails the human after recording."
-        fallback_note = "If no new pending task item should be added, use `omo_task_edit.py pending-marker-clear` with `--comment`, `--clear-kind report-only|duplicate|cancelled|superseded`, `--ack-human`, and the same `--email-file` when shown above; if an active owner task already tracks it, use `--clear-kind existing-owner-item --owner-task-file TASK.md --owner-item ITEM`. Existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove --evidence TEXT --completion-key SHA256`, sharing that exact key with any parent or child route for the same Human completion notice."
-    else:
-        quote_note = "Choose `--item` values by quoting the request's words as much as possible."
-        flag_note = "Do not pass `--ack-human`; agent-origin reports do not need a human acknowledgement."
-        fallback_note = "If there is no pending task item to add, use `omo_task_edit.py pending-marker-clear` with `--comment`; for existing pending-item edits, use `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove --evidence TEXT --completion-key SHA256`, sharing that exact key with any parent or child route for the same Human completion notice."
+        return (
+            f"{PENDING_CONSUMPTION_INSTRUCTION}\n"
+            "Record every open item with human provenance and clear `(pending)` using `omo_record_pending.py`. "
+            f"Source: `{marker.file}:{marker.line}`. Then fully dispatch the task; the responsible agent must immediately email the Human to acknowledge acceptance:"
+        )
     return (
-        f"{PENDING_CONSUMPTION_INSTRUCTION} Normally record pending items and remove the consumed `(pending)` marker by running:\n"
-        f"`{command}`\n"
-        f"{quote_note} {flag_note} {fallback_note} {after_recording}"
+        f"{PENDING_CONSUMPTION_INSTRUCTION}\n"
+        "Record every open item with agent provenance and clear `(pending)` using `omo_record_pending.py`. "
+        f"Source: `{marker.file}:{marker.line}`. Then dispatch the task:"
     )
 
 
@@ -2900,7 +2883,7 @@ def marker_direct_text(marker: Marker, attachments: Sequence[SourceAttachment]) 
     return "\n".join(
         (
             PENDING_CONSUMPTION_INSTRUCTION,
-            "Immediately record every pending task with `omo_pending.py add`:",
+            "Immediately email the Human to acknowledge acceptance. Record every open item with human provenance using `omo_pending.py add`:",
             "<human_instruction>",
             message,
             "</human_instruction>",
@@ -3026,9 +3009,14 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
 
 
 def with_manager_policy_reminder(args: Args, text: str, reminders: Sequence[str] = MANAGER_POLICY_REMINDERS) -> str:
-    if args.reminder_random is None or args.reminder_random() >= MANAGER_POLICY_REMINDER_RATE:
+    if args.reminder_random is None:
         return text
-    return f"{text}\n{args.reminder_choice(reminders)}"
+    if args.reminder_random() < MANAGER_POLICY_REMINDER_RATE:
+        text = f"{text}\n{args.reminder_choice(reminders)}"
+    for reminder in MANAGER_PERIODIC_POLICY_REMINDERS:
+        if args.reminder_random() < MANAGER_POLICY_REMINDER_RATE:
+            text = f"{text}\n{reminder}"
+    return text
 
 
 def pending_guard_text(lines: Sequence[str], idx: int) -> str:
@@ -6985,6 +6973,31 @@ def queue_blocking_wakes(
     return queued
 
 
+def todo_archive_preview_actionable(root: Path) -> bool | None:
+    """Return whether the authoritative read-only retention preview finds work."""
+    helper = root / "scripts" / "manager-monthly-archive"
+    try:
+        result = subprocess.run(
+            [str(helper), "--root", str(root), "--retain-previous", "20"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=TODO_ARCHIVE_PREVIEW_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    counts: list[int] = []
+    for label in ("stale archived TODO rows reconciled", "moved", "artifact moves", "markdown rewrites"):
+        matches = re.findall(rf"^{re.escape(label)}: (\d+)$", result.stdout, re.MULTILINE)
+        if len(matches) != 1:
+            return None
+        counts.append(int(matches[0]))
+    return any(counts)
+
+
 def scan_once(
     args: Args,
     seen: dict[str, float],
@@ -7004,15 +7017,17 @@ def scan_once(
             del seen[key]
             changed = True
         elif n_todo_lines > TODO_LINE_WARNING_THRESHOLD and not seen_contains(seen, key, now_s):
-            status = push_manager_text(
-                args,
-                TODO_LENGTH_REMINDER.format(n_lines=n_todo_lines),
-                DeliverySuccessEvent(seen_keys=(key,), seen_at_s=now_s),
-            )
-            if delivery_accepted(status):
-                if status == 0:
-                    remember_seen(seen, key, now_s)
-                changed = True
+            actionable = todo_archive_preview_actionable(args.root)
+            if actionable is not False:
+                status = push_manager_text(
+                    args,
+                    TODO_LENGTH_REMINDER.format(n_lines=n_todo_lines),
+                    DeliverySuccessEvent(seen_keys=(key,), seen_at_s=now_s),
+                )
+                if delivery_accepted(status):
+                    if status == 0:
+                        remember_seen(seen, key, now_s)
+                    changed = True
     for marker in find_markers(args.root, files):
         attachments = marker_attachments(args, marker)
         if marker.origin == "agent" and marker.source == "agent" and not marker_has_authenticated_agent_report(marker, attachments):

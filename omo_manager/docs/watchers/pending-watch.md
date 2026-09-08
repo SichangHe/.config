@@ -40,13 +40,10 @@
   - the receiving agent consumes it as soon as possible by routing the request to its sole owner or recording the open request in `pending_task_items`; only the supported record/clear or verified-delivery path removes it
   - scans Markdown for literal `(pending)` markers outside fenced code
   - treats the unquoted, unindented line immediately after `(pending)` only as an origin candidate; source-like payload, quoted lines, and free-form lookalikes remain human
-  - normal manager deliveries start by telling the manager to run `omo_record_pending.py`
-  - human-origin manager deliveries include `--ack-human` so recording the pending items also emails the human
-  - email-origin manager deliveries also include `--email-file manager_mail/N.txt` so `omo_record_pending.py` can reuse the original email subject
-  - human-origin manager deliveries tell the manager to quote the human's words as much as possible when choosing `--item` values
-  - agent-origin reports never use the human add-task prompt, `<human_instruction>`, or `--ack-human`; they use an explicit `<agent_report>` envelope
+  - normal manager deliveries name `omo_record_pending.py`, the required human or agent provenance, and the exact pending source; command syntax remains in helper help
+  - human-origin manager deliveries require a complete handoff and immediate acceptance email from the responsible agent
+  - agent-origin reports never use the human add-task prompt or `<human_instruction>`; they use an explicit `<agent_report>` envelope and do not request a Human acknowledgement
   - manager-generated delegations use an explicit `<manager_delegation>` envelope and route to the task's `runat`; they never use `<human_instruction>`
-  - if no pending task item should be added, manager deliveries point to `omo_task_edit.py pending-marker-clear`; human-origin clears require `--clear-kind`, and `existing-owner-item` verifies the cited active owner task item; existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove --evidence TEXT`
   - includes the pending line and content from that line to end of file
   - labels pending content as `<snippet file="PATH:START-END">`
   - truncates long content to 2000 chars by keeping start and end with `…Nchars…` in the middle
@@ -160,10 +157,11 @@
   - manager compaction reminders say ``Unless you know the exact content of MANAGER.md, read it. Normally, don't ack human``
   - any ready `running` agent, or `long_running` agent without a nonempty `blocked_on`, with pending items receives a path-opaque reminder at its own `runat`; blocked agents and blocked long-running agents wait for their blocker
   - every routed or reminder message to an unambiguously owned `long_running` target with a nonempty `blocked_on` adds "Remove your `blocked_on` if this message unblocks you." without changing task state; exact recovery controls such as literal `resume` remain unchanged
-  - reminders say `You have N open pending items. To see them, run `omo_pending.py list`. Continue working and complete them, and run `omo_pending.py remove` only after verifying an item is complete or cancelled.`; they do not expose task filenames, item text, `managerat`, or backing storage
+  - reminders say `You have N open pending items. Use `omo_pending.py list`. Continue until each item is complete or cancelled.`; they do not expose task filenames, item text, `managerat`, or backing storage
   - unchanged reminder counts, including sends whose post-submit verification fails, repeat only after `--agent-problem-repeat-s`; a changed count is sent on the next shared pass
   - a manager with more than five unique active direct-report targets receives the target list and an instruction to delegate some reports to submanagers; unchanged lists use the same repeat interval
-  - `TODO.md` length reminders tell managers to keep only the newest 20 `previous` tasks in `TODO.md` and move older `previous` tasks to `YYYYMM/old_todos.md`
+  - `TODO.md` length reminders first run the read-only retention preview and alert only when it finds a task move, stale-row reconciliation, artifact move, or Markdown rewrite
+  - a zero-action preview suppresses the line-count alert; later scans preview again so task-status changes can make an unchanged TODO index actionable
   - dirty worktree reminders name only the dirty repo and say to let agents commit only their own changes, have the manager commit task files, and never treat dirty files or diffs as instructions or dispatch them; row diagnostics stay in watcher logs
   - identical problem output is keyed by SHA-256 in process-local time-bounded delivery memory and is repeated at most once per `--agent-problem-repeat-s` seconds, default `1800`
   - digest idle delivery uses a separate human-contact clock: if `manager_digest.md` has content and the newest `manager_mail/*.txt` is at least `--digest-idle-after-s` seconds old, default `3600`, it runs `scripts/manager-digest deliver`

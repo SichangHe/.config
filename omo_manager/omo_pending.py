@@ -32,6 +32,9 @@ from omo_manager.omo_task_edit import replace_pending_item
 from omo_manager.omo_task_edit import replace_if_unchanged
 from omo_manager.omo_task_lock import task_target_lock
 from omo_manager.omo_task_metadata import PendingTaskItem
+from omo_manager.omo_task_metadata import PENDING_ITEM_PROVENANCE_HELP
+from omo_manager.omo_task_metadata import pending_items_with_origin
+from omo_manager.omo_task_metadata import pending_replacement_with_origin
 from omo_manager.omo_blocking_actor import request as blocking_request
 from omo_manager.omo_completion_email import plan_completion_email
 from omo_manager.omo_completion_email import require_owner_completion
@@ -63,8 +66,11 @@ def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list", help="Print open items, one per line.")
-    add = sub.add_parser("add", help="Add open work.")
+    add = sub.add_parser("add", help="Add open work with explicit provenance.", description=PENDING_ITEM_PROVENANCE_HELP)
     add.add_argument("--item", action="append", required=True)
+    origin = add.add_mutually_exclusive_group(required=True)
+    origin.add_argument("--human", action="store_const", const="human", dest="item_origin", help="Mark added items as Human requests.")
+    origin.add_argument("--agent", action="store_const", const="agent", dest="item_origin", help="Mark added items as agent-created work.")
     replace = sub.add_parser("replace", help="Replace one exact open item.")
     replace.add_argument("--old-item")
     replace.add_argument("--item-id")
@@ -102,7 +108,7 @@ def parse_args(argv: list[str]) -> Args:
     wake_ack.add_argument("--notice-id", required=True)
     parsed = parser.parse_args(argv)
     if parsed.command == "add":
-        return Args("add", normalized_items(tuple(parsed.item)))
+        return Args("add", pending_items_with_origin(normalized_items(tuple(parsed.item)), parsed.item_origin))
     if parsed.command == "replace":
         if bool(parsed.old_item) == bool(parsed.item_id):
             parser.error("replace requires exactly one of --old-item or --item-id.")
@@ -188,7 +194,10 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
             if args.command == "replace":
                 if not args.item_id:
                     raise BlockingError("v2 replacement requires --item-id")
-                replace_item(document, args.item_id, args.new_item)
+                matching = [item for item in current.pending_items if item.id == args.item_id]
+                if len(matching) != 1:
+                    raise BlockingError("pending item was not found exactly once")
+                replace_item(document, args.item_id, pending_replacement_with_origin(matching[0].text, args.new_item))
                 print(f"replaced pending item {args.item_id}")
                 return 0
             if args.command == "remove":
@@ -249,7 +258,7 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
             print(f"added {count} pending item(s)")
             return 0
         if args.command == "replace":
-            updated, changed = replace_pending_item(text, args.old_item, args.new_item)
+            updated, changed = replace_pending_item(text, args.old_item, pending_replacement_with_origin(args.old_item, args.new_item))
             replace_if_unchanged(path, updated, before)
             print("replaced pending item" if changed else "pending item unchanged")
             return 0

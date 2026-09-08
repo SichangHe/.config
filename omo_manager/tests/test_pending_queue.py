@@ -56,6 +56,22 @@ work
 
 
 class PendingQueueTests(unittest.TestCase):
+    def test_add_requires_and_encodes_explicit_provenance(self) -> None:
+        with self.assertRaises(SystemExit):
+            parse_args(["add", "--item", "review request"])
+        self.assertEqual(("🧑 review request",), parse_args(["add", "--human", "--item", "review request"]).items)
+        self.assertEqual(("review request",), parse_args(["add", "--agent", "--item", "review request"]).items)
+        self.assertEqual(("review request",), parse_args(["add", "--agent", "--item", "🧑 🧑 review request"]).items)
+
+    def test_replace_preserves_human_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text(task_text(items=("🧑 old wording",)), encoding="utf-8")
+            with patch("omo_manager.omo_pending.current_active_task", return_value=path):
+                self.assertEqual(0, run(Args("replace", old_item="🧑 old wording", new_item="new wording"), root))
+            self.assertIn("  - 🧑 new wording\n", path.read_text(encoding="utf-8"))
+
     def test_failed_owner_email_keeps_item_and_retry_cannot_duplicate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

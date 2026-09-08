@@ -25,6 +25,13 @@ class ManagerHelperHelpTests(unittest.TestCase):
         self.assertIn("original subject", record_help)
         self.assertIn("initial assignment", record_help)
         self.assertIn("worker prompts", record_help)
+        for provenance_help in (
+            helper_help("omo_pending.py", "add"),
+            record_help,
+            helper_help("omo_task_edit.py", "pending-add"),
+        ):
+            self.assertIn("Pass exactly one of --human or --agent", provenance_help)
+            self.assertIn("Human requests appear with a 🧑 prefix", provenance_help)
 
         move_help = helper_help("omo_task_edit.py", "pending-move")
         self.assertIn("initial owner", move_help)

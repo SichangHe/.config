@@ -23,6 +23,8 @@ from omo_manager.omo_blocking import split_task_text
 from omo_manager.omo_blocking import v2_enabled
 from omo_manager.omo_task_status import replace_if_unchanged
 from omo_manager.omo_task_status import task_path
+from omo_manager.omo_task_metadata import PENDING_ITEM_PROVENANCE_HELP
+from omo_manager.omo_task_metadata import pending_items_with_origin
 from omo_manager.omo_task_metadata import render_v1_pending_scalar
 
 PENDING_MARKER = "(pending)"
@@ -48,16 +50,18 @@ class ParsedArgs(argparse.Namespace):
     item: list[str]
     ack_human: bool = False
     email_file: Path | None = None
+    item_origin: str
 
 
 def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""Use this helper for pending blocks that create new task items. It
+        epilog=f"""Use this helper for pending blocks that create new task items. It
 validates that the `(pending)` marker is still at --line before atomically
 recording the items and removing the marker.
 
+{PENDING_ITEM_PROVENANCE_HELP}
 Quote human-origin requests as closely as possible in --item. For email-origin
 requests, pass --email-file so --ack-human reuses the original subject.
 --task-file is only for atomic initial assignment to a new owner; keep task-file
@@ -68,15 +72,20 @@ paths out of worker prompts.""",
     _ = parser.add_argument("--line", type=int, required=True, help="One-based line number whose stripped content is `(pending)`.")
     _ = parser.add_argument("--task-file", type=Path, help="Initial owner task file that receives `pending_task_items`; defaults to --pending-file.")
     _ = parser.add_argument("--item", action="append", default=[], help="Pending task item to append. Pass once per item.")
+    origin = parser.add_mutually_exclusive_group(required=True)
+    _ = origin.add_argument("--human", action="store_const", const="human", dest="item_origin", help="Mark added items as Human requests.")
+    _ = origin.add_argument("--agent", action="store_const", const="agent", dest="item_origin", help="Mark added items as agent-created work.")
     _ = parser.add_argument("--ack-human", action="store_true", help="Email the human after the pending marker and items are recorded.")
     _ = parser.add_argument("--email-file", type=Path, help="Stored `manager_mail/*.txt` file whose `Subject:` header should be used for the human acknowledgement.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     try:
-        items = tuple(normalized_item(item) for item in parsed.item)
+        items = pending_items_with_origin(tuple(normalized_item(item) for item in parsed.item), parsed.item_origin)
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))
     if not items:
         parser.error("at least one --item is required; use omo_task_edit.py pending-marker-clear for no-item acknowledgements or omo_task_edit.py pending-replace/pending-remove for existing-item edits.")
+    if parsed.ack_human and parsed.item_origin != "human":
+        parser.error("--ack-human requires --human.")
     return Args(parsed.root.resolve(), parsed.pending_file, parsed.line, parsed.task_file or parsed.pending_file, items, parsed.ack_human, parsed.email_file)
 
 

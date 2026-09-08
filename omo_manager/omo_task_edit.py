@@ -31,7 +31,10 @@ from omo_manager.omo_task_status import parse_manager_child_metadata
 from omo_manager.omo_task_status import replace_if_unchanged
 from omo_manager.omo_task_status import task_path
 from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1
+from omo_manager.omo_task_metadata import PENDING_ITEM_PROVENANCE_HELP
 from omo_manager.omo_task_metadata import frontmatter_parts
+from omo_manager.omo_task_metadata import pending_items_with_origin
+from omo_manager.omo_task_metadata import pending_replacement_with_origin
 from omo_manager.omo_task_metadata import render_v1_pending_scalar
 
 PENDING_MARKER = "(pending)"
@@ -113,6 +116,7 @@ class ParsedArgs(argparse.Namespace):
     source_ref: str = ""
     preserve_live_source: bool = False
     completion_key: str = ""
+    item_origin: str
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -128,10 +132,15 @@ def parse_args(argv: list[str]) -> Args:
     list_parser.set_defaults(command="pending-list")
     _ = list_parser.add_argument("task_file", type=Path)
 
-    add_parser = subparsers.add_parser("pending-add", aliases=["add"], help="Append one or more pending_task_items.")
+    add_parser = subparsers.add_parser(
+        "pending-add", aliases=["add"], help="Append one or more pending_task_items.", description=PENDING_ITEM_PROVENANCE_HELP
+    )
     add_parser.set_defaults(command="pending-add")
     _ = add_parser.add_argument("task_file", type=Path)
     _ = add_parser.add_argument("--item", action="append", required=True, help="Pending task item to add. Pass once per item.")
+    origin = add_parser.add_mutually_exclusive_group(required=True)
+    _ = origin.add_argument("--human", action="store_const", const="human", dest="item_origin", help="Mark added items as Human requests.")
+    _ = origin.add_argument("--agent", action="store_const", const="agent", dest="item_origin", help="Mark added items as agent-created work.")
 
     replace_parser = subparsers.add_parser("pending-replace", aliases=["replace", "update"], help="Replace one exact pending_task_item.")
     replace_parser.set_defaults(command="pending-replace")
@@ -244,7 +253,7 @@ def parse_args(argv: list[str]) -> Args:
                 on_item_id=parsed.on_item_id,
             )
         if command == "pending-add":
-            items = normalized_items(tuple(parsed.item or ()))
+            items = pending_items_with_origin(normalized_items(tuple(parsed.item or ())), parsed.item_origin)
             return Args(root, parsed.task_file, command, items=items)
         if command == "pending-replace":
             return Args(root, parsed.task_file, command, old_item=normalized_item(parsed.old_item), new_item=normalized_item(parsed.new_item))
@@ -932,7 +941,7 @@ def run(args: Args) -> int:
             print(f"added {count} pending item(s) to {path.name}")
             return 0
         if command == "pending-replace":
-            updated, changed = replace_pending_item(text, args.old_item, args.new_item)
+            updated, changed = replace_pending_item(text, args.old_item, pending_replacement_with_origin(args.old_item, args.new_item))
             write_if_changed(path, text, updated, before)
             action = "replaced" if changed else "left unchanged"
             print(f"{action} pending item in {path.name}")

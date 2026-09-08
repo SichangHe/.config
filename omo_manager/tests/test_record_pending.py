@@ -12,6 +12,7 @@ from omo_manager.omo_blocking import ENABLE_FILE
 from omo_manager.omo_task_metadata import parse_task_metadata
 from omo_manager.omo_record_pending import Args
 from omo_manager.omo_record_pending import ack_sent_line
+from omo_manager.omo_record_pending import parse_args
 from omo_manager.omo_record_pending import recorded_line
 from omo_manager.omo_record_pending import run
 
@@ -51,6 +52,15 @@ resolved_task_items: []
 
 
 class RecordPendingTests(unittest.TestCase):
+    def test_insert_requires_and_encodes_explicit_provenance(self) -> None:
+        base = ["--pending-file", "task.md", "--line", "10", "--item", "review request"]
+        with self.assertRaises(SystemExit):
+            parse_args(base)
+        self.assertEqual(("🧑 review request",), parse_args([*base, "--human"]).items)
+        self.assertEqual(("review request",), parse_args([*base, "--agent"]).items)
+        with self.assertRaises(SystemExit):
+            parse_args([*base, "--agent", "--ack-human"])
+
     def test_records_human_item_as_v2_object_after_enablement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

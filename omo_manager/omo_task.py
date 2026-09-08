@@ -3207,9 +3207,9 @@ def main(argv: list[str]) -> int:
         if tmux_target:
             print(tmux_target)
         if not existed:
-            print("reminder: the launched agent owns its open-work queue through omo_pending.py; do not pass task paths to it.")
+            print("reminder: the agent owns its queue.")
         if args.workdir is not None and not args.resume_idle:
-            print("reminder: launch verification succeeded; wait patiently for the agent to report instead of eagerly checking its status.")
+            print("reminder: launch verified; wait for the agent's report.")
     except Exception as exc:
         print(f"omo_task: {exc}", file=sys.stderr)
         return 1

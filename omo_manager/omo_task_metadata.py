@@ -24,9 +24,38 @@ V1_ALLOWED_FIELDS = V1_REQUIRED_FIELDS | {"blocked_on", "session_id"}
 V2_REQUIRED_FIELDS = V1_REQUIRED_FIELDS | {"task_id", "resolved_task_items"}
 V2_ALLOWED_FIELDS = V2_REQUIRED_FIELDS | {"blocked_on", "resume_status", "session_id"}
 
+# 🧑 "Make it s.t. agents’ pending task item list distinguishes human requests from
+# agent-made ones. My sense is we enforce a mandatory flag when inserting, and then prepend a human emoji"
+HUMAN_PENDING_ITEM_PREFIX = "🧑 "
+PENDING_ITEM_ORIGINS = ("human", "agent")
+PENDING_ITEM_PROVENANCE_HELP = "Pass exactly one of --human or --agent. Human requests appear with a 🧑 prefix in pending-item lists."
+
 
 class TaskFrontmatterError(ValueError):
     pass
+
+
+def pending_item_without_human_prefix(item: str) -> str:
+    """Remove the reserved display prefix, including repeated spoofed copies."""
+    while item.startswith(HUMAN_PENDING_ITEM_PREFIX):
+        item = item.removeprefix(HUMAN_PENDING_ITEM_PREFIX)
+    return item
+
+
+def pending_items_with_origin(items: tuple[str, ...], origin: str) -> tuple[str, ...]:
+    """Encode explicit insertion provenance while keeping legacy string queues readable."""
+    if origin not in PENDING_ITEM_ORIGINS:
+        raise ValueError("pending item insertion requires human or agent provenance")
+    values = tuple(pending_item_without_human_prefix(item) for item in items)
+    if origin == "human":
+        return tuple(f"{HUMAN_PENDING_ITEM_PREFIX}{item}" for item in values)
+    return values
+
+
+def pending_replacement_with_origin(old_item: str, new_item: str) -> str:
+    """Preserve an existing Human marker while replacing an item's wording."""
+    value = pending_item_without_human_prefix(new_item)
+    return f"{HUMAN_PENDING_ITEM_PREFIX}{value}" if old_item.startswith(HUMAN_PENDING_ITEM_PREFIX) else value
 
 
 @dataclass(frozen=True)
