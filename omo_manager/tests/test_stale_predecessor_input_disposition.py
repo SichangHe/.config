@@ -58,11 +58,70 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         task = tmp / "worker.md"
         todo = tmp / "TODO.md"
         manager = tmp / "manager.md"
-        task.write_text("worker\n")
+        current_manager = tmp / "dw_root_new.md"
+        before_task = b"---\nversion: v1.0.0\nstatus: blocked\nrunat: dw8:1\ntool: codex\nmanagerat: dw:0\nis_manager: false\npending_task_items: []\n---\nworker\n"
+        after_task = before_task.replace(b"managerat: dw:0\n", b"managerat: dw:15\n")
+        task.write_bytes(after_task)
         manager.write_text("manager\n")
+        current_manager.write_text("---\nversion: v1.0.0\nstatus: blocked\nrunat: dw:15\ntool: codex\nmanagerat: config:1\nis_manager: true\npending_task_items: []\n---\nmanager\n")
         todo.write_bytes(b"current:\nworker.md dw8:1\nother.md config:2\n")
         packet = disposition_packet(tmp)
-        packet.update({"todo_sha256": "a" * 64, "helper": str(Path(subject.__file__).resolve(strict=True))})
+        packet.update(
+            {
+                "task_sha256": subject.sha256(before_task),
+                "todo_sha256": "a" * 64,
+                "helper": str(Path(subject.__file__).resolve(strict=True)),
+            }
+        )
+        root_audit = tmp / "root-audit.json"
+        root_audit.write_text(
+            json.dumps(
+                {
+                    "state": "committed",
+                    "operation": "manager-replace",
+                    "old_task": "dw_manager.md",
+                    "old_target": "dw:0",
+                    "successor_task": "dw_root_new.md",
+                    "new_target": "dw:15",
+                    "parent_target": "config:1",
+                    "children": [{"task": "worker.md", "sha256": subject.sha256(before_task), "queue_sha256": subject.sha256(b"[]")}],
+                    "source1485_topology": {
+                        "root_task": "dw_root_new.md",
+                        "root_target": "dw:15.0",
+                        "parent_target": "config:1.0",
+                        "rows": [
+                            {
+                                "task": "worker.md",
+                                "sha256": subject.sha256(after_task),
+                                "status": "blocked",
+                                "runat": "dw8:1.0",
+                                "managerat": "dw:15.0",
+                                "tool": "codex",
+                                "is_manager": False,
+                                "queue_sha256": subject.sha256(b"[]"),
+                            },
+                            {
+                                "task": "dw_root_new.md",
+                                "status": "blocked",
+                                "runat": "dw:15.0",
+                                "managerat": "config:1.0",
+                                "tool": "codex",
+                                "is_manager": True,
+                            },
+                        ],
+                    },
+                    "files": [
+                        {
+                            "task": "worker.md",
+                            "before": base64.b64encode(before_task).decode(),
+                            "after": base64.b64encode(after_task).decode(),
+                        }
+                    ],
+                }
+            )
+        )
+        root_audit.chmod(0o600)
+        self.enterContext(patch.object(subject, "SOURCE1485_ROOT_AUDIT_SHA256", subject.sha256(root_audit.read_bytes())))
         row, chunks = subject.partition_todo(todo.read_bytes(), subject.owned_todo_row(packet))
         unsigned: dict[str, object] = {
             "schema": subject.TODO_RECOVERY_SCHEMA,
@@ -74,6 +133,8 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             "prepared_audit": str(tmp / "disposition.json.prepared"),
             "prepared_audit_sha256": subject.RECOVERABLE_PREPARED_AUDIT_SHA256,
             "task": str(task),
+            "original_task_sha256": packet["task_sha256"],
+            "current_task_input": subject.file_input(task, "rebound protected task"),
             "todo": str(todo),
             "original_todo_sha256": packet["todo_sha256"],
             "owned_rows_base64": [base64.b64encode(row).decode()],
@@ -81,6 +142,10 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             "unrelated_todo_sha256": subject.sha256(b"".join(chunks)),
             "current_todo_input": subject.file_input(todo, "rebound TODO"),
             "recovery_helper_input": subject.file_input(Path(subject.__file__).resolve(strict=True), "TODO recovery helper"),
+            "source1485_root_audit": str(root_audit),
+            "source1485_root_audit_sha256": subject.SOURCE1485_ROOT_AUDIT_SHA256,
+            "current_manager_task": str(current_manager),
+            "current_manager_target": "dw:15",
         }
         return packet, {**unsigned, "binding_id": subject.bound_receipt_id(unsigned)}, todo
 
@@ -208,7 +273,7 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
     def test_todo_recovery_authenticates_owned_row_and_all_unrelated_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             packet, recovery, _todo = self.todo_recovery_fixture(Path(directory))
-            current = subject.validate_todo_recovery_current(packet, recovery)
+            current, _task, _manager, _target, _parent = subject.validate_todo_recovery_current(packet, recovery)
             self.assertEqual(b"current:\nworker.md dw8:1\nother.md config:2\n", current)
 
     def test_todo_recovery_rejects_owned_row_drift_even_with_fresh_file_identity(self) -> None:
@@ -243,6 +308,66 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             ):
                 subject.validate_todo_recovery_current(packet, recovery)
 
+    def test_todo_recovery_rejects_protected_task_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, _todo = self.todo_recovery_fixture(Path(directory))
+            task = Path(str(packet["task"]))
+            task.write_bytes(task.read_bytes().replace(b"status: blocked\n", b"status: running\n"))
+            recovery["current_task_input"] = subject.file_input(task, "rebound protected task")
+            with self.assertRaisesRegex(TaskFrontmatterError, "transition evidence is invalid"):
+                subject.validate_todo_recovery_current(packet, recovery)
+
+    def test_todo_recovery_rejects_task_read_to_identity_race(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, _todo = self.todo_recovery_fixture(Path(directory))
+            task = Path(str(packet["task"]))
+            original_read_bound = subject.read_bound
+
+            def raced_read(path: Path, expected_sha256: str, label: str, *, private: bool = False) -> bytes:
+                data = original_read_bound(path, expected_sha256, label, private=private)
+                if label == "rebound protected task":
+                    task.write_bytes(data + b"raced\n")
+                return data
+
+            with (
+                patch.object(subject, "read_bound", side_effect=raced_read),
+                self.assertRaisesRegex(TaskFrontmatterError, "current task recovery input changed"),
+            ):
+                subject.validate_todo_recovery_current(packet, recovery)
+
+    def test_todo_recovery_holds_current_task_and_detects_race(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            packet, recovery, todo = self.todo_recovery_fixture(tmp)
+            task = Path(str(packet["task"]))
+            manager = Path(str(packet["manager_task"]))
+            helper = Path(subject.__file__).resolve(strict=True)
+
+            def old_input(path: Path, digest: str, label: str) -> dict[str, object]:
+                value = subject.file_input(path, label)
+                identity = subject.object_map(value["file"], label)
+                identity["sha256"] = digest
+                value["file"] = identity
+                return value
+
+            packet.update(
+                {
+                    "inputs": [
+                        old_input(task, str(packet["task_sha256"]), "old task"),
+                        old_input(todo, str(packet["todo_sha256"]), "old TODO"),
+                        old_input(manager, "b" * 64, "old manager"),
+                        old_input(helper, subject.RECOVERABLE_HELPER_SHA256, "old helper"),
+                    ],
+                    "manager_task_sha256": "b" * 64,
+                }
+            )
+            with contextlib.ExitStack() as stack, patch.object(subject, "is_recoverable_prepared_packet", return_value=True):
+                held = subject.hold_inputs(packet, stack, rebind_recoverable_helper=True, todo_recovery=recovery)
+                self.assertEqual(subject.sha256(task.read_bytes()), held[0].identity.sha256)
+                task.write_bytes(task.read_bytes() + b"raced\n")
+                with self.assertRaises(subject.CustodyError):
+                    subject.validate_held_absolute(held[0])
+
     def test_todo_recovery_accepts_changed_manager_bytes_only_with_valid_semantic_custody(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             tmp = Path(directory)
@@ -262,16 +387,65 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
                 return (task,) if target == "dw8:1" else ()
 
             with patch.object(subject, "authoritative_active_target_task_paths", side_effect=active):
-                subject.validate_lifecycle(packet, rebound_todo_data=todo.read_bytes(), allow_current_manager=True)
+                subject.validate_lifecycle(
+                    packet,
+                    rebound_todo_data=todo.read_bytes(),
+                    rebound_task_data=task.read_bytes(),
+                    current_manager_task=manager,
+                    current_manager_target="dw:0",
+                    current_manager_parent="config:1",
+                )
                 manager.write_text(manager.read_text().replace("status: running", "status: done"))
                 with self.assertRaisesRegex(TaskFrontmatterError, "lifecycle custody is invalid"):
-                    subject.validate_lifecycle(packet, rebound_todo_data=todo.read_bytes(), allow_current_manager=True)
+                    subject.validate_lifecycle(
+                        packet,
+                        rebound_todo_data=todo.read_bytes(),
+                        rebound_task_data=task.read_bytes(),
+                        current_manager_task=manager,
+                        current_manager_target="dw:0",
+                        current_manager_parent="config:1",
+                    )
+
+    def test_todo_recovery_rejects_reparented_or_mistooled_successor_manager(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            packet, recovery, todo = self.todo_recovery_fixture(tmp)
+            task = Path(str(packet["task"]))
+            manager = Path(str(recovery["current_manager_task"]))
+            task.write_text(task.read_text().replace("status: blocked", "status: running"))
+            manager.write_text(manager.read_text().replace("status: blocked", "status: running"))
+
+            def active(_root: Path, target: str) -> tuple[Path, ...]:
+                return (task,) if target == "dw8:1" else ()
+
+            with patch.object(subject, "authoritative_active_target_task_paths", side_effect=active):
+                manager.write_text(manager.read_text().replace("managerat: config:1", "managerat: config:2"))
+                with self.assertRaisesRegex(TaskFrontmatterError, "lifecycle custody is invalid"):
+                    subject.validate_lifecycle(
+                        packet,
+                        rebound_todo_data=todo.read_bytes(),
+                        rebound_task_data=task.read_bytes(),
+                        current_manager_task=manager,
+                        current_manager_target="dw:15",
+                        current_manager_parent="config:1",
+                    )
+                manager.write_text(manager.read_text().replace("managerat: config:2", "managerat: config:1").replace("tool: codex", "tool: omnigent"))
+                with self.assertRaisesRegex(TaskFrontmatterError, "lifecycle custody is invalid"):
+                    subject.validate_lifecycle(
+                        packet,
+                        rebound_todo_data=todo.read_bytes(),
+                        rebound_task_data=task.read_bytes(),
+                        current_manager_task=manager,
+                        current_manager_target="dw:15",
+                        current_manager_parent="config:1",
+                    )
 
     def test_todo_recovery_holds_current_manager_and_detects_race_before_key_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             tmp = Path(directory)
             packet, recovery, todo = self.todo_recovery_fixture(tmp)
             manager = Path(str(packet["manager_task"]))
+            task = Path(str(packet["task"]))
             helper = Path(subject.__file__).resolve(strict=True)
             old_todo = subject.file_input(todo, "old TODO")
             old_todo_file = subject.object_map(old_todo["file"], "old TODO")
@@ -281,6 +455,10 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             old_manager_file = subject.object_map(old_manager["file"], "old manager")
             old_manager_file["sha256"] = "b" * 64
             old_manager["file"] = old_manager_file
+            old_task = subject.file_input(task, "old task")
+            old_task_file = subject.object_map(old_task["file"], "old task")
+            old_task_file["sha256"] = packet["task_sha256"]
+            old_task["file"] = old_task_file
             old_helper = subject.file_input(helper, "old helper")
             old_helper_file = subject.object_map(old_helper["file"], "old helper")
             old_helper_file["sha256"] = subject.RECOVERABLE_HELPER_SHA256
@@ -290,15 +468,16 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
                     "todo_sha256": "a" * 64,
                     "manager_task_sha256": "b" * 64,
                     "helper": str(helper),
-                    "inputs": [old_todo, old_manager, old_helper],
+                    "inputs": [old_task, old_todo, old_manager, old_helper],
                 }
             )
             with contextlib.ExitStack() as stack, patch.object(subject, "is_recoverable_prepared_packet", return_value=True):
                 held = subject.hold_inputs(packet, stack, rebind_recoverable_helper=True, todo_recovery=recovery)
-                self.assertEqual(subject.sha256(manager.read_bytes()), held[1].identity.sha256)
-                manager.write_text("raced invalid manager\n")
+                current_manager = Path(str(recovery["current_manager_task"]))
+                self.assertEqual(subject.sha256(current_manager.read_bytes()), held[2].identity.sha256)
+                current_manager.write_text("raced invalid manager\n")
                 with self.assertRaises(subject.CustodyError):
-                    subject.validate_held_absolute(held[1])
+                    subject.validate_held_absolute(held[2])
 
     def test_prepare_todo_recovery_is_idempotent_and_rolls_back_before_publication(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -318,6 +497,8 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
                 review_report=review_path,
                 review_report_sha256=subject.RECOVERABLE_REVIEW_SHA256,
                 todo_recovery_output=output,
+                source1485_root_audit=Path(str(_recovery["source1485_root_audit"])),
+                source1485_root_audit_sha256=subject.SOURCE1485_ROOT_AUDIT_SHA256,
             )
             with (
                 patch.object(subject, "load_exact_failed_disposition", return_value=(packet, packet_path, review_path, prepared_path)),
@@ -360,6 +541,8 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
                         review_report=review_path,
                         review_report_sha256=subject.RECOVERABLE_REVIEW_SHA256,
                         todo_recovery_output=output,
+                        source1485_root_audit=Path(str(_recovery["source1485_root_audit"])),
+                        source1485_root_audit_sha256=subject.SOURCE1485_ROOT_AUDIT_SHA256,
                     )
                     with (
                         patch.object(subject, "load_exact_failed_disposition", return_value=(packet, packet_path, review_path, prepared_path)),
