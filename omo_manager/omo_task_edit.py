@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """Safely edit task-file metadata, pending items, and comments."""
-
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 import re
-import stat
 import subprocess
 import sys
 import tempfile
@@ -30,11 +27,8 @@ from omo_manager.omo_completion_email import plan_completion_email
 from omo_manager.omo_completion_email import require_owner_completion
 from omo_manager.omo_completion_email import send_completion_email
 from omo_manager.omo_task_context import current_active_task
-from omo_manager.omo_task_lock import task_file_lock
 from omo_manager.omo_task_status import parse_manager_child_metadata
 from omo_manager.omo_task_status import replace_if_unchanged
-from omo_manager.omo_task_status import replace_if_unchanged_locked
-from omo_manager.omo_task_status import same_file_state
 from omo_manager.omo_task_status import task_path
 from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1
 from omo_manager.omo_task_metadata import PENDING_ITEM_PROVENANCE_HELP
@@ -51,12 +45,6 @@ EMAIL_SOURCE_PREFIXES = ("(record and delegate ", "(from email ", "[source: emai
 AGENT_SOURCE_PREFIXES = ("[omo-message-source: origin=agent ", "(from agent ")
 MANAGER_SOURCE_PREFIXES = ("(from manager ",)
 ROUTED_PENDING_PREFIXES = ("(manager handled:",)
-SOURCE1503_REF = Path("manager_mail/85c5dff58359-1503.txt")
-SOURCE1503_SHA256 = "0eb6cfde4d5ef1160806e36b7077ad49f06c5e17f17248fdfec012f89d1a13eb"
-SOURCE1503_EXCERPT = "Subject: Re: Close obsolete DeepWiki planner?\n\nClose them all\n"
-SOURCE1506_REF = Path("manager_mail/85c5dff58359-1506.txt")
-SOURCE1506_SHA256 = "a9dc947ccaf3be2a05af6b09a6092000b4ae9d7046352f4aa39850a0d96f7bcb"
-SOURCE1506_EXCERPT = "Subject: Re: Wix and B12 current counts and latest site\n\nwl:11\n"
 
 COMMAND_ALIASES = {
     "list": "pending-list",
@@ -93,10 +81,6 @@ class Args:
     task_files: tuple[Path, ...] = ()
     source_ref: str = ""
     preserve_live_source: bool = False
-    expected_task_sha256: str = ""
-    authority_file: Path | None = None
-    authority_lines: tuple[int, int] = (0, 0)
-    authority_sha256: str = ""
     completion_key: str = ""
 
 
@@ -207,20 +191,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = source_dedupe_parser.add_argument("task_file", type=Path)
     _ = source_dedupe_parser.add_argument("--source-ref", required=True, help="Exact manager_mail/*.txt reference to remove.")
     _ = source_dedupe_parser.add_argument("--evidence", required=True, help="One-line evidence that the referenced request is already complete or cancelled.")
-    _ = source_dedupe_parser.add_argument(
-        "--preserve-live-source", action="store_true", help="Leave an exact source pointer in a live `(pending)` block intact; requires an active matching queue item."
-    )
-
-    envelope_parser = subparsers.add_parser(
-        "human-envelope-record",
-        help="Append one supported digest-bound Human envelope to its exact assigned closure task.",
-    )
-    envelope_parser.set_defaults(command="human-envelope-record")
-    _ = envelope_parser.add_argument("task_file", type=Path)
-    _ = envelope_parser.add_argument("--expected-task-sha256", required=True)
-    _ = envelope_parser.add_argument("--authority-file", type=Path, required=True)
-    _ = envelope_parser.add_argument("--authority-lines", required=True)
-    _ = envelope_parser.add_argument("--authority-sha256", required=True)
+    _ = source_dedupe_parser.add_argument("--preserve-live-source", action="store_true", help="Leave an exact source pointer in a live `(pending)` block intact; requires an active matching queue item.")
 
     comment_parser = subparsers.add_parser("comment-add", aliases=["comment"], help="Append a parenthesized comment line to a task file.")
     comment_parser.set_defaults(command="comment-add")
@@ -336,25 +307,6 @@ def parse_args(argv: list[str]) -> Args:
                 source_ref=normalized_source_ref(parsed.source_ref),
                 preserve_live_source=parsed.preserve_live_source,
             )
-        if command == "human-envelope-record":
-            if re.fullmatch(r"[0-9a-f]{64}", parsed.expected_task_sha256) is None or re.fullmatch(r"[0-9a-f]{64}", parsed.authority_sha256) is None:
-                parser.error("human-envelope-record requires lowercase task and authority SHA-256 digests.")
-            try:
-                start_text, end_text = parsed.authority_lines.split("-", 1)
-                lines = (int(start_text), int(end_text))
-            except (AttributeError, ValueError) as exc:
-                raise argparse.ArgumentTypeError("--authority-lines must be START-END") from exc
-            if lines != (1, 3):
-                parser.error("human-envelope-record supports only the registered lines 1-3 authority excerpts.")
-            return Args(
-                root,
-                parsed.task_file,
-                command,
-                expected_task_sha256=parsed.expected_task_sha256,
-                authority_file=parsed.authority_file,
-                authority_lines=lines,
-                authority_sha256=parsed.authority_sha256,
-            )
         if command == "comment-add":
             message = parsed.message if parsed.message is not None else parsed.legacy_message
             if message is None:
@@ -376,97 +328,6 @@ def normalized_source_ref(value: str) -> str:
     if not ref.startswith("manager_mail/") or not ref.endswith(".txt") or any(character.isspace() for character in ref):
         raise argparse.ArgumentTypeError("--source-ref must be an exact manager_mail/*.txt reference.")
     return ref
-
-
-@dataclass(frozen=True)
-class HumanEnvelopeSpec:
-    source_ref: Path
-    source_sha256: str
-    excerpt: str
-    task_ref: Path
-    runat: str
-    status: str
-    is_manager: bool
-
-
-HUMAN_ENVELOPE_SPECS = (
-    HumanEnvelopeSpec(SOURCE1503_REF, SOURCE1503_SHA256, SOURCE1503_EXCERPT, Path("dw_rotate_exec.md"), "config:4", "active", False),
-    HumanEnvelopeSpec(SOURCE1506_REF, SOURCE1506_SHA256, SOURCE1506_EXCERPT, Path("mail_stale_cleanup.md"), "wl:11", "blocked", False),
-)
-
-
-def human_envelope_spec(args: Args, task_path_value: Path) -> HumanEnvelopeSpec:
-    matches = [
-        spec
-        for spec in HUMAN_ENVELOPE_SPECS
-        if task_path_value == args.root / spec.task_ref
-        and args.authority_file == spec.source_ref
-        and args.authority_lines == (1, 3)
-        and args.authority_sha256 == spec.source_sha256
-    ]
-    if len(matches) != 1:
-        raise TaskFrontmatterError("human-envelope-record requires one exact registered task, source, line range, and source digest.")
-    return matches[0]
-
-
-def human_authority_envelope(args: Args, task_path_value: Path, task_text: str) -> tuple[str, HumanEnvelopeSpec]:
-    spec = human_envelope_spec(args, task_path_value)
-    locator = f"{spec.source_ref}:1-3"
-    if (
-        hashlib.sha256(task_text.encode()).hexdigest() != args.expected_task_sha256
-        or re.search(rf'(?m)^<human_instruction[^\r\n]*\bsource="{re.escape(locator)}"[^\r\n]*>', task_text) is not None
-    ):
-        raise TaskFrontmatterError("human-envelope-record requires the expected task bytes and an unused registered source binding.")
-    metadata = parse_task_metadata(task_text, args.root)
-    expected_status = metadata is not None and (metadata.status != "done" if spec.status == "active" else metadata.status == spec.status)
-    if (
-        metadata is None
-        or not expected_status
-        or metadata.runat != spec.runat
-        or metadata.is_manager != spec.is_manager
-        or (
-            spec.source_ref == SOURCE1506_REF
-            and (
-                metadata.blocked_on != "human"
-                or metadata.managerat != "wl:12"
-                or metadata.pending_task_items
-                or any(line.strip() == PENDING_MARKER for line in task_text.splitlines())
-            )
-        )
-    ):
-        raise TaskFrontmatterError("human-envelope-record task lifecycle does not match the registered source binding.")
-    source_path = args.root / spec.source_ref
-    manager_mail_state = source_path.parent.lstat()
-    if not stat.S_ISDIR(manager_mail_state.st_mode) or stat.S_ISLNK(manager_mail_state.st_mode) or manager_mail_state.st_uid != os.getuid() or stat.S_IMODE(manager_mail_state.st_mode) & 0o077:
-        raise TaskFrontmatterError("registered Human authority directory is not owner-private.")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(source_path, flags)
-    try:
-        before = os.fstat(fd)
-        data = os.read(fd, 1_000_001)
-        after = os.fstat(fd)
-        current = source_path.lstat()
-    finally:
-        os.close(fd)
-    if (
-        not stat.S_ISREG(before.st_mode)
-        or stat.S_ISLNK(current.st_mode)
-        or before.st_uid != os.getuid()
-        or stat.S_IMODE(before.st_mode) & 0o077
-        or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
-        or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
-        or hashlib.sha256(data).hexdigest() != spec.source_sha256
-    ):
-        raise TaskFrontmatterError("registered Human authority source is unsafe or changed.")
-    try:
-        source_lines = data.decode("utf-8").splitlines(keepends=True)
-    except UnicodeDecodeError as exc:
-        raise TaskFrontmatterError("registered Human authority source is not UTF-8.") from exc
-    excerpt = "".join(source_lines[:3])
-    if excerpt.replace("\r\n", "\n") != spec.excerpt:
-        raise TaskFrontmatterError("registered Human authority excerpt changed.")
-    block = f'<human_instruction authoritative="true" source="{locator}">\n{excerpt}</human_instruction>\n'
-    return task_text.rstrip("\n") + "\n\n" + block, spec
 
 
 def normalized_item(item: str) -> str:
@@ -1149,18 +1010,6 @@ def run(args: Args) -> int:
                 return 0
             write_if_changed(path, text, updated, before)
             print(f"removed {count} bare source pointer(s) for {args.source_ref} from {path.name}")
-            return 0
-        if command == "human-envelope-record":
-            spec = human_envelope_spec(args, path)
-            authority_path = args.root / spec.source_ref
-            with task_file_lock(path), task_file_lock(authority_path):
-                current_before = path.stat()
-                current_text = path.read_text(encoding="utf-8")
-                if not same_file_state(before, current_before) or current_text != text:
-                    raise TaskFrontmatterError("closure task changed before Human envelope recording.")
-                updated, spec = human_authority_envelope(args, path, current_text)
-                replace_if_unchanged_locked(path, updated, current_before)
-            print(f"recorded exact {spec.source_ref.name} Human envelope in {spec.task_ref}")
             return 0
         if command == "comment-add":
             updated = append_comment(text, args.comment)
