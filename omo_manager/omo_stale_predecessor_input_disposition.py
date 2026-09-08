@@ -201,7 +201,6 @@ TODO_RECOVERY_KEYS = {
     "unrelated_todo_base64",
     "unrelated_todo_sha256",
     "current_todo_input",
-    "current_manager_input",
     "recovery_helper_input",
     "binding_id",
 }
@@ -704,7 +703,7 @@ def todo_recovery_bytes(record: dict[str, object]) -> bytes:
     return canonical_json(record)
 
 
-def validate_todo_recovery_current(packet: dict[str, object], recovery: dict[str, object]) -> tuple[bytes, bytes]:
+def validate_todo_recovery_current(packet: dict[str, object], recovery: dict[str, object]) -> bytes:
     """Validate the exact current TODO bytes and current recovery helper binding."""
 
     if (
@@ -735,21 +734,14 @@ def validate_todo_recovery_current(packet: dict[str, object], recovery: dict[str
     helper = Path(__file__).resolve(strict=True)
     if recovery.get("recovery_helper_input") != file_input(helper, "TODO recovery helper"):
         raise TaskFrontmatterError("TODO recovery helper changed.")
-    manager_input = object_map(recovery.get("current_manager_input"), "current manager recovery input")
-    manager_identity = file_identity_from(manager_input.get("file"), "current manager recovery input")
-    if manager_identity.path != str(packet["manager_task"]):
-        raise TaskFrontmatterError("manager recovery packet path is invalid.")
-    current_manager = read_bound(Path(manager_identity.path), manager_identity.sha256, "rebound manager task")
-    if manager_input != file_input(Path(manager_identity.path), "rebound manager task"):
-        raise TaskFrontmatterError("current manager recovery input changed.")
-    return current_todo, current_manager
+    return current_todo
 
 
 def validate_lifecycle(
     packet: dict[str, object],
     *,
     rebound_todo_data: bytes | None = None,
-    rebound_manager_data: bytes | None = None,
+    allow_current_manager: bool = False,
 ) -> None:
     root = Path(str(packet["root"]))
     task = Path(str(packet["task"]))
@@ -757,7 +749,12 @@ def validate_lifecycle(
     manager_task = Path(str(packet["manager_task"]))
     task_data = read_bound(task, str(packet["task_sha256"]), "protected task")
     todo_data = read_bound(todo, str(packet["todo_sha256"]), "TODO") if rebound_todo_data is None else rebound_todo_data
-    manager_data = read_bound(manager_task, str(packet["manager_task_sha256"]), "manager task") if rebound_manager_data is None else rebound_manager_data
+    if allow_current_manager:
+        manager_data, manager_identity, _manager_ancestors = absolute_file_binding(manager_task, "current manager task")
+        if manager_identity.uid != os.getuid() or manager_identity.size_bytes > MAX_FILE_BYTES:
+            raise TaskFrontmatterError("current manager task changed.")
+    else:
+        manager_data = read_bound(manager_task, str(packet["manager_task_sha256"]), "manager task")
     try:
         task_metadata = parse_task_metadata(task_data.decode(), root)
         manager_metadata = parse_task_metadata(manager_data.decode(), root)
@@ -857,8 +854,8 @@ def static_evidence(
         or SESSION_RE.fullmatch(str(packet["protected_session_id"])) is None
     ):
         raise TaskFrontmatterError("disposition packet scope is inconsistent.")
-    rebound = validate_todo_recovery_current(packet, todo_recovery) if todo_recovery is not None else (None, None)
-    validate_lifecycle(packet, rebound_todo_data=rebound[0], rebound_manager_data=rebound[1])
+    rebound_todo = validate_todo_recovery_current(packet, todo_recovery) if todo_recovery is not None else None
+    validate_lifecycle(packet, rebound_todo_data=rebound_todo, allow_current_manager=todo_recovery is not None)
     expected_inputs = [
         file_input(path, label, private=private)
         for path, label, private in (
@@ -1181,7 +1178,7 @@ def validate_todo_recovery_packet(
     ):
         raise TaskFrontmatterError("recoverable prepared disposition audit changed.")
     validate_review(review_path, RECOVERABLE_REVIEW_SHA256, packet, RECOVERABLE_PACKET_SHA256)
-    current_todo, _current_manager = validate_todo_recovery_current(packet, recovery)
+    current_todo = validate_todo_recovery_current(packet, recovery)
     static_evidence(packet, rebind_recoverable_helper=True, todo_recovery=recovery)
     return current_todo
 
@@ -1195,10 +1192,6 @@ def todo_recovery_review_record(recovery: dict[str, object], recovery_sha256: st
         object_map(recovery["recovery_helper_input"], "TODO recovery helper").get("file"),
         "TODO recovery helper",
     )
-    manager_identity = file_identity_from(
-        object_map(recovery["current_manager_input"], "current manager recovery input").get("file"),
-        "current manager recovery input",
-    )
     return {
         "schema": TODO_RECOVERY_REVIEW_SCHEMA,
         "verdict": "PASS",
@@ -1207,7 +1200,6 @@ def todo_recovery_review_record(recovery: dict[str, object], recovery_sha256: st
         "prepared_audit_sha256": recovery["prepared_audit_sha256"],
         "original_todo_sha256": recovery["original_todo_sha256"],
         "current_todo_sha256": todo_identity.sha256,
-        "current_manager_sha256": manager_identity.sha256,
         "unrelated_todo_sha256": recovery["unrelated_todo_sha256"],
         "recovery_helper_sha256": helper_identity.sha256,
     }
@@ -1257,16 +1249,10 @@ def prepare_todo_recovery(args: argparse.Namespace) -> None:
         for path in sorted({Path(str(packet[key])) for key in ("task", "todo", "manager_task")}, key=str):
             stack.enter_context(task_file_lock(path))
         todo = Path(str(packet["todo"]))
-        manager = Path(str(packet["manager_task"]))
         todo_data, todo_identity, todo_ancestors = absolute_file_binding(todo, "rebound TODO")
         held_todo = hold_absolute(todo_identity, todo_ancestors)
         stack.callback(os.close, held_todo.descriptor)
         for descriptor in reversed(held_todo.directories):
-            stack.callback(os.close, descriptor)
-        _manager_data, manager_identity, manager_ancestors = absolute_file_binding(manager, "rebound manager task")
-        held_manager = hold_absolute(manager_identity, manager_ancestors)
-        stack.callback(os.close, held_manager.descriptor)
-        for descriptor in reversed(held_manager.directories):
             stack.callback(os.close, descriptor)
         helper = Path(__file__).resolve(strict=True)
         _helper_data, helper_identity, helper_ancestors = absolute_file_binding(helper, "TODO recovery helper")
@@ -1291,10 +1277,6 @@ def prepare_todo_recovery(args: argparse.Namespace) -> None:
             "unrelated_todo_base64": base64.b64encode(b"".join(chunks)).decode(),
             "unrelated_todo_sha256": sha256(b"".join(chunks)),
             "current_todo_input": file_input(todo, "rebound TODO"),
-            "current_manager_input": {
-                "file": asdict(manager_identity),
-                "ancestors": [asdict(item) for item in manager_ancestors],
-            },
             "recovery_helper_input": {
                 "file": asdict(helper_identity),
                 "ancestors": [asdict(item) for item in helper_ancestors],
@@ -1304,7 +1286,6 @@ def prepare_todo_recovery(args: argparse.Namespace) -> None:
         data = todo_recovery_bytes(recovery)
         validate_todo_recovery_packet(recovery, sha256(data), packet, packet_path, review_path, prepared_path)
         validate_held_absolute(held_todo)
-        validate_held_absolute(held_manager)
         validate_held_absolute(held_helper)
         publish_or_validate(output, data, "TODO recovery packet")
     print(sha256(data))
@@ -1380,12 +1361,10 @@ def hold_inputs(
         elif todo_recovery is not None and identity.path == str(packet["manager_task"]):
             if manager_rebound or identity.sha256 != packet["manager_task_sha256"]:
                 raise TaskFrontmatterError("prepared disposition manager recovery binding is invalid.")
-            current_input = object_map(todo_recovery.get("current_manager_input"), "current manager recovery input")
-            current_identity = file_identity_from(current_input.get("file"), "current manager recovery input")
-            raw_current_ancestors = current_input.get("ancestors")
-            if not isinstance(raw_current_ancestors, Iterable) or isinstance(raw_current_ancestors, (str, bytes, dict)):
-                raise TaskFrontmatterError("current manager recovery input ancestors are invalid.")
-            current_ancestors = tuple(directory_identity_from(entry, "current manager recovery input ancestor") for entry in cast(Iterable[object], raw_current_ancestors))
+            _data, current_identity, current_ancestors = absolute_file_binding(
+                Path(str(packet["manager_task"])),
+                "current manager recovery input",
+            )
             current = hold_absolute(current_identity, current_ancestors)
             manager_rebound = True
         elif rebind_recoverable_helper and identity.path == str(packet["helper"]):

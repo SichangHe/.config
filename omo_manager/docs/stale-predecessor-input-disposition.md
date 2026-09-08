@@ -22,7 +22,7 @@
   - accept only the recorded menu, exact `/status` input, or ready state after a prepared disposition audit exists
   - permit the released helper to supersede its predecessor helper binding only for the exact immutable packet, PASS review, old helper digest, and prepared disposition audit left by the first failed guarded attempt
   - prepare an independently reviewable TODO-CAS recovery only for that same failed transaction: authenticate its exact protected task row from the original prepared chain, preserve the current row byte-for-byte, and bind every current unrelated TODO byte without rewriting the file
-  - permit execution to rebind only the old packet's stale whole-file TODO and manager-ledger inputs when the recovery packet, independent recovery review, current helper, exact owned row, complete unrelated TODO byte stream, and semantic manager custody remain unchanged under the lifecycle locks
+  - permit execution to rebind only the old packet's stale whole-file TODO and manager-ledger inputs: the prepared recovery fixes the exact current TODO bytes, while execution opens and holds the current manager ledger under its lifecycle lock and revalidates semantic manager custody before and after every action
   - validate an existing complete disposition only when its prepared audit matches and the pane is ready
 - exclusions
   - never send `Enter`, stop either pane, change lifecycle files, or modify the prior prepared close audit
