@@ -19,6 +19,7 @@ from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from itertools import product
 from pathlib import Path
 
 from .omo_pending_digest import PENDING_CONTENT_CHAR_LIMIT
@@ -5745,6 +5746,18 @@ def top_level_no_mail_root_retained_provenance(
             return []
         return shell_tokens(item.get("command"))
 
+    def helper_tokens(tokens: list[str], helper_name: str) -> list[str]:
+        if tokens and Path(tokens[0]).name == helper_name:
+            return tokens
+        if (
+            len(tokens) >= 2
+            and Path(tokens[0]).name in {"python", "python3"}
+            and Path(tokens[1]).is_absolute()
+            and Path(tokens[1]).name == helper_name
+        ):
+            return tokens[1:]
+        return []
+
     report_executions: list[
         tuple[int, str, dict[str, object], str, str, str, dict[str, object]]
     ] = []
@@ -5757,16 +5770,12 @@ def top_level_no_mail_root_retained_provenance(
     )
 
     def optional_pending_list(tokens: list[str]) -> bool:
-        return tokens == [] or (
-            len(tokens) == 2
-            and Path(tokens[0]).name == "omo_pending.py"
-            and tokens[1] == "list"
-        ) or (
-            len(tokens) == 4
-            and tokens[:2] == ["timeout", "20s"]
-            and Path(tokens[2]).name == "omo_pending.py"
-            and tokens[3] == "list"
-        )
+        if tokens[:1] == ["&&"]:
+            tokens = tokens[1:]
+        if tokens[:2] == ["timeout", "20s"]:
+            tokens = tokens[2:]
+        tokens = helper_tokens(tokens, "omo_pending.py")
+        return tokens == [] or len(tokens) == 2 and tokens[1] == "list"
 
     def report_invocation(
         tokens: list[str],
@@ -5845,8 +5854,9 @@ def top_level_no_mail_root_retained_provenance(
         turn_id = str(payload["turn_id"])
         stdout = item.get("stdout") if isinstance(item, dict) else None
         tokens = successful_command(item)
+        report_tokens = helper_tokens(tokens, "omo_report.sh")
         if isinstance(stdout, str):
-            invocation = report_invocation(tokens, stdout)
+            invocation = report_invocation(report_tokens, stdout)
             acceptance = invocation[1] if invocation is not None else None
             transfer = acceptance.get("transfer_receipt") if isinstance(acceptance, dict) else None
             routing = acceptance.get("routing") if isinstance(acceptance, dict) else None
@@ -5912,14 +5922,14 @@ def top_level_no_mail_root_retained_provenance(
                         acceptance,
                     )
                 )
+        pending_tokens = helper_tokens(tokens, "omo_pending.py")
         if (
-            len(tokens) >= 8
-            and Path(tokens[0]).name == "omo_pending.py"
-            and tokens[1:3] == ["remove", "--item"]
+            len(pending_tokens) >= 8
+            and pending_tokens[1:3] == ["remove", "--item"]
             and isinstance(stdout, str)
         ):
-            pending_item = tokens[3]
-            tail = tokens[4:]
+            pending_item = pending_tokens[3]
+            tail = pending_tokens[4:]
             if tail[:2] == ["--outcome", "completed"]:
                 tail = tail[2:]
             if len(tail) >= 3 and tail[0] == "--evidence":
@@ -5959,30 +5969,39 @@ def top_level_no_mail_root_retained_provenance(
                             )
                         )
     def report_time_transition(
-        removal: tuple[int, str, dict[str, object], str, str, str, str, str],
+        removals: tuple[tuple[int, str, dict[str, object], str, str, str, str, str], ...],
     ) -> tuple[bytes, int, int] | None:
-        pending_item = removal[3]
-        removal_evidence = removal[4]
-        removal_note = f"(verified removed pending item: {removal_evidence})\n".encode()
-        if not current_payload.endswith(removal_note):
+        if not 1 <= len(removals) <= 2:
             return None
-        report_time_base = current_payload[: -len(removal_note)]
+        removal_notes = b"".join(
+            f"(verified removed pending item: {removal[4]})\n".encode()
+            for removal in removals
+        )
+        if not current_payload.endswith(removal_notes):
+            return None
+        report_time_base = current_payload[: -len(removal_notes)]
         report_time_base, status_replacements = re.subn(
             rb"(?m)^status: done$",
             b"status: running",
             report_time_base,
             count=1,
         )
-        pending_renderings = (
-            pending_item,
-            f"'{pending_item.replace(chr(39), chr(39) * 2)}'",
-            yaml_double_quoted_scalar(pending_item),
+        rendering_options = tuple(
+            (
+                removal[3],
+                f"'{removal[3].replace(chr(39), chr(39) * 2)}'",
+                yaml_double_quoted_scalar(removal[3]),
+            )
+            for removal in removals
         )
         matches: list[tuple[bytes, int]] = []
-        for rendering in pending_renderings:
+        for renderings in product(*rendering_options):
+            pending_block = "pending_task_items:\n" + "".join(
+                f"  - {rendering}\n" for rendering in renderings
+            ).removesuffix("\n")
             candidate, pending_replacements = re.subn(
                 rb"(?m)^pending_task_items: \[\]$",
-                lambda _match, rendering=rendering: f"pending_task_items:\n  - {rendering}".encode(),
+                lambda _match, pending_block=pending_block: pending_block.encode(),
                 report_time_base,
                 count=1,
             )
@@ -5992,11 +6011,13 @@ def top_level_no_mail_root_retained_provenance(
             return None
         return matches[0][0], status_replacements, matches[0][1]
 
-    authenticated_removals = [
-        (removal, transition)
-        for removal in removal_executions
-        if (transition := report_time_transition(removal)) is not None
-    ]
+    authenticated_removals = []
+    for removal_count in (1, 2):
+        for start in range(len(removal_executions) - removal_count + 1):
+            removals = tuple(removal_executions[start : start + removal_count])
+            transition = report_time_transition(removals)
+            if transition is not None:
+                authenticated_removals.append((removals, transition))
     if len(report_executions) != 1 or len(authenticated_removals) != 1:
         raise ReceiptError("root-retained no-mail transcript lacks one exact accepted report and pending removal")
     (
@@ -6009,9 +6030,10 @@ def top_level_no_mail_root_retained_provenance(
         report_acceptance,
     ) = report_executions[0]
     (
-        selected_removal,
+        selected_removals,
         (report_time_payload, status_replacements, pending_replacements),
     ) = authenticated_removals[0]
+    selected_removal = selected_removals[-1]
     (
         removal_record_index,
         removal_turn_id,
@@ -6023,11 +6045,17 @@ def top_level_no_mail_root_retained_provenance(
         removal_output,
     ) = selected_removal
     report_was_accepted = report_disposition == "accepted"
-    if (report_disposition, removal_mode) not in {
+    valid_single_removal = len(selected_removals) == 1 and (report_disposition, removal_mode) in {
         ("accepted", "no-email"),
         ("manager-pending-in-progress", "human-email"),
         ("manager-pending-done", "no-email"),
-    }:
+    }
+    valid_two_removal_transition = (
+        len(selected_removals) == 2
+        and report_disposition == "manager-pending-done"
+        and all(removal[5] == "no-email" and not removal[6] for removal in selected_removals)
+    )
+    if not valid_single_removal and not valid_two_removal_transition:
         raise ReceiptError("root-retained no-mail report and queue-removal modes are inconsistent")
 
     def linked_execution(
@@ -6069,9 +6097,11 @@ def top_level_no_mail_root_retained_provenance(
                 output = payload.get("output") if isinstance(payload, dict) else None
                 output_texts = (
                     [
-                        block.get("text")
+                        str(block["text"])
                         for block in output
-                        if isinstance(block, dict) and block.get("type") == "input_text"
+                        if isinstance(block, dict)
+                        and block.get("type") == "input_text"
+                        and isinstance(block.get("text"), str)
                     ]
                     if isinstance(output, list)
                     else []
@@ -6106,18 +6136,22 @@ def top_level_no_mail_root_retained_provenance(
         report_output,
         ("omo_report.sh", "--status", "--message-file"),
     )
-    removal_call_index, removal_output_index, removal_call, removal_call_output = linked_execution(
-        removal_record_index,
-        removal_turn_id,
-        removal_output,
-        (
-            ("omo_pending.py", "remove", "--item", "--evidence", "--no-email")
-            if removal_mode == "no-email"
-            else ("omo_pending.py", "remove", "--item", "--evidence", "--completion-key")
-        ),
-    )
+    linked_removals = [
+        linked_execution(
+            removal[0],
+            removal[1],
+            removal[7],
+            (
+                ("omo_pending.py", "remove", "--item", "--evidence", "--no-email")
+                if removal[5] == "no-email"
+                else ("omo_pending.py", "remove", "--item", "--evidence", "--completion-key")
+            ),
+        )
+        for removal in selected_removals
+    ]
+    removal_call_index, removal_output_index, removal_call, removal_call_output = linked_removals[-1]
     manager_completion_directive: tuple[int, int, dict[str, object], dict[str, object]] | None = None
-    if report_disposition == "manager-pending-done":
+    if report_disposition == "manager-pending-done" and len(selected_removals) == 1:
         report_input = report_acceptance.get("input")
         report_input_sha256 = report_input.get("sha256") if isinstance(report_input, dict) else None
         manager_confirmation = re.search(
@@ -6215,6 +6249,189 @@ def top_level_no_mail_root_retained_provenance(
                 "root-retained terminal report lacks one exact manager completion directive"
             )
         manager_completion_directive = directive_matches[0]
+    multi_item_manager_directive: tuple[int, int, dict[str, object], dict[str, object]] | None = None
+    consumption_verifications: list[
+        tuple[int, dict[str, object], tuple[int, int, dict[str, object], dict[str, object]]]
+    ] = []
+    if len(selected_removals) == 2:
+        directive_matches = []
+        for response_index, response_record in enumerate(records):
+            response_payload = response_record.get("payload")
+            response_metadata = (
+                response_payload.get("internal_chat_message_metadata_passthrough")
+                if isinstance(response_payload, dict)
+                else None
+            )
+            response_content = (
+                response_payload.get("content") if isinstance(response_payload, dict) else None
+            )
+            if (
+                not response_index < report_call_index
+                or response_record.get("type") != "response_item"
+                or not isinstance(response_payload, dict)
+                or response_payload.get("type") != "message"
+                or response_payload.get("role") != "user"
+                or not isinstance(response_metadata, dict)
+                or response_metadata.get("turn_id") != operation_turn_id
+                or not isinstance(response_content, list)
+                or len(response_content) != 1
+                or not isinstance(response_content[0], dict)
+                or response_content[0].get("type") != "input_text"
+                or not isinstance(response_content[0].get("text"), str)
+            ):
+                continue
+            directive_text = str(response_content[0]["text"])
+            envelope = re.fullmatch(
+                r'<agent_message from="(?P<sender>[A-Za-z0-9_.:-]+)">\n'
+                r"(?P<body>.+)\n</agent_message>",
+                directive_text,
+                flags=re.DOTALL,
+            )
+            body = re.sub(r"\s+", " ", envelope.group("body")).strip() if envelope is not None else ""
+            if (
+                envelope is None
+                or envelope.group("sender") != manager_target
+                or re.search(r"(?i)\bindependent review\b", body) is None
+                or re.search(r"(?i)\bterminal\b", body) is None
+                or re.search(r"(?i)\b(?:submit|send)\b[^.]{0,120}\breport\b", body) is None
+                or re.search(
+                    r"(?i)\bremove\b[^.]{0,120}\b(?:item|work)\b[^.]{0,120}\bafter report consumption\b",
+                    body,
+                )
+                is None
+            ):
+                continue
+            event_index = response_index + 1
+            if event_index >= report_call_index:
+                continue
+            event_record = records[event_index]
+            event_payload = event_record.get("payload")
+            event_item = event_payload.get("item") if isinstance(event_payload, dict) else None
+            event_content = event_item.get("content") if isinstance(event_item, dict) else None
+            if (
+                event_record.get("type") == "event_msg"
+                and isinstance(event_payload, dict)
+                and event_payload.get("type") == "item_completed"
+                and event_payload.get("thread_id") == session_id
+                and event_payload.get("turn_id") == operation_turn_id
+                and isinstance(event_item, dict)
+                and event_item.get("type") == "UserMessage"
+                and event_content == [{"type": "text", "text": directive_text, "text_elements": []}]
+            ):
+                directive_matches.append((response_index, event_index, response_record, event_record))
+        if len(directive_matches) != 1:
+            raise ReceiptError("root-retained multi-item completion lacks one exact manager directive")
+        multi_item_manager_directive = directive_matches[0]
+
+        previous_output_index = report_output_index
+        for removal, linked_removal in zip(selected_removals, linked_removals, strict=True):
+            removal_call = linked_removal[0]
+            candidates = []
+            for event_index in range(previous_output_index + 1, removal_call):
+                event_record = records[event_index]
+                event_payload = event_record.get("payload")
+                event_item = event_payload.get("item") if isinstance(event_payload, dict) else None
+                stdout = event_item.get("stdout") if isinstance(event_item, dict) else None
+                tokens = helper_tokens(successful_command(event_item), "omo_report.sh")
+                if (
+                    event_record.get("type") != "event_msg"
+                    or not isinstance(event_payload, dict)
+                    or event_payload.get("type") != "item_completed"
+                    or event_payload.get("thread_id") != session_id
+                    or event_payload.get("turn_id") != operation_turn_id
+                    or len(tokens) != 6
+                    or tokens[1:5] != ["--verify-consumed", "--status", "done", "--message-file"]
+                    or not Path(tokens[5]).is_absolute()
+                    or not isinstance(stdout, str)
+                ):
+                    continue
+                try:
+                    consumed = json.loads(stdout)
+                except json.JSONDecodeError:
+                    continue
+                unsigned = dict(consumed) if isinstance(consumed, dict) else {}
+                attestation_id = unsigned.pop("attestation_id", None)
+                consumed_input = consumed.get("input") if isinstance(consumed, dict) else None
+                consumption_evidence = consumed.get("consumption_evidence") if isinstance(consumed, dict) else None
+                transfer = consumed.get("transfer_receipt") if isinstance(consumed, dict) else None
+                authority = transfer.get("authority") if isinstance(transfer, dict) else None
+                queue_item = transfer.get("queue_item") if isinstance(transfer, dict) else None
+                routing = transfer.get("routing") if isinstance(transfer, dict) else None
+                if (
+                    not isinstance(consumed, dict)
+                    or canonical_json(consumed) != stdout.encode()
+                    or set(consumed)
+                    != {
+                        "accepted",
+                        "attestation_id",
+                        "consumed_at_unix_s",
+                        "consumption_evidence",
+                        "input",
+                        "reason",
+                        "recovery_residue",
+                        "replay_id",
+                        "schema",
+                        "status",
+                        "terminal",
+                        "transfer_receipt",
+                    }
+                    or consumed.get("schema") != "omo-report-consumed-closure/v1"
+                    or consumed.get("accepted") is not False
+                    or consumed.get("terminal") is not True
+                    or consumed.get("status") != "done"
+                    or consumed.get("reason")
+                    != "manager watcher consumed report; acceptance receipt unavailable"
+                    or not isinstance(attestation_id, str)
+                    or attestation_id != bound_receipt_id(unsigned)
+                    or consumed.get("replay_id") not in removal[4]
+                    or attestation_id not in removal[4]
+                    or re.search(r"(?i)\bverified consumed\b", removal[4]) is None
+                    or not isinstance(consumed_input, dict)
+                    or set(consumed_input) != {"sha256", "size_bytes"}
+                    or HASH_RE.fullmatch(str(consumed_input.get("sha256", ""))) is None
+                    or not isinstance(consumed_input.get("size_bytes"), int)
+                    or not isinstance(consumption_evidence, dict)
+                    or consumption_evidence.get("schema") != "omo-pending-watch-consumed-report/v1"
+                    or not isinstance(transfer, dict)
+                    or transfer.get("schema") != "omo-report-transfer-receipt/v1"
+                    or not isinstance(authority, dict)
+                    or authority.get("kind") != "agent-originated"
+                    or authority.get("source_task") != str(original_task)
+                    or authority.get("producer_target") != current_snapshot[0]["runat"]
+                    or not isinstance(queue_item, dict)
+                    or queue_item.get("replay_id") != consumed.get("replay_id")
+                    or not isinstance(routing, dict)
+                    or routing.get("task") != str(original_task)
+                    or routing.get("producer_target") != current_snapshot[0]["runat"]
+                    or routing.get("requested_manager_target") != manager_target
+                ):
+                    continue
+                linked = linked_execution(
+                    event_index,
+                    operation_turn_id,
+                    stdout,
+                    ("omo_report.sh", "--verify-consumed", "--status", "--message-file"),
+                )
+                if not previous_output_index < linked[0] < event_index < linked[1] < removal_call:
+                    continue
+                candidates.append((event_index, consumed, linked))
+            if len(candidates) != 1:
+                raise ReceiptError("root-retained multi-item removal lacks one exact consumed report")
+            consumption_verifications.append(candidates[0])
+            previous_output_index = linked_removal[1]
+        terminal_consumed = consumption_verifications[-1][1]
+        if (
+            len({str(consumed["replay_id"]) for _, consumed, _ in consumption_verifications}) != 2
+            or len({str(consumed["attestation_id"]) for _, consumed, _ in consumption_verifications})
+            != 2
+        ):
+            raise ReceiptError("root-retained multi-item removals reuse one consumed report")
+        if (
+            terminal_consumed.get("replay_id") != replay_id
+            or terminal_consumed.get("input") != report_acceptance.get("input")
+            or terminal_consumed.get("transfer_receipt") != report_acceptance.get("transfer_receipt")
+        ):
+            raise ReceiptError("root-retained terminal consumption differs from the submitted report")
     manager_acknowledgment: tuple[int, int, dict[str, object], dict[str, object]] | None = None
     if removal_mode == "human-email":
         report_acceptance = json.loads(report_output)
@@ -6290,8 +6507,18 @@ def top_level_no_mail_root_retained_provenance(
             and payload.get("turn_id") == operation_turn_id
         ):
             terminal_records.append((record_index, record))
+    removal_sequence_is_ordered = all(
+        removal[1] == operation_turn_id
+        and (report_output_index if index == 0 else linked_removals[index - 1][1])
+        < linked_removal[0]
+        < removal[0]
+        < linked_removal[1]
+        for index, (removal, linked_removal) in enumerate(
+            zip(selected_removals, linked_removals, strict=True)
+        )
+    )
     if (
-        operation_turn_id != removal_turn_id
+        not removal_sequence_is_ordered
         or not report_call_index < report_record_index < report_output_index < removal_call_index
         or (
             manager_acknowledgment is not None
@@ -6312,6 +6539,45 @@ def top_level_no_mail_root_retained_provenance(
     ):
         raise ReceiptError("root-retained no-mail completion order is invalid")
     terminal_index, terminal_record = terminal_records[0]
+    if multi_item_manager_directive is not None:
+        def pending_removal_command(command: object, tokens: list[str]) -> bool:
+            tokenizations = [tokens]
+            if isinstance(command, list) and command and isinstance(command[-1], str):
+                try:
+                    tokenizations.append(shlex.split(command[-1]))
+                except ValueError:
+                    return re.search(r"omo_pending\.py[^\r\n;|&]*\bremove\b", command[-1]) is not None
+            for candidate in tokenizations:
+                for index, token in enumerate(candidate[:-1]):
+                    if Path(token).name != "omo_pending.py" or candidate[index + 1] != "remove":
+                        continue
+                    tail = candidate[index + 2 :]
+                    if tail and tail[0] in {"--help", "-h"} and (
+                        len(tail) == 1 or tail[1] in {"&&", "||", ";"}
+                    ):
+                        continue
+                    return True
+            return bool(
+                isinstance(command, list)
+                and command
+                and isinstance(command[-1], str)
+                and re.search(
+                    r"omo_pending\.py['\"]?\s+remove\b"
+                    r"(?!\s+(?:--help|-h)(?:\s|['\"]|$))",
+                    command[-1],
+                )
+            )
+
+        operation_removals = []
+        for record_index in range(multi_item_manager_directive[1] + 1, terminal_index):
+            payload = records[record_index].get("payload")
+            item = payload.get("item") if isinstance(payload, dict) else None
+            tokens = successful_command(item)
+            command = item.get("command") if isinstance(item, dict) else None
+            if tokens and pending_removal_command(command, tokens):
+                operation_removals.append(record_index)
+        if operation_removals != [removal[0] for removal in selected_removals]:
+            raise ReceiptError("root-retained multi-item completion contains an unrelated pending removal")
     for record_index, record in enumerate(records):
         payload = record.get("payload")
         item = payload.get("item") if isinstance(payload, dict) else None
@@ -6322,11 +6588,16 @@ def top_level_no_mail_root_retained_provenance(
         ):
             raise ReceiptError("root-retained no-mail transcript contains an unbound Human email command")
     if removal_mode == "no-email":
-        for record in records:
+        email_scan_start = (
+            multi_item_manager_directive[1]
+            if multi_item_manager_directive is not None
+            else 0
+        )
+        for record_index, record in enumerate(records):
             payload = record.get("payload")
             item = payload.get("item") if isinstance(payload, dict) else None
             command = item.get("command") if isinstance(item, dict) else None
-            if command_mentions_email_helper(command):
+            if email_scan_start <= record_index and command_mentions_email_helper(command):
                 raise ReceiptError("root-retained no-mail transcript contains a Human email command")
 
     report_snapshot = frontmatter_snapshot(report_time_payload)
@@ -6442,7 +6713,56 @@ def top_level_no_mail_root_retained_provenance(
                 if manager_completion_directive is not None
                 else {}
             ),
-            "verified_removal_note_count": 1,
+            **(
+                {
+                    "multi_item_manager_directive_record_index": multi_item_manager_directive[0],
+                    "multi_item_manager_directive_sha256": hashlib.sha256(
+                        canonical_json(multi_item_manager_directive[2])
+                    ).hexdigest(),
+                    "multi_item_manager_event_record_index": multi_item_manager_directive[1],
+                    "multi_item_manager_event_sha256": hashlib.sha256(
+                        canonical_json(multi_item_manager_directive[3])
+                    ).hexdigest(),
+                    "removal_sequence": [
+                        {
+                            "call_record_index": linked_removal[0],
+                            "call_sha256": hashlib.sha256(
+                                canonical_json(linked_removal[2])
+                            ).hexdigest(),
+                            "evidence_sha256": hashlib.sha256(removal[4].encode()).hexdigest(),
+                            "item_sha256": hashlib.sha256(removal[3].encode()).hexdigest(),
+                            "output_record_index": linked_removal[1],
+                            "output_sha256": hashlib.sha256(
+                                canonical_json(linked_removal[3])
+                            ).hexdigest(),
+                            "record_index": removal[0],
+                            "record_sha256": hashlib.sha256(
+                                canonical_json(removal[2])
+                            ).hexdigest(),
+                        }
+                        for removal, linked_removal in zip(
+                            selected_removals,
+                            linked_removals,
+                            strict=True,
+                        )
+                    ],
+                    "consumption_verifications": [
+                        {
+                            "attestation_id": consumed["attestation_id"],
+                            "call_record_index": linked[0],
+                            "call_sha256": hashlib.sha256(canonical_json(linked[2])).hexdigest(),
+                            "output_record_index": linked[1],
+                            "output_sha256": hashlib.sha256(canonical_json(linked[3])).hexdigest(),
+                            "record_index": event_index,
+                            "replay_id": consumed["replay_id"],
+                        }
+                        for event_index, consumed, linked in consumption_verifications
+                    ],
+                }
+                if multi_item_manager_directive is not None
+                else {}
+            ),
+            "verified_removal_note_count": len(selected_removals),
         },
     }
 

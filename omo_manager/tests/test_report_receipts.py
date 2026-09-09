@@ -333,7 +333,10 @@ def root_retained_no_mail_fixture(
     no_mail_task_contract: str | None = None,
     manager_pending_done: bool = False,
     combined_describe: bool = False,
+    manager_pending_two_items: bool = False,
 ) -> tuple[ReportFixture, Path, Path, Path, str]:
+    if manager_pending_two_items:
+        manager_pending_done = True
     if human_email and manager_pending_done:
         raise AssertionError("terminal manager-pending fixtures are no-mail only")
     case, manager, _owner = active_manager_fixture(tmp_path)
@@ -348,6 +351,10 @@ def root_retained_no_mail_fixture(
         if human_email
         else '"Finish the bounded classification:\\v\u00a0report it privately."'
     )
+    second_pending_item = "Publish the reviewed terminal decision and record its consumed report."
+    pending_block = f"pending_task_items:\n  - {pending_rendering}"
+    if manager_pending_two_items:
+        pending_block += f"\n  - {second_pending_item}"
     task_contract = (
         "Classify the current TODO state and email the Human.\n"
         if human_email
@@ -372,7 +379,7 @@ def root_retained_no_mail_fixture(
     report_time_task = (
         frontmatter(runat="cfg:7", managerat="vl:2").replace(
             "pending_task_items: []",
-            f"pending_task_items:\n  - {pending_rendering}",
+            pending_block,
         )
         + '<manager_delegation from="vl:2">\n'
         + task_contract
@@ -380,9 +387,19 @@ def root_retained_no_mail_fixture(
         + human_instruction
     )
     task.write_text(report_time_task, encoding="utf-8")
-    draft = allocate_report_draft(case, b"root-retained no-mail report\n")
     case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
     report_status = "in-progress" if human_email else "done"
+    earlier_draft = None
+    earlier_verified = None
+    if manager_pending_two_items:
+        earlier_draft = allocate_report_draft(case, b"reviewed design report\n")
+        earlier_pending = run_report_from(case, earlier_draft, status="done")
+        if earlier_pending.returncode != 0 or run_manager_watcher_once(case, manager).returncode != 0:
+            raise AssertionError(earlier_pending.stderr or "manager watcher did not consume the first report")
+        earlier_verified = run_report_from(case, earlier_draft, status="done", verify_consumed=True)
+        if earlier_verified.returncode != 0:
+            raise AssertionError(earlier_verified.stderr)
+    draft = allocate_report_draft(case, b"root-retained no-mail report\n")
     pending = run_report_from(case, draft, status=report_status)
     if pending.returncode != 0 or run_manager_watcher_once(case, manager).returncode != 0:
         raise AssertionError(pending.stderr or "manager watcher did not consume the report")
@@ -391,6 +408,11 @@ def root_retained_no_mail_fixture(
         report_result = run_report_from(case, draft, status="done")
         if report_result.returncode != 0 or json.loads(report_result.stdout).get("accepted") is not True:
             raise AssertionError(report_result.stderr or report_result.stdout)
+    terminal_verified = None
+    if manager_pending_two_items:
+        terminal_verified = run_report_from(case, draft, status="done", verify_consumed=True)
+        if terminal_verified.returncode != 0:
+            raise AssertionError(terminal_verified.stderr)
     transfer = json.loads(report_result.stdout)["transfer_receipt"]
     replay_id = str(transfer["queue_item"]["replay_id"])
     envelope = Path(str(transfer["queue_item"]["pointer"]).rsplit(" ", 1)[1][:-1])
@@ -401,13 +423,27 @@ def root_retained_no_mail_fixture(
             f"Completed the classification; private report SHA-256 {report_sha256} was routed as "
             f"replay {replay_id} and the manager confirmed the one-shot work complete."
         )
+    removal_evidences = [removal_evidence]
+    if manager_pending_two_items:
+        assert earlier_verified is not None and terminal_verified is not None
+        earlier_attestation = json.loads(earlier_verified.stdout)
+        terminal_attestation = json.loads(terminal_verified.stdout)
+        removal_evidences = [
+            "Reviewed design report replay "
+            f"{earlier_attestation['replay_id']} verified consumed with attestation "
+            f"{earlier_attestation['attestation_id']}.",
+            "Terminal decision report replay "
+            f"{terminal_attestation['replay_id']} verified consumed with attestation "
+            f"{terminal_attestation['attestation_id']}.",
+        ]
     completed = report_time_task.replace("status: running", "status: done", 1).replace(
-        f"pending_task_items:\n  - {pending_rendering}\n",
+        f"{pending_block}\n",
         "pending_task_items: []\n",
         1,
     )
     task.write_text(
-        completed + f"(verified removed pending item: {removal_evidence})\n",
+        completed
+        + "".join(f"(verified removed pending item: {evidence})\n" for evidence in removal_evidences),
         encoding="utf-8",
     )
     (case.root / "TODO.md").write_text(
@@ -437,7 +473,18 @@ def root_retained_no_mail_fixture(
             f"&& timeout 30s omo_report.sh --status {report_status} --message-file {draft}"
         )
         report_output = (canonical_json(description) + canonical_json(acceptance)).decode()
-    if human_email:
+    if manager_pending_two_items:
+        removal_commands = [
+            "python3 /home/test/.config/omo_pending.py remove "
+            f"--item {shlex.quote(item)} --outcome completed "
+            f"--evidence {shlex.quote(evidence)} --no-email"
+            + ("" if index == 0 else " && python3 /home/test/.config/omo_pending.py list")
+            for index, (item, evidence) in enumerate(
+                zip((pending_item, second_pending_item), removal_evidences, strict=True)
+            )
+        ]
+        removed_output = "removed 1 pending item(s) without email; verify each item was actually done or cancelled\n"
+    elif human_email:
         acknowledgment_command = "omo_codex_status.py vl:2 --lines 24"
         acknowledgment_output = (
             f'<agent_message from="cfg:7">\n'
@@ -514,8 +561,60 @@ def root_retained_no_mail_fixture(
             },
         ]
 
-    operation_records = command_records(1, report_call_id, report_command, report_output)
-    if human_email:
+    if manager_pending_two_items:
+        assert earlier_draft is not None and earlier_verified is not None and terminal_verified is not None
+        manager_directive = (
+            '<agent_message from="vl:2">\n'
+            "Independent review confirms this terminal result. Submit the report and remove the completed work "
+            "after report consumption.\n"
+            "</agent_message>"
+        )
+        operation_records = [
+            {
+                "ordinal": 1,
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": manager_directive}],
+                    "internal_chat_message_metadata_passthrough": {"turn_id": turn_id},
+                },
+            },
+            {
+                "ordinal": 2,
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "thread_id": session_id,
+                    "turn_id": turn_id,
+                    "item": {
+                        "type": "UserMessage",
+                        "content": [{"type": "text", "text": manager_directive, "text_elements": []}],
+                    },
+                },
+            },
+            *command_records(3, report_call_id, report_command, report_output),
+            *command_records(
+                6,
+                "call_verify_first",
+                f"omo_report.sh --verify-consumed --status done --message-file {earlier_draft}",
+                earlier_verified.stdout,
+            ),
+            *command_records(9, "call_remove_first", removal_commands[0], removed_output),
+            *command_records(
+                12,
+                "call_verify_terminal",
+                f"omo_report.sh --verify-consumed --status done --message-file {draft}",
+                terminal_verified.stdout,
+            ),
+            *command_records(15, "call_remove_terminal", removal_commands[1], removed_output),
+        ]
+        terminal_ordinal = 18
+    else:
+        operation_records = command_records(1, report_call_id, report_command, report_output)
+    if manager_pending_two_items:
+        pass
+    elif human_email:
         acknowledgment_records = command_records(
             4 if not acknowledgment_after_removal else 7,
             acknowledgment_call_id,
@@ -4310,6 +4409,213 @@ return 75
             validated = validate_export_from(case, exported)
             self.assertEqual(0, validated.returncode, validated.stderr)
             self.assertEqual(attestation, json.loads(validated.stdout))
+
+    def test_root_retained_no_mail_custody_authenticates_two_consumed_item_removals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, envelope, task, transcript, replay_id = root_retained_no_mail_fixture(
+                tmp_path,
+                manager_pending_two_items=True,
+            )
+            exported = tmp_path / "manager-consumed-two-items.json"
+
+            result = export_archived_report(
+                case,
+                envelope,
+                exported,
+                no_mail_transcript=transcript,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            attestation = json.loads(result.stdout)
+            binding = attestation["archive_custody"]["git_provenance"]["commitment_binding"]
+            self.assertEqual(replay_id, attestation["replay_id"])
+            self.assertEqual(2, binding["verified_removal_note_count"])
+            self.assertEqual(2, len(binding["removal_sequence"]))
+            self.assertEqual(2, len(binding["consumption_verifications"]))
+            self.assertEqual(
+                replay_id,
+                binding["consumption_verifications"][-1]["replay_id"],
+            )
+            self.assertEqual(
+                hashlib.sha256(task.read_bytes()).hexdigest(),
+                attestation["archive_custody"]["task_sha256"],
+            )
+            validated = validate_export_from(case, exported)
+            self.assertEqual(0, validated.returncode, validated.stderr)
+            self.assertEqual(attestation, json.loads(validated.stdout))
+
+    def test_two_consumed_item_removals_reject_tamper_and_email(self) -> None:
+        defects = (
+            "missing removal",
+            "duplicate removal",
+            "reordered removals",
+            "substituted item",
+            "manager directive",
+            "email after directive",
+            "extra removal",
+            "noncanonical extra removal",
+            "nested-shell extra removal",
+            "reordered-flag extra removal",
+            "reused consumed report",
+        )
+        for defect in defects:
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                case, envelope, task, transcript, _replay_id = root_retained_no_mail_fixture(
+                    tmp_path,
+                    manager_pending_two_items=True,
+                )
+                records = [json.loads(line) for line in transcript.read_text(encoding="utf-8").splitlines()]
+                if defect == "missing removal":
+                    records = [record for record in records if record["ordinal"] not in {9, 10, 11}]
+                elif defect == "duplicate removal":
+                    duplicate = [dict(record) for record in records if record["ordinal"] in {9, 10, 11}]
+                    records[12:12] = duplicate
+                elif defect == "reordered removals":
+                    first = records[9:12]
+                    second = records[15:18]
+                    records[9:12], records[15:18] = second, first
+                elif defect == "substituted item":
+                    for record in records[9:11]:
+                        payload = record["payload"]
+                        raw_input = payload.get("input")
+                        if isinstance(raw_input, str):
+                            payload["input"] = raw_input.replace(
+                                "Finish the bounded classification",
+                                "Substituted classification",
+                            )
+                        item = payload.get("item")
+                        command = item.get("command") if isinstance(item, dict) else None
+                        if isinstance(command, list):
+                            command[-1] = command[-1].replace(
+                                "Finish the bounded classification",
+                                "Substituted classification",
+                            )
+                elif defect == "manager directive":
+                    for record in records[1:3]:
+                        payload = record["payload"]
+                        content = payload.get("content") or payload["item"]["content"]
+                        content[0]["text"] = content[0]["text"].replace(
+                            "after report consumption",
+                            "after a later decision",
+                        )
+                elif defect in {
+                    "extra removal",
+                    "noncanonical extra removal",
+                    "nested-shell extra removal",
+                    "reordered-flag extra removal",
+                }:
+                    terminal_item = "Publish the reviewed terminal decision and record its consumed report."
+                    extra = json.loads(json.dumps(records[15:18]))
+                    for record in extra:
+                        record["ordinal"] = int(record["ordinal"]) + 3
+                        payload = record["payload"]
+                        if payload.get("call_id") == "call_remove_terminal":
+                            payload["call_id"] = "call_remove_extra"
+                        raw_input = payload.get("input")
+                        if isinstance(raw_input, str):
+                            payload["input"] = raw_input.replace(
+                                "call_remove_terminal",
+                                "call_remove_extra",
+                            ).replace(terminal_item, "Unrelated follow-up")
+                        item = payload.get("item")
+                        command = item.get("command") if isinstance(item, dict) else None
+                        if isinstance(command, list):
+                            command[-1] = command[-1].replace(
+                                terminal_item,
+                                "Unrelated follow-up",
+                            )
+                    records[18:18] = extra
+                    if defect == "nested-shell extra removal":
+                        records[19]["payload"]["item"]["command"][1] = "-c"
+                    if defect == "reordered-flag extra removal":
+                        extra_command = (
+                            "python3 /home/test/.config/omo_pending.py remove "
+                            "--evidence 'Unrelated evidence' --no-email "
+                            "--item 'Unrelated follow-up' --outcome completed"
+                        )
+                        records[18]["payload"]["input"] = (
+                            f"const r = await tools.exec_command({json.dumps({'cmd': extra_command})});"
+                        )
+                        records[19]["payload"]["item"]["command"][-1] = extra_command
+                    if defect == "noncanonical extra removal":
+                        records[19]["payload"]["item"]["stdout"] = "unusual successful removal\n"
+                        records[19]["payload"]["item"]["aggregated_output"] = (
+                            "unusual successful removal\n"
+                        )
+                        records[19]["payload"]["item"]["formatted_output"] = (
+                            "unusual successful removal\n"
+                        )
+                        records[20]["payload"]["output"] = [
+                            {"type": "input_text", "text": "unusual successful removal\n"}
+                        ]
+                elif defect == "reused consumed report":
+                    earlier = json.loads(records[7]["payload"]["item"]["stdout"])
+                    terminal_stdout = records[13]["payload"]["item"]["stdout"]
+                    terminal = json.loads(terminal_stdout)
+                    records[6]["payload"]["input"] = records[12]["payload"]["input"]
+                    records[7]["payload"]["item"]["command"] = records[13]["payload"]["item"]["command"]
+                    records[7]["payload"]["item"]["stdout"] = terminal_stdout
+                    records[7]["payload"]["item"]["aggregated_output"] = terminal_stdout
+                    records[7]["payload"]["item"]["formatted_output"] = terminal_stdout
+                    records[8]["payload"]["output"] = records[14]["payload"]["output"]
+                    replacements = {
+                        str(earlier["replay_id"]): str(terminal["replay_id"]),
+                        str(earlier["attestation_id"]): str(terminal["attestation_id"]),
+                    }
+                    task_text = task.read_text(encoding="utf-8")
+                    for old, new in replacements.items():
+                        task_text = task_text.replace(old, new)
+                        for record in records[9:12]:
+                            payload = record["payload"]
+                            raw_input = payload.get("input")
+                            if isinstance(raw_input, str):
+                                payload["input"] = raw_input.replace(old, new)
+                            item = payload.get("item")
+                            command = item.get("command") if isinstance(item, dict) else None
+                            if isinstance(command, list):
+                                command[-1] = command[-1].replace(old, new)
+                    task.write_text(task_text, encoding="utf-8")
+                else:
+                    records.insert(
+                        3,
+                        {
+                            "ordinal": 3,
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "item_completed",
+                                "thread_id": "11111111-2222-3333-4444-555555555555",
+                                "turn_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                                "item": {
+                                    "type": "CommandExecution",
+                                    "command": ["/bin/sh", "-lc", "email_me.py --subject-file /tmp/s"],
+                                    "cwd": f"file://{tmp_path / 'worker'}",
+                                    "status": "completed",
+                                    "stdout": "",
+                                    "stderr": "",
+                                    "aggregated_output": "",
+                                    "formatted_output": "",
+                                    "exit_code": 0,
+                                    "source": "unified_exec_startup",
+                                },
+                            },
+                        },
+                    )
+                transcript.write_bytes(b"".join(canonical_json(record) for record in records))
+
+                result = export_archived_report(
+                    case,
+                    envelope,
+                    tmp_path / "rejected.json",
+                    no_mail_transcript=transcript,
+                )
+
+                self.assertEqual(2, result.returncode)
+                self.assertRegex(
+                    result.stderr,
+                    "accepted report|completion order|consumed report|email command|manager directive|pending removal|command execution order",
+                )
 
     def test_manager_consumed_terminal_report_rejects_directive_and_binding_tamper(self) -> None:
         defects = (
