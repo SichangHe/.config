@@ -68,7 +68,7 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         packet = disposition_packet(tmp)
         packet.update(
             {
-                "task_sha256": subject.sha256(before_task),
+                "task_sha256": subject.sha256(after_task),
                 "todo_sha256": "a" * 64,
                 "helper": str(Path(subject.__file__).resolve(strict=True)),
                 "helper_sha256": subject.RECOVERABLE_HELPER_SHA256,
@@ -308,7 +308,7 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             packet, recovery, _todo = self.todo_recovery_fixture(Path(directory))
             prior = {
                 "task": packet["task"],
-                "task_sha256": packet["task_sha256"],
+                "task_sha256": subject.SOURCE1485_ORIGINAL_TASK_SHA256,
                 "manager_task": packet["manager_task"],
                 "manager_target": packet["manager_target"],
             }
@@ -317,7 +317,7 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
                 **packet,
                 "schema": subject.SOURCE1485_SCHEMA,
                 "task_sha256": subject.sha256(task.read_bytes()),
-                "original_task_sha256": packet["task_sha256"],
+                "original_task_sha256": subject.SOURCE1485_ORIGINAL_TASK_SHA256,
                 "manager_task": recovery["current_manager_task"],
                 "manager_target": recovery["current_manager_target"],
                 "original_manager_task": packet["manager_task"],
@@ -335,7 +335,7 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             packet, recovery, _todo = self.todo_recovery_fixture(Path(directory))
             prior = {
                 "task": packet["task"],
-                "task_sha256": packet["task_sha256"],
+                "task_sha256": subject.SOURCE1485_ORIGINAL_TASK_SHA256,
                 "manager_task": packet["manager_task"],
                 "manager_target": packet["manager_target"],
             }
@@ -439,6 +439,26 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
                 patch.object(subject, "read_bound", side_effect=raced_read),
                 self.assertRaisesRegex(TaskFrontmatterError, "current TODO recovery input changed"),
             ):
+                subject.validate_todo_recovery_current(packet, recovery)
+
+    def test_todo_recovery_rejects_original_child_before_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, _todo = self.todo_recovery_fixture(Path(directory))
+            audit_path = Path(str(recovery["source1485_root_audit"]))
+            audit = json.loads(audit_path.read_bytes())
+            audit["children"][0]["sha256"] = "f" * 64
+            audit_path.write_text(json.dumps(audit))
+            recovery["source1485_root_audit_sha256"] = subject.sha256(audit_path.read_bytes())
+            self.enterContext(patch.object(subject, "SOURCE1485_ROOT_AUDIT_SHA256", recovery["source1485_root_audit_sha256"]))
+            with self.assertRaisesRegex(TaskFrontmatterError, "changed unsupported bytes"):
+                subject.validate_todo_recovery_current(packet, recovery)
+
+    def test_todo_recovery_rejects_migrated_packet_after_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, _todo = self.todo_recovery_fixture(Path(directory))
+            packet["task_sha256"] = "f" * 64
+            recovery["original_task_sha256"] = packet["task_sha256"]
+            with self.assertRaisesRegex(TaskFrontmatterError, "changed unsupported bytes"):
                 subject.validate_todo_recovery_current(packet, recovery)
 
     def test_todo_recovery_rejects_protected_task_drift(self) -> None:

@@ -801,8 +801,7 @@ def validate_source1485_transition(packet: dict[str, object], recovery: dict[str
     manager_row = unique_record(topology.get("rows"), "task", audit["successor_task"], "Source-1485 successor manager")
     file_change = unique_record(audit.get("files"), "task", task_ref, "Source-1485 task change")
     if (
-        child.get("sha256") != packet.get("task_sha256")
-        or child.get("queue_sha256") != sha256(b"[]")
+        child.get("queue_sha256") != sha256(b"[]")
         or row.get("sha256")
         != file_identity_from(
             object_map(recovery.get("current_task_input"), "current task recovery input").get("file"),
@@ -828,8 +827,9 @@ def validate_source1485_transition(packet: dict[str, object], recovery: dict[str
     except (KeyError, ValueError) as exc:
         raise TaskFrontmatterError("Source-1485 task transition encoding is invalid.") from exc
     if (
-        sha256(before) != packet.get("task_sha256")
+        sha256(before) != child.get("sha256")
         or sha256(after) != row.get("sha256")
+        or sha256(after) != packet.get("task_sha256")
         or before.replace(b"managerat: dw:0\n", b"managerat: dw:15\n") != after
         or before.count(b"managerat: dw:0\n") != 1
         or after.count(b"managerat: dw:15\n") != 1
@@ -1138,17 +1138,16 @@ def validate_source1485_packet(packet: dict[str, object], prior: dict[str, objec
         or packet.get("original_manager_target") != prior.get("manager_target")
     ):
         raise TaskFrontmatterError("fresh disposition does not bind its pre-Source-1485 custody.")
-    legacy_packet = {**packet, "task_sha256": packet["original_task_sha256"]}
     recovery_view = {
         "task": packet["task"],
-        "original_task_sha256": packet["original_task_sha256"],
+        "original_task_sha256": packet["task_sha256"],
         "current_task_input": file_input(Path(str(packet["task"])), "fresh protected task"),
         "source1485_root_audit": packet["source1485_root_audit"],
         "source1485_root_audit_sha256": packet["source1485_root_audit_sha256"],
         "current_manager_task": packet["manager_task"],
         "current_manager_target": packet["manager_target"],
     }
-    task_data, manager_task, manager_target, manager_parent = validate_source1485_transition(legacy_packet, recovery_view)
+    task_data, manager_task, manager_target, manager_parent = validate_source1485_transition(packet, recovery_view)
     if sha256(task_data) != packet.get("task_sha256") or manager_task != Path(str(packet["manager_task"])):
         raise TaskFrontmatterError("fresh disposition current Source-1485 custody is invalid.")
     return task_data, manager_task, manager_target, manager_parent
