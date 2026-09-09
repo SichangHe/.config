@@ -2017,15 +2017,18 @@ def _validate_exited_codex_shell(
         raise RuntimeError(f"expected an exited non-Codex shell: {expected_pane_id} status={actual}")
     before = capture(expected_pane_id, n_lines)
     interrupted_at = before.rfind("Conversation interrupted")
-    compact_report = re.sub(r"\s+", "", before[:interrupted_at])
-    accepted_at = compact_report.rfind('"accepted":true')
     marker_count = before.count("Conversation interrupted")
-    if marker_count > 1 or (not accepted_terminal_report and marker_count != 1) or (not accepted_terminal_report and (accepted_at < 0 or evidence not in compact_report[accepted_at:])):
+    if marker_count > 1:
         raise RuntimeError("terminal report evidence is absent before the final Codex exit marker")
     exit_text = before[interrupted_at:] if marker_count == 1 else before
     resume_matches = list(EXIT_RESUME_RE.finditer(exit_text))
     if len(resume_matches) != 1 or resume_matches[0].group(1) != session_id or extract_resume_id(exit_text) != session_id:
         raise RuntimeError("captured terminal Codex session does not match the supplied session id")
+    exit_at = interrupted_at if marker_count == 1 else resume_matches[0].start()
+    compact_report = re.sub(r"\s+", "", before[:exit_at])
+    accepted_at = compact_report.rfind('"accepted":true')
+    if not accepted_terminal_report and (accepted_at < 0 or evidence not in compact_report[accepted_at:]):
+        raise RuntimeError("terminal report evidence is absent before the final Codex exit marker")
     shell_tail = exit_text[resume_matches[0].end() :].strip("\r\n")
     shell_tail = EXIT_SELECTOR_RE.sub("", shell_tail, count=1).strip("\r\n")
     if not shell_tail or len(shell_tail.splitlines()) != 1:

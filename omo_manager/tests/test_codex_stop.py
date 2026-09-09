@@ -215,6 +215,34 @@ class CodexStopTests(unittest.TestCase):
         capture.assert_called_with("%42", 73)
         close.assert_not_called()
 
+    def test_validate_exited_codex_shell_accepts_clean_normal_exit_without_interruption_marker(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f'{{"accepted":true,"receipt":"specific-token"}}\nTo continue this session, run:\n  codex resume {session_id}\nOr run codex resume and select Follow manager worker defaults.\n$ '
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.pane_target", return_value="cfg:1.0"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="zsh"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["$ "])),
+            patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
+        ):
+            observed = validate_exited_codex_shell("cfg:1", "%42", session_id, "specific-token")
+        self.assertEqual(hashlib.sha256(transcript.encode()).hexdigest(), observed)
+
+    def test_validate_exited_codex_shell_clean_exit_still_rejects_report_after_resume_marker(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f'To continue this session, run:\n  codex resume {session_id}\n$ {{"accepted":true,"receipt":"specific-token"}}'
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.pane_target", return_value="cfg:1.0"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="zsh"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["$ "])),
+            patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
+            self.assertRaisesRegex(RuntimeError, "terminal report evidence is absent"),
+        ):
+            validate_exited_codex_shell("cfg:1", "%42", session_id, "specific-token")
+
     def test_consumed_report_shell_validation_only_waives_visible_acceptance(self) -> None:
         session_id = "11111111-2222-3333-4444-555555555555"
         transcript = f"terminal report sent\nTo continue this session, run:\n  codex resume {session_id}\nOr run codex resume and select Define manager worker defaults.\n$ "
