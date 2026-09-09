@@ -8,6 +8,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 from unittest.mock import patch
 
@@ -16,16 +17,20 @@ from omo_manager.omo_stale_predecessor_close import (
     AUDIT_KEYS,
     OPERATION,
     SCHEMA,
+    SOURCE1485_PACKET_KEYS,
+    SOURCE1485_SCHEMA,
     PanePin,
     audit_authorizes,
     audit_authorizes_after_close,
     bound_receipt_id,
     execute,
+    live_evidence,
     packet_bytes,
     parse_pin,
     predecessor_snapshots,
     reconstruct_predecessor,
     sha256,
+    validate_source1485_manager_transition,
     validate_inputs,
     validate_ready_predecessor,
     validate_packet,
@@ -39,6 +44,58 @@ def task_text(body: str = "first\n(done)\nnew work\n") -> bytes:
 
 def manager_text() -> str:
     return "---\nversion: v1.0.0\nstatus: running\nrunat: dw:0\ntool: codex\nmanagerat: wl:1\nis_manager: true\npending_task_items: []\n---\n"
+
+
+def source1485_audit(tmp: Path) -> tuple[Path, str]:
+    successor = b"authenticated successor manager\n"
+    record = {
+        "state": "committed",
+        "operation": "manager-replace",
+        "root": str(tmp),
+        "old_task": "dw_manager.md",
+        "old_target": "dw:0",
+        "successor_task": "dw_root_new.md",
+        "new_target": "dw:15",
+        "parent_target": "config:1",
+        "source1485_topology": {
+            "root_task": "dw_root_new.md",
+            "root_target": "dw:15.0",
+            "parent_target": "config:1.0",
+            "rows": [
+                {
+                    "task": "dw_root_new.md",
+                    "is_manager": True,
+                    "tool": "codex",
+                    "runat": "dw:15.0",
+                    "managerat": "config:1.0",
+                    "sha256": sha256(successor),
+                }
+            ],
+        },
+        "files": [{"task": "dw_root_new.md", "before": None, "after": base64.b64encode(successor).decode()}],
+    }
+    data = canonical_json(record)
+    path = tmp / "source1485-audit.json"
+    path.write_bytes(data)
+    path.chmod(0o600)
+    return path, sha256(data)
+
+
+def source1485_record(tmp: Path) -> tuple[dict[str, object], str]:
+    audit, audit_sha = source1485_audit(tmp)
+    record = packet_record(tmp)
+    record.update(
+        {
+            "schema": SOURCE1485_SCHEMA,
+            "manager_task": str(tmp / "dw_root_new.md"),
+            "manager_target": "dw:15",
+            "historical_manager_task": str(tmp / "dw_manager.md"),
+            "historical_manager_target": "dw:0",
+            "source1485_root_audit": str(audit),
+            "source1485_root_audit_sha256": audit_sha,
+        }
+    )
+    return record, audit_sha
 
 
 def packet_record(tmp: Path) -> dict[str, object]:
@@ -104,6 +161,111 @@ class StalePredecessorCloseTests(unittest.TestCase):
             parsed = validate_packet(data, sha256(data))
             self.assertEqual(SCHEMA, parsed["schema"])
             self.assertEqual(bound_receipt_id({key: value for key, value in parsed.items() if key != "binding_id"}), parsed["binding_id"])
+
+    def test_source1485_packet_authenticates_historical_to_current_manager_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            record, audit_sha = source1485_record(tmp)
+            data = packet_bytes(record)
+            with (
+                patch("omo_manager.omo_stale_predecessor_close.SOURCE1485_ROOT_AUDIT_SHA256", audit_sha),
+                patch("omo_manager.omo_stale_predecessor_close.SOURCE1485_ROOT_AUDIT_PATH", tmp / "source1485-audit.json"),
+            ):
+                parsed = validate_packet(data, sha256(data))
+                historical, target, audit = validate_source1485_manager_transition(parsed)
+            self.assertEqual(SOURCE1485_PACKET_KEYS, set(parsed))
+            self.assertEqual((tmp / "dw_manager.md", "dw:0", tmp / "source1485-audit.json"), (historical, target, audit))
+
+    def test_source1485_transition_rejects_wrong_old_or_current_manager(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            original, audit_sha = source1485_record(tmp)
+            for field, value in (
+                ("historical_manager_task", str(tmp / "other-old.md")),
+                ("historical_manager_target", "dw:9"),
+                ("manager_task", str(tmp / "other-current.md")),
+                ("manager_target", "dw:9"),
+            ):
+                with self.subTest(field=field):
+                    record = dict(original)
+                    record[field] = value
+                    with (
+                        patch("omo_manager.omo_stale_predecessor_close.SOURCE1485_ROOT_AUDIT_SHA256", audit_sha),
+                        patch("omo_manager.omo_stale_predecessor_close.SOURCE1485_ROOT_AUDIT_PATH", tmp / "source1485-audit.json"),
+                        self.assertRaisesRegex(TaskFrontmatterError, "transition evidence"),
+                    ):
+                        validate_source1485_manager_transition(record)
+
+    def test_source1485_transition_rejects_wrong_audit_path_digest_and_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            original, audit_sha = source1485_record(tmp)
+            wrong_path = dict(original)
+            wrong_path["source1485_root_audit"] = "relative.json"
+            wrong_digest = dict(original)
+            wrong_digest["source1485_root_audit_sha256"] = "0" * 64
+            for record, message in ((wrong_path, "binding"), (wrong_digest, "binding")):
+                with (
+                    patch("omo_manager.omo_stale_predecessor_close.SOURCE1485_ROOT_AUDIT_SHA256", audit_sha),
+                    patch("omo_manager.omo_stale_predecessor_close.SOURCE1485_ROOT_AUDIT_PATH", tmp / "source1485-audit.json"),
+                    self.assertRaisesRegex(TaskFrontmatterError, message),
+                ):
+                    validate_source1485_manager_transition(record)
+            (tmp / "source1485-audit.json").write_bytes(b"{}\n")
+            with (
+                patch("omo_manager.omo_stale_predecessor_close.SOURCE1485_ROOT_AUDIT_SHA256", audit_sha),
+                patch("omo_manager.omo_stale_predecessor_close.SOURCE1485_ROOT_AUDIT_PATH", tmp / "source1485-audit.json"),
+                self.assertRaisesRegex(TaskFrontmatterError, "changed"),
+            ):
+                validate_source1485_manager_transition(original)
+
+    def test_source1485_transition_rejects_semantic_audit_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            original, _audit_sha = source1485_record(tmp)
+            audit_path = tmp / "source1485-audit.json"
+            audit = json.loads(audit_path.read_bytes())
+            audit["old_target"] = "dw:9"
+            data = canonical_json(audit)
+            audit_path.write_bytes(data)
+            semantic_sha = sha256(data)
+            original["source1485_root_audit_sha256"] = semantic_sha
+            with (
+                patch("omo_manager.omo_stale_predecessor_close.SOURCE1485_ROOT_AUDIT_SHA256", semantic_sha),
+                patch("omo_manager.omo_stale_predecessor_close.SOURCE1485_ROOT_AUDIT_PATH", tmp / "source1485-audit.json"),
+                self.assertRaisesRegex(TaskFrontmatterError, "transition evidence"),
+            ):
+                validate_source1485_manager_transition(original)
+
+    def test_source1485_live_evidence_uses_historical_consumed_manager_and_current_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            record, audit_sha = source1485_record(tmp)
+            record["inputs"] = [{}] * 6
+            running = base64.b64decode(cast(str, record["predecessor_running_base64"]))
+            done = base64.b64decode(cast(str, record["predecessor_done_base64"]))
+            consumed = (
+                {"replay_id": record["report_replay_id"], "attestation_id": record["report_attestation_id"]},
+                running,
+                done,
+                tmp / "dw_manager.md",
+                (),
+            )
+            current_manager = SimpleNamespace(is_manager=True, runat="dw:15", status="running")
+            with (
+                patch("omo_manager.omo_stale_predecessor_close.SOURCE1485_ROOT_AUDIT_SHA256", audit_sha),
+                patch("omo_manager.omo_stale_predecessor_close.SOURCE1485_ROOT_AUDIT_PATH", tmp / "source1485-audit.json"),
+                patch("omo_manager.omo_stale_predecessor_close.read_private_or_owned", return_value=b"current bytes"),
+                patch("omo_manager.omo_stale_predecessor_close.validate_successor"),
+                patch("omo_manager.omo_stale_predecessor_close.parse_task_metadata", return_value=current_manager),
+                patch("omo_manager.omo_stale_predecessor_close.validate_consumed_export", return_value=consumed) as validate_consumed,
+                patch("omo_manager.omo_stale_predecessor_close.file_input", return_value={}),
+                patch("omo_manager.omo_stale_predecessor_close.authoritative_active_target_task_paths", return_value=()),
+                patch("omo_manager.omo_stale_predecessor_close.current_pin", return_value=True),
+                patch("omo_manager.omo_stale_predecessor_close.codex_status", return_value="ready"),
+            ):
+                live_evidence(record, query_sessions=False)
+            self.assertEqual("dw:0", validate_consumed.call_args.args[-1])
 
     def test_packet_rejects_target_overlap(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

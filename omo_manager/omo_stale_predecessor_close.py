@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import hashlib
 import json
 import os
@@ -51,10 +52,11 @@ from omo_manager.omo_repository_custody import (
 )
 from omo_manager.omo_report_receipt import bound_receipt_id
 from omo_manager.omo_task_lock import process_start_ticks, task_file_lock, task_target_lock
-from omo_manager.omo_task_metadata import TaskFrontmatterError, parse_task_metadata
+from omo_manager.omo_task_metadata import TaskFrontmatterError, canonical_target, parse_task_metadata
 from omo_manager.omo_task_status import authoritative_active_target_task_paths
 
 SCHEMA = "omo-stale-predecessor-close/v1"
+SOURCE1485_SCHEMA = "omo-stale-predecessor-close/v2"
 REVIEW_SCHEMA = "omo-stale-predecessor-close-review/v1"
 # 🧑 "Continue until each item is complete or cancelled."
 OPERATION = "stale-predecessor-no-mail-close"
@@ -63,6 +65,8 @@ SESSION_RE = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
 PANE_RE = re.compile(r"^%[0-9]+$")
 TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 MAX_FILE_BYTES = 4 * 1024 * 1024
+SOURCE1485_ROOT_AUDIT_SHA256 = "dd2cd04c1c6cd6c4050c7cd537d893e3c24aec45c504c1db3dbe0e4c0c792f2b"
+SOURCE1485_ROOT_AUDIT_PATH = Path("/tmp/config4-source1485-root.83gryy/audit.json")
 PACKET_KEYS = {
     "schema",
     "root",
@@ -95,6 +99,12 @@ PACKET_KEYS = {
     "inputs",
     "binding_id",
 }
+SOURCE1485_PACKET_KEYS = PACKET_KEYS | {
+    "historical_manager_task",
+    "historical_manager_target",
+    "source1485_root_audit",
+    "source1485_root_audit_sha256",
+}
 AUDIT_KEYS = {
     "schema",
     "operation",
@@ -126,6 +136,12 @@ AUDIT_KEYS = {
     "inputs",
     "packet_sha256",
     "binding_id",
+}
+SOURCE1485_AUDIT_KEYS = AUDIT_KEYS | {
+    "historical_manager_task",
+    "historical_manager_target",
+    "source1485_root_audit",
+    "source1485_root_audit_sha256",
 }
 
 
@@ -165,6 +181,70 @@ def canonical_object(data: bytes, label: str) -> dict[str, object]:
     if canonical_json(record) != data:
         raise TaskFrontmatterError(f"{label} is not canonical JSON.")
     return record
+
+
+def validate_source1485_manager_transition(record: dict[str, object]) -> tuple[Path, str, Path]:
+    """Bind the exact historical-to-current manager migration used by Source 1485."""
+
+    root = Path(str(record.get("root", "")))
+    historical_manager = Path(str(record.get("historical_manager_task", "")))
+    current_manager = Path(str(record.get("manager_task", "")))
+    audit_path = Path(str(record.get("source1485_root_audit", "")))
+    historical_target = str(record.get("historical_manager_target", ""))
+    current_target = str(record.get("manager_target", ""))
+    audit_sha256 = str(record.get("source1485_root_audit_sha256", ""))
+    if (
+        record.get("schema") != SOURCE1485_SCHEMA
+        or not root.is_absolute()
+        or not historical_manager.is_absolute()
+        or not current_manager.is_absolute()
+        or audit_path != SOURCE1485_ROOT_AUDIT_PATH
+        or audit_sha256 != SOURCE1485_ROOT_AUDIT_SHA256
+    ):
+        raise TaskFrontmatterError("Source-1485 manager transition binding is invalid.")
+    audit = canonical_object(read_private(audit_path, audit_sha256, "Source-1485 root audit"), "Source-1485 root audit")
+    topology = object_map(audit.get("source1485_topology"), "Source-1485 topology")
+    rows = topology.get("rows")
+    if not isinstance(rows, list):
+        raise TaskFrontmatterError("Source-1485 manager transition evidence is invalid.")
+    manager_rows = [object_map(item, "Source-1485 topology row") for item in rows if isinstance(item, dict) and item.get("task") == audit.get("successor_task")]
+    files = audit.get("files")
+    if not isinstance(files, list):
+        raise TaskFrontmatterError("Source-1485 manager transition evidence is invalid.")
+    successor_files = [object_map(item, "Source-1485 file") for item in files if isinstance(item, dict) and item.get("task") == audit.get("successor_task")]
+    if len(manager_rows) != 1 or len(successor_files) != 1:
+        raise TaskFrontmatterError("Source-1485 manager transition evidence is invalid.")
+    manager_row, successor_file = manager_rows[0], successor_files[0]
+    encoded_after = successor_file.get("after")
+    try:
+        successor_after = base64.b64decode(str(encoded_after), validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise TaskFrontmatterError("Source-1485 manager transition evidence is invalid.") from exc
+    if (
+        audit.get("state") != "committed"
+        or audit.get("operation") != "manager-replace"
+        or audit.get("root") != str(root)
+        or audit.get("old_task") != "dw_manager.md"
+        or canonical_target(str(audit.get("old_target", ""))) != "dw:0"
+        or audit.get("successor_task") != "dw_root_new.md"
+        or canonical_target(str(audit.get("new_target", ""))) != "dw:15"
+        or canonical_target(str(audit.get("parent_target", ""))) != "config:1"
+        or historical_manager != root / "dw_manager.md"
+        or canonical_target(historical_target) != "dw:0"
+        or current_manager != root / "dw_root_new.md"
+        or canonical_target(current_target) != "dw:15"
+        or topology.get("root_task") != "dw_root_new.md"
+        or canonical_target(str(topology.get("root_target", ""))) != "dw:15"
+        or canonical_target(str(topology.get("parent_target", ""))) != "config:1"
+        or manager_row.get("is_manager") is not True
+        or manager_row.get("tool") != "codex"
+        or canonical_target(str(manager_row.get("runat", ""))) != "dw:15"
+        or canonical_target(str(manager_row.get("managerat", ""))) != "config:1"
+        or successor_file.get("before") is not None
+        or sha256(successor_after) != manager_row.get("sha256")
+    ):
+        raise TaskFrontmatterError("Source-1485 manager transition evidence is invalid.")
+    return historical_manager, historical_target, audit_path
 
 
 def bound_id(record: dict[str, object], field: str, label: str) -> str:
@@ -521,7 +601,9 @@ def validate_packet(data: bytes, expected_sha256: str = "") -> dict[str, object]
     if expected_sha256 and sha256(data) != expected_sha256:
         raise TaskFrontmatterError("packet digest changed.")
     packet = canonical_object(data, "stale-predecessor packet")
-    if set(packet) != PACKET_KEYS or packet.get("schema") != SCHEMA or bound_id(packet, "binding_id", "packet") != packet["binding_id"]:
+    schema = packet.get("schema")
+    expected_keys = SOURCE1485_PACKET_KEYS if schema == SOURCE1485_SCHEMA else PACKET_KEYS
+    if schema not in {SCHEMA, SOURCE1485_SCHEMA} or set(packet) != expected_keys or bound_id(packet, "binding_id", "packet") != packet["binding_id"]:
         raise TaskFrontmatterError("stale-predecessor packet schema is invalid.")
     if sha256(base64.b64decode(str(packet["predecessor_running_base64"]), validate=True)) != packet["predecessor_running_sha256"]:
         raise TaskFrontmatterError("packet predecessor running image is invalid.")
@@ -539,7 +621,42 @@ def validate_packet(data: bytes, expected_sha256: str = "") -> dict[str, object]
         or not Path(str(packet["audit"])).is_absolute()
     ):
         raise TaskFrontmatterError("packet target scope is invalid.")
+    if schema == SOURCE1485_SCHEMA:
+        validate_source1485_manager_transition(packet)
     return packet
+
+
+def manager_evidence(record: dict[str, object]) -> tuple[Path, str, Path | None]:
+    manager_path = Path(str(record["manager_task"]))
+    manager_target = str(record["manager_target"])
+    if record.get("schema") == SOURCE1485_SCHEMA:
+        return validate_source1485_manager_transition(record)
+    return manager_path, manager_target, None
+
+
+def evidence_input_specs(
+    record: dict[str, object],
+    task_path: Path,
+    todo_path: Path,
+    manager_path: Path,
+    evidence_paths: tuple[Path, ...],
+) -> tuple[tuple[Path, str, bool], ...]:
+    source_audit = manager_evidence(record)[2]
+    items: list[tuple[Path, str, bool]] = [
+        (task_path, "protected task", False),
+        (todo_path, "TODO", False),
+        (manager_path, "manager task", False),
+    ]
+    if source_audit is not None:
+        items.append((source_audit, "Source-1485 root audit", True))
+    items.extend(
+        (
+            (Path(str(record["helper"])), "stale-predecessor helper", False),
+            (Path(str(record["consumed_export"])), "consumed export", True),
+            *tuple((path, f"predecessor evidence {index}", True) for index, path in enumerate(evidence_paths)),
+        )
+    )
+    return tuple(items)
 
 
 def live_evidence(
@@ -559,6 +676,7 @@ def live_evidence(
     manager = parse_task_metadata(manager_data.decode(), root)
     if manager is None or not manager.is_manager or manager.runat != packet["manager_target"] or manager.status not in {"running", "long_running"}:
         raise TaskFrontmatterError("manager task is no longer the active reporting owner.")
+    historical_manager, historical_target, _source_audit = manager_evidence(packet)
     attestation, running, done, observed_manager, evidence_paths = validate_consumed_export(
         Path(str(packet["consumed_export"])),
         str(packet["consumed_export_sha256"]),
@@ -566,10 +684,10 @@ def live_evidence(
         task_data,
         root,
         str(packet["predecessor_target"]),
-        str(packet["manager_target"]),
+        historical_target,
     )
     if (
-        observed_manager != manager_path
+        observed_manager != historical_manager
         or sha256(running) != packet["predecessor_running_sha256"]
         or sha256(done) != packet["predecessor_done_sha256"]
         or attestation.get("replay_id") != packet["report_replay_id"]
@@ -578,17 +696,7 @@ def live_evidence(
         raise TaskFrontmatterError("predecessor provenance changed.")
     validate_inputs(
         packet["inputs"],
-        [
-            file_input(path, label, private=private)
-            for path, label, private in (
-                (task_path, "protected task", False),
-                (todo_path, "TODO", False),
-                (manager_path, "manager task", False),
-                (Path(str(packet["helper"])), "stale-predecessor helper", False),
-                (Path(str(packet["consumed_export"])), "consumed export", True),
-                *tuple((path, f"predecessor evidence {index}", True) for index, path in enumerate(evidence_paths)),
-            )
-        ],
+        [file_input(path, label, private=private) for path, label, private in evidence_input_specs(packet, task_path, todo_path, manager_path, evidence_paths)],
     )
     if authoritative_active_target_task_paths(root, str(packet["predecessor_target"])):
         raise TaskFrontmatterError("completed predecessor target has an active lifecycle owner.")
@@ -654,6 +762,24 @@ def prepare(args: argparse.Namespace) -> None:
     manager_data, manager_identity, _ = absolute_file_binding(manager_path, "manager task")
     helper_path = Path(__file__).resolve(strict=True)
     helper_data, _helper_identity, _ = absolute_file_binding(helper_path, "stale-predecessor helper")
+    source_audit_supplied = args.source1485_root_audit is not None or bool(args.source1485_root_audit_sha256)
+    if source_audit_supplied != (args.source1485_root_audit is not None and bool(args.source1485_root_audit_sha256)):
+        raise TaskFrontmatterError("Source-1485 manager transition requires an audit path and digest.")
+    transition_fields: dict[str, object] = {}
+    if source_audit_supplied:
+        transition_fields = {
+            "schema": SOURCE1485_SCHEMA,
+            "root": str(root),
+            "manager_task": str(manager_path),
+            "manager_target": args.manager_target,
+            "historical_manager_task": str(root / "dw_manager.md"),
+            "historical_manager_target": "dw:0",
+            "source1485_root_audit": str(args.source1485_root_audit),
+            "source1485_root_audit_sha256": args.source1485_root_audit_sha256,
+        }
+        historical_manager, historical_target, _source_audit = validate_source1485_manager_transition(transition_fields)
+    else:
+        historical_manager, historical_target = manager_path, args.manager_target
     predecessor_identity = target_identity(args.predecessor_target)
     protected_identity = target_identity(args.protected_target)
     predecessor = PanePin(args.predecessor_target, *predecessor_identity)
@@ -669,27 +795,25 @@ def prepare(args: argparse.Namespace) -> None:
         task_data,
         root,
         args.predecessor_target,
-        args.manager_target,
+        historical_target,
     )
-    if observed_manager != manager_path:
-        raise TaskFrontmatterError("consumed report manager differs from the active reporting manager.")
+    if observed_manager != historical_manager:
+        raise TaskFrontmatterError("consumed report manager differs from the authenticated historical reporting manager.")
     validate_successor(task_path, task_data, todo_data, root, args.protected_target, args.manager_target)
     if authoritative_active_target_task_paths(root, args.predecessor_target):
         raise TaskFrontmatterError("completed predecessor target still has active lifecycle ownership.")
     secret = secrets.token_hex(32)
-    inputs = [
-        file_input(path, label, private=private)
-        for path, label, private in (
-            (task_path, "protected task", False),
-            (todo_path, "TODO", False),
-            (manager_path, "manager task", False),
-            (helper_path, "stale-predecessor helper", False),
-            (args.consumed_export.resolve(strict=True), "consumed export", True),
-            *tuple((path, f"predecessor evidence {index}", True) for index, path in enumerate(evidence_paths)),
-        )
-    ]
+    input_record = {
+        "schema": SOURCE1485_SCHEMA if source_audit_supplied else SCHEMA,
+        "manager_task": str(manager_path),
+        "manager_target": args.manager_target,
+        **transition_fields,
+        "helper": str(helper_path),
+        "consumed_export": str(args.consumed_export.resolve(strict=True)),
+    }
+    inputs = [file_input(path, label, private=private) for path, label, private in evidence_input_specs(input_record, task_path, todo_path, manager_path, evidence_paths)]
     record: dict[str, object] = {
-        "schema": SCHEMA,
+        "schema": SOURCE1485_SCHEMA if source_audit_supplied else SCHEMA,
         "root": str(root),
         "task": str(task_path),
         "todo": str(todo_path),
@@ -718,6 +842,7 @@ def prepare(args: argparse.Namespace) -> None:
         "close_proof_commitment": sha256(secret.encode()),
         "audit": str(args.audit),
         "inputs": inputs,
+        **{key: value for key, value in transition_fields.items() if key in SOURCE1485_PACKET_KEYS - PACKET_KEYS},
     }
     data = packet_bytes(record)
     publish_or_validate(args.output, data, "stale-predecessor packet")
@@ -725,8 +850,9 @@ def prepare(args: argparse.Namespace) -> None:
 
 
 def prepared_audit(packet: dict[str, object], packet_sha256: str) -> bytes:
-    fields = {key: packet[key] for key in AUDIT_KEYS if key in packet}
-    fields.update({"schema": SCHEMA, "operation": OPERATION, "state": "prepared", "packet_sha256": packet_sha256})
+    keys = SOURCE1485_AUDIT_KEYS if packet.get("schema") == SOURCE1485_SCHEMA else AUDIT_KEYS
+    fields = {key: packet[key] for key in keys if key in packet}
+    fields.update({"schema": packet["schema"], "operation": OPERATION, "state": "prepared", "packet_sha256": packet_sha256})
     return canonical_json(fields)
 
 
@@ -742,9 +868,13 @@ def _audit_authorizes(
     *,
     predecessor_absent: bool,
 ) -> bool:
-    if not isinstance(audit, dict) or set(audit) != AUDIT_KEYS:
+    if not isinstance(audit, dict):
         return False
     record = {str(key): value for key, value in audit.items()}
+    schema = record.get("schema")
+    expected_keys = SOURCE1485_AUDIT_KEYS if schema == SOURCE1485_SCHEMA else AUDIT_KEYS
+    if schema not in {SCHEMA, SOURCE1485_SCHEMA} or set(record) != expected_keys:
+        return False
     try:
         predecessor = parse_pin(record["predecessor_pane"], "predecessor pane")
         protected = parse_pin(record["protected_pane"], "protected pane")
@@ -758,6 +888,7 @@ def _audit_authorizes(
         read_private_or_owned(Path(str(record["helper"])), str(record["helper_sha256"]), "stale-predecessor helper")
         validate_successor(task, task_data, todo_data, root, protected.target, str(record["manager_target"]))
         manager = parse_task_metadata(manager_data.decode(), root)
+        historical_manager, historical_target, _source_audit = manager_evidence(record)
         attestation, running, done, observed_manager, evidence_paths = validate_consumed_export(
             Path(str(record["consumed_export"])),
             str(record["consumed_export_sha256"]),
@@ -765,19 +896,9 @@ def _audit_authorizes(
             task_data,
             root,
             predecessor.target,
-            str(record["manager_target"]),
+            historical_target,
         )
-        expected_inputs = [
-            file_input(path, label, private=private)
-            for path, label, private in (
-                (task, "protected task", False),
-                (todo, "TODO", False),
-                (manager_path, "manager task", False),
-                (Path(str(record["helper"])), "stale-predecessor helper", False),
-                (Path(str(record["consumed_export"])), "consumed export", True),
-                *tuple((path, f"predecessor evidence {index}", True) for index, path in enumerate(evidence_paths)),
-            )
-        ]
+        expected_inputs = [file_input(path, label, private=private) for path, label, private in evidence_input_specs(record, task, todo, manager_path, evidence_paths)]
         if predecessor_absent:
             predecessor_state_matches = pin_is_absent(predecessor)
             predecessor_session = record.get("predecessor_session_id")
@@ -792,7 +913,7 @@ def _audit_authorizes(
         return False
     return (
         audit_text.encode() == canonical_json(record)
-        and record.get("schema") == SCHEMA
+        and record.get("schema") in {SCHEMA, SOURCE1485_SCHEMA}
         and record.get("operation") == OPERATION
         and record.get("state") == "prepared"
         and record.get("close_proof_commitment") == commitment
@@ -807,7 +928,7 @@ def _audit_authorizes(
         and manager.is_manager
         and manager.runat == record.get("manager_target")
         and manager.status in {"running", "long_running"}
-        and observed_manager == manager_path
+        and observed_manager == historical_manager
         and attestation.get("replay_id") == record.get("report_replay_id")
         and attestation.get("attestation_id") == record.get("report_attestation_id")
         and sha256(running) == record.get("predecessor_running_sha256")
@@ -1080,6 +1201,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--manager-target", default="")
     result.add_argument("--consumed-export", type=Path)
     result.add_argument("--consumed-export-sha256", default="")
+    result.add_argument("--source1485-root-audit", type=Path)
+    result.add_argument("--source1485-root-audit-sha256", default="")
     result.add_argument("--audit", type=Path)
     result.add_argument("--output", type=Path)
     result.add_argument("--packet", type=Path)
