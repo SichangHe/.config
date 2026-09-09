@@ -56,6 +56,9 @@ from omo_manager.omo_stale_predecessor_close import (
     SCHEMA as CLOSE_SCHEMA,
 )
 from omo_manager.omo_stale_predecessor_close import (
+    SOURCE1485_SCHEMA as CLOSE_SOURCE1485_SCHEMA,
+)
+from omo_manager.omo_stale_predecessor_close import (
     PanePin,
     current_pin,
     object_map,
@@ -64,6 +67,9 @@ from omo_manager.omo_stale_predecessor_close import (
     prepared_audit as close_prepared_audit,
     session_from_process,
     sha256,
+    source1485_live_custody,
+    validate_consumed_export as validate_close_consumed_export,
+    validate_successor,
     validate_packet as validate_close_packet,
 )
 from omo_manager.omo_task_lock import task_file_lock, task_target_lock
@@ -74,6 +80,7 @@ from omo_manager.omo_tmux_send import CODEX_PLACEHOLDER_INPUT_TEXTS, exact_compl
 
 SCHEMA = "omo-stale-predecessor-input-disposition/v1"
 SOURCE1485_SCHEMA = "omo-stale-predecessor-input-disposition/v2"
+POST_REVIEW_SCHEMA = "omo-stale-predecessor-input-disposition/v3"
 REVIEW_SCHEMA = "omo-stale-predecessor-input-disposition-review/v1"
 TODO_RECOVERY_SCHEMA = "omo-stale-predecessor-input-disposition-todo-recovery/v2"
 TODO_RECOVERY_REVIEW_SCHEMA = "omo-stale-predecessor-input-disposition-todo-recovery-review/v2"
@@ -105,6 +112,13 @@ LATEST_RECOVERABLE_PACKET_SHA256 = "d9037a18a9ec4ab999b6c9059a87f85231f94601b8de
 LATEST_RECOVERABLE_REVIEW_SHA256 = "2a91482ee7170cc783cc8ec66f5a8bb13238483359e8ab06966fb49e10aea751"
 LATEST_RECOVERABLE_PREPARED_AUDIT_SHA256 = "d0df18ce5617e099cb89abca02afc0cd35f342707cb500fca4a494252fa134ff"
 LATEST_RECOVERABLE_HELPER_SHA256 = "af137b28809b36adf81ac0c5057c066518ffe35a6d86f8d47d343c3a3ba89c4c"
+POST_REVIEW_CLOSE_PACKET_SHA256 = "f763f132c8ba83d80fe1ddeb7c16911a7a42737af2e3f888b0c1e959a4e1919a"
+POST_REVIEW_CLOSE_REVIEW_SHA256 = "353942d04da71bba9a086808e01d701cdfb26582ad79d445a60781d1ab6f2e4d"
+POST_REVIEW_CLOSE_PREPARED_SHA256 = "dbbae3752d1eb098f59b89de8091f22143a9c01a536547cf2dc46edc392bfab1"
+POST_REVIEW_CLOSE_HELPER_SHA256 = "4ee19e34672d706dc9a846f9c3e97a703de9080265ff15277c6abbfb8caa0ab4"
+POST_REVIEW_CLOSE_PACKET_PATH = Path("/tmp/config4-dw8-close-source1485-blocked.JrmGfC/packet.json")
+POST_REVIEW_CLOSE_REVIEW_PATH = Path("/tmp/dw8-close-source1485-review.YYrxI6/independent-review.json")
+POST_REVIEW_CLOSE_PREPARED_PATH = Path("/tmp/config4-dw8-close-source1485-blocked.JrmGfC/audit.json.prepared")
 SOURCE1485_ROOT_AUDIT_SHA256 = "dd2cd04c1c6cd6c4050c7cd537d893e3c24aec45c504c1db3dbe0e4c0c792f2b"
 SOURCE1485_ORIGINAL_TASK_SHA256 = "b79fb58c6b1409dfce202f0f05105e8e3d88887cde77d69e2fc810687148094e"
 EXPECTED_SCOPE = {
@@ -177,6 +191,40 @@ SOURCE1485_PACKET_KEYS = PACKET_KEYS | {
     "original_task_sha256",
     "original_manager_task",
     "original_manager_target",
+}
+POST_REVIEW_PACKET_KEYS = {
+    "schema",
+    "operation",
+    "root",
+    "prior_packet",
+    "prior_packet_sha256",
+    "prior_review",
+    "prior_review_sha256",
+    "prepared_close_audit",
+    "prepared_close_audit_sha256",
+    "authorized_input",
+    "task",
+    "task_sha256",
+    "todo",
+    "original_todo_sha256",
+    "todo_sha256",
+    "manager_task",
+    "original_manager_task_sha256",
+    "manager_task_sha256",
+    "manager_target",
+    "predecessor_target",
+    "predecessor_pane",
+    "predecessor_session_id",
+    "protected_target",
+    "protected_pane",
+    "protected_session_id",
+    "menu_capture_base64",
+    "menu_capture_sha256",
+    "helper",
+    "helper_sha256",
+    "audit",
+    "inputs",
+    "binding_id",
 }
 SOURCE1485_INPUT_COUNT = 14
 SOURCE1485_MANAGER_INPUT_INDEX = 11
@@ -668,6 +716,69 @@ def validate_close_artifacts(
     return prior_packet
 
 
+def validate_post_review_close_artifacts(
+    prior_packet_path: Path,
+    prior_packet_sha256: str,
+    prior_review_path: Path,
+    prior_review_sha256: str,
+    prepared_path: Path,
+    prepared_sha256: str,
+) -> dict[str, object]:
+    """Authenticate the exact reviewed v2 close that encountered a fresh menu."""
+
+    if (
+        prior_packet_path != POST_REVIEW_CLOSE_PACKET_PATH
+        or prior_review_path != POST_REVIEW_CLOSE_REVIEW_PATH
+        or prepared_path != POST_REVIEW_CLOSE_PREPARED_PATH
+        or prior_packet_sha256 != POST_REVIEW_CLOSE_PACKET_SHA256
+        or prior_review_sha256 != POST_REVIEW_CLOSE_REVIEW_SHA256
+        or prepared_sha256 != POST_REVIEW_CLOSE_PREPARED_SHA256
+    ):
+        raise TaskFrontmatterError("post-review recovery is outside the exact failed v2 close transaction.")
+    prior = validate_close_packet(
+        read_bound(prior_packet_path, prior_packet_sha256, "post-review close packet", private=True),
+        prior_packet_sha256,
+    )
+    prepared = read_bound(prepared_path, prepared_sha256, "post-review prepared close audit", private=True)
+    review = canonical_object(
+        read_bound(prior_review_path, prior_review_sha256, "post-review close review", private=True),
+        "post-review close review",
+    )
+    expected_review = {
+        "schema": CLOSE_REVIEW_SCHEMA,
+        "verdict": "PASS",
+        "packet_sha256": prior_packet_sha256,
+        "predecessor_session_id": prior["predecessor_session_id"],
+        "protected_session_id": prior["protected_session_id"],
+        "predecessor_pane": prior["predecessor_pane"],
+        "protected_pane": prior["protected_pane"],
+    }
+    prepared_complete = Path(str(prior["audit"])).resolve(strict=False)
+    proof = prepared_path.with_name(f".{prepared_path.name}.owner-stopped")
+    if (
+        prior.get("schema") != CLOSE_SOURCE1485_SCHEMA
+        or prior.get("helper_sha256") != POST_REVIEW_CLOSE_HELPER_SHA256
+        or prior.get("manager_target") != "dw:15"
+        or prior.get("historical_manager_target") != "dw:0"
+        or prior.get("historical_manager_task") != str(Path(str(prior["root"])) / "dw_manager.md")
+        or prior.get("manager_task") != str(Path(str(prior["root"])) / "dw_root_new.md")
+        or prior.get("predecessor_target") != EXPECTED_SCOPE["predecessor_target"]
+        or prior.get("predecessor_pane") != EXPECTED_SCOPE["predecessor_pane"]
+        or prior.get("predecessor_session_id") != EXPECTED_SCOPE["predecessor_session_id"]
+        or prior.get("protected_target") != EXPECTED_SCOPE["protected_target"]
+        or prior.get("protected_pane") != EXPECTED_SCOPE["protected_pane"]
+        or prior.get("protected_session_id") != EXPECTED_SCOPE["protected_session_id"]
+        or prepared != close_prepared_audit(prior, prior_packet_sha256)
+        or review != expected_review
+        or prepared_path != Path(f"{prior['audit']}.prepared")
+        or path_entry_exists(prepared_complete)
+        or path_entry_exists(done_live_close_started_path(prepared_path))
+        or path_entry_exists(proof)
+    ):
+        raise TaskFrontmatterError("post-review v2 close transaction is not one exact unstarted prepared failure.")
+    return prior
+
+
 def prior_close_control_paths(complete_path: Path, prepared_path: Path) -> set[Path]:
     """Return every path reserved by the prepared predecessor-close transaction."""
 
@@ -966,12 +1077,157 @@ def rebind_todo_recovery_input(
     expected_inputs[expected_matches[0]] = raw_matches[0][1]
 
 
+def validate_post_review_lifecycle(record: dict[str, object]) -> None:
+    root = Path(str(record["root"]))
+    task = Path(str(record["task"]))
+    todo = Path(str(record["todo"]))
+    manager = Path(str(record["manager_task"]))
+    task_data = read_bound(task, str(record["task_sha256"]), "post-review protected task")
+    todo_data = read_bound(todo, str(record["todo_sha256"]), "post-review TODO")
+    manager_data = read_bound(manager, str(record["manager_task_sha256"]), "post-review manager task")
+    validate_successor(
+        task,
+        task_data,
+        todo_data,
+        root,
+        str(record["protected_target"]),
+        str(record["manager_target"]),
+        source1485=True,
+    )
+    metadata = parse_task_metadata(manager_data.decode(), root)
+    if (
+        metadata is None
+        or metadata.status not in {"running", "long_running"}
+        or not metadata.is_manager
+        or metadata.tool != "codex"
+        or canonical_target(metadata.runat) != canonical_target(str(record["manager_target"]))
+        or canonical_target(metadata.managerat) != "config:1"
+        or authoritative_active_target_task_paths(root, str(record["manager_target"])) != (manager,)
+        or authoritative_active_target_task_paths(root, str(record["predecessor_target"]))
+    ):
+        raise TaskFrontmatterError("post-review predecessor/successor lifecycle custody is invalid.")
+
+
+def validate_post_review_provenance(prior: dict[str, object]) -> Path:
+    root = Path(str(prior["root"]))
+    task = Path(str(prior["task"]))
+    task_data = read_bound(task, str(prior["task_sha256"]), "post-review protected task")
+    attestation, running, done, historical_manager, evidence = validate_close_consumed_export(
+        Path(str(prior["consumed_export"])),
+        str(prior["consumed_export_sha256"]),
+        task,
+        task_data,
+        root,
+        str(prior["predecessor_target"]),
+        str(prior["historical_manager_target"]),
+        source1485=True,
+    )
+    if (
+        historical_manager != Path(str(prior["historical_manager_task"]))
+        or attestation.get("replay_id") != prior.get("report_replay_id")
+        or attestation.get("attestation_id") != prior.get("report_attestation_id")
+        or sha256(running) != prior.get("predecessor_running_sha256")
+        or sha256(done) != prior.get("predecessor_done_sha256")
+        or len(evidence) != 4
+    ):
+        raise TaskFrontmatterError("post-review consumed-report provenance changed.")
+    return evidence[-1]
+
+
+def post_review_input_records(
+    prior: dict[str, object],
+    prior_packet_path: Path,
+    prior_review_path: Path,
+    prepared_path: Path,
+    helper: Path,
+) -> list[dict[str, object]]:
+    prior_inputs = prior.get("inputs")
+    if not isinstance(prior_inputs, list):
+        raise TaskFrontmatterError("post-review close input set is invalid.")
+    task = str(prior["task"])
+    todo = str(prior["todo"])
+    manager = str(prior["manager_task"])
+    ledger = str(validate_post_review_provenance(prior))
+    rebound: list[dict[str, object]] = []
+    replaced: set[str] = set()
+    for value in prior_inputs:
+        item = object_map(value, "post-review close input")
+        identity = file_identity_from(item.get("file"), "post-review close input")
+        if identity.path in {todo, manager, ledger}:
+            if identity.path in replaced:
+                raise TaskFrontmatterError("post-review close lifecycle input is duplicated.")
+            rebound.append(file_input(Path(identity.path), "current post-review lifecycle input"))
+            replaced.add(identity.path)
+        else:
+            rebound.append(item)
+    if replaced != {todo, manager, ledger} or sum(file_identity_from(item["file"], "post-review close input").path == task for item in rebound) != 1:
+        raise TaskFrontmatterError("post-review close lifecycle input set is invalid.")
+    records = [
+        file_input(prior_packet_path, "post-review close packet", private=True),
+        file_input(prior_review_path, "post-review close review", private=True),
+        file_input(prepared_path, "post-review prepared close audit", private=True),
+        *rebound,
+        file_input(helper, "post-review disposition helper"),
+    ]
+    validate_recorded_inputs_current(records)
+    return records
+
+
+def static_post_review_evidence(packet: dict[str, object]) -> tuple[PanePin, PanePin]:
+    validate_post_review_packet_scope(packet)
+    prior = validate_post_review_close_artifacts(
+        Path(str(packet["prior_packet"])),
+        str(packet["prior_packet_sha256"]),
+        Path(str(packet["prior_review"])),
+        str(packet["prior_review_sha256"]),
+        Path(str(packet["prepared_close_audit"])),
+        str(packet["prepared_close_audit_sha256"]),
+    )
+    helper = Path(__file__).resolve(strict=True)
+    helper_data = read_bound(helper, str(packet["helper_sha256"]), "post-review disposition helper")
+    expected_inputs = post_review_input_records(
+        prior,
+        Path(str(packet["prior_packet"])),
+        Path(str(packet["prior_review"])),
+        Path(str(packet["prepared_close_audit"])),
+        helper,
+    )
+    expected_identities = {
+        identity.path: identity for identity in (file_identity_from(object_map(value, "post-review disposition input").get("file"), "post-review disposition input") for value in expected_inputs)
+    }
+    if (
+        packet.get("root") != prior.get("root")
+        or packet.get("task") != prior.get("task")
+        or packet.get("task_sha256") != prior.get("task_sha256")
+        or packet.get("todo") != prior.get("todo")
+        or packet.get("original_todo_sha256") != prior.get("todo_sha256")
+        or packet.get("manager_task") != prior.get("manager_task")
+        or packet.get("original_manager_task_sha256") != prior.get("manager_task_sha256")
+        or packet.get("todo_sha256") != expected_identities[str(packet["todo"])].sha256
+        or packet.get("manager_task_sha256") != expected_identities[str(packet["manager_task"])].sha256
+        or packet.get("helper") != str(helper)
+        or sha256(helper_data) != packet.get("helper_sha256")
+        or packet.get("inputs") != expected_inputs
+    ):
+        raise TaskFrontmatterError("post-review disposition evidence changed.")
+    validate_post_review_lifecycle(packet)
+    predecessor = parse_pin(packet["predecessor_pane"], "predecessor pane")
+    protected = parse_pin(packet["protected_pane"], "protected pane")
+    if predecessor.target == protected.target:
+        raise TaskFrontmatterError("post-review disposition pane scope is invalid.")
+    return predecessor, protected
+
+
 def static_evidence(
     packet: dict[str, object],
     *,
     rebind_recoverable_helper: bool = False,
     todo_recovery: dict[str, object] | None = None,
 ) -> tuple[PanePin, PanePin]:
+    if packet.get("schema") == POST_REVIEW_SCHEMA:
+        if rebind_recoverable_helper or todo_recovery is not None:
+            raise TaskFrontmatterError("post-review disposition does not permit evidence rebinding.")
+        return static_post_review_evidence(packet)
     validate_incident_digests(packet)
     prior = validate_close_artifacts(
         Path(str(packet["prior_packet"])),
@@ -1109,7 +1365,7 @@ def live_state(
     if predecessor_session != packet["predecessor_session_id"] or protected_session != packet["protected_session_id"]:
         raise TaskFrontmatterError("predecessor or protected Codex session changed.")
     capture = capture_pinned(predecessor)
-    if packet.get("schema") == SOURCE1485_SCHEMA and not exact_ready_capture(capture_pinned(protected)):
+    if packet.get("schema") in {SOURCE1485_SCHEMA, POST_REVIEW_SCHEMA} and not exact_ready_capture(capture_pinned(protected)):
         raise TaskFrontmatterError("protected successor left its preserved ready state.")
     state = exact_recovery_state(capture_lines(capture), str(packet["authorized_input"]))
     expected_capture = base64.b64decode(str(packet["menu_capture_base64"]), validate=True)
@@ -1126,18 +1382,76 @@ def packet_bytes(record: dict[str, object]) -> bytes:
     return canonical_json({**unsigned, "binding_id": bound_receipt_id(unsigned)})
 
 
+def validate_post_review_packet_scope(packet: dict[str, object]) -> None:
+    if (
+        packet.get("schema") != POST_REVIEW_SCHEMA
+        or packet.get("operation") != OPERATION
+        or packet.get("prior_packet_sha256") != POST_REVIEW_CLOSE_PACKET_SHA256
+        or packet.get("prior_review_sha256") != POST_REVIEW_CLOSE_REVIEW_SHA256
+        or packet.get("prepared_close_audit_sha256") != POST_REVIEW_CLOSE_PREPARED_SHA256
+        or packet.get("authorized_input") != AUTHORIZED_INPUT
+        or packet.get("manager_target") != "dw:15"
+        or packet.get("predecessor_target") != EXPECTED_SCOPE["predecessor_target"]
+        or packet.get("predecessor_pane") != EXPECTED_SCOPE["predecessor_pane"]
+        or packet.get("predecessor_session_id") != EXPECTED_SCOPE["predecessor_session_id"]
+        or packet.get("protected_target") != EXPECTED_SCOPE["protected_target"]
+        or packet.get("protected_pane") != EXPECTED_SCOPE["protected_pane"]
+        or packet.get("protected_session_id") != EXPECTED_SCOPE["protected_session_id"]
+        or not all(Path(str(packet[key])).is_absolute() for key in ("root", "prior_packet", "prior_review", "prepared_close_audit", "task", "todo", "manager_task", "helper", "audit"))
+    ):
+        raise TaskFrontmatterError("post-review disposition packet scope is inconsistent.")
+
+
+def hold_recorded_inputs(records: object, stack: ExitStack) -> list[HeldAbsolute]:
+    if not isinstance(records, list):
+        raise TaskFrontmatterError("post-review disposition input set is invalid.")
+    held: list[HeldAbsolute] = []
+    paths: set[str] = set()
+    for value in records:
+        item = object_map(value, "post-review disposition input")
+        identity = file_identity_from(item.get("file"), "post-review disposition input")
+        raw_ancestors = item.get("ancestors")
+        if identity.path in paths or not isinstance(raw_ancestors, Iterable) or isinstance(raw_ancestors, (str, bytes, dict)):
+            raise TaskFrontmatterError("post-review disposition input set is invalid.")
+        paths.add(identity.path)
+        ancestors = tuple(directory_identity_from(entry, "post-review disposition input ancestor") for entry in cast(Iterable[object], raw_ancestors))
+        current = hold_absolute(identity, ancestors)
+        held.append(current)
+        stack.callback(os.close, current.descriptor)
+        for descriptor in reversed(current.directories):
+            stack.callback(os.close, descriptor)
+    for current in held:
+        validate_held_absolute(current)
+    return held
+
+
+def validate_recorded_inputs_current(records: object) -> None:
+    with ExitStack() as stack:
+        hold_recorded_inputs(records, stack)
+
+
 def validate_packet(data: bytes, expected_sha256: str = "") -> dict[str, object]:
     if expected_sha256 and sha256(data) != expected_sha256:
         raise TaskFrontmatterError("disposition packet digest changed.")
     packet = canonical_object(data, "input disposition packet")
     unsigned = dict(packet)
     observed_binding = unsigned.pop("binding_id", None)
-    expected_keys = SOURCE1485_PACKET_KEYS if packet.get("schema") == SOURCE1485_SCHEMA else PACKET_KEYS
+    schema = packet.get("schema")
+    expected_keys = POST_REVIEW_PACKET_KEYS if schema == POST_REVIEW_SCHEMA else SOURCE1485_PACKET_KEYS if schema == SOURCE1485_SCHEMA else PACKET_KEYS
     if set(packet) != expected_keys or observed_binding != bound_receipt_id(unsigned):
         raise TaskFrontmatterError("input disposition packet schema is invalid.")
-    validate_incident_digests(packet)
+    if schema == POST_REVIEW_SCHEMA:
+        validate_post_review_packet_scope(packet)
+    else:
+        validate_incident_digests(packet)
     if not Path(str(packet["audit"])).is_absolute():
         raise TaskFrontmatterError("input disposition audit path is invalid.")
+    try:
+        capture = base64.b64decode(str(packet["menu_capture_base64"]), validate=True)
+    except ValueError as exc:
+        raise TaskFrontmatterError("bound menu capture bytes are invalid.") from exc
+    if sha256(capture) != packet["menu_capture_sha256"]:
+        raise TaskFrontmatterError("bound menu capture bytes are invalid.")
     return packet
 
 
@@ -1185,6 +1499,125 @@ def capture_fresh_preparation_menu(predecessor: PanePin, protected: PanePin) -> 
     if not exact_ready_capture(capture_pinned(protected)):
         raise TaskFrontmatterError("protected successor changed during preparation.")
     return menu_capture
+
+
+def validate_post_review_live_custody(
+    prior: dict[str, object],
+    root: Path,
+    manager: Path,
+    predecessor: PanePin,
+    protected: PanePin,
+) -> None:
+    """Reject pane, session, or lifecycle custody drift during preparation."""
+
+    if not current_pin(predecessor) or not current_pin(protected):
+        raise TaskFrontmatterError("predecessor or protected pane identity changed.")
+    predecessor_session = session_from_process(predecessor)
+    protected_session = session_from_process(protected)
+    if not current_pin(predecessor) or not current_pin(protected):
+        raise TaskFrontmatterError("predecessor or protected pane identity changed during session validation.")
+    if predecessor_session != prior["predecessor_session_id"] or protected_session != prior["protected_session_id"]:
+        raise TaskFrontmatterError("predecessor or protected Codex session changed.")
+    if not source1485_live_custody(root, protected.target, str(prior["manager_target"]), manager):
+        raise TaskFrontmatterError("protected successor or current manager custody changed.")
+
+
+def prepare_post_review(args: argparse.Namespace) -> None:
+    prior_packet_path = args.prior_packet.resolve(strict=True)
+    prior_review_path = args.prior_review.resolve(strict=True)
+    prepared_path = args.prepared_close_audit.resolve(strict=True)
+    prior = validate_post_review_close_artifacts(
+        prior_packet_path,
+        args.prior_packet_sha256,
+        prior_review_path,
+        args.prior_review_sha256,
+        prepared_path,
+        args.prepared_close_audit_sha256,
+    )
+    root = Path(str(prior["root"])).resolve(strict=True)
+    task = Path(str(prior["task"])).resolve(strict=True)
+    todo = Path(str(prior["todo"])).resolve(strict=True)
+    manager = Path(str(prior["manager_task"])).resolve(strict=True)
+    helper = Path(__file__).resolve(strict=True)
+    helper_data, helper_identity, _helper_ancestors = absolute_file_binding(helper, "post-review disposition helper")
+    output = args.output.resolve(strict=False)
+    audit = args.audit.resolve(strict=False)
+    raw_inputs = prior.get("inputs")
+    if not isinstance(raw_inputs, list):
+        raise TaskFrontmatterError("post-review close input set is invalid.")
+    reserved = {
+        prior_packet_path,
+        prior_review_path,
+        prepared_path,
+        Path(str(prior["audit"])).resolve(strict=False),
+        task,
+        todo,
+        manager,
+        helper,
+        *(Path(file_identity_from(object_map(value, "post-review close input").get("file"), "post-review close input").path) for value in raw_inputs),
+    } | prior_close_control_paths(Path(str(prior["audit"])), prepared_path)
+    validate_disposition_output_paths(output, audit, reserved)
+    predecessor = parse_pin(prior["predecessor_pane"], "predecessor pane")
+    protected = parse_pin(prior["protected_pane"], "protected pane")
+    validate_post_review_live_custody(prior, root, manager, predecessor, protected)
+    menu_capture = capture_fresh_preparation_menu(predecessor, protected)
+    inputs = post_review_input_records(prior, prior_packet_path, prior_review_path, prepared_path, helper)
+    input_identities = {
+        identity.path: identity for identity in (file_identity_from(object_map(value, "post-review disposition input").get("file"), "post-review disposition input") for value in inputs)
+    }
+    record: dict[str, object] = {
+        "schema": POST_REVIEW_SCHEMA,
+        "operation": OPERATION,
+        "root": str(root),
+        "prior_packet": str(prior_packet_path),
+        "prior_packet_sha256": args.prior_packet_sha256,
+        "prior_review": str(prior_review_path),
+        "prior_review_sha256": args.prior_review_sha256,
+        "prepared_close_audit": str(prepared_path),
+        "prepared_close_audit_sha256": args.prepared_close_audit_sha256,
+        "authorized_input": AUTHORIZED_INPUT,
+        "task": str(task),
+        "task_sha256": prior["task_sha256"],
+        "todo": str(todo),
+        "original_todo_sha256": prior["todo_sha256"],
+        "todo_sha256": input_identities[str(todo)].sha256,
+        "manager_task": str(manager),
+        "original_manager_task_sha256": prior["manager_task_sha256"],
+        "manager_task_sha256": input_identities[str(manager)].sha256,
+        "manager_target": prior["manager_target"],
+        "predecessor_target": prior["predecessor_target"],
+        "predecessor_pane": prior["predecessor_pane"],
+        "predecessor_session_id": prior["predecessor_session_id"],
+        "protected_target": prior["protected_target"],
+        "protected_pane": prior["protected_pane"],
+        "protected_session_id": prior["protected_session_id"],
+        "menu_capture_base64": base64.b64encode(menu_capture).decode(),
+        "menu_capture_sha256": sha256(menu_capture),
+        "helper": str(helper),
+        "helper_sha256": sha256(helper_data),
+        "audit": str(audit),
+        "inputs": inputs,
+    }
+    data = packet_bytes(record)
+    packet = validate_packet(data, sha256(data))
+    with ExitStack() as stack:
+        held_inputs = hold_recorded_inputs(inputs, stack)
+        static_post_review_evidence(packet)
+        for held in held_inputs:
+            validate_held_absolute(held)
+        if capture_fresh_preparation_menu(predecessor, protected) != menu_capture:
+            raise TaskFrontmatterError("post-review status-menu capture raced before publication.")
+        for held in held_inputs:
+            validate_held_absolute(held)
+        validate_post_review_live_custody(prior, root, manager, predecessor, protected)
+        if capture_fresh_preparation_menu(predecessor, protected) != menu_capture:
+            raise TaskFrontmatterError("post-review status-menu capture raced during final custody validation.")
+        for held in held_inputs:
+            validate_held_absolute(held)
+        publish_or_validate(output, data, "post-review input disposition packet")
+        for held in held_inputs:
+            validate_held_absolute(held)
+    print(sha256(data))
 
 
 def prepare(args: argparse.Namespace) -> None:
@@ -1835,8 +2268,8 @@ def execute(args: argparse.Namespace) -> None:
     recovery_path: Path | None = None
     recovery_review_path: Path | None = None
     if all(recovery_values):
-        recovery_path = args.todo_recovery_packet.resolve(strict=True)
-        recovery_review_path = args.todo_recovery_review.resolve(strict=True)
+        recovery_path = cast(Path, args.todo_recovery_packet).resolve(strict=True)
+        recovery_review_path = cast(Path, args.todo_recovery_review).resolve(strict=True)
         if {recovery_path, recovery_review_path} & ({prepared_path, complete_path} | reserved) or recovery_path == recovery_review_path:
             raise TaskFrontmatterError("TODO recovery paths overlap immutable evidence or disposition outputs.")
         todo_recovery = canonical_object(
@@ -1966,6 +2399,7 @@ def parser() -> argparse.ArgumentParser:
     modes.add_argument("--execute", action="store_true")
     modes.add_argument("--prepare-todo-recovery", action="store_true")
     modes.add_argument("--review-todo-recovery", action="store_true")
+    modes.add_argument("--prepare-post-review", action="store_true")
     result.add_argument("--prior-packet", type=Path)
     result.add_argument("--prior-packet-sha256", default="")
     result.add_argument("--prior-review", type=Path)
@@ -2000,7 +2434,18 @@ def main() -> int:
     try:
         if args.wait_s <= 0:
             raise TaskFrontmatterError("wait bound must be positive.")
-        if args.prepare:
+        if args.prepare_post_review:
+            required = (
+                args.prior_packet,
+                args.prior_review,
+                args.prepared_close_audit,
+                args.audit,
+                args.output,
+            )
+            if any(value is None for value in required) or not args.audit.is_absolute() or not args.output.is_absolute():
+                raise TaskFrontmatterError("post-review preparation requires exact close evidence and absolute audit/output paths.")
+            prepare_post_review(args)
+        elif args.prepare:
             required = (
                 args.prior_packet,
                 args.prior_review,

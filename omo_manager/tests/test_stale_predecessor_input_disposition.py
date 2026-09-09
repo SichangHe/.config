@@ -12,9 +12,11 @@ import time
 import unittest
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 from omo_manager import omo_codex_stop, omo_stale_predecessor_input_disposition as subject
+from omo_manager.omo_repository_custody import HeldAbsolute
 from omo_manager.omo_stale_predecessor_close import PanePin
 from omo_manager.omo_task_metadata import TaskFrontmatterError
 
@@ -54,6 +56,47 @@ def disposition_packet(tmp: Path) -> dict[str, object]:
 
 
 class StalePredecessorInputDispositionTests(unittest.TestCase):
+    def post_review_prepare_fixture(self, tmp: Path) -> tuple[argparse.Namespace, dict[str, object]]:
+        paths = {name: tmp / name for name in ("packet.json", "review.json", "close.json.prepared", "worker.md", "TODO.md", "manager.md", "ledger.tsv")}
+        for path in paths.values():
+            path.write_text(f"{path.name}\n")
+            if path.name in {"packet.json", "review.json", "close.json.prepared"}:
+                path.chmod(0o600)
+        prior: dict[str, object] = {
+            "root": str(tmp),
+            "audit": str(tmp / "close.json"),
+            "task": str(paths["worker.md"]),
+            "task_sha256": subject.sha256(paths["worker.md"].read_bytes()),
+            "todo": str(paths["TODO.md"]),
+            "todo_sha256": subject.sha256(paths["TODO.md"].read_bytes()),
+            "manager_task": str(paths["manager.md"]),
+            "manager_task_sha256": subject.sha256(paths["manager.md"].read_bytes()),
+            "manager_target": "dw:15",
+            "predecessor_target": subject.EXPECTED_SCOPE["predecessor_target"],
+            "predecessor_pane": subject.EXPECTED_SCOPE["predecessor_pane"],
+            "predecessor_session_id": subject.EXPECTED_SCOPE["predecessor_session_id"],
+            "protected_target": subject.EXPECTED_SCOPE["protected_target"],
+            "protected_pane": subject.EXPECTED_SCOPE["protected_pane"],
+            "protected_session_id": subject.EXPECTED_SCOPE["protected_session_id"],
+            "inputs": [
+                subject.file_input(paths["worker.md"], "protected task"),
+                subject.file_input(paths["TODO.md"], "TODO"),
+                subject.file_input(paths["manager.md"], "manager task"),
+                subject.file_input(paths["ledger.tsv"], "ledger"),
+            ],
+        }
+        args = argparse.Namespace(
+            prior_packet=paths["packet.json"],
+            prior_packet_sha256=subject.POST_REVIEW_CLOSE_PACKET_SHA256,
+            prior_review=paths["review.json"],
+            prior_review_sha256=subject.POST_REVIEW_CLOSE_REVIEW_SHA256,
+            prepared_close_audit=paths["close.json.prepared"],
+            prepared_close_audit_sha256=subject.POST_REVIEW_CLOSE_PREPARED_SHA256,
+            audit=tmp / "disposition.json",
+            output=tmp / "disposition-packet.json",
+        )
+        return args, prior
+
     def recovery_execution_paths_fixture(self, tmp: Path) -> tuple[dict[str, object], dict[str, object], list[object], dict[str, Path]]:
         paths = {name: tmp / name for name in ("manager", "root-audit", "packet", "review", "prepared", "complete", "recovery", "recovery-review")}
         paths.update({f"input-{index}": tmp / f"input-{index}" for index in range(subject.SOURCE1485_INPUT_COUNT)})
@@ -221,10 +264,13 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         *,
         prepared_exists: bool,
         recoverable: bool = False,
+        schema: str | None = None,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             tmp = Path(directory)
             packet = disposition_packet(tmp)
+            if schema is not None:
+                packet["schema"] = schema
             prepared_close = Path(str(packet["prepared_close_audit"]))
             prepared_close.write_bytes(b"preserved-close-audit\n")
             predecessor = PanePin("dw8:0", "%1", 101, 201)
@@ -297,6 +343,245 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         lines = ["older output", *MENU_LINES, "", ""]
         self.assertTrue(subject.exact_status_menu(lines))
         self.assertEqual("status_menu", subject.exact_recovery_state(lines))
+
+    def test_post_review_prepare_binds_exact_failed_close_and_menu_without_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            args, prior = self.post_review_prepare_fixture(tmp)
+            menu = "\n".join(MENU_LINES).encode()
+            published: list[bytes] = []
+            with (
+                patch.object(subject, "validate_post_review_close_artifacts", return_value=prior) as validate_close,
+                patch.object(subject, "validate_post_review_lifecycle"),
+                patch.object(subject, "current_pin", return_value=True),
+                patch.object(
+                    subject,
+                    "session_from_process",
+                    side_effect=lambda pin: prior[f"{'predecessor' if pin.target == 'dw8:0' else 'protected'}_session_id"],
+                ),
+                patch.object(subject, "source1485_live_custody", return_value=True),
+                patch.object(subject, "validate_post_review_provenance", return_value=tmp / "ledger.tsv"),
+                patch.object(subject, "capture_fresh_preparation_menu", return_value=menu),
+                patch.object(subject, "publish_or_validate", side_effect=lambda _path, data, _label: published.append(data)),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                subject.prepare_post_review(args)
+            self.assertEqual(2, validate_close.call_count)
+            self.assertEqual(1, len(published))
+            packet = subject.validate_packet(published[0], subject.sha256(published[0]))
+            self.assertEqual(subject.POST_REVIEW_SCHEMA, packet["schema"])
+            self.assertEqual(subject.POST_REVIEW_CLOSE_PACKET_SHA256, packet["prior_packet_sha256"])
+            self.assertEqual(menu, base64.b64decode(str(packet["menu_capture_base64"])))
+
+    def test_post_review_prepare_rejects_capture_race_before_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            args, prior = self.post_review_prepare_fixture(tmp)
+            with (
+                patch.object(subject, "validate_post_review_close_artifacts", return_value=prior),
+                patch.object(subject, "validate_post_review_lifecycle"),
+                patch.object(subject, "current_pin", return_value=True),
+                patch.object(
+                    subject,
+                    "session_from_process",
+                    side_effect=lambda pin: prior[f"{'predecessor' if pin.target == 'dw8:0' else 'protected'}_session_id"],
+                ),
+                patch.object(subject, "source1485_live_custody", return_value=True),
+                patch.object(subject, "validate_post_review_provenance", return_value=tmp / "ledger.tsv"),
+                patch.object(subject, "capture_fresh_preparation_menu", side_effect=[b"menu", b"changed"]),
+                patch.object(subject, "publish_or_validate") as publish,
+                self.assertRaisesRegex(TaskFrontmatterError, "raced before publication"),
+            ):
+                subject.prepare_post_review(args)
+            publish.assert_not_called()
+
+    def test_post_review_prepare_holds_all_inputs_through_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            args, prior = self.post_review_prepare_fixture(tmp)
+            ledger = tmp / "ledger.tsv"
+            menu = b"menu"
+            captures = 0
+
+            def capture(_predecessor: PanePin, _protected: PanePin) -> bytes:
+                nonlocal captures
+                captures += 1
+                if captures == 2:
+                    ledger.write_text("raced after static validation\n")
+                return menu
+
+            with (
+                patch.object(subject, "validate_post_review_close_artifacts", return_value=prior),
+                patch.object(subject, "validate_post_review_lifecycle"),
+                patch.object(subject, "current_pin", return_value=True),
+                patch.object(
+                    subject,
+                    "session_from_process",
+                    side_effect=lambda pin: prior[f"{'predecessor' if pin.target == 'dw8:0' else 'protected'}_session_id"],
+                ),
+                patch.object(subject, "source1485_live_custody", return_value=True),
+                patch.object(subject, "validate_post_review_provenance", return_value=ledger),
+                patch.object(subject, "capture_fresh_preparation_menu", side_effect=capture),
+                patch.object(subject, "publish_or_validate") as publish,
+                self.assertRaisesRegex(subject.CustodyError, "identity drifted"),
+            ):
+                subject.prepare_post_review(args)
+            publish.assert_not_called()
+
+    def test_post_review_prepare_rejects_final_session_race_before_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            args, prior = self.post_review_prepare_fixture(tmp)
+            predecessor_session = str(prior["predecessor_session_id"])
+            protected_session = str(prior["protected_session_id"])
+            with (
+                patch.object(subject, "validate_post_review_close_artifacts", return_value=prior),
+                patch.object(subject, "validate_post_review_lifecycle"),
+                patch.object(subject, "current_pin", return_value=True),
+                patch.object(
+                    subject,
+                    "session_from_process",
+                    side_effect=[predecessor_session, protected_session, "changed-session", protected_session],
+                ),
+                patch.object(subject, "source1485_live_custody", return_value=True),
+                patch.object(subject, "validate_post_review_provenance", return_value=tmp / "ledger.tsv"),
+                patch.object(subject, "capture_fresh_preparation_menu", return_value=b"menu"),
+                patch.object(subject, "publish_or_validate") as publish,
+                self.assertRaisesRegex(TaskFrontmatterError, "session changed"),
+            ):
+                subject.prepare_post_review(args)
+            publish.assert_not_called()
+
+    def test_post_review_prepare_rejects_capture_change_during_final_custody(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            args, prior = self.post_review_prepare_fixture(tmp)
+            predecessor_session = str(prior["predecessor_session_id"])
+            protected_session = str(prior["protected_session_id"])
+            with (
+                patch.object(subject, "validate_post_review_close_artifacts", return_value=prior),
+                patch.object(subject, "validate_post_review_lifecycle"),
+                patch.object(subject, "current_pin", return_value=True),
+                patch.object(
+                    subject,
+                    "session_from_process",
+                    side_effect=[predecessor_session, protected_session, predecessor_session, protected_session],
+                ),
+                patch.object(subject, "source1485_live_custody", return_value=True),
+                patch.object(subject, "validate_post_review_provenance", return_value=tmp / "ledger.tsv"),
+                patch.object(subject, "capture_fresh_preparation_menu", side_effect=[b"menu", b"menu", b"changed"]),
+                patch.object(subject, "publish_or_validate") as publish,
+                self.assertRaisesRegex(TaskFrontmatterError, "final custody validation"),
+            ):
+                subject.prepare_post_review(args)
+            publish.assert_not_called()
+
+    def test_post_review_static_evidence_rejects_wrong_root(self) -> None:
+        packet: dict[str, object] = {
+            "root": "/tmp/wrong-root",
+            "prior_packet": "/tmp/prior-packet",
+            "prior_packet_sha256": "0" * 64,
+            "prior_review": "/tmp/prior-review",
+            "prior_review_sha256": "1" * 64,
+            "prepared_close_audit": "/tmp/prior-audit.prepared",
+            "prepared_close_audit_sha256": "2" * 64,
+            "helper_sha256": "3" * 64,
+        }
+        prior: dict[str, object] = {"root": "/tmp/authenticated-root"}
+        with (
+            patch.object(subject, "validate_post_review_packet_scope"),
+            patch.object(subject, "validate_post_review_close_artifacts", return_value=prior),
+            patch.object(subject, "read_bound", return_value=b"helper"),
+            patch.object(subject, "post_review_input_records", return_value=[]),
+            self.assertRaisesRegex(TaskFrontmatterError, "evidence changed"),
+        ):
+            subject.static_post_review_evidence(packet)
+
+    def test_post_review_artifacts_reject_wrong_path_or_digest_before_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            args, _prior = self.post_review_prepare_fixture(tmp)
+            with (
+                patch.object(subject, "read_bound") as read,
+                self.assertRaisesRegex(TaskFrontmatterError, "outside the exact"),
+            ):
+                subject.validate_post_review_close_artifacts(
+                    args.prior_packet,
+                    args.prior_packet_sha256,
+                    args.prior_review,
+                    args.prior_review_sha256,
+                    args.prepared_close_audit,
+                    args.prepared_close_audit_sha256,
+                )
+            read.assert_not_called()
+
+    def test_post_review_inputs_rebind_only_todo_manager_and_authenticated_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            args, prior = self.post_review_prepare_fixture(tmp)
+            task = Path(str(prior["task"]))
+            prior_inputs = cast(list[dict[str, object]], prior["inputs"])
+            original_task_input = next(value for value in prior_inputs if subject.file_identity_from(value["file"], "input").path == str(task))
+            for name in ("TODO.md", "manager.md", "ledger.tsv"):
+                (tmp / name).write_text(f"current {name}\n")
+            with patch.object(subject, "validate_post_review_provenance", return_value=tmp / "ledger.tsv"):
+                records = subject.post_review_input_records(
+                    prior,
+                    args.prior_packet,
+                    args.prior_review,
+                    args.prepared_close_audit,
+                    Path(subject.__file__).resolve(strict=True),
+                )
+            identities = {
+                subject.file_identity_from(subject.object_map(value, "input")["file"], "input").path: subject.file_identity_from(subject.object_map(value, "input")["file"], "input")
+                for value in records
+            }
+            self.assertEqual(original_task_input["file"], next(value for value in records if subject.file_identity_from(value["file"], "input").path == str(task))["file"])
+            for name in ("TODO.md", "manager.md", "ledger.tsv"):
+                self.assertEqual(subject.sha256((tmp / name).read_bytes()), identities[str(tmp / name)].sha256)
+
+    def test_post_review_inputs_reject_unrelated_evidence_drift_and_read_race(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            args, prior = self.post_review_prepare_fixture(tmp)
+            task = Path(str(prior["task"]))
+            task.write_text("drift\n")
+            with (
+                patch.object(subject, "validate_post_review_provenance", return_value=tmp / "ledger.tsv"),
+                self.assertRaisesRegex(subject.CustodyError, "identity drifted"),
+            ):
+                subject.post_review_input_records(
+                    prior,
+                    args.prior_packet,
+                    args.prior_review,
+                    args.prepared_close_audit,
+                    Path(subject.__file__).resolve(strict=True),
+                )
+
+            args, prior = self.post_review_prepare_fixture(tmp)
+            ledger = tmp / "ledger.tsv"
+            original_validate = subject.validate_held_absolute
+            mutated = False
+
+            def race(held: HeldAbsolute) -> None:
+                nonlocal mutated
+                if not mutated:
+                    ledger.write_text("raced\n")
+                    mutated = True
+                original_validate(held)
+
+            with (
+                patch.object(subject, "validate_post_review_provenance", return_value=ledger),
+                patch.object(subject, "validate_held_absolute", side_effect=race),
+                self.assertRaisesRegex(subject.CustodyError, "identity drifted"),
+            ):
+                subject.post_review_input_records(
+                    prior,
+                    args.prior_packet,
+                    args.prior_review,
+                    args.prepared_close_audit,
+                    Path(subject.__file__).resolve(strict=True),
+                )
 
     def test_menu_recognizer_rejects_any_expansion_or_drift(self) -> None:
         cases = (
@@ -842,7 +1127,7 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             latest,
         )
         self.assertIsNone(subject.recoverable_incident("0" * 64))
-        packet = {"helper_sha256": subject.LATEST_RECOVERABLE_HELPER_SHA256}
+        packet: dict[str, object] = {"helper_sha256": subject.LATEST_RECOVERABLE_HELPER_SHA256}
         with (
             patch.object(subject, "packet_bytes", return_value=b"latest packet"),
             patch.object(subject, "sha256", return_value=subject.LATEST_RECOVERABLE_PACKET_SHA256),
@@ -934,6 +1219,22 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         prepared_index = next(index for index, event in enumerate(events) if event.startswith("publish:prepared"))
         escape_index = next(index for index, event in enumerate(events) if event.startswith("key:Escape:"))
         self.assertLess(prepared_index, escape_index)
+
+    def test_post_review_recurrence_uses_only_escape_then_status_cancel(self) -> None:
+        events: list[str] = []
+        self.execute_states(
+            ["status_menu", "status_menu", "status_input", "status_input", "ready", "ready"],
+            events,
+            prepared_exists=False,
+            schema=subject.POST_REVIEW_SCHEMA,
+        )
+        self.assertEqual(["key:Escape:status_menu", "key:C-c:status_input"], [event for event in events if event.startswith("key:")])
+
+    def test_post_review_prepared_retry_is_idempotent_when_already_ready(self) -> None:
+        events: list[str] = []
+        self.execute_states(["ready", "ready"], events, prepared_exists=True, schema=subject.POST_REVIEW_SCHEMA)
+        self.assertFalse(any(event.startswith("key:") for event in events))
+        self.assertEqual(1, sum(event.startswith("publish:complete") for event in events))
 
     def test_prepared_recovery_completes_from_ready_without_keys(self) -> None:
         events: list[str] = []
