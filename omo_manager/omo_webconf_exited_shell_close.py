@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -54,10 +55,7 @@ SOURCE_SHA256 = "5347e871809a360ea8a08bdb3a95ab1dbc91caefad64e3010618e1da9b8130b
 REPORT_REPLAY_ID = "a3fca7e249315c3e739e68ac02a9ee7c522e600ee614cd0b8d71ea40fcb21f5e"
 REPORT_COMMITMENT_SHA256 = "08523d5e1c778aac7e87d552a418d1e6c59d44b62f492c6767a24cca236637be"
 REPORT_SHA256 = "f28dc6bcbde8a9ffa9f2090b12dfc88fa6db684dfec68b607d9eeff8b8ad1a20"
-REPORT_COMMITMENT_PATH = Path(
-    "/home/sichangheagent/.local/state/omo-manager/report-receipts/"
-    "a3fca7e249315c3e739e68ac02a9ee7c522e600ee614cd0b8d71ea40fcb21f5e.commitment"
-)
+REPORT_COMMITMENT_PATH = Path("/home/sichangheagent/.local/state/omo-manager/report-receipts/a3fca7e249315c3e739e68ac02a9ee7c522e600ee614cd0b8d71ea40fcb21f5e.commitment")
 SESSION_ID = "01a08342-0b49-7de2-9bb0-fc885e92fd1a"
 INCIDENT_TASK_SHA256 = "1215a3c225ee23090898e15cc4a5d44cb57090413b63afd526879f4bde93dc65"
 INCIDENT_TODO_SHA256 = "f881ba07a5ea909e72bceeafc7db98477963187c7b6d7e3e0dbace7166c5a5d7"
@@ -81,6 +79,43 @@ class Args:
     report_commitment: Path
     report_commitment_sha256: str
     audit_output: Path
+    recovery_packet: Path | None = None
+    recovery_packet_sha256: str = ""
+    recovery_review: Path | None = None
+    recovery_review_sha256: str = ""
+
+
+def has_recovery(args: Args) -> bool:
+    return any(
+        (
+            args.recovery_packet is not None,
+            bool(args.recovery_packet_sha256),
+            args.recovery_review is not None,
+            bool(args.recovery_review_sha256),
+        )
+    )
+
+
+def validate_recovery(args: Args, *, assert_current_inputs: bool) -> None:
+    if not has_recovery(args):
+        return
+    if args.recovery_packet is None or args.recovery_review is None:
+        raise TaskFrontmatterError("WebConf recovery binding is incomplete")
+    recovery_module = importlib.import_module("omo_manager.omo_webconf_exited_shell_recovery")
+    recovery_module.validate_recovery_files(
+        args.recovery_packet,
+        args.recovery_packet_sha256,
+        args.recovery_review,
+        args.recovery_review_sha256,
+        expected_task_sha256=args.expected_task_sha256,
+        expected_todo_sha256=args.expected_todo_sha256,
+        expected_capture_sha256=args.expected_capture_sha256,
+        expected_pane_id=args.expected_pane_id,
+        expected_pane_pid=args.expected_pane_pid,
+        expected_pane_start_ticks=args.expected_pane_start_ticks,
+        audit_output=args.audit_output,
+        assert_current_inputs=assert_current_inputs,
+    )
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -95,12 +130,37 @@ def parse_args(argv: list[str]) -> Args:
     parser.add_argument("--report-commitment", type=Path, required=True)
     parser.add_argument("--report-commitment-sha256", required=True)
     parser.add_argument("--audit-output", type=Path, required=True)
+    parser.add_argument("--recovery-packet", type=Path)
+    parser.add_argument("--recovery-packet-sha256", default="")
+    parser.add_argument("--recovery-review", type=Path)
+    parser.add_argument("--recovery-review-sha256", default="")
     parser.add_argument("task_file", type=Path)
     parsed = parser.parse_args(argv)
     digests = (parsed.expected_task_sha256, parsed.expected_todo_sha256, parsed.expected_capture_sha256, parsed.report_commitment_sha256)
     if any(SHA256_RE.fullmatch(value) is None for value in digests):
         parser.error("all expected digests must be lowercase SHA-256 values")
-    if tuple(digests[:3]) != (INCIDENT_TASK_SHA256, INCIDENT_TODO_SHA256, INCIDENT_CAPTURE_SHA256):
+    recovery_values = (
+        parsed.recovery_packet,
+        parsed.recovery_packet_sha256,
+        parsed.recovery_review,
+        parsed.recovery_review_sha256,
+    )
+    if any(bool(value) for value in recovery_values):
+        if not all(bool(value) for value in recovery_values):
+            parser.error("recovery requires packet and review paths and SHA-256 values")
+        if not parsed.recovery_packet.is_absolute() or not parsed.recovery_review.is_absolute():
+            parser.error("recovery packet and review paths must be absolute")
+        if any(SHA256_RE.fullmatch(value) is None for value in (parsed.recovery_packet_sha256, parsed.recovery_review_sha256)):
+            parser.error("recovery packet and review digests must be lowercase SHA-256 values")
+        recovery_module = importlib.import_module("omo_manager.omo_webconf_exited_shell_recovery")
+
+        if parsed.expected_task_sha256 != INCIDENT_TASK_SHA256 or (parsed.expected_pane_id, parsed.expected_pane_pid, parsed.expected_pane_start_ticks) != (
+            recovery_module.RECOVERY_PANE_ID,
+            recovery_module.RECOVERY_PANE_PID,
+            recovery_module.RECOVERY_PANE_START_TICKS,
+        ):
+            parser.error("recovery identity does not match the exact WebConf incident")
+    elif tuple(digests[:3]) != (INCIDENT_TASK_SHA256, INCIDENT_TODO_SHA256, INCIDENT_CAPTURE_SHA256):
         parser.error("task, TODO, and capture digests must match the immutable WebConf release")
     if PANE_RE.fullmatch(parsed.expected_pane_id) is None or parsed.expected_pane_pid <= 1 or parsed.expected_pane_start_ticks <= 0:
         parser.error("pane id, PID, and start ticks must be exact positive identities")
@@ -110,7 +170,23 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("report commitment and audit paths must be absolute")
     if parsed.report_commitment.resolve() != REPORT_COMMITMENT_PATH:
         parser.error("report commitment must be the exact registered WebConf commitment path")
-    return Args(parsed.root.resolve(), parsed.task_file, *digests[:2], parsed.expected_pane_id, parsed.expected_pane_pid, parsed.expected_pane_start_ticks, parsed.expected_capture_sha256, parsed.report_commitment.resolve(), parsed.report_commitment_sha256, parsed.audit_output.resolve())
+    return Args(
+        parsed.root.resolve(),
+        parsed.task_file,
+        parsed.expected_task_sha256,
+        parsed.expected_todo_sha256,
+        parsed.expected_pane_id,
+        parsed.expected_pane_pid,
+        parsed.expected_pane_start_ticks,
+        parsed.expected_capture_sha256,
+        parsed.report_commitment.resolve(),
+        parsed.report_commitment_sha256,
+        parsed.audit_output.resolve(),
+        parsed.recovery_packet.resolve() if parsed.recovery_packet is not None else None,
+        parsed.recovery_packet_sha256,
+        parsed.recovery_review.resolve() if parsed.recovery_review is not None else None,
+        parsed.recovery_review_sha256,
+    )
 
 
 def private_bytes(path: Path, expected_sha256: str, label: str) -> bytes:
@@ -272,7 +348,7 @@ def validate_source_task(args: Args, task_path: Path, task_text: str, todo_text:
 
 
 def close_authority_text(args: Args, commitment: str) -> str:
-    record = {
+    record: dict[str, object] = {
         "close_note": "",
         "close_proof_commitment": commitment,
         "completed_task_sha256": "",
@@ -292,6 +368,17 @@ def close_authority_text(args: Args, commitment: str) -> str:
         "todo_sha256": args.expected_todo_sha256,
         "version": "v2.0.0",
     }
+    if has_recovery(args):
+        record.update(
+            {
+                "recovery_packet": str(args.recovery_packet),
+                "recovery_packet_sha256": args.recovery_packet_sha256,
+                "recovery_review": str(args.recovery_review),
+                "recovery_review_sha256": args.recovery_review_sha256,
+                "transaction_audit": str(args.audit_output),
+                "version": "v3.0.0",
+            }
+        )
     return json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
 
 
@@ -313,25 +400,77 @@ def validate_close_authority_file(
         record = json.loads(payload)
     except json.JSONDecodeError as error:
         raise RuntimeError("WebConf close authority is not canonical JSON") from error
+    recovery_values = (
+        record.get("recovery_packet"),
+        record.get("recovery_packet_sha256"),
+        record.get("recovery_review"),
+        record.get("recovery_review_sha256"),
+        record.get("transaction_audit"),
+    )
+    recovery = any(value is not None for value in recovery_values)
+    if recovery and not all(isinstance(value, str) and value for value in recovery_values):
+        raise RuntimeError("WebConf close authority has an incomplete recovery binding")
+    expected_todo_sha256 = str(record.get("todo_sha256")) if recovery else INCIDENT_TODO_SHA256
+    expected_capture_sha256 = str(record.get("terminal_capture_sha256")) if recovery else INCIDENT_CAPTURE_SHA256
+    base_keys = {
+        "close_note",
+        "close_proof_commitment",
+        "completed_task_sha256",
+        "manager_consumed_receipt_sha256",
+        "manager_target",
+        "operation",
+        "pane_id",
+        "pane_pid",
+        "pane_start_ticks",
+        "session_id",
+        "state",
+        "target",
+        "task",
+        "task_sha256",
+        "terminal_capture_sha256",
+        "terminal_evidence_sha256",
+        "todo_sha256",
+        "version",
+    }
+    recovery_keys = {"recovery_packet", "recovery_packet_sha256", "recovery_review", "recovery_review_sha256", "transaction_audit"}
     if (
         payload != (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
         or not isinstance(record, dict)
+        or set(record) != (base_keys | recovery_keys if recovery else base_keys)
+        or record.get("version") != ("v3.0.0" if recovery else "v2.0.0")
+        or SHA256_RE.fullmatch(expected_todo_sha256) is None
+        or SHA256_RE.fullmatch(expected_capture_sha256) is None
         or record.get("operation") != WEBCONF_EXITED_CLOSE_OPERATION
         or record.get("state") != "terminalized"
         or record.get("target") != TARGET
         or record.get("manager_target") != MANAGER_TARGET
         or record.get("task") != TASK_REF.as_posix()
         or record.get("task_sha256") != INCIDENT_TASK_SHA256
-        or record.get("todo_sha256") != INCIDENT_TODO_SHA256
+        or record.get("todo_sha256") != expected_todo_sha256
         or record.get("manager_consumed_receipt_sha256") != REPORT_COMMITMENT_SHA256
-        or record.get("terminal_capture_sha256") != INCIDENT_CAPTURE_SHA256
+        or record.get("terminal_capture_sha256") != expected_capture_sha256
         or record.get("terminal_evidence_sha256") != hashlib.sha256(REPORT_REPLAY_ID.encode()).hexdigest()
         or record.get("session_id") != SESSION_ID
         or record.get("close_proof_commitment") != commitment
-        or (target, expected_pane_id, expected_pane_pid, expected_pane_start_ticks)
-        != (TARGET, record.get("pane_id"), record.get("pane_pid"), record.get("pane_start_ticks"))
+        or (target, expected_pane_id, expected_pane_pid, expected_pane_start_ticks) != (TARGET, record.get("pane_id"), record.get("pane_pid"), record.get("pane_start_ticks"))
     ):
         raise RuntimeError("WebConf close authority does not bind the exact incident")
+    if recovery:
+        recovery_module = importlib.import_module("omo_manager.omo_webconf_exited_shell_recovery")
+        recovery_module.validate_recovery_files(
+            Path(str(record["recovery_packet"])),
+            str(record["recovery_packet_sha256"]),
+            Path(str(record["recovery_review"])),
+            str(record["recovery_review_sha256"]),
+            expected_task_sha256=INCIDENT_TASK_SHA256,
+            expected_todo_sha256=expected_todo_sha256,
+            expected_capture_sha256=expected_capture_sha256,
+            expected_pane_id=expected_pane_id,
+            expected_pane_pid=expected_pane_pid,
+            expected_pane_start_ticks=expected_pane_start_ticks,
+            audit_output=Path(str(record["transaction_audit"])),
+            assert_current_inputs=not closed_identity,
+        )
     if not closed_identity:
         observed = validate_exited_codex_shell_with_consumed_report(TARGET, expected_pane_id, SESSION_ID, REPORT_REPLAY_ID)
         if observed != record["terminal_capture_sha256"]:
@@ -339,7 +478,7 @@ def validate_close_authority_file(
 
 
 def transaction_record(args: Args, state: str, source_task: str, source_todo: str, completed_task: str, completed_todo: str, authority_path: Path, authority_sha256: str, secret: str) -> str:
-    record = {
+    record: dict[str, object] = {
         "close_authority": str(authority_path),
         "close_authority_sha256": authority_sha256,
         "close_proof_secret": secret,
@@ -357,6 +496,15 @@ def transaction_record(args: Args, state: str, source_task: str, source_todo: st
         "state": state,
         "target": TARGET,
     }
+    if has_recovery(args):
+        record.update(
+            {
+                "recovery_packet": str(args.recovery_packet),
+                "recovery_packet_sha256": args.recovery_packet_sha256,
+                "recovery_review": str(args.recovery_review),
+                "recovery_review_sha256": args.recovery_review_sha256,
+            }
+        )
     return json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
 
 
@@ -371,6 +519,7 @@ def run(args: Args) -> int:
         with root_membership_lock(args.root), task_target_lock(args.root, TARGET), ExitStack() as locks:
             for path in sorted({task_path, todo_path}, key=str):
                 locks.enter_context(task_file_lock(path))
+            validate_recovery(args, assert_current_inputs=not args.audit_output.exists())
             validate_report_commitment(args, task_path)
             if args.audit_output.exists():
                 raw_tx = read_private_audit(args.audit_output)
@@ -410,7 +559,14 @@ def run(args: Args) -> int:
                 todo_before = todo_path.stat()
                 task_bytes = task_path.read_bytes()
                 todo_bytes = todo_path.read_bytes()
-                if b"\r" in task_bytes or b"\r" in todo_bytes or not task_bytes.endswith(b"\n") or not todo_bytes.endswith(b"\n") or hashlib.sha256(task_bytes).hexdigest() != args.expected_task_sha256 or hashlib.sha256(todo_bytes).hexdigest() != args.expected_todo_sha256:
+                if (
+                    b"\r" in task_bytes
+                    or b"\r" in todo_bytes
+                    or not task_bytes.endswith(b"\n")
+                    or not todo_bytes.endswith(b"\n")
+                    or hashlib.sha256(task_bytes).hexdigest() != args.expected_task_sha256
+                    or hashlib.sha256(todo_bytes).hexdigest() != args.expected_todo_sha256
+                ):
                     raise TaskFrontmatterError("task or TODO bytes do not match the canonical invocation")
                 source_task = task_bytes.decode("utf-8")
                 source_todo = todo_bytes.decode("utf-8")
@@ -440,13 +596,16 @@ def run(args: Args) -> int:
                 if started_secret or not absent:
                     raise TaskFrontmatterError("final close proof contradicts pane or started-marker state")
             elif started_secret and absent:
-                promote_done_live_close_started(proof_path, authority_path, commitment, audit_sha256, TARGET, args.expected_pane_id, args.expected_pane_pid, args.expected_pane_start_ticks, WEBCONF_EXITED_CLOSE_OPERATION)
+                promote_done_live_close_started(
+                    proof_path, authority_path, commitment, audit_sha256, TARGET, args.expected_pane_id, args.expected_pane_pid, args.expected_pane_start_ticks, WEBCONF_EXITED_CLOSE_OPERATION
+                )
             else:
                 if absent:
                     raise TaskFrontmatterError("pane disappeared without durable pre-kill evidence")
 
                 def evidence_is_current() -> bool:
                     try:
+                        validate_recovery(args, assert_current_inputs=True)
                         return (
                             canonical_text(task_path, "task") == current_task
                             and canonical_text(todo_path, "TODO") == current_todo
@@ -456,8 +615,28 @@ def run(args: Args) -> int:
                     except (OSError, RuntimeError):
                         return False
 
-                close_bound_tmux_target(args.expected_pane_id, evidence_is_current, TARGET, args.expected_pane_id, str(proof_path), str(authority_path), secret, commitment, args.expected_pane_pid, args.expected_pane_start_ticks, evidence_is_current, WEBCONF_EXITED_CLOSE_OPERATION, audit_sha256)
-            if not has_bound_close_proof(proof_path, commitment, audit_sha256, WEBCONF_EXITED_CLOSE_OPERATION) or path_entry_exists(started_path) or pane_id(TARGET) or pane_id(args.expected_pane_id) or process_start_ticks(args.expected_pane_pid) is not None:
+                close_bound_tmux_target(
+                    args.expected_pane_id,
+                    evidence_is_current,
+                    TARGET,
+                    args.expected_pane_id,
+                    str(proof_path),
+                    str(authority_path),
+                    secret,
+                    commitment,
+                    args.expected_pane_pid,
+                    args.expected_pane_start_ticks,
+                    evidence_is_current,
+                    WEBCONF_EXITED_CLOSE_OPERATION,
+                    audit_sha256,
+                )
+            if (
+                not has_bound_close_proof(proof_path, commitment, audit_sha256, WEBCONF_EXITED_CLOSE_OPERATION)
+                or path_entry_exists(started_path)
+                or pane_id(TARGET)
+                or pane_id(args.expected_pane_id)
+                or process_start_ticks(args.expected_pane_pid) is not None
+            ):
                 raise TaskFrontmatterError("WebConf close lacks final durable proof or exact absence")
             transaction_state = json.loads(raw_tx)["state"]
             if transaction_state == "complete" and (current_task, current_todo) != (completed_task, completed_todo):
@@ -479,7 +658,9 @@ def run(args: Args) -> int:
             if canonical_text(task_path, "task") != completed_task or canonical_text(todo_path, "TODO") != completed_todo:
                 raise TaskFrontmatterError("WebConf lifecycle transaction did not publish exact completion")
             if json.loads(raw_tx)["state"] != "complete":
-                replace_private_audit(args.audit_output, raw_tx, transaction_record(args, "complete", source_task, source_todo, completed_task, completed_todo, authority_path, authority_sha256, secret))
+                replace_private_audit(
+                    args.audit_output, raw_tx, transaction_record(args, "complete", source_task, source_todo, completed_task, completed_todo, authority_path, authority_sha256, secret)
+                )
         print(f"Closed {TARGET}; session_id: {SESSION_ID}; no Human mail sent.")
         return 0
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError, UnicodeError, TaskFrontmatterError) as error:

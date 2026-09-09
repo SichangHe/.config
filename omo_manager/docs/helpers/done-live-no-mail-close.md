@@ -83,3 +83,14 @@ source-bound WebConf recovery
   prepared, shell-closed, or completed transition associated with the same
   immutable invocation, and conflicting task, TODO, pane, process, report,
   source, ownership, or audit state fails closed
+- if only unrelated `TODO.md` bytes or the validated exited-shell capture have
+  changed since the incident release, first run
+  `omo_webconf_exited_shell_recovery.py --prepare` from one immutable helper
+  tree, then have an independent owner run its `--review` mode
+- the recovery packet binds the exact current WebConf row, every unrelated
+  TODO byte, task/source/report/session/pane/process identity, the validated
+  capture, the close-audit destination, and every helper input; pass the
+  packet and review paths and digests to `omo_webconf_exited_shell_close.py`
+- preparation, review, and close each recheck the exact packet inputs; any
+  intervening task, TODO, capture, identity, helper, packet, review, or output
+  drift fails before close
