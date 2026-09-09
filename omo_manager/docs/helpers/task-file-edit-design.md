@@ -191,6 +191,17 @@ closure task. Each registration binds the source bytes, line range, task and
 lifecycle shape, and current task digest; all other source/task/owner
 combinations fail closed. The operation performs no pane mutation.
 
+`omo_task_edit.py source-pointer-disposition-cleanup` removes one bare Human
+source pointer only for the registered `dw_ops_mgr.md` Source-1528 incident.
+The invocation supplies the exact task and source SHA-256 values. Under locks,
+the helper rechecks the exact owner/lifecycle shape, owner-private Human source
+bytes, absence of a live pending marker, one and only one bare pointer outside
+Markdown fences, and both unique same-task Calendar A15 cancellation records.
+It preserves those disposition records, appends a digest-bound cleanup record,
+uses compare-and-swap replacement, sends no email, and never treats a single
+pointer as duplicate intake. Any other task, source, lifecycle, pointer count,
+or incomplete/ambiguous disposition fails before mutation.
+
 Keep existing `list`, `add`, `replace`/`update`, `remove`, and `comment` names
 as compatibility aliases if already shipped, but docs should use the canonical
 names above.

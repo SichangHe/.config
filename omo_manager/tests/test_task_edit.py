@@ -14,6 +14,8 @@ from unittest.mock import patch
 from omo_manager.omo_task_edit import REMOVE_REMINDER
 from omo_manager.omo_task_edit import SOURCE1503_SHA256
 from omo_manager.omo_task_edit import SOURCE1506_SHA256
+from omo_manager.omo_task_edit import SOURCE1528_DISPOSITION_RECORDS
+from omo_manager.omo_task_edit import SOURCE1528_SHA256
 from omo_manager.omo_task_edit import Args
 from omo_manager.omo_task_edit import normalize_duplicate_frontmatter
 from omo_manager.omo_task_edit import parse_args
@@ -41,6 +43,103 @@ def task_frontmatter(*, status: str = "running", pending_items: tuple[str, ...] 
 
 
 class TaskEditTests(unittest.TestCase):
+    SOURCE1528_BYTES = (
+        b"Subject: Re: Calendar owner needed for transcript_tasks.md\n\n"
+        b"For a manager, close this task is not needed.\r\n\r\n"
+        b"On Tue, Sep 8, 2026 at 16:24 <sichangheagent@gmail.com> wrote:\r\n\r\n"
+        b"> The existing task graph has no identifiable owner for the weekly meeting\r\n"
+        b"> calendar. Who owns that calendar series, or which existing calendar-capable\r\n"
+        b"> agent should receive Calvin Ardi\xe2\x80\x99s earlier invite request? No agent will\r\n"
+        b"> edit the event without that ownership or explicit authorization.\r\n>\r\n"
+    )
+
+    def source1528_fixture(self, root: Path, *, pointer_count: int = 1, dispositions: tuple[str, ...] = SOURCE1528_DISPOSITION_RECORDS) -> tuple[Path, str]:
+        mail = root / "manager_mail"
+        mail.mkdir(mode=0o700)
+        source = mail / "85c5dff58359-1528.txt"
+        source.write_bytes(self.SOURCE1528_BYTES)
+        source.chmod(0o600)
+        task = root / "dw_ops_mgr.md"
+        header = task_frontmatter(status="long_running", pending_items=("unrelated open manager item",), is_manager=True).replace("runat: wl:2", "runat: dw:18").replace("managerat: wl:1", "managerat: dw:15")
+        pointers = "".join("(record and delegate manager_mail/85c5dff58359-1528.txt)\n" for _ in range(pointer_count))
+        text = header + pointers + "\n".join(dispositions) + "\n"
+        task.write_text(text, encoding="utf-8")
+        return task, text
+
+    def test_source_pointer_disposition_cleanup_removes_one_exact_registered_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text = self.source1528_fixture(root)
+            args = Args(
+                root,
+                Path("dw_ops_mgr.md"),
+                "source-pointer-disposition-cleanup",
+                source_ref="manager_mail/85c5dff58359-1528.txt",
+                expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                expected_source_sha256=SOURCE1528_SHA256,
+            )
+
+            self.assertEqual(0, run(args))
+
+            updated = task.read_text(encoding="utf-8")
+            self.assertNotIn("(record and delegate manager_mail/85c5dff58359-1528.txt)", updated)
+            for record in SOURCE1528_DISPOSITION_RECORDS:
+                self.assertIn(record, updated)
+            self.assertIn("dispositioned source pointer removed for manager_mail/85c5dff58359-1528.txt", updated)
+            self.assertIn(SOURCE1528_SHA256, updated)
+
+    def test_source_pointer_disposition_cleanup_fails_closed_on_ambiguous_provenance(self) -> None:
+        cases = ("wrong task digest", "wrong source digest", "missing disposition", "fenced disposition", "duplicate pointer", "live pending", "crlf task")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                dispositions = SOURCE1528_DISPOSITION_RECORDS[:-1] if case == "missing disposition" else SOURCE1528_DISPOSITION_RECORDS
+                task, text = self.source1528_fixture(root, pointer_count=2 if case == "duplicate pointer" else 1, dispositions=dispositions)
+                if case == "fenced disposition":
+                    text = text.replace(
+                        "\n".join(SOURCE1528_DISPOSITION_RECORDS),
+                        "```text\n" + "\n".join(SOURCE1528_DISPOSITION_RECORDS) + "\n```",
+                    )
+                    task.write_text(text, encoding="utf-8")
+                if case == "live pending":
+                    text += "(pending)\nactive request\n"
+                    task.write_text(text, encoding="utf-8")
+                if case == "crlf task":
+                    raw_task = text.replace("\n", "\r\n").encode()
+                    task.write_bytes(raw_task)
+                args = Args(
+                    root,
+                    Path("dw_ops_mgr.md"),
+                    "source-pointer-disposition-cleanup",
+                    source_ref="manager_mail/85c5dff58359-1528.txt",
+                    expected_task_sha256=(
+                        "0" * 64
+                        if case == "wrong task digest"
+                        else hashlib.sha256(raw_task if case == "crlf task" else text.encode()).hexdigest()
+                    ),
+                    expected_source_sha256="0" * 64 if case == "wrong source digest" else SOURCE1528_SHA256,
+                )
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    self.assertEqual(2, run(args))
+                if case == "crlf task":
+                    self.assertEqual(raw_task, task.read_bytes())
+                else:
+                    self.assertEqual(text, task.read_text(encoding="utf-8"))
+
+    def test_source_pointer_disposition_cleanup_parser_requires_all_exact_digests(self) -> None:
+        common = [
+            "--root", "/tmp/work_logs", "source-pointer-disposition-cleanup", "dw_ops_mgr.md",
+            "--source-ref", "manager_mail/85c5dff58359-1528.txt", "--expected-task-sha256", "a" * 64,
+            "--expected-source-sha256", SOURCE1528_SHA256,
+        ]
+        args = parse_args(common)
+        self.assertEqual("source-pointer-disposition-cleanup", args.command)
+        for flag in ("--source-ref", "--expected-task-sha256", "--expected-source-sha256"):
+            with self.subTest(flag=flag), self.assertRaises(SystemExit):
+                index = common.index(flag)
+                parse_args(common[:index] + common[index + 2 :])
+
     def test_human_envelope_record_binds_exact_source_and_active_closure_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
