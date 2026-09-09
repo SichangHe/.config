@@ -27,6 +27,33 @@ MENU_LINES = [
     "  /statusline  configure which items appear in the status line",
 ]
 
+ACCUMULATED_STATUS_LINES = [
+    "│  Permissions:                 Full Access                                    │",
+    "│  Agents.md:                   ~/.codex/AGENTS.md, AGENTS.md                  │",
+    "│  Account:                     team@mi.inc (Pro)                              │",
+    "│  Thread name:                 Define manager worker defaults                 │",
+    "│  Collaboration mode:          Default                                        │",
+    "│  Session:                     01a07f0f-ffbd-7f13-89f1-4936c50be5c2           │",
+    "│                                                                              │",
+    "│  Context window:              30% left (183K used / 258K)                    │",
+    "│  gpt-reserve Weekly limit:    [████████████████████] 100% left               │",
+    "│                               (resets 16:27 on 15 Sep)                       │",
+    "│  Weekly limit:                [█████████████░░░░░░░] 66% left                │",
+    "│                               (resets 18:24 on 14 Sep)                       │",
+    "│  GPT-5.3-Codex-Spark limit:                                                  │",
+    "│  5h limit:                    [████████████████████] 100% left               │",
+    "│                               (resets 21:27)                                 │",
+    "│  Weekly limit:                [████████████████████] 100% left               │",
+    "│                               (resets 16:27 on 15 Sep)                       │",
+    "│  Warning:                     limits may be stale - run /status again shortl │",
+    "╰──────────────────────────────────────────────────────────────────────────────╯",
+    " ",
+    " ",
+    "› /status                 ",
+    " ",
+    "  gpt-5.6-sol high · workspace · usage",
+]
+
 
 def disposition_packet(tmp: Path) -> dict[str, object]:
     return {
@@ -271,6 +298,10 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             packet = disposition_packet(tmp)
             if schema is not None:
                 packet["schema"] = schema
+            if schema == subject.POST_REVIEW_SCHEMA:
+                reviewed_capture = "\n".join(ACCUMULATED_STATUS_LINES).encode() if states[0] == "status_input" else "\n".join(MENU_LINES).encode()
+                packet["menu_capture_base64"] = base64.b64encode(reviewed_capture).decode()
+                packet["menu_capture_sha256"] = subject.sha256(reviewed_capture)
             prepared_close = Path(str(packet["prepared_close_audit"]))
             prepared_close.write_bytes(b"preserved-close-audit\n")
             predecessor = PanePin("dw8:0", "%1", 101, 201)
@@ -344,6 +375,35 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         self.assertTrue(subject.exact_status_menu(lines))
         self.assertEqual("status_menu", subject.exact_recovery_state(lines))
 
+    def test_exact_accumulated_status_input_is_recognized(self) -> None:
+        self.assertTrue(subject.exact_accumulated_status_input(ACCUMULATED_STATUS_LINES))
+        repeated = [*ACCUMULATED_STATUS_LINES[:19], *ACCUMULATED_STATUS_LINES]
+        self.assertTrue(subject.exact_accumulated_status_input(repeated))
+
+    def test_accumulated_status_input_rejects_structural_drift(self) -> None:
+        cases = []
+        for index, replacement in (
+            (2, "│  Wrong:                       account                                        │"),
+            (18, "not a panel close"),
+            (20, "unexpected output"),
+            (21, "› /status now"),
+            (23, "footer without separators"),
+        ):
+            lines = list(ACCUMULATED_STATUS_LINES)
+            lines[index] = replacement
+            cases.append(lines)
+        for lines in cases:
+            with self.subTest(lines=lines):
+                self.assertFalse(subject.exact_accumulated_status_input(lines))
+        wrong_border = list(ACCUMULATED_STATUS_LINES)
+        wrong_border[18] = "╰foo╯"
+        self.assertFalse(subject.exact_accumulated_status_input(wrong_border))
+        wrong_value = list(ACCUMULATED_STATUS_LINES)
+        wrong_value[0] = "│  Permissions:                 Danger Zone                                    │"
+        self.assertFalse(subject.exact_accumulated_status_input(wrong_value))
+        inserted = [*ACCUMULATED_STATUS_LINES[:3], "│  Arbitrary:                   content                                        │", *ACCUMULATED_STATUS_LINES[3:]]
+        self.assertFalse(subject.exact_accumulated_status_input(inserted))
+
     def test_post_review_prepare_binds_exact_failed_close_and_menu_without_input(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             tmp = Path(directory)
@@ -403,8 +463,14 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             menu = b"menu"
             captures = 0
 
-            def capture(_predecessor: PanePin, _protected: PanePin) -> bytes:
+            def capture(
+                _predecessor: PanePin,
+                _protected: PanePin,
+                *,
+                allow_accumulated_status_input: bool = False,
+            ) -> bytes:
                 nonlocal captures
+                self.assertTrue(allow_accumulated_status_input)
                 captures += 1
                 if captures == 2:
                     ledger.write_text("raced after static validation\n")
@@ -807,6 +873,57 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             self.assertRaisesRegex(TaskFrontmatterError, "capture raced"),
         ):
             subject.capture_fresh_preparation_menu(predecessor, protected)
+
+    def test_post_review_prepare_accepts_stable_accumulated_status_input(self) -> None:
+        predecessor = PanePin("dw8:0", "%1", 101, 201)
+        protected = PanePin("dw8:1", "%2", 102, 202)
+        ready = b"\xe2\x80\xba Ask Codex to do anything\n\n  gpt-5.5\n"
+        accumulated = "\n".join(ACCUMULATED_STATUS_LINES).encode()
+        with patch.object(subject, "capture_pinned", side_effect=[ready, accumulated, accumulated, ready]):
+            self.assertEqual(
+                accumulated,
+                subject.capture_fresh_preparation_menu(predecessor, protected, allow_accumulated_status_input=True),
+            )
+        with (
+            patch.object(subject, "capture_pinned", side_effect=[ready, accumulated]),
+            self.assertRaisesRegex(TaskFrontmatterError, "cancellable /status shape"),
+        ):
+            subject.capture_fresh_preparation_menu(predecessor, protected)
+
+    def test_only_v3_live_state_classifies_accumulated_status_input(self) -> None:
+        predecessor = PanePin("dw8:0", "%1", 101, 201)
+        protected = PanePin("dw8:1", "%2", 102, 202)
+        accumulated = "\n".join(ACCUMULATED_STATUS_LINES).encode()
+        ready = b"\xe2\x80\xba Ask Codex to do anything\n\n  gpt-5.5\n"
+        packet = disposition_packet(Path("/tmp"))
+        packet.update(
+            {
+                "schema": subject.POST_REVIEW_SCHEMA,
+                "menu_capture_base64": base64.b64encode(accumulated).decode(),
+                "menu_capture_sha256": subject.sha256(accumulated),
+            }
+        )
+
+        def observed_state(schema: str, *, require_original: bool, capture: bytes = accumulated) -> str:
+            packet["schema"] = schema
+            with (
+                patch.object(subject, "static_evidence", return_value=(predecessor, protected)),
+                patch.object(subject, "current_pin", return_value=True),
+                patch.object(
+                    subject,
+                    "session_from_process",
+                    side_effect=[packet["predecessor_session_id"], packet["protected_session_id"]],
+                ),
+                patch.object(subject, "capture_pinned", side_effect=[capture, ready]),
+            ):
+                return subject.live_state(packet, require_original_menu=require_original)[2]
+
+        self.assertEqual("status_input", observed_state(subject.POST_REVIEW_SCHEMA, require_original=True))
+        self.assertEqual("other", observed_state(subject.SOURCE1485_SCHEMA, require_original=False))
+        drifted = accumulated.replace(b"team@mi.inc", b"evil@mi.inc")
+        self.assertTrue(subject.exact_accumulated_status_input(subject.capture_lines(drifted)))
+        with self.assertRaisesRegex(TaskFrontmatterError, "independently reviewed capture"):
+            observed_state(subject.POST_REVIEW_SCHEMA, require_original=True, capture=drifted)
 
     def test_fresh_prepare_rejects_nonready_or_changed_protected_successor(self) -> None:
         predecessor = PanePin("dw8:0", "%1", 101, 201)
@@ -1229,6 +1346,20 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             schema=subject.POST_REVIEW_SCHEMA,
         )
         self.assertEqual(["key:Escape:status_menu", "key:C-c:status_input"], [event for event in events if event.startswith("key:")])
+
+    def test_post_review_accumulated_status_input_uses_only_status_cancel(self) -> None:
+        events: list[str] = []
+        self.execute_states(
+            ["status_input", "status_input", "ready", "ready"],
+            events,
+            prepared_exists=False,
+            schema=subject.POST_REVIEW_SCHEMA,
+        )
+        self.assertEqual(["key:C-c:status_input"], [event for event in events if event.startswith("key:")])
+        self.assertEqual(
+            ["state:status_input:True", "state:status_input:True"],
+            [event for event in events if event.startswith("state:")][:2],
+        )
 
     def test_post_review_prepared_retry_is_idempotent_when_already_ready(self) -> None:
         events: list[str] = []

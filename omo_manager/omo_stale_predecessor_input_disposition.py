@@ -112,13 +112,13 @@ LATEST_RECOVERABLE_PACKET_SHA256 = "d9037a18a9ec4ab999b6c9059a87f85231f94601b8de
 LATEST_RECOVERABLE_REVIEW_SHA256 = "2a91482ee7170cc783cc8ec66f5a8bb13238483359e8ab06966fb49e10aea751"
 LATEST_RECOVERABLE_PREPARED_AUDIT_SHA256 = "d0df18ce5617e099cb89abca02afc0cd35f342707cb500fca4a494252fa134ff"
 LATEST_RECOVERABLE_HELPER_SHA256 = "af137b28809b36adf81ac0c5057c066518ffe35a6d86f8d47d343c3a3ba89c4c"
-POST_REVIEW_CLOSE_PACKET_SHA256 = "f763f132c8ba83d80fe1ddeb7c16911a7a42737af2e3f888b0c1e959a4e1919a"
-POST_REVIEW_CLOSE_REVIEW_SHA256 = "353942d04da71bba9a086808e01d701cdfb26582ad79d445a60781d1ab6f2e4d"
-POST_REVIEW_CLOSE_PREPARED_SHA256 = "dbbae3752d1eb098f59b89de8091f22143a9c01a536547cf2dc46edc392bfab1"
+POST_REVIEW_CLOSE_PACKET_SHA256 = "8a06804b2182aaea4621f2d30970c9b347253f88ec11f0adcaf5b7b18b333f8c"
+POST_REVIEW_CLOSE_REVIEW_SHA256 = "93db4c51aad30dcbfc6000f992c60cb2b95f7ce143f8a73083677ea3c2601a2a"
+POST_REVIEW_CLOSE_PREPARED_SHA256 = "32f66f2976a3a167e0238ad386b056d3e1c89bdbbbfedc2a40e80d54c1d1e598"
 POST_REVIEW_CLOSE_HELPER_SHA256 = "4ee19e34672d706dc9a846f9c3e97a703de9080265ff15277c6abbfb8caa0ab4"
-POST_REVIEW_CLOSE_PACKET_PATH = Path("/tmp/config4-dw8-close-source1485-blocked.JrmGfC/packet.json")
-POST_REVIEW_CLOSE_REVIEW_PATH = Path("/tmp/dw8-close-source1485-review.YYrxI6/independent-review.json")
-POST_REVIEW_CLOSE_PREPARED_PATH = Path("/tmp/config4-dw8-close-source1485-blocked.JrmGfC/audit.json.prepared")
+POST_REVIEW_CLOSE_PACKET_PATH = Path("/tmp/config4-dw8-ready-close.Sob3kx/packet.json")
+POST_REVIEW_CLOSE_REVIEW_PATH = Path("/tmp/dw8-ready-close-review.X9f8Pa/independent-review.json")
+POST_REVIEW_CLOSE_PREPARED_PATH = Path("/tmp/config4-dw8-ready-close.Sob3kx/audit.json.prepared")
 SOURCE1485_ROOT_AUDIT_SHA256 = "dd2cd04c1c6cd6c4050c7cd537d893e3c24aec45c504c1db3dbe0e4c0c792f2b"
 SOURCE1485_ORIGINAL_TASK_SHA256 = "b79fb58c6b1409dfce202f0f05105e8e3d88887cde77d69e2fc810687148094e"
 EXPECTED_SCOPE = {
@@ -305,6 +305,55 @@ def exact_status_menu(lines: list[str], authorized_input: str = AUTHORIZED_INPUT
         visible.pop()
     expected = [f"› {authorized_input}", "", *(f"  {row}" for row in STATUS_MENU_ROWS)]
     return len(visible) >= len(expected) and visible[-len(expected) :] == expected
+
+
+def exact_accumulated_status_input(lines: list[str], authorized_input: str = AUTHORIZED_INPUT) -> bool:
+    """Recognize a status result panel followed by the exact held command."""
+
+    report = report_from_lines(lines)
+    if report.status != "stuck_input" or report.input_text != authorized_input or not report.can_submit_input or report.input_blocker:
+        return False
+    rendered = [line.rstrip() for line in lines]
+    prompt = f"› {authorized_input}"
+    prompt_indices = [index for index, line in enumerate(rendered) if line == prompt]
+    close_indices = [index for index, line in enumerate(rendered) if line.startswith("╰") and line.endswith("╯")]
+    if not prompt_indices or not close_indices:
+        return False
+    prompt_index = prompt_indices[-1]
+    close_index = close_indices[-1]
+    if prompt_index != close_index + 3 or prompt_index + 2 != len(rendered) - 1:
+        return False
+    if any(rendered[index] for index in (close_index + 1, close_index + 2, prompt_index + 1)):
+        return False
+    panel_patterns = (
+        r"│  Permissions:\s+Full Access\s+│",
+        r"│  Agents\.md:\s+~/\.codex/AGENTS\.md, AGENTS\.md\s+│",
+        r"│  Account:\s+\S+ \(Pro\)\s+│",
+        r"│  Thread name:\s+Define manager worker defaults\s+│",
+        r"│  Collaboration mode:\s+Default\s+│",
+        rf"│  Session:\s+{re.escape(str(EXPECTED_SCOPE['predecessor_session_id']))}\s+│",
+        r"│\s+│",
+        r"│  Context window:\s+\d+% left \(\d+[KM] used / \d+[KM]\)\s+│",
+        r"│  gpt-reserve Weekly limit:\s+\[[█░]+\] \d+% left\s+│",
+        r"│\s+\(resets \d{2}:\d{2} on \d{1,2} [A-Z][a-z]{2}\)\s+│",
+        r"│  Weekly limit:\s+\[[█░]+\] \d+% left\s+│",
+        r"│\s+\(resets \d{2}:\d{2} on \d{1,2} [A-Z][a-z]{2}\)\s+│",
+        r"│  GPT-5\.3-Codex-Spark limit:\s+│",
+        r"│  5h limit:\s+\[[█░]+\] \d+% left\s+│",
+        r"│\s+\(resets \d{2}:\d{2}\)\s+│",
+        r"│  Weekly limit:\s+\[[█░]+\] \d+% left\s+│",
+        r"│\s+\(resets \d{2}:\d{2} on \d{1,2} [A-Z][a-z]{2}\)\s+│",
+        r"│  Warning:\s+limits may be stale - run /status again shortl │",
+    )
+    prior_close = close_indices[-2] if len(close_indices) > 1 else -1
+    panel = rendered[prior_close + 1 : close_index]
+    if len(panel) != len(panel_patterns) or rendered[close_index] != f"╰{'─' * 78}╯":
+        return False
+    if any(len(line) != 80 or re.fullmatch(pattern, line) is None for line, pattern in zip(panel, panel_patterns, strict=True)):
+        return False
+    if any(marker in line for line in panel for marker in ("›", "•")):
+        return False
+    return re.fullmatch(r"  gpt-[A-Za-z0-9.-]+ (?:low|medium|high|xhigh|max|ultra) · [^·]+ · [^·]+", rendered[-1]) is not None
 
 
 def exact_recovery_state(lines: list[str], authorized_input: str = AUTHORIZED_INPUT) -> str:
@@ -1367,11 +1416,15 @@ def live_state(
     capture = capture_pinned(predecessor)
     if packet.get("schema") in {SOURCE1485_SCHEMA, POST_REVIEW_SCHEMA} and not exact_ready_capture(capture_pinned(protected)):
         raise TaskFrontmatterError("protected successor left its preserved ready state.")
-    state = exact_recovery_state(capture_lines(capture), str(packet["authorized_input"]))
+    lines = capture_lines(capture)
+    state = exact_recovery_state(lines, str(packet["authorized_input"]))
+    if packet.get("schema") == POST_REVIEW_SCHEMA and exact_accumulated_status_input(lines, str(packet["authorized_input"])):
+        state = "status_input"
     expected_capture = base64.b64decode(str(packet["menu_capture_base64"]), validate=True)
     if sha256(expected_capture) != packet["menu_capture_sha256"]:
         raise TaskFrontmatterError("bound menu capture bytes are invalid.")
-    if require_original_menu and (state != "status_menu" or capture != expected_capture):
+    reviewed_states = {"status_menu", "status_input"} if packet.get("schema") == POST_REVIEW_SCHEMA else {"status_menu"}
+    if require_original_menu and (state not in reviewed_states or capture != expected_capture):
         raise TaskFrontmatterError("live status menu differs from the independently reviewed capture.")
     return predecessor, protected, state, capture
 
@@ -1486,14 +1539,21 @@ def file_input(path: Path, label: str, *, private: bool = False) -> dict[str, ob
     return {"file": asdict(identity), "ancestors": [asdict(item) for item in ancestors]}
 
 
-def capture_fresh_preparation_menu(predecessor: PanePin, protected: PanePin) -> bytes:
-    """Bind stable predecessor-menu bytes while preserving a ready successor."""
+def capture_fresh_preparation_menu(
+    predecessor: PanePin,
+    protected: PanePin,
+    *,
+    allow_accumulated_status_input: bool = False,
+) -> bytes:
+    """Bind one stable cancellable status shape while preserving a ready successor."""
 
     if not exact_ready_capture(capture_pinned(protected)):
         raise TaskFrontmatterError("protected successor is not in its preserved ready state.")
     menu_capture = capture_pinned(predecessor)
-    if not exact_status_menu(capture_lines(menu_capture)):
-        raise TaskFrontmatterError("predecessor does not show the exact /status completion menu.")
+    lines = capture_lines(menu_capture)
+    acceptable = exact_status_menu(lines) or (allow_accumulated_status_input and exact_accumulated_status_input(lines))
+    if not acceptable:
+        raise TaskFrontmatterError("predecessor does not show one exact cancellable /status shape.")
     if capture_pinned(predecessor) != menu_capture:
         raise TaskFrontmatterError("predecessor status-menu capture raced during preparation.")
     if not exact_ready_capture(capture_pinned(protected)):
@@ -1560,7 +1620,7 @@ def prepare_post_review(args: argparse.Namespace) -> None:
     predecessor = parse_pin(prior["predecessor_pane"], "predecessor pane")
     protected = parse_pin(prior["protected_pane"], "protected pane")
     validate_post_review_live_custody(prior, root, manager, predecessor, protected)
-    menu_capture = capture_fresh_preparation_menu(predecessor, protected)
+    menu_capture = capture_fresh_preparation_menu(predecessor, protected, allow_accumulated_status_input=True)
     inputs = post_review_input_records(prior, prior_packet_path, prior_review_path, prepared_path, helper)
     input_identities = {
         identity.path: identity for identity in (file_identity_from(object_map(value, "post-review disposition input").get("file"), "post-review disposition input") for value in inputs)
@@ -1605,12 +1665,12 @@ def prepare_post_review(args: argparse.Namespace) -> None:
         static_post_review_evidence(packet)
         for held in held_inputs:
             validate_held_absolute(held)
-        if capture_fresh_preparation_menu(predecessor, protected) != menu_capture:
+        if capture_fresh_preparation_menu(predecessor, protected, allow_accumulated_status_input=True) != menu_capture:
             raise TaskFrontmatterError("post-review status-menu capture raced before publication.")
         for held in held_inputs:
             validate_held_absolute(held)
         validate_post_review_live_custody(prior, root, manager, predecessor, protected)
-        if capture_fresh_preparation_menu(predecessor, protected) != menu_capture:
+        if capture_fresh_preparation_menu(predecessor, protected, allow_accumulated_status_input=True) != menu_capture:
             raise TaskFrontmatterError("post-review status-menu capture raced during final custody validation.")
         for held in held_inputs:
             validate_held_absolute(held)
@@ -1792,8 +1852,9 @@ def prepare(args: argparse.Namespace) -> None:
 
 def review_record(packet: dict[str, object], packet_sha256: str) -> dict[str, object]:
     predecessor, protected, state, capture = live_state(packet, require_original_menu=True)
-    if state != "status_menu":
-        raise TaskFrontmatterError("independent review did not observe the exact status menu.")
+    allowed_states = {"status_menu", "status_input"} if packet.get("schema") == POST_REVIEW_SCHEMA else {"status_menu"}
+    if state not in allowed_states:
+        raise TaskFrontmatterError("independent review did not observe the exact cancellable status shape.")
     return {
         "schema": REVIEW_SCHEMA,
         "verdict": "PASS",
@@ -2331,6 +2392,13 @@ def execute(args: argparse.Namespace) -> None:
             rebind_recoverable_helper=rebind_recoverable_helper,
             todo_recovery=todo_recovery,
         )
+        bound_status_input = False
+        if packet.get("schema") == POST_REVIEW_SCHEMA:
+            expected_capture = base64.b64decode(str(packet["menu_capture_base64"]), validate=True)
+            bound_status_input = exact_accumulated_status_input(
+                capture_lines(expected_capture),
+                str(packet["authorized_input"]),
+            )
 
         def current_state(*, allowed: set[str], require_original_menu: bool = False) -> tuple[str, bytes]:
             for item in held:
@@ -2358,8 +2426,9 @@ def execute(args: argparse.Namespace) -> None:
             current_state(allowed={"ready"})
             print(complete_path)
             return
+        initial_states = {"status_menu", "status_input"} if packet.get("schema") == POST_REVIEW_SCHEMA else {"status_menu"}
         state, _capture = current_state(
-            allowed={"status_menu", "status_input", "ready"} if prepared_exists else {"status_menu"},
+            allowed={"status_menu", "status_input", "ready"} if prepared_exists else initial_states,
             require_original_menu=not prepared_exists,
         )
         publish_or_validate(prepared_path, prepared_data, "prepared input disposition audit")
@@ -2375,7 +2444,7 @@ def execute(args: argparse.Namespace) -> None:
             state, _capture = guarded_tmux_command_for_capture(
                 predecessor,
                 ["send-keys", "-t", predecessor.pane_id, "C-c"],
-                validate_before=lambda: current_state(allowed={"status_input"}),
+                validate_before=lambda: current_state(allowed={"status_input"}, require_original_menu=bound_status_input),
                 validate_after=lambda: current_state(allowed={"status_input", "ready"}),
             )
             deadline = time.monotonic() + args.wait_s
