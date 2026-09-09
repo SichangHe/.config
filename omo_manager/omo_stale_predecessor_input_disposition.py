@@ -353,7 +353,8 @@ def exact_accumulated_status_input(lines: list[str], authorized_input: str = AUT
         return False
     if any(marker in line for line in panel for marker in ("›", "•")):
         return False
-    return re.fullmatch(r"  gpt-[A-Za-z0-9.-]+ (?:low|medium|high|xhigh|max|ultra) · [^·]+ · [^·]+", rendered[-1]) is not None
+    footer_pattern = r"  gpt-[A-Za-z0-9.-]+ (?:low|medium|high|xhigh|max|ultra) · /ssd1/sichangheagent/dw8 · weekly \d+% left · \d+(?:\.\d+)?[KMG] used · …"
+    return re.fullmatch(footer_pattern, rendered[-1]) is not None
 
 
 def exact_recovery_state(lines: list[str], authorized_input: str = AUTHORIZED_INPUT) -> str:

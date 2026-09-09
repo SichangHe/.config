@@ -51,7 +51,7 @@ ACCUMULATED_STATUS_LINES = [
     " ",
     "› /status                 ",
     " ",
-    "  gpt-5.6-sol high · workspace · usage",
+    "  gpt-5.6-sol high · /ssd1/sichangheagent/dw8 · weekly 60% left · 6.82M used · …",
 ]
 
 
@@ -403,6 +403,19 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         self.assertFalse(subject.exact_accumulated_status_input(wrong_value))
         inserted = [*ACCUMULATED_STATUS_LINES[:3], "│  Arbitrary:                   content                                        │", *ACCUMULATED_STATUS_LINES[3:]]
         self.assertFalse(subject.exact_accumulated_status_input(inserted))
+        footer_drifts = (
+            "  gpt-5.6-sol high · /ssd1/sichangheagent/dw8 · weekly 60% left · 6.82M used",
+            "  gpt-5.6-sol high · /tmp/dw8 · weekly 60% left · 6.82M used · …",
+            "  gpt-5.6-sol high · /ssd1/sichangheagent/dw8 · weekly 60% left · 6.82M used · extra · …",
+            "  gpt-5.6-sol high · /ssd1/sichangheagent/dw8 · weekly sixty left · 6.82M used · …",
+            "  gpt-5.6-sol high · /ssd1/sichangheagent/dw8 · weekly 60% left · unknown used · …",
+            "  gpt-5.6-sol high · /ssd1/sichangheagent/dw8 · weekly 60% left · 6.82M used · ...",
+        )
+        for footer in footer_drifts:
+            with self.subTest(footer=footer):
+                lines = list(ACCUMULATED_STATUS_LINES)
+                lines[-1] = footer
+                self.assertFalse(subject.exact_accumulated_status_input(lines))
 
     def test_post_review_prepare_binds_exact_failed_close_and_menu_without_input(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
