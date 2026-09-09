@@ -4089,7 +4089,10 @@ def archived_task_custody(plan: Plan) -> dict[str, object]:
     )
     r100_archive_changed = isinstance(commitment_binding, dict) and commitment_binding.get(
         "kind"
-    ) == "r100-terminal-status-transition" and (
+    ) in {
+        "r100-terminal-status-transition",
+        "r100-top-level-no-mail-terminal-transition",
+    } and (
         commitment_binding.get("done_sha256") != hashlib.sha256(task_payload).hexdigest()
         or commitment_binding.get("done_size_bytes") != len(task_payload)
     )
@@ -5478,7 +5481,7 @@ def custom_exec_shell_command(raw_input: str) -> str:
     """Extract the exact shell command from a canonical Codex exec call."""
 
     match = re.search(
-        r'tools\.exec_command\(\{(?:cmd|"cmd")\s*:\s*(?P<command>"(?:\\.|[^"\\])*")',
+        r'tools\.exec_command\(\{\s*(?:cmd|"cmd")\s*:\s*(?P<command>"(?:\\.|[^"\\])*")',
         raw_input,
     )
     if match is None:
@@ -5678,8 +5681,12 @@ def top_level_no_mail_root_retained_provenance(
     replay_id: str,
     manager_target: str,
     evidence: RootRetainedNoMailEvidence,
+    *,
+    current_task: Path | None = None,
 ) -> dict[str, object]:
     """Authenticate one top-level report, no-mail removal, and terminal task."""
+
+    completed_task = original_task if current_task is None else current_task
 
     prefix = read_append_only_session_prefix(evidence)
     records = root_retained_jsonl_records(prefix, "root-retained no-mail prefix")
@@ -5746,6 +5753,19 @@ def top_level_no_mail_root_retained_provenance(
         r"removed 1 pending item\(s\); verify each item was actually done or cancelled\n"
         r"Emailed the human with the exact removed work and evidence\.\n$"
     )
+
+    def optional_pending_list(tokens: list[str]) -> bool:
+        return tokens == [] or (
+            len(tokens) == 2
+            and Path(tokens[0]).name == "omo_pending.py"
+            and tokens[1] == "list"
+        ) or (
+            len(tokens) == 4
+            and tokens[:2] == ["timeout", "20s"]
+            and Path(tokens[2]).name == "omo_pending.py"
+            and tokens[3] == "list"
+        )
+
     for record_index, record in enumerate(records):
         payload = record.get("payload")
         item = payload.get("item") if isinstance(payload, dict) else None
@@ -5823,7 +5843,7 @@ def top_level_no_mail_root_retained_provenance(
                 removal_evidence = tail[1]
                 if tail[2] == "--no-email" and stdout == no_mail_removed_output:
                     remainder = tail[3:]
-                    if remainder in ([], ["omo_pending.py", "list"]):
+                    if optional_pending_list(remainder):
                         removal_executions.append(
                             (record_index, turn_id, record, pending_item, removal_evidence, "no-email", "", stdout)
                         )
@@ -5841,7 +5861,7 @@ def top_level_no_mail_root_retained_provenance(
                         and Path(subject_file).is_absolute()
                         and Path(message_file).is_absolute()
                         and MESSAGE_ID_RE.fullmatch(message_id) is not None
-                        and remainder in ([], ["omo_pending.py", "list"], ["timeout", "20s", "omo_pending.py", "list"])
+                        and optional_pending_list(remainder)
                     ):
                         removal_executions.append(
                             (
@@ -5855,7 +5875,46 @@ def top_level_no_mail_root_retained_provenance(
                                 stdout,
                             )
                         )
-    if len(report_executions) != 1 or len(removal_executions) != 1:
+    def report_time_transition(
+        removal: tuple[int, str, dict[str, object], str, str, str, str, str],
+    ) -> tuple[bytes, int, int] | None:
+        pending_item = removal[3]
+        removal_evidence = removal[4]
+        removal_note = f"(verified removed pending item: {removal_evidence})\n".encode()
+        if not current_payload.endswith(removal_note):
+            return None
+        report_time_base = current_payload[: -len(removal_note)]
+        report_time_base, status_replacements = re.subn(
+            rb"(?m)^status: done$",
+            b"status: running",
+            report_time_base,
+            count=1,
+        )
+        pending_renderings = (
+            pending_item,
+            f"'{pending_item.replace(chr(39), chr(39) * 2)}'",
+            yaml_double_quoted_scalar(pending_item),
+        )
+        matches: list[tuple[bytes, int]] = []
+        for rendering in pending_renderings:
+            candidate, pending_replacements = re.subn(
+                rb"(?m)^pending_task_items: \[\]$",
+                lambda _match, rendering=rendering: f"pending_task_items:\n  - {rendering}".encode(),
+                report_time_base,
+                count=1,
+            )
+            if len(candidate) == source_size and hashlib.sha256(candidate).hexdigest() == source_sha256:
+                matches.append((candidate, pending_replacements))
+        if len(matches) != 1:
+            return None
+        return matches[0][0], status_replacements, matches[0][1]
+
+    authenticated_removals = [
+        (removal, transition)
+        for removal in removal_executions
+        if (transition := report_time_transition(removal)) is not None
+    ]
+    if len(report_executions) != 1 or len(authenticated_removals) != 1:
         raise ReceiptError("root-retained no-mail transcript lacks one exact accepted report and pending removal")
     (
         report_record_index,
@@ -5866,6 +5925,10 @@ def top_level_no_mail_root_retained_provenance(
         report_was_accepted,
     ) = report_executions[0]
     (
+        selected_removal,
+        (report_time_payload, status_replacements, pending_replacements),
+    ) = authenticated_removals[0]
+    (
         removal_record_index,
         removal_turn_id,
         removal_record,
@@ -5874,7 +5937,7 @@ def top_level_no_mail_root_retained_provenance(
         removal_mode,
         completion_email_message_id,
         removal_output,
-    ) = removal_executions[0]
+    ) = selected_removal
     if (report_was_accepted, removal_mode) not in {
         (True, "no-email"),
         (False, "human-email"),
@@ -6074,39 +6137,11 @@ def top_level_no_mail_root_retained_provenance(
             if command_mentions_email_helper(command):
                 raise ReceiptError("root-retained no-mail transcript contains a Human email command")
 
-    removal_note = f"(verified removed pending item: {removal_evidence})\n".encode()
-    if not current_payload.endswith(removal_note):
-        raise ReceiptError("root-retained no-mail task lacks its exact verified removal note")
-    report_time_base = current_payload[: -len(removal_note)]
-    report_time_base, status_replacements = re.subn(
-        rb"(?m)^status: done$",
-        b"status: running",
-        report_time_base,
-        count=1,
-    )
-    pending_renderings = (
-        pending_item,
-        f"'{pending_item.replace(chr(39), chr(39) * 2)}'",
-        yaml_double_quoted_scalar(pending_item),
-    )
-    report_time_candidates: list[bytes] = []
-    pending_replacements = 0
-    for rendering in pending_renderings:
-        candidate, candidate_replacements = re.subn(
-            rb"(?m)^pending_task_items: \[\]$",
-            lambda _match, rendering=rendering: f"pending_task_items:\n  - {rendering}".encode(),
-            report_time_base,
-            count=1,
-        )
-        pending_replacements = max(pending_replacements, candidate_replacements)
-        if len(candidate) == source_size and hashlib.sha256(candidate).hexdigest() == source_sha256:
-            report_time_candidates.append(candidate)
-    if len(report_time_candidates) != 1:
-        raise ReceiptError("root-retained no-mail task transition does not authenticate the report source")
-    report_time_payload = report_time_candidates[0]
     report_snapshot = frontmatter_snapshot(report_time_payload)
     no_mail_contract = re.findall(
-        rb"(?i)\b(?:do not|must not|never) email (?:the )?Human\b|\bno Human email\b",
+        rb"(?i)\b(?:do not|must not|never) email (?:the )?Human\b"
+        rb"|\bno Human email\b"
+        rb"|\bwithout\b[^\r\n.]{0,120}\bsending (?:Human )?email\b",
         report_time_payload,
     )
     authority_binding: dict[str, object] = {}
@@ -6138,7 +6173,8 @@ def top_level_no_mail_root_retained_provenance(
         raise ReceiptError("root-retained no-mail task transition does not authenticate the report source")
     if (
         read_append_only_session_prefix(evidence) != prefix
-        or regular_file_bytes(original_task, maximum=MAX_ROUTE_FILE_BYTES, field="completed task") != current_payload
+        or regular_file_bytes(completed_task, maximum=MAX_ROUTE_FILE_BYTES, field="completed task")
+        != current_payload
         or regular_file_bytes(root / "TODO.md", maximum=MAX_ROUTE_FILE_BYTES, field="TODO") != todo_payload
         or (
             authority_source is not None
@@ -6917,7 +6953,10 @@ def infer_archived_task_path(
             return original_task, provenance
     if os.path.lexists(original_task):
         raise ReceiptError("archived task Git rename provenance is missing or ambiguous")
-    if root_retained_evidence is not None:
+    if root_retained_evidence is not None and not isinstance(
+        root_retained_evidence,
+        RootRetainedNoMailEvidence,
+    ):
         raise ReceiptError("root-retained session evidence cannot authenticate a monthly archive")
 
     def git(*arguments: str, text: bool = False) -> bytes | str:
@@ -6994,6 +7033,11 @@ def infer_archived_task_path(
     if not all(git_object_re.fullmatch(value) for value in (source_blob, destination_blob, head_blob)):
         raise ReceiptError("archived task Git blob identity is invalid")
     current_payload = regular_file_bytes(candidate, maximum=MAX_ROUTE_FILE_BYTES, field="archived task")
+    todo_payload = regular_file_bytes(
+        root / "TODO.md",
+        maximum=MAX_ROUTE_FILE_BYTES,
+        field="TODO",
+    )
     raw_head_payload = git("cat-file", "blob", head_blob)
     if not isinstance(raw_head_payload, bytes):
         raise AssertionError("binary Git command returned text")
@@ -7039,6 +7083,8 @@ def infer_archived_task_path(
         if len(payload) == source_size and hashlib.sha256(payload).hexdigest() == source_sha256:
             committed_blobs.add(blob)
     if committed_blobs:
+        if root_retained_evidence is not None:
+            raise ReceiptError("root-retained session evidence is unnecessary for committed Git custody")
         commitment_binding: dict[str, object] = {
             "kind": "historical-git-blob",
             "blob": sorted(committed_blobs)[0],
@@ -7066,6 +7112,8 @@ def infer_archived_task_path(
         if records and (len(records) != 1 or len(matching_records) != 1):
             raise ReceiptError("archived task Git history does not authenticate its committed report source")
         if matching_records:
+            if root_retained_evidence is not None:
+                raise ReceiptError("root-retained session evidence is unnecessary for an archive record")
             record = matching_records[0].group(0)
             commitment_binding = {
                 "kind": "archived-task-record",
@@ -7073,6 +7121,8 @@ def infer_archived_task_path(
                 "record_sha256": hashlib.sha256(record.encode()).hexdigest(),
             }
         elif terminal_transition_matches:
+            if root_retained_evidence is not None:
+                raise ReceiptError("root-retained session evidence is unnecessary for an exact status transition")
             commitment_binding = {
                 "kind": "r100-terminal-status-transition",
                 "from_status": "running",
@@ -7080,6 +7130,39 @@ def infer_archived_task_path(
                 "transition_count": terminal_replacements,
                 "done_sha256": current_sha256,
                 "done_size_bytes": len(current_payload),
+            }
+        elif isinstance(root_retained_evidence, RootRetainedNoMailEvidence):
+            if (
+                Path(original_ref).parent != Path(".")
+                or similarity != "100"
+                or source_blob != destination_blob
+                or destination_blob != head_blob
+            ):
+                raise ReceiptError(
+                    "root-retained no-mail transcript requires one clean exact root-to-archive rename"
+                )
+            terminal_provenance = top_level_no_mail_root_retained_provenance(
+                root,
+                original_task,
+                current_payload,
+                todo_payload,
+                str(source_sha256),
+                source_size,
+                replay_id,
+                manager_target,
+                root_retained_evidence,
+                current_task=candidate,
+            )
+            if (
+                terminal_provenance.get("current_done_sha256") != current_sha256
+                or terminal_provenance.get("current_done_size_bytes") != len(current_payload)
+            ):
+                raise ReceiptError("archived terminal task transition changed")
+            commitment_binding = {
+                "kind": "r100-top-level-no-mail-terminal-transition",
+                "done_sha256": current_sha256,
+                "done_size_bytes": len(current_payload),
+                "terminal_provenance": terminal_provenance,
             }
         else:
             raise ReceiptError("archived task Git history does not authenticate its committed report source")

@@ -330,6 +330,7 @@ def root_retained_no_mail_fixture(
     authority_text: str = "Email me the result.",
     close_authority: bool = True,
     acknowledgment_after_removal: bool = False,
+    no_mail_task_contract: str | None = None,
 ) -> tuple[ReportFixture, Path, Path, Path, str]:
     case, manager, _owner = active_manager_fixture(tmp_path)
     task = case.root / "worker.md"
@@ -346,7 +347,10 @@ def root_retained_no_mail_fixture(
     task_contract = (
         "Classify the current TODO state and email the Human.\n"
         if human_email
-        else "Classify the current TODO state, report privately, and do not email the Human.\n"
+        else (
+            no_mail_task_contract
+            or "Classify the current TODO state, report privately, and do not email the Human.\n"
+        )
     )
     human_instruction = (
         '<human_instruction authoritative="true" source="manager_mail/source.txt:1-1">\n'
@@ -531,6 +535,85 @@ def root_retained_no_mail_fixture(
     transcript.write_bytes(b"".join(canonical_json(record) for record in records))
     transcript.chmod(0o600)
     return case, envelope, task, transcript, replay_id
+
+
+def archive_root_retained_no_mail_task(case: ReportFixture, task: Path) -> Path:
+    """Commit one completed root task, then archive it through one clean R100 rename."""
+
+    subprocess.run(["git", "init", "-q", str(case.root)], check=True)
+    subprocess.run(["git", "-C", str(case.root), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(case.root), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(case.root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(case.root), "commit", "-qm", "record completed root task"], check=True)
+    (case.root / "TODO.md").write_text("current:\nmanager.md vl:2\n\nprevious:\n", encoding="utf-8")
+    month = case.root / "202608"
+    month.mkdir()
+    archived = month / task.name
+    task.rename(archived)
+    subprocess.run(["git", "-C", str(case.root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(case.root), "commit", "-qm", "archive completed task"], check=True)
+    return archived
+
+
+def insert_no_mail_removal(transcript: Path, command: str, *, call_id: str) -> None:
+    """Insert one earlier successful queue removal into a synthetic owner transcript."""
+
+    records = [json.loads(line) for line in transcript.read_text(encoding="utf-8").splitlines()]
+    session = records[0]["payload"]
+    turn_id = f"{call_id:0<8}-1111-2222-3333-444444444444"[:36]
+    stdout = "removed 1 pending item(s) without email; verify each item was actually done or cancelled\n"
+    for record in records[1:]:
+        record["ordinal"] = int(record["ordinal"]) + 3
+    inserted: list[dict[str, object]] = [
+        {
+            "ordinal": 1,
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": call_id,
+                "input": f"const r = await tools.exec_command({json.dumps({'cmd': command})});",
+                "internal_chat_message_metadata_passthrough": {"turn_id": turn_id},
+            },
+        },
+        {
+            "ordinal": 2,
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": session["id"],
+                "turn_id": turn_id,
+                "item": {
+                    "type": "CommandExecution",
+                    "command": ["/bin/sh", "-lc", command],
+                    "cwd": f"file://{session['cwd']}",
+                    "status": "completed",
+                    "stdout": stdout,
+                    "stderr": "",
+                    "aggregated_output": stdout,
+                    "formatted_output": stdout,
+                    "exit_code": 0,
+                    "source": "unified_exec_startup",
+                },
+            },
+        },
+        {
+            "ordinal": 3,
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "call_id": call_id,
+                "output": [{"type": "input_text", "text": stdout}],
+                "internal_chat_message_metadata_passthrough": {"turn_id": turn_id},
+            },
+        },
+    ]
+    transcript.write_bytes(
+        b"".join(canonical_json(record) for record in [records[0], *inserted, *records[1:]])
+    )
 
 
 def root_retained_session_fixture(
@@ -4128,12 +4211,188 @@ return 75
             self.assertEqual(0, validated.returncode, validated.stderr)
             self.assertEqual(attestation, json.loads(validated.stdout))
 
+    def test_root_retained_no_mail_custody_composes_with_exact_archive_rename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, envelope, task, transcript, _replay_id = root_retained_no_mail_fixture(
+                tmp_path,
+                no_mail_task_contract=(
+                    "Integrate the reviewed release without touching the worker or sending email.\n"
+                ),
+            )
+            transcript.write_text(
+                transcript.read_text(encoding="utf-8").replace(
+                    "omo_pending.py list",
+                    "/home/test/.config/bin/omo_pending.py list",
+                ),
+                encoding="utf-8",
+            )
+            unrelated = (
+                "omo_pending.py remove --item 'Earlier unrelated work' --evidence "
+                "'Earlier work completed.' --no-email"
+            )
+            insert_no_mail_removal(transcript, unrelated, call_id="earlier_remove")
+            archived = archive_root_retained_no_mail_task(case, task)
+            exported = tmp_path / "archived-no-mail.json"
+
+            result = export_archived_report(
+                case,
+                envelope,
+                exported,
+                no_mail_transcript=transcript,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            attestation = json.loads(result.stdout)
+            custody = attestation["archive_custody"]
+            provenance = custody["git_provenance"]
+            binding = provenance["commitment_binding"]
+            self.assertEqual(str(archived), custody["task"])
+            self.assertEqual(0, custody["todo_reference_count"])
+            self.assertEqual("omo-report-archived-task-git-provenance/v1", provenance["schema"])
+            self.assertEqual("100", provenance["rename_similarity"])
+            self.assertEqual("r100-top-level-no-mail-terminal-transition", binding["kind"])
+            self.assertEqual(
+                "codex-top-level-no-mail-prefix",
+                binding["terminal_provenance"]["commitment_binding"]["kind"],
+            )
+            validated = validate_export_from(case, exported)
+            self.assertEqual(0, validated.returncode, validated.stderr)
+            self.assertEqual(attestation, json.loads(validated.stdout))
+
+    def test_root_retained_no_mail_archive_rejects_duplicate_matching_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, envelope, task, transcript, _replay_id = root_retained_no_mail_fixture(tmp_path)
+            records = [json.loads(line) for line in transcript.read_text(encoding="utf-8").splitlines()]
+            removal_event = next(
+                record
+                for record in records
+                if "--no-email" in str(record.get("payload", {}).get("item", {}).get("command", ""))
+            )
+            command = removal_event["payload"]["item"]["command"][-1]
+            insert_no_mail_removal(transcript, command, call_id="duplicate_remove")
+            archive_root_retained_no_mail_task(case, task)
+
+            result = export_archived_report(
+                case,
+                envelope,
+                tmp_path / "rejected.json",
+                no_mail_transcript=transcript,
+            )
+
+            self.assertEqual(2, result.returncode)
+            self.assertIn("one exact accepted report and pending removal", result.stderr)
+
+    def test_archived_root_retained_no_mail_rejects_task_read_race(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, _envelope, task, transcript, replay_id = root_retained_no_mail_fixture(tmp_path)
+            archived = archive_root_retained_no_mail_task(case, task)
+            commitment = json.loads(
+                (
+                    Path(case.env["XDG_STATE_HOME"])
+                    / "omo-manager"
+                    / "report-receipts"
+                    / f"{replay_id}.commitment"
+                ).read_text(encoding="utf-8")
+            )
+            evidence = omo_report_receipt.capture_root_retained_no_mail_evidence(transcript)
+            original_reader = omo_report_receipt.regular_file_bytes
+
+            def racing_reader(
+                path: Path,
+                *,
+                maximum: int,
+                field: str,
+                require_owner: bool = True,
+            ) -> bytes:
+                payload = original_reader(
+                    path,
+                    maximum=maximum,
+                    field=field,
+                    require_owner=require_owner,
+                )
+                if path == archived and field == "completed task":
+                    return payload + b"raced\n"
+                return payload
+
+            with patch.object(omo_report_receipt, "regular_file_bytes", side_effect=racing_reader):
+                with self.assertRaisesRegex(ReceiptError, "evidence changed"):
+                    omo_report_receipt.infer_archived_task_path(
+                        case.root,
+                        case.root / "worker.md",
+                        commitment["preflight"]["routing_sources"],
+                        replay_id,
+                        "vl:2",
+                        evidence,
+                    )
+
+    def test_archived_root_retained_no_mail_rejects_nested_source_rename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, _envelope, task, transcript, replay_id = root_retained_no_mail_fixture(tmp_path)
+            source_dir = case.root / "202607"
+            source_dir.mkdir()
+            source = source_dir / task.name
+            task.rename(source)
+            subprocess.run(["git", "init", "-q", str(case.root)], check=True)
+            subprocess.run(["git", "-C", str(case.root), "config", "user.name", "Test"], check=True)
+            subprocess.run(
+                ["git", "-C", str(case.root), "config", "user.email", "test@example.com"],
+                check=True,
+            )
+            subprocess.run(["git", "-C", str(case.root), "add", "-A"], check=True)
+            subprocess.run(["git", "-C", str(case.root), "commit", "-qm", "record old archive"], check=True)
+            destination_dir = case.root / "202608"
+            destination_dir.mkdir()
+            source.rename(destination_dir / source.name)
+            subprocess.run(["git", "-C", str(case.root), "add", "-A"], check=True)
+            subprocess.run(["git", "-C", str(case.root), "commit", "-qm", "move between archives"], check=True)
+            evidence = omo_report_receipt.capture_root_retained_no_mail_evidence(transcript)
+            route_evidence = [
+                {
+                    "exists": True,
+                    "path": str(source),
+                    "sha256": "0" * 64,
+                    "size_bytes": 1,
+                },
+                {
+                    "exists": True,
+                    "path": str(case.root / "TODO.md"),
+                    "sha256": hashlib.sha256((case.root / "TODO.md").read_bytes()).hexdigest(),
+                    "size_bytes": (case.root / "TODO.md").stat().st_size,
+                },
+            ]
+
+            with self.assertRaisesRegex(ReceiptError, "root-to-archive rename"):
+                omo_report_receipt.infer_archived_task_path(
+                    case.root,
+                    source,
+                    route_evidence,
+                    replay_id,
+                    "vl:2",
+                    evidence,
+                )
+
     def test_no_mail_reconstruction_matches_v1_double_quoted_renderer(self) -> None:
         escaped = 'double " slash \\\\ controls \0\x07\x08\t\x0b\x0c\r\x1b\x85\u2028\u2029\ufeff\u00a0 emoji \U0001f642'
         self.assertEqual(
             render_v1_pending_scalar(escaped),
             omo_report_receipt.yaml_double_quoted_scalar(escaped),
         )
+
+    def test_custom_exec_shell_command_accepts_multiline_exec_options(self) -> None:
+        command = "omo_report.sh --status done --message-file /tmp/report.md"
+        raw_input = (
+            "const r = await tools.exec_command({\n"
+            f"  cmd: {json.dumps(command)},\n"
+            '  workdir: "/tmp/worktree",\n'
+            "  yield_time_ms: 30000\n"
+            "});\ntext(r.output);"
+        )
+
+        self.assertEqual(command, omo_report_receipt.custom_exec_shell_command(raw_input))
 
     def test_root_retained_top_level_human_email_completion_after_routed_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

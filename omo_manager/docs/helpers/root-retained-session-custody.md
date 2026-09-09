@@ -39,4 +39,8 @@ This form requires one top-level Codex transcript to prove the private report, t
 - an acknowledged terminal `done` report followed by `--no-email`, with exactly one explicit no-Human-email contract and no Human-email command anywhere in the captured prefix;
 - an initially unacknowledged `in-progress` report, its exact manager consumption acknowledgment, then the normal completion-email removal, with one Human-owned queue item, completion key, and Message-ID. The complete authoritative Human-instruction block must quote exact lines from a safe private `manager_mail` source whose digest is bound in the export.
 
-Any mixed pair, missing authority, ambiguous report or removal, subagent transcript, or provenance shared between the two exceptional forms fails closed. The eventual pane close remains no-mail in both cases.
+An earlier unrelated queue removal in the same top-level session is ignored only when it cannot reconstruct the commitment-bound report-time task. Two removals that both reconstruct those bytes remain ambiguous and fail closed.
+
+The same form also supports a completed root task subsequently moved into one monthly archive by a clean committed R100 rename. The helper binds the report-time transition first, then the unchanged source/destination/head Git blob and current zero-reference TODO state. A non-R100 rename, task-path dirt, Git snapshot race, or archive bytes changed after the transcript transition fails closed.
+
+Any mixed pair, missing authority, ambiguous matching report or removal, subagent transcript, or provenance shared between the two exceptional forms fails closed. The eventual pane close remains no-mail in both cases.
