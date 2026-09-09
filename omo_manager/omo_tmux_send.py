@@ -35,6 +35,8 @@ try:
         current_input_text,
         cursor_usage_limit_lines,
         exact_pane_id,
+        exact_codex_launch,
+        exact_pane_process,
         exact_tail,
         file_search_overlay_input_text,
         has_codex_model_footer,
@@ -66,6 +68,8 @@ except ModuleNotFoundError:
         current_input_text,
         cursor_usage_limit_lines,
         exact_pane_id,
+        exact_codex_launch,
+        exact_pane_process,
         exact_tail,
         file_search_overlay_input_text,
         has_codex_model_footer,
@@ -145,6 +149,13 @@ class Args:
     cancel_existing_sha256: str = ""
     describe_partial_cursor: bool = False
     clear_partial_cursor_sha256: str = ""
+    cancel_existing_wrapped_file: Path | None = None
+    cancel_existing_source_sha256: str = ""
+    cancel_existing_rendered_sha256: str = ""
+    cancel_existing_rendered_trailing_blank_sha256: str = ""
+    expected_pane_id: str = ""
+    expected_pane_pid: int = 0
+    expected_pane_command: str = ""
 
 
 @dataclass(frozen=True)
@@ -158,6 +169,21 @@ class ExistingInputCapture:
     pane_id: str
     text: str
     cursor: bool = False
+
+
+@dataclass(frozen=True)
+class CodexRuntimeBinding:
+    pane_id: str
+    pane_pid: int
+    pane_command: str
+
+
+@dataclass(frozen=True)
+class WrappedCodexCancelAuthorization:
+    source: ExistingInputAuthorization
+    rendered_sha256: str
+    rendered_trailing_blank_sha256: str
+    runtime: CodexRuntimeBinding
 
 
 @dataclass(frozen=True)
@@ -280,6 +306,13 @@ class ParsedArgs(argparse.Namespace):
     submit_existing_sha256: str = ""
     cancel_existing_file: Path | None = None
     cancel_existing_sha256: str = ""
+    cancel_existing_wrapped_file: Path | None = None
+    cancel_existing_source_sha256: str = ""
+    cancel_existing_rendered_sha256: str = ""
+    cancel_existing_rendered_trailing_blank_sha256: str = ""
+    expected_pane_id: str = ""
+    expected_pane_pid: int = 0
+    expected_pane_command: str = ""
     describe_partial_cursor: bool = False
     clear_partial_cursor_sha256: str = ""
     enter_count: int = 1
@@ -309,6 +342,17 @@ def parse_args(argv: list[str]) -> Args:
         help="Cancel existing input only if it exactly matches this UTF-8 file, including bounded padded trailing-blank recovery.",
     )
     _ = parser.add_argument("--cancel-existing-sha256", metavar="SHA256", help="Cancel existing input only if its exact UTF-8 text has this lowercase SHA-256 digest.")
+    _ = parser.add_argument(
+        "--cancel-existing-wrapped-file",
+        type=Path,
+        help="Cancel one hard-wrapped Codex composer only after source, rendering, and runtime authentication.",
+    )
+    _ = parser.add_argument("--cancel-existing-source-sha256", metavar="SHA256", help=argparse.SUPPRESS)
+    _ = parser.add_argument("--cancel-existing-rendered-sha256", metavar="SHA256", help=argparse.SUPPRESS)
+    _ = parser.add_argument("--cancel-existing-rendered-trailing-blank-sha256", metavar="SHA256", help=argparse.SUPPRESS)
+    _ = parser.add_argument("--expected-pane-id", help=argparse.SUPPRESS)
+    _ = parser.add_argument("--expected-pane-pid", type=int, default=0, help=argparse.SUPPRESS)
+    _ = parser.add_argument("--expected-pane-command", help=argparse.SUPPRESS)
     _ = parser.add_argument(
         "--describe-partial-cursor",
         action="store_true",
@@ -376,11 +420,12 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--target must be a tmux target.")
     submit_existing = parsed.submit_existing_file is not None or bool(parsed.submit_existing_sha256)
     cancel_existing = parsed.cancel_existing_file is not None or bool(parsed.cancel_existing_sha256)
+    cancel_existing_wrapped = parsed.cancel_existing_wrapped_file is not None
     partial_cursor_recovery = parsed.describe_partial_cursor or bool(parsed.clear_partial_cursor_sha256)
-    existing_recovery = submit_existing or cancel_existing or partial_cursor_recovery
+    existing_recovery = submit_existing or cancel_existing or cancel_existing_wrapped or partial_cursor_recovery
     if parsed.message_file is not None and existing_recovery:
         parser.error("--message-file cannot be used with existing-input recovery.")
-    if sum((submit_existing, cancel_existing, partial_cursor_recovery)) > 1:
+    if sum((submit_existing, cancel_existing, cancel_existing_wrapped, partial_cursor_recovery)) > 1:
         parser.error("choose one existing-input recovery operation.")
     if parsed.describe_partial_cursor and parsed.clear_partial_cursor_sha256:
         parser.error("choose either partial Cursor describe or clear.")
@@ -394,6 +439,25 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--cancel-existing-sha256 must be a lowercase 64-character SHA-256 digest.")
     if parsed.clear_partial_cursor_sha256 and SHA256_RE.fullmatch(parsed.clear_partial_cursor_sha256) is None:
         parser.error("--clear-partial-cursor-sha256 must be a lowercase 64-character SHA-256 digest.")
+    wrapped_values = (
+        parsed.cancel_existing_source_sha256,
+        parsed.cancel_existing_rendered_sha256,
+        parsed.cancel_existing_rendered_trailing_blank_sha256,
+        parsed.expected_pane_id,
+        parsed.expected_pane_pid,
+        parsed.expected_pane_command,
+    )
+    if cancel_existing_wrapped:
+        if (
+            any(SHA256_RE.fullmatch(value) is None for value in wrapped_values[:3])
+            or re.fullmatch(r"%[0-9]+", parsed.expected_pane_id or "") is None
+            or parsed.expected_pane_pid <= 1
+            or parsed.expected_pane_command not in {"codex", "bunx", "npx"}
+            or parsed.cancel_existing_rendered_sha256 == parsed.cancel_existing_rendered_trailing_blank_sha256
+        ):
+            parser.error("wrapped cancellation requires distinct lowercase source/rendering digests and exact Codex pane, PID, and command bindings.")
+    elif any(wrapped_values):
+        parser.error("wrapped cancellation bindings require --cancel-existing-wrapped-file.")
     if existing_recovery and (parsed.async_mode or parsed.async_worker):
         parser.error("--async cannot be used with existing-input recovery.")
     if parsed.message_file is None and not existing_recovery:
@@ -415,6 +479,13 @@ def parse_args(argv: list[str]) -> Args:
         parsed.cancel_existing_sha256,
         parsed.describe_partial_cursor,
         parsed.clear_partial_cursor_sha256,
+        parsed.cancel_existing_wrapped_file,
+        parsed.cancel_existing_source_sha256,
+        parsed.cancel_existing_rendered_sha256,
+        parsed.cancel_existing_rendered_trailing_blank_sha256,
+        parsed.expected_pane_id,
+        parsed.expected_pane_pid,
+        parsed.expected_pane_command,
     )
 
 
@@ -438,6 +509,22 @@ def read_exact_message_file(message_file: Path) -> str:
 
 def text_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def wrapped_cancel_authorization(args: Args) -> WrappedCodexCancelAuthorization:
+    if args.cancel_existing_wrapped_file is None:
+        raise RuntimeError("wrapped cancellation authorization file is required")
+    text = read_exact_message_file(args.cancel_existing_wrapped_file)
+    if not text:
+        raise RuntimeError("wrapped cancellation authorization file is empty")
+    source = ExistingInputAuthorization(args.cancel_existing_source_sha256, text)
+    require_authorized_existing_input_text(text, source)
+    return WrappedCodexCancelAuthorization(
+        source,
+        args.cancel_existing_rendered_sha256,
+        args.cancel_existing_rendered_trailing_blank_sha256,
+        CodexRuntimeBinding(args.expected_pane_id, args.expected_pane_pid, args.expected_pane_command),
+    )
 
 
 def existing_input_authorization(args: Args) -> ExistingInputAuthorization:
@@ -789,6 +876,63 @@ def send_enter(target: str) -> None:
 
 def send_cancel_input(target: str) -> None:
     _ = subprocess.run(["tmux", "send-keys", "-t", target, "C-c"], timeout=5, check=True)
+
+
+def exact_codex_runtime_binding(target: str) -> CodexRuntimeBinding:
+    try:
+        result = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", target, "#{pane_id}\t#{pane_pid}\t#{pane_current_command}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("target Codex runtime cannot be authenticated") from exc
+    fields = (result.stdout or "").rstrip("\r\n").split("\t") if result.returncode == 0 else []
+    if (
+        len(fields) != 3
+        or re.fullmatch(r"%[0-9]+", fields[0]) is None
+        or not fields[1].isdigit()
+        or int(fields[1]) <= 1
+        or fields[2] not in {"codex", "bunx", "npx"}
+        or exact_pane_id(target) != fields[0]
+    ):
+        raise RuntimeError("target Codex runtime cannot be authenticated")
+    process = exact_pane_process(target, fields[0])
+    if process is None or not exact_codex_launch(*process):
+        raise RuntimeError("target Codex runtime is not a direct authenticated launch")
+    return CodexRuntimeBinding(fields[0], int(fields[1]), fields[2])
+
+
+def require_same_wrapped_codex_target(target: str, expected: CodexRuntimeBinding, phase: str) -> None:
+    if exact_codex_runtime_binding(target) != expected:
+        raise RuntimeError(f"target Codex pane or process changed {phase}")
+
+
+def send_guarded_wrapped_codex_cancel(target: str, runtime: CodexRuntimeBinding) -> None:
+    condition = (
+        f"#{{&&:#{{==:#{{pane_id}},{runtime.pane_id}}},"
+        f"#{{&&:#{{==:#{{pane_pid}},{runtime.pane_pid}}},#{{==:#{{pane_current_command}},{runtime.pane_command}}}}}}}"
+    )
+    result = subprocess.run(
+        [
+            "tmux",
+            "if-shell",
+            "-F",
+            "-t",
+            target,
+            condition,
+            f"send-keys -t {runtime.pane_id} C-c",
+            "run-shell 'exit 1'",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("target Codex pane or process changed at wrapped cancellation")
 
 
 def wait_paste_visible(
@@ -1281,6 +1425,53 @@ def exact_file_authorized_cancel_trailing_blank_text(lines: list[str], authorize
     return result
 
 
+def require_wrapped_codex_cancel_candidates(
+    lines: list[str],
+    authorization: WrappedCodexCancelAuthorization,
+) -> set[str]:
+    """Authenticate the two observed renderings of one hard-wrapped source."""
+
+    source = authorization.source.text
+    if source is None or not source.endswith("\n\n"):
+        raise RuntimeError("wrapped cancellation source has an unsupported newline shape")
+    candidates = file_cancel_trailing_blank_candidates(lines)
+    by_digest = {text_sha256(candidate): candidate for candidate in candidates}
+    expected_digests = {
+        authorization.rendered_sha256,
+        authorization.rendered_trailing_blank_sha256,
+    }
+    if len(candidates) != 2 or set(by_digest) != expected_digests:
+        raise RuntimeError("target wrapped input does not match both authorized rendering digests")
+    unpadded = by_digest[authorization.rendered_sha256]
+    padded = by_digest[authorization.rendered_trailing_blank_sha256]
+    if not is_deterministic_codex_wrap(unpadded, source[:-1]):
+        raise RuntimeError("target input is not the authorized deterministic hard-wrap rendering")
+    if not is_deterministic_codex_wrap(padded, f"{source[:-1]} "):
+        raise RuntimeError("target input has an unauthorized trailing-blank rendering")
+    return candidates
+
+
+def is_deterministic_codex_wrap(rendered: str, source: str) -> bool:
+    """Match only source newlines or source spaces rendered as LF plus two spaces."""
+
+    source_idx = 0
+    rendered_idx = 0
+    n_hard_wraps = 0
+    while source_idx < len(source) and rendered_idx < len(rendered):
+        source_char = source[source_idx]
+        if source_char in {" ", "\n"} and rendered.startswith("\n  ", rendered_idx):
+            n_hard_wraps += source_char == " "
+            source_idx += 1
+            rendered_idx += 3
+            continue
+        if source_char == rendered[rendered_idx]:
+            source_idx += 1
+            rendered_idx += 1
+            continue
+        return False
+    return source_idx == len(source) and rendered_idx == len(rendered) and n_hard_wraps > 0
+
+
 def require_authorized_existing_input_text(text: str, authorization: ExistingInputAuthorization) -> None:
     if authorization.text is not None and text != authorization.text:
         raise RuntimeError("target existing input does not exactly match the authorized file")
@@ -1563,6 +1754,83 @@ def cancel_existing_codex_input(target: str, authorization: ExistingInputAuthori
         raise RuntimeError("target pane changed before cancel-existing")
     send_cancel_input(capture.pane_id)
     verify_authorized_existing_cancel(target, authorization, selected, capture.pane_id, preexisting_error)
+
+
+def verify_wrapped_codex_cancel(
+    target: str,
+    authorization: WrappedCodexCancelAuthorization,
+    options: CodexSendOptions,
+    preexisting_error: tuple[str, ...] | None,
+) -> None:
+    deadline_s = time.monotonic() + options.submit_verify_timeout_s
+    while True:
+        require_same_wrapped_codex_target(target, authorization.runtime, "after wrapped cancellation")
+        lines = capture_complete_input_lines(authorization.runtime.pane_id)
+        require_same_wrapped_codex_target(target, authorization.runtime, "after wrapped cancellation capture")
+        validate_error_transition(lines, preexisting_error, target, "after wrapped cancellation")
+        try:
+            input_text = exact_complete_input_text(lines, allow_codex_footer_spacer=True)
+        except RuntimeError as exc:
+            if str(exc) != "target existing input has an ambiguous trailing blank line":
+                raise
+            try:
+                _ = require_wrapped_codex_cancel_candidates(lines, authorization)
+            except RuntimeError:
+                candidates = file_cancel_trailing_blank_candidates(lines)
+                placeholders = candidates & CODEX_PLACEHOLDER_INPUT_TEXTS
+                if len(placeholders) != 1:
+                    raise exc
+                input_text = placeholders.pop()
+            else:
+                input_text = "authorized wrapped input"
+        if input_text in CODEX_PLACEHOLDER_INPUT_TEXTS:
+            current_status = target_status(target, lines)
+            if current_status not in {"ready", "running", "waiting_subagent", "error"}:
+                raise RuntimeError(f"target is not in a supported Codex state after wrapped cancellation: {target} status={current_status}")
+            return
+        if input_text != "authorized wrapped input":
+            raise RuntimeError("target input changed after wrapped cancellation")
+        now_s = time.monotonic()
+        if now_s >= deadline_s:
+            raise RuntimeError(
+                f"Codex wrapped cancellation not verified after {options.submit_verify_timeout_s:g}s: authorized input still visible"
+            )
+        time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
+
+
+def cancel_existing_wrapped_codex_input(
+    target: str,
+    authorization: WrappedCodexCancelAuthorization,
+    options: CodexSendOptions | None = None,
+) -> None:
+    """Cancel only one source-bound and rendering-bound Codex composer."""
+
+    selected = options or CodexSendOptions(DEFAULT_TMUX_ENTER_COUNT, 0.15, False)
+    validate_options(selected)
+    if selected.submit_verify_timeout_s <= 0:
+        raise RuntimeError("wrapped cancellation requires a positive verification timeout")
+    if target.partition(":")[0].startswith("h"):
+        raise RuntimeError("wrapped cancellation refuses human-owned targets")
+    require_authorized_existing_input_text(authorization.source.text or "", authorization.source)
+    if selected.dry_run:
+        _ = print(f"would authenticate one deterministic hard-wrap rendering at {target}")
+        _ = print(f"would send one guarded Ctrl+C to {authorization.runtime.pane_id}")
+        _ = print(f"would verify existing input is gone at {target}")
+        return
+    preexisting_error = require_sendable_codex_target(target, EXISTING_INPUT_CAPTURE_LINES)
+    require_same_wrapped_codex_target(target, authorization.runtime, "before wrapped cancellation")
+    lines = capture_complete_input_lines(authorization.runtime.pane_id)
+    require_same_wrapped_codex_target(target, authorization.runtime, "after wrapped cancellation capture")
+    validate_error_transition(lines, preexisting_error, target, "before wrapped cancellation")
+    if has_plan_prompt(lines):
+        raise RuntimeError("Codex wrapped cancellation blocked by unsafe Plan prompt")
+    _ = require_wrapped_codex_cancel_candidates(lines, authorization)
+    lines = capture_complete_input_lines(authorization.runtime.pane_id)
+    require_same_wrapped_codex_target(target, authorization.runtime, "immediately before wrapped cancellation")
+    validate_error_transition(lines, preexisting_error, target, "immediately before wrapped cancellation")
+    _ = require_wrapped_codex_cancel_candidates(lines, authorization)
+    send_guarded_wrapped_codex_cancel(target, authorization.runtime)
+    verify_wrapped_codex_cancel(target, authorization, selected, preexisting_error)
 
 
 def clear_existing_input_before_send(
@@ -2418,6 +2686,10 @@ def main(argv: list[str]) -> int:
         if args.cancel_existing_file is not None or args.cancel_existing_sha256:
             with tmux_input_lock(args.target):
                 cancel_existing_codex_input(args.target, existing_input_authorization(args), args.options)
+            return 0
+        if args.cancel_existing_wrapped_file is not None:
+            with tmux_input_lock(args.target):
+                cancel_existing_wrapped_codex_input(args.target, wrapped_cancel_authorization(args), args.options)
             return 0
         if args.async_mode:
             message = read_message(args)

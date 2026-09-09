@@ -13,14 +13,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from omo_manager.omo_codex_status import Report
 from omo_manager.omo_tmux_send import (
     Args,
+    CodexRuntimeBinding,
     CodexSendOptions,
     ExistingInputAuthorization,
     ExistingInputCapture,
     MANAGER_DELEGATION_PREFIX,
     PENDING_CONSUMPTION_INSTRUCTION,
     RetainedCursorComposerProof,
+    WrappedCodexCancelAuthorization,
     async_job_from_query,
     cancel_existing_codex_input,
+    cancel_existing_wrapped_codex_input,
     claim_recent_tmux_delivery,
     capture_complete_existing_input,
     clear_bound_cursor_composer,
@@ -30,12 +33,14 @@ from omo_manager.omo_tmux_send import (
     clear_existing_input_before_send,
     exact_capacity_error,
     exact_cursor_runtime_binding,
+    exact_codex_runtime_binding,
     exact_existing_input_text,
     exact_file_authorized_cancel_trailing_blank_text,
     exact_file_authorized_trailing_blank_text,
     exact_retained_cursor_rendering,
     escape_agent_message_envelope_tags,
     existing_input_authorization,
+    is_deterministic_codex_wrap,
     launch_async,
     main,
     message_probes,
@@ -51,6 +56,7 @@ from omo_manager.omo_tmux_send import (
     require_no_existing_input,
     require_ready_partial_cursor_composer,
     require_ready_retained_cursor_composer,
+    require_wrapped_codex_cancel_candidates,
     require_sendable_codex_target,
     run_async_worker,
     run_capacity_resume,
@@ -58,6 +64,7 @@ from omo_manager.omo_tmux_send import (
     run_tmux,
     send_capacity_resume,
     send_enter_to_pinned_cursor,
+    send_guarded_wrapped_codex_cancel,
     send_message_file_to_codex,
     send_system_to_codex,
     send_to_codex,
@@ -72,6 +79,7 @@ from omo_manager.omo_tmux_send import (
     wait_paste_visible,
     worker_argv,
     wrap_agent_message,
+    wrapped_cancel_authorization,
     write_private_temp,
 )
 
@@ -81,6 +89,39 @@ SELECTED_MODEL_CAPACITY_SCREEN = [
     "› Use /skills to list available skills",
     "  gpt-5.5 high · 100% left",
 ]
+
+WRAPPED_CANCEL_SOURCE = """<agent_message from="dw:18">
+The Human has not answered the earlier Bonsai identifier question, and the watcher blocker persisted beyond the prior claim window. Re-ask the old unanswered question once from your pane so email_me.py continues your existing Archive thread. State that it was first asked earlier today, and request exactly one usable Bonsai repository path, command, model name, or configuration file. Do not add domain details, restart work, or send more than one email. Report the new Message-ID privately to dw:18 and remain blocked.
+</agent_message>
+
+"""
+WRAPPED_CANCEL_SCREEN = [
+    '› <agent_message from="dw:18">',
+    "  The Human has not answered the earlier Bonsai identifier question, and the",
+    "  watcher blocker persisted beyond the prior claim window. Re-ask the old",
+    "  unanswered question once from your pane so email_me.py continues your",
+    "  existing Archive thread. State that it was first asked earlier today, and",
+    "  request exactly one usable Bonsai repository path, command, model name, or",
+    "  configuration file. Do not add domain details, restart work, or send more",
+    "  than one email. Report the new Message-ID privately to dw:18 and remain",
+    "  blocked.",
+    "  </agent_message>",
+    " ",
+    " ",
+    "  gpt-5.6-sol medium · /ssd1/sichangheagent/dw2 ·… Goal stalled (/goal resume)",
+]
+WRAPPED_CANCEL_SOURCE_SHA256 = "728ae75251b30b7799343975547e8cdc190812e3035776c86e586783def652a3"
+WRAPPED_CANCEL_RENDERED_SHA256 = "551ded3b9b2e3c0a4e7df7f9269fd84dfa42e75196db60c956ef2f08c887b829"
+WRAPPED_CANCEL_RENDERED_TRAILING_BLANK_SHA256 = "e455de54740b3ce6a1df093417fbec8c64dc82c382a1dd6159281f3931b3a1d8"
+
+
+def wrapped_cancel_authority(runtime: CodexRuntimeBinding | None = None) -> WrappedCodexCancelAuthorization:
+    return WrappedCodexCancelAuthorization(
+        ExistingInputAuthorization(WRAPPED_CANCEL_SOURCE_SHA256, WRAPPED_CANCEL_SOURCE),
+        WRAPPED_CANCEL_RENDERED_SHA256,
+        WRAPPED_CANCEL_RENDERED_TRAILING_BLANK_SHA256,
+        runtime or CodexRuntimeBinding("%432", 388967, "bunx"),
+    )
 
 
 def cursor_agent_lines(prompt: str = "Add a follow-up", *, running: bool = False) -> list[str]:
@@ -470,6 +511,111 @@ class TmuxSendTests(unittest.TestCase):
             with self.subTest(argv=argv), patch("sys.stderr", new_callable=StringIO):
                 with self.assertRaises(SystemExit):
                     parse_args(argv)
+
+    def test_parse_wrapped_cancel_requires_complete_distinct_binding(self) -> None:
+        argv = [
+            "--target",
+            "dw2:0",
+            "--cancel-existing-wrapped-file",
+            "source.txt",
+            "--cancel-existing-source-sha256",
+            "a" * 64,
+            "--cancel-existing-rendered-sha256",
+            "b" * 64,
+            "--cancel-existing-rendered-trailing-blank-sha256",
+            "c" * 64,
+            "--expected-pane-id",
+            "%432",
+            "--expected-pane-pid",
+            "388967",
+            "--expected-pane-command",
+            "bunx",
+        ]
+
+        parsed = parse_args(argv)
+
+        self.assertEqual(Path("source.txt"), parsed.cancel_existing_wrapped_file)
+        self.assertEqual("%432", parsed.expected_pane_id)
+        self.assertEqual(388967, parsed.expected_pane_pid)
+        for defect in (
+            argv[:-2],
+            [*argv[:-10], *argv[-10:-6], "b" * 64, *argv[-5:]],
+            ["--target", "dw2:0", "--expected-pane-id", "%432", "--message-file", "prompt.txt"],
+        ):
+            with self.subTest(defect=defect), patch("sys.stderr", new_callable=StringIO), self.assertRaises(SystemExit):
+                parse_args(defect)
+
+    def test_wrapped_cancel_authorization_binds_exact_source_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source.txt"
+            _ = source.write_text(WRAPPED_CANCEL_SOURCE, encoding="utf-8")
+            args = Args(
+                "dw2:0",
+                None,
+                options(),
+                cancel_existing_wrapped_file=source,
+                cancel_existing_source_sha256=WRAPPED_CANCEL_SOURCE_SHA256,
+                cancel_existing_rendered_sha256=WRAPPED_CANCEL_RENDERED_SHA256,
+                cancel_existing_rendered_trailing_blank_sha256=WRAPPED_CANCEL_RENDERED_TRAILING_BLANK_SHA256,
+                expected_pane_id="%432",
+                expected_pane_pid=388967,
+                expected_pane_command="bunx",
+            )
+
+            self.assertEqual(wrapped_cancel_authority(), wrapped_cancel_authorization(args))
+            wrong = Args(
+                "dw2:0",
+                None,
+                options(),
+                cancel_existing_wrapped_file=source,
+                cancel_existing_source_sha256="f" * 64,
+                cancel_existing_rendered_sha256=WRAPPED_CANCEL_RENDERED_SHA256,
+                cancel_existing_rendered_trailing_blank_sha256=WRAPPED_CANCEL_RENDERED_TRAILING_BLANK_SHA256,
+                expected_pane_id="%432",
+                expected_pane_pid=388967,
+                expected_pane_command="bunx",
+            )
+            with self.assertRaisesRegex(RuntimeError, "digest"):
+                wrapped_cancel_authorization(wrong)
+
+    def test_wrapped_cancel_exact_rendering_matches_both_observed_candidates(self) -> None:
+        candidates = require_wrapped_codex_cancel_candidates(WRAPPED_CANCEL_SCREEN, wrapped_cancel_authority())
+
+        self.assertEqual(568, len(WRAPPED_CANCEL_SOURCE.encode()))
+        self.assertEqual(WRAPPED_CANCEL_SOURCE_SHA256, text_sha256(WRAPPED_CANCEL_SOURCE))
+        self.assertEqual(
+            {WRAPPED_CANCEL_RENDERED_SHA256, WRAPPED_CANCEL_RENDERED_TRAILING_BLANK_SHA256},
+            {text_sha256(candidate) for candidate in candidates},
+        )
+        self.assertEqual({585, 586}, {len(candidate.encode()) for candidate in candidates})
+
+    def test_deterministic_codex_wrap_rejects_every_other_byte_change(self) -> None:
+        self.assertTrue(is_deterministic_codex_wrap("alpha\n  beta\n  gamma", "alpha beta\ngamma"))
+        for rendered, source in (
+            ("alpha\n beta", "alpha beta"),
+            ("alpha\n   beta", "alpha beta"),
+            ("alpha\n  Beta", "alpha beta"),
+            ("alpha\n  beta", "alpha  beta"),
+            ("alpha beta", "alpha beta"),
+        ):
+            with self.subTest(rendered=rendered, source=source):
+                self.assertFalse(is_deterministic_codex_wrap(rendered, source))
+
+    def test_wrapped_cancel_rejects_digest_and_trailing_blank_ambiguity(self) -> None:
+        wrong_digest = WrappedCodexCancelAuthorization(
+            wrapped_cancel_authority().source,
+            "f" * 64,
+            WRAPPED_CANCEL_RENDERED_TRAILING_BLANK_SHA256,
+            CodexRuntimeBinding("%432", 388967, "bunx"),
+        )
+        defects = (
+            (WRAPPED_CANCEL_SCREEN, wrong_digest),
+            ([*WRAPPED_CANCEL_SCREEN[:-3], " ", *WRAPPED_CANCEL_SCREEN[-3:]], wrapped_cancel_authority()),
+            ([*WRAPPED_CANCEL_SCREEN[:4], "  changed", *WRAPPED_CANCEL_SCREEN[5:]], wrapped_cancel_authority()),
+        )
+        for lines, authorization in defects:
+            with self.subTest(lines=lines), self.assertRaises(RuntimeError):
+                require_wrapped_codex_cancel_candidates(lines, authorization)
 
     def test_parse_partial_cursor_recovery_requires_one_exact_operation(self) -> None:
         described = parse_args(["--target", "cfg:1.0", "--describe-partial-cursor"])
@@ -2748,6 +2894,140 @@ class TmuxSendTests(unittest.TestCase):
         sendable.assert_not_called()
         capture.assert_not_called()
         cancel.assert_not_called()
+
+    def test_exact_codex_runtime_binding_authenticates_pane_pid_command_and_process(self) -> None:
+        result = subprocess.CompletedProcess(["tmux"], 0, stdout="%432\t388967\tbunx\n")
+        with patch("omo_manager.omo_tmux_send.subprocess.run", return_value=result), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%432"
+        ), patch(
+            "omo_manager.omo_tmux_send.exact_pane_process",
+            return_value=("bunx", ["bunx", "@openai/codex"]),
+        ):
+            self.assertEqual(CodexRuntimeBinding("%432", 388967, "bunx"), exact_codex_runtime_binding("dw2:0"))
+
+    def test_exact_codex_runtime_binding_rejects_identity_drift(self) -> None:
+        for output, pane_id, process in (
+            ("%433\t388967\tbunx\n", "%432", ("bunx", ["bunx", "@openai/codex"])),
+            ("%432\t388968\tpython\n", "%432", ("python", ["python", "worker.py"])),
+            ("%432\t388967\tbunx\n", "%432", None),
+            ("%432\t388967\tbunx\n", "%432", ("bunx", ["zsh", "-lc", "bunx @openai/codex"])),
+        ):
+            result = subprocess.CompletedProcess(["tmux"], 0, stdout=output)
+            with self.subTest(output=output, process=process), patch(
+                "omo_manager.omo_tmux_send.subprocess.run", return_value=result
+            ), patch("omo_manager.omo_tmux_send.exact_pane_id", return_value=pane_id), patch(
+                "omo_manager.omo_tmux_send.exact_pane_process", return_value=process
+            ), self.assertRaisesRegex(RuntimeError, "cannot be authenticated|not a direct authenticated launch"):
+                exact_codex_runtime_binding("dw2:0")
+
+    def test_guarded_wrapped_cancel_uses_one_atomic_identity_predicate(self) -> None:
+        result = subprocess.CompletedProcess(["tmux"], 0)
+        runtime = CodexRuntimeBinding("%432", 388967, "bunx")
+        with patch("omo_manager.omo_tmux_send.subprocess.run", return_value=result) as run:
+            send_guarded_wrapped_codex_cancel("dw2:0", runtime)
+
+        argv = run.call_args.args[0]
+        self.assertEqual("if-shell", argv[1])
+        self.assertIn("#{pane_id},%432", argv[5])
+        self.assertIn("#{pane_pid},388967", argv[5])
+        self.assertIn("#{pane_current_command},bunx", argv[5])
+        self.assertEqual("send-keys -t %432 C-c", argv[6])
+        self.assertNotIn("Enter", argv)
+
+    def test_guarded_wrapped_cancel_fails_closed_when_atomic_predicate_fails(self) -> None:
+        result = subprocess.CompletedProcess(["tmux"], 1, stderr="identity changed")
+        runtime = CodexRuntimeBinding("%432", 388967, "bunx")
+
+        with patch("omo_manager.omo_tmux_send.subprocess.run", return_value=result), self.assertRaisesRegex(
+            RuntimeError, "changed at wrapped cancellation"
+        ):
+            send_guarded_wrapped_codex_cancel("dw2:0", runtime)
+
+    def test_wrapped_cancel_rechecks_rendering_and_runtime_before_one_ctrl_c(self) -> None:
+        authorization = wrapped_cancel_authority()
+        cleared = ["› Use /skills to list available skills", "", "  gpt-5.6-sol medium · /workspace"]
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.require_same_wrapped_codex_target"
+        ) as same, patch(
+            "omo_manager.omo_tmux_send.capture_complete_input_lines",
+            side_effect=[WRAPPED_CANCEL_SCREEN, WRAPPED_CANCEL_SCREEN, cleared],
+        ), patch("omo_manager.omo_tmux_send.send_guarded_wrapped_codex_cancel") as cancel, patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            cancel_existing_wrapped_codex_input("dw2:0", authorization, options())
+
+        self.assertGreaterEqual(same.call_count, 4)
+        cancel.assert_called_once_with("dw2:0", authorization.runtime)
+        enter.assert_not_called()
+
+    def test_wrapped_cancel_rejects_valid_runtime_drift_before_ctrl_c(self) -> None:
+        authorization = wrapped_cancel_authority()
+        drifted = CodexRuntimeBinding("%433", 388968, "bunx")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.exact_codex_runtime_binding",
+            side_effect=[authorization.runtime, authorization.runtime, drifted],
+        ), patch(
+            "omo_manager.omo_tmux_send.capture_complete_input_lines",
+            side_effect=[WRAPPED_CANCEL_SCREEN, WRAPPED_CANCEL_SCREEN],
+        ), patch("omo_manager.omo_tmux_send.send_guarded_wrapped_codex_cancel") as cancel, self.assertRaisesRegex(
+            RuntimeError, "immediately before wrapped cancellation"
+        ):
+            cancel_existing_wrapped_codex_input("dw2:0", authorization, options())
+
+        cancel.assert_not_called()
+
+    def test_wrapped_cancel_rejects_valid_runtime_drift_after_ctrl_c(self) -> None:
+        authorization = wrapped_cancel_authority()
+        drifted = CodexRuntimeBinding("%433", 388968, "bunx")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.exact_codex_runtime_binding",
+            side_effect=[authorization.runtime, authorization.runtime, authorization.runtime, drifted],
+        ), patch(
+            "omo_manager.omo_tmux_send.capture_complete_input_lines",
+            side_effect=[WRAPPED_CANCEL_SCREEN, WRAPPED_CANCEL_SCREEN],
+        ), patch("omo_manager.omo_tmux_send.send_guarded_wrapped_codex_cancel") as cancel, self.assertRaisesRegex(
+            RuntimeError, "after wrapped cancellation"
+        ):
+            cancel_existing_wrapped_codex_input("dw2:0", authorization, options())
+
+        cancel.assert_called_once_with("dw2:0", authorization.runtime)
+
+    def test_wrapped_cancel_atomic_guard_failure_skips_verification(self) -> None:
+        authorization = wrapped_cancel_authority()
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.require_same_wrapped_codex_target"
+        ), patch(
+            "omo_manager.omo_tmux_send.capture_complete_input_lines",
+            side_effect=[WRAPPED_CANCEL_SCREEN, WRAPPED_CANCEL_SCREEN],
+        ), patch(
+            "omo_manager.omo_tmux_send.send_guarded_wrapped_codex_cancel",
+            side_effect=RuntimeError("target Codex pane or process changed at wrapped cancellation"),
+        ), patch("omo_manager.omo_tmux_send.verify_wrapped_codex_cancel") as verify, self.assertRaisesRegex(
+            RuntimeError, "changed at wrapped cancellation"
+        ):
+            cancel_existing_wrapped_codex_input("dw2:0", authorization, options())
+
+        verify.assert_not_called()
+
+    def test_wrapped_cancel_race_or_byte_drift_never_mutates(self) -> None:
+        authorization = wrapped_cancel_authority()
+        changed = WRAPPED_CANCEL_SCREEN.copy()
+        changed[4] = "  existing Archive thread. State that it was first asked yesterday, and"
+        for second_capture, runtime_error in (
+            (changed, None),
+            (WRAPPED_CANCEL_SCREEN, RuntimeError("target Codex pane or process changed immediately before wrapped cancellation")),
+        ):
+            with self.subTest(runtime_error=runtime_error), patch(
+                "omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None
+            ), patch(
+                "omo_manager.omo_tmux_send.require_same_wrapped_codex_target",
+                side_effect=[None, None, runtime_error] if runtime_error else None,
+            ), patch(
+                "omo_manager.omo_tmux_send.capture_complete_input_lines",
+                side_effect=[WRAPPED_CANCEL_SCREEN, second_capture],
+            ), patch("omo_manager.omo_tmux_send.send_guarded_wrapped_codex_cancel") as cancel, self.assertRaises(RuntimeError):
+                cancel_existing_wrapped_codex_input("dw2:0", authorization, options())
+            cancel.assert_not_called()
 
     def test_cancel_existing_sends_one_ctrl_c_and_never_enter_while_verifying(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("stale duplicate"), "stale duplicate")

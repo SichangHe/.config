@@ -30,6 +30,14 @@ omo_tmux_send.py --target cfg:1.0 --cancel-existing-sha256 "$prompt_sha256"
 
 Cancellation applies the same exact-text, exact empty spacer, and pinned-pane checks immediately before sending one `Ctrl+C`. For the padded-spacer recovery above, `--cancel-existing-file` is required; digest-only cancellation stays strict. It then requires the same live Codex pane to show no real input. It never sends Enter, retries `Ctrl+C`, submits the stale input, stops Codex, or performs normal dispatch. Target rebinding, changed input, unsupported state, overlays, human-owned `h*` targets, and unverifiable clearing fail the command.
 
+For one independently captured Codex composer whose display replaced source spaces or newlines with hard-wrap line feeds and literal two-space prefixes, use the narrower wrapped-file cancellation mode. It requires the retained source file and its digest, both distinct file-cancel candidate digests (ordinary and space-rendered trailing blank), and the exact pane ID, pane PID, and direct Codex launch command. Shell-started or otherwise indirect launches are rejected:
+
+```sh
+omo_tmux_send.py --target cfg:1.0 --cancel-existing-wrapped-file "$prompt_file" --cancel-existing-source-sha256 "$source_sha256" --cancel-existing-rendered-sha256 "$rendered_sha256" --cancel-existing-rendered-trailing-blank-sha256 "$rendered_blank_sha256" --expected-pane-id "$pane_id" --expected-pane-pid "$pane_pid" --expected-pane-command "$pane_command"
+```
+
+The deterministic comparison consumes the source and rendering from left to right. Each byte must match exactly except that one source ASCII space or source line feed may appear as one rendered line feed followed by exactly two ASCII spaces; at least one replaced source space is required. The ordinary rendering must equal the source without its final spacer line, while the second rendering must differ only by the parser's one literal trailing-space interpretation. Both candidate digests must appear together. The helper authenticates the known Codex process, captures and validates twice, then sends one `Ctrl+C` under one tmux pane/PID/command predicate. Every other byte, candidate count, suffix, layout, target, process, error, or race fails closed. This mode never sends Enter and post-cancel verification keeps the same runtime binding.
+
 When a failed Cursor paste leaves only a transport suffix in the composer, first obtain its current raw-rendering proof without mutation, then use that exact digest once:
 
 ```sh
