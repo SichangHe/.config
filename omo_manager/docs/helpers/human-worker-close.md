@@ -6,18 +6,18 @@
   - permit only authenticated current `config:16` continuity with the completed Codex session
 - prepare
   - prove historical pane `%432` and PID `388967` belong to protected `dw2:0` through same-session rollout events
-  - bind Human source, task, TODO, terminal replay and commitment, current manager task, current pane/process/start/session, and exact source-derived composer capture
+  - bind Human source, task, TODO, terminal replay and commitment, current manager task, current pane/process/start/session, exact shell-started foreground process, and source-derived composer capture
   - bind `config:18`, `config:19`, `config:20`, and `dw2:0` by state, pane/process/start, and tail
   - publish one owner-private immutable packet without changing pane or lifecycle state
 - review
   - require an authenticated PASS report from a target other than `config:16` and `wl:21`
 - execute
+  - reject before packet access unless the caller pane is the pane currently resolved from sole executor `wl:21`
   - revalidate every packet input under lifecycle locks
   - reject session change, composer drift, ownership drift, or any protected-target change before input
   - publish a recoverable prepared audit
-  - authenticate the exact source-derived composer and cancel it with one guarded `Ctrl+C`
-  - permit stop input only as empty, exact `/status`, optional exact `/status` fallback, then empty before interrupts or close
-  - close only the exact session-bound `config:16` pane with no feedback or mail
+  - authenticate the exact source-derived composer without submitting or cancelling it
+  - atomically close only the exact session-bound `config:16` pane; send no terminal input, feedback, or mail
   - recoverably move the task from blocked/current to done/previous and publish the committed audit
 - exclusions
   - any source, replay, manager, task, TODO, pane, process, session, tail, reviewer, or protected-target drift, including `dw2:0`

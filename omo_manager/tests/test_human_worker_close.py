@@ -20,12 +20,13 @@ from omo_manager.omo_human_worker_close import (
     REPORT_MESSAGE_SHA256,
     TARGET,
     PanePin,
+    close_bound_target,
     lifecycle_state,
-    stop_input_guard,
     task_after,
     todo_after,
     validate_authority,
     validate_live,
+    validate_executor,
     validate_historical_rollout,
     validate_protected_dw2,
     validate_terminal_report,
@@ -150,6 +151,21 @@ previous:
         with self.assertRaises(TaskFrontmatterError):
             lifecycle_state(packet, after_task, before_todo)
 
+    def test_executor_requires_current_wl21_pane_before_packet_read(self) -> None:
+        from omo_manager.omo_human_worker_close import execute
+
+        with patch.dict("os.environ", {"TMUX_PANE": "%77"}), patch("omo_manager.omo_human_worker_close.exact_pane_id", return_value="%77"):
+            validate_executor()
+        ns = argparse.Namespace(packet=Path("missing"), packet_sha256="0" * 64)
+        with (
+            patch.dict("os.environ", {"TMUX_PANE": "%76"}),
+            patch("omo_manager.omo_human_worker_close.exact_pane_id", return_value="%77"),
+            patch("omo_manager.omo_human_worker_close.read_regular") as read,
+            self.assertRaises(TaskFrontmatterError),
+        ):
+            execute(ns)
+        read.assert_not_called()
+
     def test_historical_rollout_binds_protected_dw2_identity_and_replay(self) -> None:
         records = [
             {
@@ -200,31 +216,23 @@ previous:
         with self.assertRaises(TaskFrontmatterError):
             validate_protected_dw2([{**snapshot, "pane_pid": 999}])
 
-    def test_stop_input_guard_requires_empty_status_optional_status_then_empty(self) -> None:
+    def test_close_bound_target_kills_only_authenticated_config16_pane(self) -> None:
         pin = PanePin(TARGET, "%12", 123, 456, HISTORICAL_SESSION_ID)
-        protected: list[dict[str, object]] = []
         with (
-            patch("omo_manager.omo_human_worker_close.protected_snapshots", return_value=protected),
             patch("omo_manager.omo_human_worker_close.target_identity", return_value=("%12", 123, 456)),
             patch("omo_manager.omo_human_worker_close.session_from_process", return_value=HISTORICAL_SESSION_ID),
-            patch(
-                "omo_manager.omo_human_worker_close.composer_input",
-                side_effect=["Use /skills to list available skills", "/status", "/status", "Use /skills to list available skills"],
-            ),
+            patch("omo_manager.omo_human_worker_close.guarded_tmux_command") as guarded,
         ):
-            guard = stop_input_guard(pin, protected)
-            guard()
-            guard()
-            guard()
-            guard()
+            close_bound_target(pin)
+        guarded.assert_called_once_with(TARGET, "%12", ["kill-pane", "-t", "%12"], 123)
         with (
-            patch("omo_manager.omo_human_worker_close.protected_snapshots", return_value=protected),
-            patch("omo_manager.omo_human_worker_close.target_identity", return_value=("%12", 123, 456)),
+            patch("omo_manager.omo_human_worker_close.target_identity", return_value=("%13", 123, 456)),
             patch("omo_manager.omo_human_worker_close.session_from_process", return_value=HISTORICAL_SESSION_ID),
-            patch("omo_manager.omo_human_worker_close.composer_input", return_value="unsafe staged text"),
+            patch("omo_manager.omo_human_worker_close.guarded_tmux_command") as guarded,
         ):
             with self.assertRaises(TaskFrontmatterError):
-                stop_input_guard(pin, protected)()
+                close_bound_target(pin)
+        guarded.assert_not_called()
 
     def test_prepare_scope_rejects_wrong_replay_before_pane_access(self) -> None:
         from omo_manager.omo_human_worker_close import prepare

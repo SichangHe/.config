@@ -13,7 +13,6 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -25,19 +24,10 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from omo_manager.omo_codex_status import exact_pane_id, exact_tail
-from omo_manager.omo_codex_stop import Args as CodexStopArgs
-from omo_manager.omo_codex_stop import bound_guarded_read, codex_status
-from omo_manager.omo_codex_stop import stop as guarded_codex_stop
+from omo_manager.omo_codex_stop import bound_guarded_read, codex_status, guarded_tmux_command
 from omo_manager.omo_tmux_send import (
-    CODEX_PLACEHOLDER_INPUT_TEXTS,
-    CodexRuntimeBinding,
-    CodexSendOptions,
-    ExistingInputAuthorization,
-    WrappedCodexCancelAuthorization,
-    cancel_existing_wrapped_codex_input,
     capture_complete_input_lines,
     exact_codex_runtime_binding,
-    exact_complete_input_text,
     source_bound_wrapped_candidates,
     wrap_agent_message,
 )
@@ -217,34 +207,6 @@ def inspect_target(target: str) -> str:
     return codex_status(target)
 
 
-def stop_target(
-    target: str,
-    pane_id: str,
-    pane_pid: int,
-    pane_start_ticks: int,
-    session_id: str,
-    pre_input_check: Callable[[], None],
-) -> None:
-    observed = guarded_codex_stop(
-        CodexStopArgs(
-            target=target,
-            wait_s=10.0,
-            lines=2000,
-            dry_run=False,
-            allow_self=False,
-            no_feedback=True,
-            bound_symbolic_target=target,
-            bound_pane_id=pane_id,
-            bound_pane_pid=pane_pid,
-            bound_pane_start_ticks=pane_start_ticks,
-            bound_expected_session_id=session_id,
-            bound_pre_input_check=pre_input_check,
-        )
-    )
-    if observed.lower() != session_id.lower():
-        raise TaskFrontmatterError("guarded closure did not return the exact bound Codex session.")
-
-
 def validate_historical_rollout(data: bytes, path: Path) -> None:
     if path.name != HISTORICAL_ROLLOUT_NAME:
         raise TaskFrontmatterError("historical rollout does not bind protected dw2:0, session, and replay.")
@@ -322,7 +284,7 @@ def composer_snapshot(pin: PanePin, source: bytes) -> dict[str, object]:
     rendering = f"{wrap_agent_message(source_text, source_target=COMPOSER_SOURCE_TARGET, include_authority_reminder=True)}\n"
     lines = capture_complete_input_lines(pin.pane_id, full_history=True)
     ordinary, trailing = source_bound_wrapped_candidates(lines, rendering, True)
-    runtime = exact_codex_runtime_binding(pin.target)
+    runtime = exact_codex_runtime_binding(pin.target, allow_shell=True)
     if (runtime.pane_id, runtime.pane_pid) != (pin.pane_id, pin.pane_pid):
         raise TaskFrontmatterError("config:16 runtime changed during composer capture.")
     if target_identity(pin.target) != (pin.pane_id, pin.pane_pid, pin.pane_start_ticks):
@@ -334,68 +296,10 @@ def composer_snapshot(pin: PanePin, source: bytes) -> dict[str, object]:
     }
 
 
-def composer_authorization(packet: dict[str, object], source: bytes) -> WrappedCodexCancelAuthorization:
-    source_text = source.decode("utf-8")
-    rendered = packet["composer_rendered_sha256s"]
-    runtime = packet["composer_runtime"]
-    if not isinstance(rendered, list) or len(rendered) != 2 or not all(isinstance(value, str) for value in rendered):
-        raise TaskFrontmatterError("composer rendering digest set is malformed.")
-    runtime_fields = {"pane_id", "pane_pid", "pane_command", "foreground_pid", "foreground_start_ticks", "foreground_cmdline_sha256"}
-    if not isinstance(runtime, dict) or set(runtime) != runtime_fields:
-        raise TaskFrontmatterError("composer runtime binding is malformed.")
-    try:
-        binding = CodexRuntimeBinding(**runtime)
-    except TypeError as exc:
-        raise TaskFrontmatterError("composer runtime binding is malformed.") from exc
-    return WrappedCodexCancelAuthorization(
-        ExistingInputAuthorization(sha256(source), source_text),
-        rendered[0],
-        rendered[1],
-        binding,
-        f"{wrap_agent_message(source_text, source_target=COMPOSER_SOURCE_TARGET, include_authority_reminder=True)}\n",
-        True,
-    )
-
-
-def composer_is_empty(pin: PanePin) -> bool:
-    try:
-        return composer_input(pin) in CODEX_PLACEHOLDER_INPUT_TEXTS
-    except TaskFrontmatterError:
-        return False
-
-
-def composer_input(pin: PanePin) -> str:
-    if target_identity(pin.target) != (pin.pane_id, pin.pane_pid, pin.pane_start_ticks):
-        raise TaskFrontmatterError("config:16 changed before composer-state verification.")
-    try:
-        return exact_complete_input_text(capture_complete_input_lines(pin.pane_id), allow_codex_footer_spacer=True)
-    except RuntimeError as exc:
-        raise TaskFrontmatterError("config:16 composer state is not exact.") from exc
-
-
-def stop_input_guard(pin: PanePin, protected: object) -> Callable[[], None]:
-    phase = 0
-
-    def check() -> None:
-        nonlocal phase
-        if protected_snapshots() != protected:
-            raise TaskFrontmatterError("a protected target changed before config:16 input.")
-        if target_identity(TARGET) != (pin.pane_id, pin.pane_pid, pin.pane_start_ticks):
-            raise TaskFrontmatterError("config:16 identity changed before guarded input.")
-        if session_from_process(pin.pane_pid) != pin.session_id:
-            raise TaskFrontmatterError("config:16 session changed before guarded input.")
-        current = composer_input(pin)
-        if phase == 0 and current not in CODEX_PLACEHOLDER_INPUT_TEXTS:
-            raise TaskFrontmatterError("config:16 composer was not empty before the status paste.")
-        if phase == 1 and current != "/status":
-            raise TaskFrontmatterError("config:16 composer was not the exact status query before Enter.")
-        if phase == 2 and current != "/status" and current not in CODEX_PLACEHOLDER_INPUT_TEXTS:
-            raise TaskFrontmatterError("config:16 composer changed before status fallback or interrupt.")
-        if phase > 2 and current not in CODEX_PLACEHOLDER_INPUT_TEXTS:
-            raise TaskFrontmatterError("config:16 composer was not empty before interrupt or close.")
-        phase += 1
-
-    return check
+def close_bound_target(pin: PanePin) -> None:
+    if target_identity(TARGET) != (pin.pane_id, pin.pane_pid, pin.pane_start_ticks) or session_from_process(pin.pane_pid) != pin.session_id:
+        raise TaskFrontmatterError("config:16 identity changed before its guarded pane close.")
+    guarded_tmux_command(TARGET, pin.pane_id, ["kill-pane", "-t", pin.pane_id], pin.pane_pid)
 
 
 def session_from_process(pane_pid: int, proc_root: Path = Path("/proc")) -> str:
@@ -668,7 +572,14 @@ def lifecycle_state(packet: dict[str, object], task_data: bytes, todo_data: byte
     return current
 
 
+def validate_executor() -> None:
+    caller = os.environ.get("TMUX_PANE", "")
+    if re.fullmatch(r"%[0-9]+", caller) is None or exact_pane_id(CURRENT_MANAGER) != caller:
+        raise TaskFrontmatterError("Source-1570 closure execution is restricted to the current wl:21 pane.")
+
+
 def execute(ns: argparse.Namespace) -> None:
+    validate_executor()
     packet_data, _ = read_regular(ns.packet.resolve(strict=True), ns.packet_sha256)
     review_data, _ = read_regular(ns.review.resolve(strict=True), ns.review_sha256)
     packet = json.loads(packet_data)
@@ -801,21 +712,15 @@ def execute(ns: argparse.Namespace) -> None:
         if protected_snapshots() != packet["protected_panes"]:
             raise TaskFrontmatterError("a protected target changed before closure.")
         live_identity = target_identity(TARGET)
-        composer_present = False
         if live_identity == (pin.pane_id, pin.pane_pid, pin.pane_start_ticks):
-            if prepared_exists and composer_is_empty(pin):
-                if session_from_process(pin.pane_pid) != pin.session_id:
-                    raise TaskFrontmatterError("config:16 Codex session identity changed during recovery.")
-            else:
-                validate_live(pin, str(packet["terminal_tail_sha256"]))
-                composer = composer_snapshot(pin, composer_source_data)
-                if (
-                    composer["capture_sha256"] != packet["composer_capture_sha256"]
-                    or composer["rendered_sha256s"] != packet["composer_rendered_sha256s"]
-                    or composer["runtime"] != packet["composer_runtime"]
-                ):
-                    raise TaskFrontmatterError("config:16 composer bytes changed before closure.")
-                composer_present = True
+            validate_live(pin, str(packet["terminal_tail_sha256"]))
+            composer = composer_snapshot(pin, composer_source_data)
+            if (
+                composer["capture_sha256"] != packet["composer_capture_sha256"]
+                or composer["rendered_sha256s"] != packet["composer_rendered_sha256s"]
+                or composer["runtime"] != packet["composer_runtime"]
+            ):
+                raise TaskFrontmatterError("config:16 composer bytes changed before closure.")
         elif not (prepared_exists and live_identity == ("", 0, 0)):
             raise TaskFrontmatterError("config:16 pane identity drifted before closure.")
         publish_or_validate(prepared_path, prepared, "Source-1570 prepared close audit")
@@ -823,27 +728,12 @@ def execute(ns: argparse.Namespace) -> None:
             read_regular(Path(str(packet["audit"])), sha256(committed))
             return
         if live_identity != ("", 0, 0):
-            if composer_present:
-                cancel_existing_wrapped_codex_input(
-                    TARGET,
-                    composer_authorization(packet, composer_source_data),
-                    CodexSendOptions(enter_count=1, enter_delay_s=0.15, dry_run=False, submit_verify_timeout_s=10.0),
-                )
-            if not composer_is_empty(pin):
-                raise IndeterminateClose("config:16 composer was not proven empty after guarded cancellation.")
             if protected_snapshots() != packet["protected_panes"]:
-                raise IndeterminateClose("a protected target changed across the config:16 composer cancellation.")
-            if target_identity(TARGET) != (pin.pane_id, pin.pane_pid, pin.pane_start_ticks) or session_from_process(pin.pane_pid) != pin.session_id:
-                raise IndeterminateClose("config:16 identity changed across guarded composer cancellation.")
-
-            stop_target(
-                TARGET,
-                pin.pane_id,
-                pin.pane_pid,
-                pin.pane_start_ticks,
-                pin.session_id,
-                stop_input_guard(pin, packet["protected_panes"]),
-            )
+                raise IndeterminateClose("a protected target changed before the config:16 pane close.")
+            current = composer_snapshot(pin, composer_source_data)
+            if current["capture_sha256"] != packet["composer_capture_sha256"] or current["rendered_sha256s"] != packet["composer_rendered_sha256s"] or current["runtime"] != packet["composer_runtime"]:
+                raise IndeterminateClose("config:16 composer or runtime changed before its guarded pane close.")
+            close_bound_target(pin)
         if target_identity(TARGET) != ("", 0, 0):
             raise IndeterminateClose("config:16 remains after its exact guarded close.")
         if protected_snapshots() != packet["protected_panes"]:
