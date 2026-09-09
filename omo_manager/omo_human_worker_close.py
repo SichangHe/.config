@@ -40,6 +40,7 @@ from omo_manager.omo_exported_agent_close import (
     restore_exact_after,
 )
 from omo_manager.omo_repository_custody import (
+    FileIdentity,
     absolute_file_binding,
     authenticated_report,
     canonical_target,
@@ -245,6 +246,16 @@ def validate_historical_rollout(data: bytes, path: Path) -> None:
         or '"replay_id":"205eec6dff48bc1feedd27d3521f86580d86d9943dad469056c63a33dec9d9dc"' not in command_stdout(263)
     ):
         raise TaskFrontmatterError("historical rollout does not bind protected dw2:0, session, and replay.")
+
+
+def validate_owned_source(identity: FileIdentity) -> None:
+    if identity.uid != os.getuid() or identity.mode & 0o022:
+        raise TaskFrontmatterError("historical rollout must be current-user-owned and not group/other writable.")
+
+
+def validate_bound_source(identity: FileIdentity, historical_rollout: Path) -> None:
+    if Path(identity.path) == historical_rollout:
+        validate_owned_source(identity)
 
 
 def pane_snapshot(target: str) -> dict[str, object]:
@@ -502,8 +513,9 @@ def prepare(ns: argparse.Namespace) -> None:
             _, identity, ancestors = absolute_file_binding(
                 path,
                 f"Source-1570 closure input {path}",
-                private=path in {report_path, commitment, historical_rollout},
+                private=path in {report_path, commitment},
             )
+            validate_bound_source(identity, historical_rollout)
             inputs.append({"file": asdict(identity), "ancestors": [asdict(item) for item in ancestors]})
         packet: dict[str, object] = {
             "schema": SCHEMA,
@@ -658,6 +670,7 @@ def execute(ns: argparse.Namespace) -> None:
         held = {}
         for item in raw_inputs:
             identity = file_identity_from(item["file"], "closure input")
+            validate_bound_source(identity, Path(str(packet["historical_rollout"])))
             ancestors = tuple(directory_identity_from(value, "closure input ancestor") for value in item["ancestors"])
             if prepared_exists and Path(identity.path) in {task, todo}:
                 current_data, current_identity, current_ancestors = absolute_file_binding(

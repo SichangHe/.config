@@ -25,12 +25,14 @@ from omo_manager.omo_human_worker_close import (
     task_after,
     todo_after,
     validate_authority,
+    validate_bound_source,
     validate_live,
     validate_executor,
     validate_historical_rollout,
     validate_protected_dw2,
     validate_terminal_report,
 )
+from omo_manager.omo_repository_custody import FileIdentity
 from omo_manager.omo_task_metadata import TaskFrontmatterError, parse_task_metadata
 
 
@@ -209,6 +211,16 @@ previous:
         unrelated = f'{{"ordinal":1,"thread_id":"{HISTORICAL_SESSION_ID}","text":"pid={DW2_PANE_PID} {REPLAY_ID}"}}'.encode()
         with self.assertRaises(TaskFrontmatterError):
             validate_historical_rollout(unrelated, Path(HISTORICAL_ROLLOUT_NAME))
+
+    def test_historical_rollout_source_accepts_owned_0644_only(self) -> None:
+        identity = FileIdentity("/rollout", 0o644, 1, 2, 1000, 1000, 3, "0" * 64)
+        with patch("omo_manager.omo_human_worker_close.os.getuid", return_value=1000):
+            validate_bound_source(identity, Path("/rollout"))
+            validate_bound_source(FileIdentity("/other", 0o666, 1, 2, 1001, 1000, 3, "0" * 64), Path("/rollout"))
+            with self.assertRaises(TaskFrontmatterError):
+                validate_bound_source(FileIdentity("/rollout", 0o666, 1, 2, 1000, 1000, 3, "0" * 64), Path("/rollout"))
+            with self.assertRaises(TaskFrontmatterError):
+                validate_bound_source(FileIdentity("/rollout", 0o644, 1, 2, 1001, 1000, 3, "0" * 64), Path("/rollout"))
 
     def test_protected_dw2_requires_authenticated_pane_and_process(self) -> None:
         snapshot: dict[str, object] = {"target": DW2_TARGET, "pane_id": DW2_PANE_ID, "pane_pid": DW2_PANE_PID}
