@@ -1,11 +1,28 @@
-"""Focused contract tests for the captured-response SVG extractor."""
+"""Focused contract tests for the PATH-installed ChatGPT SVG extractor."""
 
 from __future__ import annotations
 
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+import os
+from pathlib import Path
+import subprocess
+import tempfile
 import unittest
 
-from extract_svg import extract_svg
 
+def load_extractor():
+    path = Path(__file__).with_name("bin") / "extract_chatgpt_svg"
+    loader = SourceFileLoader("extract_chatgpt_svg", str(path))
+    spec = spec_from_loader("extract_chatgpt_svg", loader)
+    assert spec is not None
+    module = module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+extract_svg = load_extractor().extract_svg
 
 VALID = """```svg
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><rect width="1" height="1"/></svg>
@@ -13,6 +30,22 @@ VALID = """```svg
 
 
 class ExtractSvgTest(unittest.TestCase):
+    def test_path_command_extracts_svg(self) -> None:
+        command_dir = Path(__file__).with_name("bin")
+        with tempfile.TemporaryDirectory() as tmp:
+            answer = Path(tmp) / "answer.md"
+            output = Path(tmp) / "diagram.svg"
+            answer.write_text(VALID, encoding="utf-8")
+            result = subprocess.run(
+                ["extract_chatgpt_svg", str(answer), str(output)],
+                check=False,
+                capture_output=True,
+                env={**os.environ, "PATH": f"{command_dir}:{os.environ['PATH']}"},
+                text=True,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(extract_svg(VALID), output.read_text(encoding="utf-8"))
+
     def test_extracts_one_well_formed_self_contained_svg(self) -> None:
         self.assertIn("<svg", extract_svg(VALID))
 

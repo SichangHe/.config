@@ -116,6 +116,7 @@ def local_reference(value: str) -> bool:
     return value.strip().startswith("#")
 
 
+# 🧑 “Put the commands needed in my path as opposed to bundling them with the skill”
 def main() -> int:
     args = parse_args()
     source = args.answer.expanduser().resolve()

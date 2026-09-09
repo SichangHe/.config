@@ -91,33 +91,13 @@ class GetAgentsMdTest(unittest.TestCase):
 
             self.assertFalse((target / "AGENTS.md").exists())
 
-    def test_list_fetches_index_and_caches_it(self):
-        module = load_getagentsmd()
-        with tempfile.TemporaryDirectory() as tmp:
-            module.CACHE_DIR = Path(tmp)
-            (Path(tmp) / "index.md").write_text("stale\n", encoding="utf-8")
-            (Path(tmp) / "index.md").chmod(0o600)
-            requested = []
-            module.get = lambda url, timeout: requested.append(url) or Response(
-                200, "available\n"
-            )
-
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out):
-                self.assertEqual(0, module.main(["list"]))
-
-            self.assertEqual([f"{module.INSTRUCTIONS_URL}/index.md"], requested)
-            self.assertEqual("available\n", out.getvalue())
-            self.assertEqual(
-                "available\n", (Path(tmp) / "index.md").read_text(encoding="utf-8")
-            )
-
     def test_get_fetches_only_explicit_instruction(self):
         module = load_getagentsmd()
         with tempfile.TemporaryDirectory() as tmp:
             module.CACHE_DIR = Path(tmp)
-            (Path(tmp) / "coding.md").write_text("stale\n", encoding="utf-8")
-            (Path(tmp) / "coding.md").chmod(0o600)
+            cache_file = Path(tmp) / "python_coding.md"
+            cache_file.write_text("stale\n", encoding="utf-8")
+            cache_file.chmod(0o600)
             requested = []
             module.get = lambda url, timeout: requested.append(url) or Response(
                 200, "python choices are optional\n"
@@ -125,14 +105,14 @@ class GetAgentsMdTest(unittest.TestCase):
 
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
-                self.assertEqual(0, module.main(["get", "coding"]))
+                self.assertEqual(0, module.main(["get", "python_coding"]))
 
-            self.assertEqual([f"{module.INSTRUCTIONS_URL}/coding.md"], requested)
-            self.assertEqual("python choices are optional\n", out.getvalue())
             self.assertEqual(
-                "python choices are optional\n",
-                (Path(tmp) / "coding.md").read_text(encoding="utf-8"),
+                [f"{module.INSTRUCTIONS_URL}/python_coding.md"],
+                requested,
             )
+            self.assertEqual("python choices are optional\n", out.getvalue())
+            self.assertEqual("python choices are optional\n", cache_file.read_text())
             self.assertFalse((Path(tmp) / "python.md").exists())
 
     def test_named_instruction_uses_its_cache_after_remote_failure(self):
@@ -154,20 +134,33 @@ class GetAgentsMdTest(unittest.TestCase):
                 f"{module.FALLBACK_NOTICE}\ncached python\n", out.getvalue()
             )
 
-    def test_get_rejects_paths_and_does_not_fetch(self):
+    def test_get_rejects_non_snake_case_names_and_paths_without_fetching(self):
         module = load_getagentsmd()
         module.get = lambda url, timeout: self.fail("invalid names must not be fetched")
 
+        for name in ("python-coding", "coding/python", "Python_coding"):
+            with self.subTest(name=name):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(2, module.main(["get", name]))
+                self.assertEqual(
+                    "Usage: getagentsmd [get INSTRUCTION_NAME]\n", err.getvalue()
+                )
+
+    def test_list_is_rejected_without_fetching(self):
+        module = load_getagentsmd()
+        module.get = lambda url, timeout: self.fail("list must not fetch")
+
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            self.assertEqual(2, module.main(["get", "coding/python"]))
+            self.assertEqual(2, module.main(["list"]))
 
         self.assertEqual(
-            "Usage: getagentsmd [list | get INSTRUCTION_NAME]\n", err.getvalue()
+            "Usage: getagentsmd [get INSTRUCTION_NAME]\n", err.getvalue()
         )
 
     def test_new_commands_fail_without_remote_or_cache(self):
-        for args in (["list"], ["get", "coding"]):
+        for args in (["get", "coding"],):
             with self.subTest(args=args), tempfile.TemporaryDirectory() as tmp:
                 module = load_getagentsmd()
                 module.CACHE_DIR = Path(tmp)

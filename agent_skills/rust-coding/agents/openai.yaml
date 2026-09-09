@@ -1,4 +1,0 @@
-interface:
-  display_name: "Rust Coding"
-  short_description: "Rust style with clippy, fmt, and enums"
-  default_prompt: "Use $rust-coding when writing or reviewing Rust code."

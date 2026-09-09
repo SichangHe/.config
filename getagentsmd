@@ -170,8 +170,9 @@ def print_remote_or_cache(
         return False
 
 
+# 🧑 “I’d like them to be in snake case.”
 def instruction_name(value: str) -> str | None:
-    return value if fullmatch(r"[a-z0-9][a-z0-9_-]*", value) else None
+    return value if fullmatch(r"[a-z0-9][a-z0-9_]*", value) else None
 
 
 def main(args: list[str] | None = None) -> int:
@@ -179,12 +180,8 @@ def main(args: list[str] | None = None) -> int:
     if not args:
         _ = print_remote_or_cache(AGENTS_MD_URL, CACHE_FILE, render_root=True)
         return 0
-    if args == ["list"]:
-        found = print_remote_or_cache(
-            f"{INSTRUCTIONS_URL}/index.md", CACHE_DIR / "index.md"
-        )
-        return 0 if found else 1
-    # 🧑 “Don't require anything, just tell agents they have the option. Don't do language detection.”
+    # 🧑 “The workflow agents will use is they will run getagentsmd and follow
+    # through the linked commands to read the docs they need to read”
     if (
         len(args) == 2
         and args[0] == "get"
@@ -194,7 +191,7 @@ def main(args: list[str] | None = None) -> int:
             f"{INSTRUCTIONS_URL}/{name}.md", CACHE_DIR / f"{name}.md"
         )
         return 0 if found else 1
-    print("Usage: getagentsmd [list | get INSTRUCTION_NAME]", file=sys.stderr)
+    print("Usage: getagentsmd [get INSTRUCTION_NAME]", file=sys.stderr)
     return 2
 
 
