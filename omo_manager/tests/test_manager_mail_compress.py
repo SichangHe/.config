@@ -3717,6 +3717,103 @@ with tempfile.TemporaryDirectory() as tmp:
                     "b" * 64,
                 ))
 
+    def test_source_1438_accepts_exact_archived_manager_mail(self) -> None:
+        digest = "a" * 64
+        source = parse_explicit_source(f"7:100:200:{digest}:read")
+        context = parse_explicit_context(f"100:200:{digest}")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail_root = root / "202608" / "manager_mail"
+            mail_root.mkdir(parents=True, mode=0o755)
+            approval = mail_root / SOURCE_1438_APPROVAL_FILE
+            approval.write_text(SOURCE_1438_APPROVAL_QUOTE, encoding="utf-8")
+            approval.chmod(0o600)
+            approval_sha256 = hashlib.sha256(approval.read_bytes()).hexdigest()
+            review = root / "review.tsv"
+            review.write_text(
+                "kind\tvalue\n"
+                "version\tv1.2.0\n"
+                f"approval_sha256\t{approval_sha256}\n"
+                "task_id\ttask-a\n"
+                "preparer\towner-a\n"
+                "reviewer\treviewer-b\n"
+                "source_uidvalidity\t1\n"
+                "source_location_mode\tstrict-fresh\n"
+                "allow_additive_final_context\tfalse\n"
+                f"runtime_bundle_sha256\t{'b' * 64}\n"
+                "verdict\tPASS\n"
+                f"source\t7:100:200:{digest}:read\n"
+                f"context\t100:200:{digest}\n",
+                encoding="utf-8",
+            )
+            review.chmod(0o600)
+            with (
+                patch("omo_manager.omo_manager_mail_compress.configured_work_logs_root", return_value=root),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_1438_APPROVAL_SHA256", approval_sha256),
+            ):
+                self.assertFalse(require_source_1140_direct_removal(
+                    approval,
+                    SOURCE_1438_APPROVAL_QUOTE,
+                    review,
+                    "task-a",
+                    [source],
+                    [context],
+                    "owner-a",
+                    "reviewer-b",
+                    "1",
+                    "strict-fresh",
+                    False,
+                    "b" * 64,
+                ))
+
+    def test_source_1438_rejects_wrong_archive_month(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail_root = root / "202607" / "manager_mail"
+            mail_root.mkdir(parents=True)
+            approval = mail_root / SOURCE_1438_APPROVAL_FILE
+            approval.write_text(SOURCE_1438_APPROVAL_QUOTE, encoding="utf-8")
+            approval.chmod(0o600)
+            with (
+                patch("omo_manager.omo_manager_mail_compress.configured_work_logs_root", return_value=root),
+                self.assertRaisesRegex(RuntimeError, "trusted manager mail"),
+            ):
+                require_source_1140_direct_removal(
+                    approval,
+                    SOURCE_1438_APPROVAL_QUOTE,
+                    None,
+                    "task-a",
+                    [],
+                    [],
+                    "owner-a",
+                    "reviewer-b",
+                )
+
+    def test_source_1438_rejects_symlinked_archive_month(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            root.mkdir()
+            external_mail_root = Path(tmp) / "external" / "manager_mail"
+            external_mail_root.mkdir(parents=True)
+            (root / "202608").symlink_to(external_mail_root.parent, target_is_directory=True)
+            approval = external_mail_root / SOURCE_1438_APPROVAL_FILE
+            approval.write_text(SOURCE_1438_APPROVAL_QUOTE, encoding="utf-8")
+            approval.chmod(0o600)
+            with (
+                patch("omo_manager.omo_manager_mail_compress.configured_work_logs_root", return_value=root),
+                self.assertRaisesRegex(RuntimeError, "does not match the supported Human source"),
+            ):
+                require_source_1140_direct_removal(
+                    approval,
+                    SOURCE_1438_APPROVAL_QUOTE,
+                    None,
+                    "task-a",
+                    [],
+                    [],
+                    "owner-a",
+                    "reviewer-b",
+                )
+
     def test_source_1438_rejects_missing_config_root_as_runtime_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             missing_root = Path(tmp) / "missing"
