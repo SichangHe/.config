@@ -3899,6 +3899,39 @@ with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(1, cmd_locate_replacement(type("LocateArgs", (), {"subject": "exact subject"})()))
         fetch_mock.assert_not_called()
 
+    def test_locate_replacement_disambiguates_duplicate_subject_by_gmail_identity(self) -> None:
+        record = MailRecord("7", "date", "agent", "human", "exact subject", "digest")
+        selected = replace(record, uid="8")
+        msg = Message()
+        msg["Message-ID"] = "<selected@example.test>"
+        stdout = io.StringIO()
+        with (
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(object(), {})),
+            patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            patch("omo_manager.omo_manager_mail_compress.special_use_mailboxes", return_value={r"\All": "[Gmail]/All Mail"}),
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+            patch("omo_manager.omo_manager_mail_compress.manager_candidate_uids", return_value=["7", "8"]),
+            patch("omo_manager.omo_manager_mail_compress.accepted_manager_headers", return_value=([record, selected], [])),
+            patch("omo_manager.omo_manager_mail_compress.gmail_message_uids", return_value=["8"]) as identity_mock,
+            patch("omo_manager.omo_manager_mail_compress.fetch_msg", return_value=(msg, "a" * 64)) as fetch_mock,
+            patch("omo_manager.omo_manager_mail_compress.logout_mailbox"),
+            redirect_stdout(stdout),
+        ):
+            args = type("LocateArgs", (), {"subject": "exact subject", "gmail_message_id": "101"})()
+            self.assertEqual(0, cmd_locate_replacement(args))
+        identity_mock.assert_called_once_with(identity_mock.call_args.args[0], "101")
+        fetch_mock.assert_called_once_with(fetch_mock.call_args.args[0], "8", HEADER_FETCH)
+        self.assertIn("message_id=<selected@example.test>", stdout.getvalue())
+        self.assertIn("uid=8", stdout.getvalue())
+
+    def test_locate_replacement_rejects_invalid_gmail_identity_before_mailbox_access(self) -> None:
+        for value in ("10x", "١", "²"):
+            with self.subTest(value=value):
+                args = type("LocateArgs", (), {"subject": "exact subject", "gmail_message_id": value})()
+                with patch("omo_manager.omo_manager_mail_compress.open_mailbox") as open_mailbox_mock:
+                    self.assertEqual(2, cmd_locate_replacement(args))
+                open_mailbox_mock.assert_not_called()
+
     def test_trash_explicit_rejects_whitespace_identity_variants(self) -> None:
         digest = "a" * 64
         args = type(
