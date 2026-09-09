@@ -6034,7 +6034,8 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                 if done_live_pane_state(args) != "live":
                     raise TaskFrontmatterError("done-live close prepared recovery lost its exact live pane.")
                 capture_sha256 = ""
-                if close_audit.state == "prepared":
+                # 🧑 Human: "Continue until each item is complete or cancelled."
+                if close_audit.state == "prepared" or manager_consumed:
                     try:
                         capture_sha256 = validate_terminal_shell(
                             args.active_target,
@@ -6044,6 +6045,9 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                         )
                     except RuntimeError:
                         capture_sha256 = ""
+                recovered_exited_shell = bool(capture_sha256)
+                if recovered_exited_shell and close_audit.state == "reserved":
+                    terminalization_evidence()
                 if not capture_sha256:
                     shell = terminalize_to_shell(
                         args.active_target,
@@ -6057,7 +6061,7 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                     if shell.session_id != args.expected_session_id:
                         raise TaskFrontmatterError("done-live close terminalization returned a different Codex session.")
                     capture_sha256 = shell.capture_sha256
-                unchanged_evidence()
+                unchanged_evidence(capture_sha256 if recovered_exited_shell else "")
                 if close_audit.state != "prepared" or SHA256_RE.fullmatch(capture_sha256) is None:
                     raise TaskFrontmatterError("done-live close did not authenticate one terminal shell capture.")
                 proof_secret = secrets.token_hex(32)

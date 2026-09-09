@@ -3754,6 +3754,71 @@ class TaskStatusTests(unittest.TestCase):
             self.assertEqual(text, task.read_text(encoding="utf-8"))
             self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
 
+    def test_done_live_close_recovers_reserved_audit_after_consumed_worker_exited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_done_live_close_case(root)
+            args = self.write_consumed_attestation(root, task, args)
+            evidence = args.manager_consumed_report_receipt
+            assert evidence is not None
+            attestation = json.loads(evidence.read_text(encoding="utf-8"))["attestation"]
+            capture_sha256 = "c" * 64
+
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.process_start_ticks", return_value=73),
+                patch("omo_manager.omo_task_status.validate_consumed_closure_export_file", return_value=attestation),
+                patch(
+                    "omo_manager.omo_task_status.validate_exited_codex_shell_with_consumed_report",
+                    return_value=capture_sha256,
+                ) as validate_shell,
+                patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell_with_consumed_report") as terminalize,
+                patch("omo_manager.omo_task_status.close_bound_tmux_target", side_effect=RuntimeError("stop before test mutation")) as close,
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(2, run(args))
+            self.assertGreaterEqual(validate_shell.call_count, 2)
+            terminalize.assert_not_called()
+            close.assert_called_once()
+            audit = json.loads(args.audit_output.read_text(encoding="utf-8"))
+            self.assertEqual("terminalized", audit["state"])
+            self.assertEqual(capture_sha256, audit["terminal_capture_sha256"])
+            self.assertEqual(args.manager_consumed_report_receipt_sha256, audit["manager_consumed_receipt_sha256"])
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_done_live_close_rejects_reserved_exited_shell_capture_race(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_done_live_close_case(root)
+            args = self.write_consumed_attestation(root, task, args)
+            evidence = args.manager_consumed_report_receipt
+            assert evidence is not None
+            attestation = json.loads(evidence.read_text(encoding="utf-8"))["attestation"]
+
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.process_start_ticks", return_value=73),
+                patch("omo_manager.omo_task_status.validate_consumed_closure_export_file", return_value=attestation),
+                patch(
+                    "omo_manager.omo_task_status.validate_exited_codex_shell_with_consumed_report",
+                    side_effect=("c" * 64, "d" * 64),
+                ),
+                patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell_with_consumed_report") as terminalize,
+                patch("omo_manager.omo_task_status.close_bound_tmux_target") as close,
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(2, run(args))
+            terminalize.assert_not_called()
+            close.assert_not_called()
+            audit = json.loads(args.audit_output.read_text(encoding="utf-8"))
+            self.assertEqual("prepared", audit["state"])
+            self.assertEqual(args.manager_consumed_report_receipt_sha256, audit["manager_consumed_receipt_sha256"])
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
     def test_done_live_close_rejects_pointer_appearing_before_authenticated_manager_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

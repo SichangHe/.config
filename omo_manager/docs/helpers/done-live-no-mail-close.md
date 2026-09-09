@@ -51,6 +51,7 @@ recovery
 - `reserved` means no pane input was authorized
 - `prepared` means accepted report and lifecycle evidence were checked before terminal input
   - v2 also binds the exact manager-consumed receipt digest before terminal input
+  - a retry may reach `prepared` without input when the same consumed report and an unchanged exited shell authenticate from `reserved`
 - `terminalized` binds the exact exited-shell capture and close-proof commitment
 - `terminalized` plus only `.owner-close-started` is retryable: reuse its secret if the exact pane is live, or promote it after exact absence
 - `terminalized` plus both marker names is the retryable link-before-unlink state; both names must identify one inode
