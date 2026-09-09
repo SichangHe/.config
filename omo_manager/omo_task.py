@@ -31,18 +31,22 @@ if __name__ == "__main__" and Path(sys.prefix).resolve() != HELPER_ENV.resolve()
         os.execv(project_python, [project_python, __file__, *sys.argv[1:]])
 
 try:
+    from omo_manager.omo_omnigent import launch_session as launch_omnigent_session
+    from omo_manager.omo_omnigent import send_message as send_omnigent_message
     from omo_manager.omo_codex_status import current_block, exact_pane_id, status, tail
     from omo_manager.omo_agent_status import DEFAULT_ROOT, TaskFrontmatterError, parse_task_metadata
     from omo_manager.omo_blocking import V2_VERSION, generated_id, load_yaml_mapping, render_task, split_task_text, v2_enabled
     from omo_manager.omo_manager_rotate import RotationError, is_codex_launch_argv, process_is_under, read_processes
-    from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1, TASK_FRONTMATTER_V2, first_version, frontmatter_text
+    from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1, TASK_FRONTMATTER_V2, first_version, frontmatter_text, runat_kind
     from omo_manager.omo_task_lock import process_start_ticks, task_file_lock, task_target_lock
 except ModuleNotFoundError:
+    from omo_omnigent import launch_session as launch_omnigent_session
+    from omo_omnigent import send_message as send_omnigent_message
     from omo_codex_status import current_block, exact_pane_id, status, tail
     from omo_agent_status import DEFAULT_ROOT, TaskFrontmatterError, parse_task_metadata
     from omo_blocking import V2_VERSION, generated_id, load_yaml_mapping, render_task, split_task_text, v2_enabled
     from omo_manager_rotate import RotationError, is_codex_launch_argv, process_is_under, read_processes
-    from omo_task_metadata import TASK_FRONTMATTER_V1, TASK_FRONTMATTER_V2, first_version, frontmatter_text
+    from omo_task_metadata import TASK_FRONTMATTER_V1, TASK_FRONTMATTER_V2, first_version, frontmatter_text, runat_kind
     from omo_task_lock import process_start_ticks, task_file_lock, task_target_lock
 
 DEFAULT_WORKER_INSTRUCTIONS = HELPER_DIR / "WORKER_DEFAULTS.md"
@@ -164,6 +168,8 @@ class Args:
     prepared_process_environment: tuple[tuple[str, str], ...] = ()
     prepared_tmux_path: Path | None = None
     prepared_tmux_environment: tuple[tuple[str, str], ...] = ()
+    omnigent: bool = False
+    omnigent_host_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -257,6 +263,8 @@ class ParsedArgs(argparse.Namespace):
     expected_prepared_prompt_sha256: str = ""
     expected_prepared_queue_sha256: str = ""
     expected_prepared_launch_manifest_sha256: str = ""
+    omnigent: bool = False
+    omnigent_host_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -297,8 +305,9 @@ def parse_args(argv: list[str]) -> Args:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Launch behavior:
   With --workdir, create or update task frontmatter, link the task in TODO.md
-  unless --no-link is passed, open a tmux window with its normal shell, and
-  start Cursor Agent there unless --tool codex or --tool pcodx is requested.
+  unless --no-link is passed, then launch in tmux by default. Pass --omnigent
+  to create a host-backed OmniGent session instead; --tool still names the
+  actual codex or cursor harness, while runat identifies the metaframework.
   This does not stop already running Codex panes. --prompt-file becomes the
   worker's initial prompt argument. Every new launch requires --model and
   --reasoning-effort; model selection in --codex-flag is rejected. Pass
@@ -356,6 +365,8 @@ Ownership migration:
         action="store_true",
         help="Explicitly allow creating the named session when reuse is genuinely unsuitable.",
     )
+    _ = parser.add_argument("--omnigent", action="store_true", help="Launch through OmniGent and record its session URI as `runat`; `tool` remains the actual harness.")
+    _ = parser.add_argument("--omnigent-host-id", default="", help="Exact OmniGent host id; otherwise the sole online host is used.")
     _ = parser.add_argument(
         "--migrate-manager-owner", action="store_true", help="Atomically migrate only `managerat` on one existing task; requires explicit old and new targets and performs no launch or TODO action."
     )
@@ -425,11 +436,25 @@ Ownership migration:
                 parsed.expected_prepared_prompt_sha256,
                 parsed.expected_prepared_queue_sha256,
                 parsed.expected_prepared_launch_manifest_sha256,
+                parsed.omnigent,
+                parsed.omnigent_host_id,
             )
         ):
             parser.error("--migrate-manager-owner only accepts --root, --task-file, explicit old/new manager targets, and optional --dry-run.")
-    if not parsed.migrate_manager_owner and not parsed.tmux_session:
-        parser.error("--tmux-session is required.")
+    if not parsed.migrate_manager_owner and not parsed.tmux_session and not parsed.omnigent:
+        parser.error("--tmux-session is required unless --omnigent is selected.")
+    if parsed.omnigent and any((parsed.tmux_session, parsed.tmux_window, parsed.require_existing_tmux_session, parsed.allow_new_tmux_session, parsed.prelaunch_source, parsed.amh_caller_agent, parsed.prepared_successor_journal)):
+        parser.error("--omnigent does not accept tmux selection, prelaunch-source, AMH caller, or prepared-successor options.")
+    if parsed.omnigent and parsed.workdir is None:
+        parser.error("--omnigent requires --workdir.")
+    if parsed.omnigent and parsed.session_id:
+        parser.error("--omnigent launch does not use Codex --session-id; the returned `runat` is the durable session identity.")
+    if parsed.omnigent and parsed.tool not in {"codex", "cursor"}:
+        parser.error("--omnigent supports --tool codex or --tool cursor.")
+    if parsed.omnigent and parsed.codex_flag:
+        parser.error("--codex-flag is not yet portable through OmniGent launch.")
+    if parsed.omnigent_host_id and not parsed.omnigent:
+        parser.error("--omnigent-host-id requires --omnigent.")
     if parsed.require_existing_tmux_session and parsed.allow_new_tmux_session:
         parser.error("--require-existing-tmux-session and --allow-new-tmux-session are mutually exclusive.")
     if parsed.tmux_session and TMUX_SESSION_RE.fullmatch(parsed.tmux_session) is None:
@@ -518,6 +543,8 @@ Ownership migration:
         expected_prepared_prompt_sha256=parsed.expected_prepared_prompt_sha256,
         expected_prepared_queue_sha256=parsed.expected_prepared_queue_sha256,
         expected_prepared_launch_manifest_sha256=parsed.expected_prepared_launch_manifest_sha256,
+        omnigent=parsed.omnigent,
+        omnigent_host_id=parsed.omnigent_host_id.strip(),
     )
 
 
@@ -821,6 +848,8 @@ def header(tmux_target: str, tool: str) -> str:
 
 
 def target_aliases(tmux_target: str) -> set[str]:
+    if runat_kind(tmux_target) == "omnigent":
+        return {tmux_target}
     aliases = {tmux_target} if tmux_target else set()
     window_target, dot, _pane = tmux_target.rpartition(".")
     if dot and ":" in window_target:
@@ -1129,9 +1158,9 @@ def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> st
 
 def new_task_text(args: Args, tmux_target: str, validate_target: bool = True) -> str:
     if not tmux_target:
-        raise ValueError("runat tmux target is required to write task frontmatter.")
-    if validate_target and TMUX_TARGET_RE.fullmatch(tmux_target) is None:
-        raise ValueError("runat tmux target must be a full tmux target like `SESSION:WINDOW`.")
+        raise ValueError("runat target is required to write task frontmatter.")
+    if validate_target and runat_kind(tmux_target) not in {"tmux", "omnigent"}:
+        raise ValueError("runat must be a full tmux target like `SESSION:WINDOW` or `omnigent://SESSION_ID`.")
     managerat = managerat_for_task(args, tmux_target)
     body = task_instruction_text(args, managerat)
     return f"{task_frontmatter(args, tmux_target, managerat)}\n{body}\n"
@@ -1205,6 +1234,47 @@ def task_instruction_text(args: Args, manager_target: str) -> str:
     if excerpt:
         parts.append(authoritative_human_instruction(excerpt, human_email_source(args)))
     return "\n".join(parts)
+
+
+def omnigent_initial_prompt(args: Args) -> str:
+    """Build the same provenance-separated prompt used by a tmux launch."""
+    manager_target = managerat_for_task(args, "omnigent://pending")
+    paths = [DEFAULT_WORKER_INSTRUCTIONS]
+    if is_vl_agent(args.task_file, ""):
+        paths.append(VL_WORKER_INSTRUCTIONS)
+    if args.is_manager:
+        paths.append(args.root / "MANAGER.md")
+    parts = [path.read_text(encoding="utf-8").rstrip() for path in paths]
+    instruction = task_instruction_text(args, manager_target).rstrip()
+    if instruction:
+        parts.append(instruction)
+    return "\n".join(parts) + "\n"
+
+
+def launch_omnigent_task(args: Args) -> tuple[Path, str]:
+    """Create the remote runtime, bind task custody, then deliver its prompt."""
+    assert args.workdir is not None
+    prompt = omnigent_initial_prompt(args)
+    target = launch_omnigent_session(
+        effective_tool(args),
+        args.workdir,
+        args.model,
+        args.reasoning_effort,
+        host_id=args.omnigent_host_id,
+        title=args.window_name or Path(args.task_file).stem,
+    )
+    try:
+        with task_target_lock(args.root, target):
+            path = ensure_task_file(args, target)
+            if not args.no_link:
+                link_todo(args, target)
+        send_omnigent_message(target, prompt)
+    except Exception as exc:
+        raise RuntimeError(
+            f"OmniGent session {target} was created, but task registration or initial delivery failed: {exc}. "
+            "Inspect or stop that exact session before retrying launch."
+        ) from exc
+    return path, target
 
 
 def write_instruction_file(text: str, prefix: str) -> Path:
@@ -2010,6 +2080,9 @@ def refreshed_todo_entry(existing: str, ref: str, tmux_target: str) -> str:
         return f"{leading}{ref}" if not rest else f"{leading}{ref} {rest}"
     if not rest:
         return f"{leading}{ref} {tmux_target}"
+    omnigent_target_match = re.match(r"(?P<target>omnigent://[A-Za-z0-9._-]+)(?P<tail>.*)$", rest)
+    if omnigent_target_match is not None:
+        return f"{leading}{ref} {tmux_target}{omnigent_target_match.group('tail')}"
     target_match = re.match(r"(?P<target>[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?P<tail>.*)$", rest)
     if target_match is not None:
         return f"{leading}{ref} {tmux_target}{target_match.group('tail')}"
@@ -2052,6 +2125,21 @@ def link_todo(args: Args, tmux_target: str, *, locked: bool = False) -> None:
 
 
 def dry_run(args: Args) -> None:
+    if args.omnigent:
+        path = task_path(args.root, args.task_file)
+        launch_target = launch_omnigent_session(
+            effective_tool(args),
+            args.workdir or Path.cwd(),
+            args.model,
+            args.reasoning_effort,
+            host_id=args.omnigent_host_id,
+            title=args.window_name or path.stem,
+            dry_run=True,
+        )
+        print(f"task_file: {path}")
+        if not args.no_link:
+            print(f"todo_line: {todo_line(args, launch_target)}")
+        return
     session = launch_session(args) if args.workdir is not None else None
     tmux_target = target(args) if session is None else f"{session.name}:{args.tmux_window or 'DRYRUN'}"
     path = task_path(args.root, args.task_file)
@@ -2144,9 +2232,9 @@ def validate_existing_target_runtime(args: Args) -> str:
 
 
 def validate_inputs(args: Args) -> str:
-    if not args.tmux_session:
+    if not args.tmux_session and not args.omnigent:
         raise ValueError("--tmux-session is required.")
-    if TMUX_SESSION_RE.fullmatch(args.tmux_session) is None:
+    if args.tmux_session and TMUX_SESSION_RE.fullmatch(args.tmux_session) is None:
         raise ValueError("--tmux-session must be an exact session name starting with a letter and containing only letters, numbers, `_`, or `-`.")
     if args.workdir is not None and not args.workdir.is_dir():
         raise ValueError(f"--workdir must be an existing directory: {args.workdir}")
@@ -2171,7 +2259,7 @@ def validate_inputs(args: Args) -> str:
         raise ValueError("--human-email-file and --human-email-lines require --workdir.")
     if args.human_email_file is not None:
         _ = human_email_excerpt(args)
-    if args.workdir is not None:
+    if args.workdir is not None and not args.omnigent:
         _ = validate_launch_session(args)
     if args.workdir is not None and not args.resume_idle:
         readable_file(DEFAULT_WORKER_INSTRUCTIONS, "worker defaults")
@@ -3173,6 +3261,20 @@ def main(argv: list[str]) -> int:
             print(path)
             print(tmux_target)
             print("prepared successor launch committed with exact task, prompt, queue, process, and sole-owner bindings")
+            return 0
+        if args.omnigent:
+            args = replace(args, human_email_text=validate_inputs(args))
+            if args.dry_run:
+                dry_run(args)
+                return 0
+            existed = task_path(args.root, args.task_file).exists()
+            with root_membership_lock(args.root):
+                path, launch_target = launch_omnigent_task(args)
+            print(path)
+            print(launch_target)
+            if not existed:
+                print("reminder: the agent owns its queue.")
+            print("reminder: launch verified; wait for the agent's report.")
             return 0
         existing_target = target(args) if args.workdir is None else ""
         with root_membership_lock(args.root):

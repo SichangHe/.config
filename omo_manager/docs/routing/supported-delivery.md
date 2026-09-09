@@ -1,6 +1,6 @@
 # supported delivery
 
-`omo_tmux_send.py` is the shared send helper for Codex and live Cursor Agent panes. Watchers, wake loops, and managers use it; do not add a tool-specific send path.
+`omo_tmux_send.py` is the shared send helper for Codex and live Cursor Agent targets. Tmux `SESSION:WINDOW[.PANE]` targets keep the guarded buffer-and-input path; `omnigent://SESSION_ID` targets use OmniGent's session-event API. Watchers, wake loops, and managers use the same helper and dispatch from the target syntax.
 
 - sendable targets
   - Codex panes in `ready`, `running`, `stuck_input`, `waiting_subagent`, or `error`

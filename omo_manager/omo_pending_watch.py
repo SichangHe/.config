@@ -90,6 +90,8 @@ from omo_manager.omo_ready_report import VisibleTurn
 from omo_manager.omo_ready_report import latest_visible_turn
 from omo_manager.omo_ready_report import recent_visible_turns
 from omo_manager.omo_ready_report import turn_invoked_report_helper
+from omo_manager.omo_omnigent import manager_status as omnigent_manager_status
+from omo_manager.omo_omnigent import session_snapshot as omnigent_session_snapshot
 from omo_manager.omo_tmux_send import CodexSendOptions
 from omo_manager.omo_tmux_send import DEFAULT_TMUX_ENTER_COUNT
 from omo_manager.omo_tmux_send import DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S
@@ -104,6 +106,7 @@ from omo_manager.omo_task_lock import watcher_report_state_maintenance_temporary
 from omo_manager.omo_task_lock import watcher_report_state_temporary
 from omo_manager.omo_task_metadata import TaskBlocker
 from omo_manager.omo_task_metadata import TaskMetadata
+from omo_manager.omo_task_metadata import runat_kind
 
 
 def default_state_dir() -> Path:
@@ -1113,7 +1116,8 @@ def send_to_codex(
     if selected.dry_run:
         print(message)
         return None
-    require_sendable_codex_target(target, inspect_lines_for_message(message))
+    if runat_kind(target) != "omnigent":
+        require_sendable_codex_target(target, inspect_lines_for_message(message))
     if all(value is None for value in (pending_guard, problem_guard, success_event, failure_fallback)):
         return submit_send(target, message, selected, root=root, delivery_id=delivery_id)
     return submit_send(
@@ -4081,11 +4085,16 @@ def push_agent_pending_item_reminders(
         last_sent_s = seen_get(seen, key, now_s=now_wall_s)
         if not count or (key in seen and now_wall_s - last_sent_s < args.agent_problem_repeat_s):
             continue
-        if not args.dry_run and inspect_codex(CodexStatusArgs(target, 80)).status != "ready":
-            continue
-        turn, nearby_report = ready_report_context(target)
-        if turn is not None and not nearby_report:
-            continue
+        if not args.dry_run:
+            if runat_kind(target) == "omnigent":
+                if omnigent_manager_status(omnigent_session_snapshot(target)) != "ready":
+                    continue
+            elif inspect_codex(CodexStatusArgs(target, 80)).status != "ready":
+                continue
+        if runat_kind(target) != "omnigent":
+            turn, nearby_report = ready_report_context(target)
+            if turn is not None and not nearby_report:
+                continue
         reminder_text = AGENT_PENDING_ITEMS_REMINDER.format(count=count)
         if args.dry_run:
             print(reminder_text)

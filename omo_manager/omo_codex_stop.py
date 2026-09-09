@@ -22,10 +22,16 @@ from pathlib import Path
 import yaml
 
 try:
+    from omo_manager.omo_omnigent import session_id as omnigent_session_id
+    from omo_manager.omo_omnigent import stop_session as stop_omnigent_session
+    from omo_manager.omo_task_metadata import runat_kind
     from omo_manager.omo_codex_status import Args as StatusArgs
     from omo_manager.omo_codex_status import current_block, exact_pane_id, inspect, is_cursor_agent_capture, report_from_lines, status, tail, tail_pane_id
     from omo_manager.omo_task_lock import process_start_ticks, task_file_lock
 except ModuleNotFoundError:
+    from omo_omnigent import session_id as omnigent_session_id
+    from omo_omnigent import stop_session as stop_omnigent_session
+    from omo_task_metadata import runat_kind
     from omo_codex_status import Args as StatusArgs
     from omo_codex_status import current_block, exact_pane_id, inspect, is_cursor_agent_capture, report_from_lines, status, tail, tail_pane_id
     from omo_task_lock import process_start_ticks, task_file_lock  # pyright: ignore[reportImplicitRelativeImport]
@@ -138,7 +144,7 @@ an exact `h*` task target with hash-bound human-close authority; it requires
 `--task-file` and `--no-feedback`. Restart a running task in place with
 `omo_codex_start.py --restart-running`.""",
     )
-    _ = parser.add_argument("--target", required=True, help="tmux pane/window target, e.g. `cfg:2.0`.")
+    _ = parser.add_argument("--target", required=True, help="tmux pane/window or `omnigent://SESSION_ID` target.")
     _ = parser.add_argument("--wait-s", type=float, default=10.0)
     _ = parser.add_argument("--lines", type=int, default=2000)
     _ = parser.add_argument("--dry-run", action="store_true")
@@ -565,17 +571,24 @@ def task_tool(args: Args) -> str:
 
 
 def resume_cmd(args: Args, session_id: str) -> str:
+    if runat_kind(args.target) == "omnigent":
+        return f"omnigent resume {session_id}"
     return f"{resume_tool(args)} resume {session_id}"
 
 
 def close_note(target: str, session_id: str, now: datetime | None = None) -> str:
     stamp = (now or datetime.now().astimezone()).strftime("%m-%d %H:%M %Z")
+    if runat_kind(target) == "omnigent":
+        return f"\n(manager stopped OmniGent agent {stamp}; runat `{target}`.)\n"
     if session_id:
         return f"\n(manager closed Codex agent {stamp}; tmux target `{target}`; session_id: `{session_id}`.)\n"
     return f"\n(manager closed Codex agent {stamp}; tmux target `{target}`; Codex session id not found in captured tmux output.)\n"
 
 
 def has_close_note(text: str, target: str, session_id: str) -> bool:
+    if runat_kind(target) == "omnigent":
+        pattern = re.compile(rf"^\(manager stopped OmniGent agent \d{{2}}-\d{{2}} \d{{2}}:\d{{2}} [A-Za-z0-9_+\-]+; runat `{re.escape(target)}`\.\)$")
+        return any(pattern.fullmatch(line) for line in text.splitlines())
     stamp_pattern = r"\d{2}-\d{2} \d{2}:\d{2} [A-Za-z0-9_+\-]+"
     target_pattern = re.escape(target)
     if session_id:
@@ -2037,6 +2050,11 @@ def maybe_request_feedback(args: Args) -> None:
 
 
 def stop(args: Args) -> str:
+    if runat_kind(args.target) == "omnigent":
+        if args.allow_self or args.bound_symbolic_target or args.bound_pane_id or args.bound_expected_session_id:
+            raise RuntimeError("OmniGent stop does not accept tmux identity options")
+        stop_omnigent_session(args.target, dry_run=args.dry_run)
+        return omnigent_session_id(args.target)
     authorized_target = human_authorized_target(args)
     human_authorized = bool(authorized_target)
     if human_authorized:

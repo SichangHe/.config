@@ -68,6 +68,12 @@ class AmhEmailWatcherRouteTests(unittest.TestCase):
         args = watcher.parse_args(["--default-contact-agent", "hwl:3"])
         self.assertEqual("hwl:3", args.default_contact_agent)
 
+    def test_omnigent_target_is_sendable_without_tmux_preflight(self) -> None:
+        with patch.object(watcher, "require_sendable_codex_target") as require:
+            self.assertTrue(watcher.sendable_codex_target("omnigent://session-1"))
+        require.assert_not_called()
+        self.assertEqual({"omnigent://session.1"}, watcher.target_aliases("omnigent://session.1"))
+
     def test_untagged_email_routes_to_available_default_contact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

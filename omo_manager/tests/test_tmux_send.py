@@ -720,6 +720,16 @@ class TmuxSendTests(unittest.TestCase):
 
         raw.assert_called_once_with("cfg:1.0", "system reminder\n", selected, before_paste=None)
 
+    def test_omnigent_uncertain_delivery_claim_suppresses_exact_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": tmp}), patch(
+            "omo_manager.omo_tmux_send.send_omnigent_message", side_effect=RuntimeError("timeout after queue")
+        ) as send:
+            with self.assertRaisesRegex(RuntimeError, "timeout after queue"):
+                send_system_to_codex("omnigent://session-1", "system reminder\n", options())
+            send_system_to_codex("omnigent://session-1", "system reminder\n", options())
+
+        send.assert_called_once()
+
     def test_async_completion_notification_is_system_text(self) -> None:
         args = Args("cfg:2", None, options(), async_notify_target="cfg:1")
         with patch("omo_manager.omo_tmux_send.send_system_to_codex") as send_system, patch(

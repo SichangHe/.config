@@ -6371,8 +6371,6 @@ def run(args: Args) -> int:
         before = path.stat()
         text = path.read_text(encoding="utf-8")
         initial_metadata = parse_manager_child_metadata(text, args.root) if args.restore_terminal_target or args.close_retired_done else parse_task_metadata(text, args.root)
-        if initial_metadata is not None and runat_kind(initial_metadata.runat) == "omnigent":
-            raise TaskFrontmatterError("task status operations do not yet support an OmniGent `runat`")
         if initial_metadata is not None and initial_metadata.version == V2_VERSION and not v2_enabled(args.root):
             raise BlockingError("v2 task writes are disabled until reviewed migration enablement")
         if initial_metadata is not None and initial_metadata.version != V2_VERSION and v2_enabled(args.root):
@@ -6461,13 +6459,17 @@ def run(args: Args) -> int:
                 replace_if_unchanged(path, in_progress, before)
                 try:
                     assert metadata is not None
-                    close_args, session_id = stop_done_agent(
-                        args.root,
-                        path,
-                        metadata,
-                        args.human_close_authorization_source,
-                        args.human_close_authorization_sha256,
-                    )
+                    if runat_kind(metadata.runat) == "omnigent":
+                        close_args = StopArgs(metadata.runat, 10.0, 2000, False, False, args.root, path.relative_to(args.root).as_posix(), True, 0.0)
+                        session_id = stop(close_args)
+                    else:
+                        close_args, session_id = stop_done_agent(
+                            args.root,
+                            path,
+                            metadata,
+                            args.human_close_authorization_source,
+                            args.human_close_authorization_sha256,
+                        )
                 except Exception as exc:
                     rollback_before = path.stat()
                     rollback_text = path.read_text(encoding="utf-8")

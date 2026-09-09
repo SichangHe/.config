@@ -108,6 +108,81 @@ CAPTURED_TRUST_POPUP = (
 
 
 class OmoTaskTests(unittest.TestCase):
+    @patch("omo_manager.omo_task.send_omnigent_message")
+    @patch("omo_manager.omo_task.launch_omnigent_session", return_value="omnigent://session-123")
+    def test_main_omnigent_launch_binds_task_and_delivers_initial_prompt(self, launch, send) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task-file",
+                        "x.md",
+                        "--omnigent",
+                        "--tool",
+                        "codex",
+                        "--manager-target",
+                        "mgr:1",
+                        "--workdir",
+                        str(root),
+                        "--window-name",
+                        "task",
+                        "--model",
+                        "gpt-5.6-sol",
+                        "--reasoning-effort",
+                        "high",
+                        "--prompt-file",
+                        str(prompt),
+                    ]
+                )
+            self.assertEqual(0, result)
+            path = root / "x.md"
+            metadata = parse_task_metadata(path.read_text(encoding="utf-8"), root)
+            assert metadata is not None
+            self.assertEqual("omnigent://session-123", metadata.runat)
+            self.assertEqual("codex", metadata.tool)
+            self.assertIn("x.md omnigent://session-123", (root / "TODO.md").read_text(encoding="utf-8"))
+            self.assertIn('<manager_delegation from="mgr:1">', send.call_args.args[1])
+            launch.assert_called_once_with("codex", root, "gpt-5.6-sol", "high", host_id="", title="task")
+
+    @patch("omo_manager.omo_task.ensure_task_file", side_effect=OSError("disk full"))
+    @patch("omo_manager.omo_task.launch_omnigent_session", return_value="omnigent://session-orphan")
+    def test_main_omnigent_post_create_failure_reports_recovery_target(self, _launch, _ensure) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task-file",
+                        "x.md",
+                        "--omnigent",
+                        "--tool",
+                        "codex",
+                        "--manager-target",
+                        "mgr:1",
+                        "--workdir",
+                        str(root),
+                        "--model",
+                        "gpt-5.6-sol",
+                        "--reasoning-effort",
+                        "high",
+                        "--prompt-file",
+                        str(prompt),
+                    ]
+                )
+            self.assertEqual(1, result)
+            self.assertIn("omnigent://session-orphan", stderr.getvalue())
+            self.assertIn("Inspect or stop that exact session", stderr.getvalue())
+
     def test_deployed_entrypoint_reexecutes_project_environment(self) -> None:
         config_root = Path(__file__).resolve().parents[2]
         entrypoint = config_root / "bin" / "omo_task.py"
