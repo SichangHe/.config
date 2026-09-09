@@ -71,6 +71,7 @@ SOURCE_1179_APPROVAL_SHA256 = "0c470c290d70d8cf66a95ba8fabce3d2881b4ca0edb866267
 SOURCE_1438_APPROVAL_FILE = "85c5dff58359-1438.txt"
 SOURCE_1438_APPROVAL_QUOTE = "You need to aggressively trash any email the human no longer needs to read and replace any partially unnecessary emails with new emails."
 SOURCE_1438_APPROVAL_SHA256 = "461ff49a0e4b8d901e9708553827f01623d3efdaddf730192cb2497f30fa3b96"
+SOURCE_1438_ARCHIVE_MONTH = "202608"
 REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION = "v1.2.0"
 LEGACY_REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION = "v1.1.0"
 GMAIL_IDENTITY_UID_BATCH = 40
@@ -2655,33 +2656,60 @@ def require_source_1140_direct_removal(
         work_logs_root_arg = configured_work_logs_root().resolve(strict=True)
     except OSError as exc:
         raise RuntimeError("replacement-free removal work-log root is unreadable") from exc
-    mail_root_arg = work_logs_root_arg / "manager_mail"
-    if (
-        not approval_arg.is_absolute()
-        or approval_arg.parent.resolve(strict=False) != mail_root_arg
-        or approval_arg.name not in approvals
-    ):
+    direct_mail_root = work_logs_root_arg / "manager_mail"
+    archived_mail_parent = work_logs_root_arg / SOURCE_1438_ARCHIVE_MONTH
+    allowed_mail_roots = [direct_mail_root]
+    if approval_name == SOURCE_1438_APPROVAL_FILE:
+        allowed_mail_roots.append(archived_mail_parent / "manager_mail")
+    if not approval_arg.is_absolute() or approval_arg.name not in approvals:
         raise RuntimeError("replacement-free removal requires trusted manager mail")
+    try:
+        resolved_parent = approval_arg.parent.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError("replacement-free removal approval evidence is unreadable") from exc
+    matching_mail_roots: list[Path] = []
+    for candidate in allowed_mail_roots:
+        try:
+            candidate_root = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if candidate_root == resolved_parent:
+            matching_mail_roots.append(candidate)
+    if len(matching_mail_roots) != 1:
+        raise RuntimeError("replacement-free removal requires trusted manager mail")
+    mail_root_arg = matching_mail_roots[0]
     try:
         work_logs_root_stat = work_logs_root_arg.lstat()
         mail_root_stat = mail_root_arg.lstat()
+        archived_mail_parent_stat = archived_mail_parent.lstat() if mail_root_arg != direct_mail_root else None
         work_logs_root = work_logs_root_arg.resolve(strict=True)
         mail_root = mail_root_arg.resolve(strict=True)
         approval_path, approval_bytes = read_owner_only_regular_file(approval_arg, "replacement-free removal approval file")
         approval_text = approval_bytes.decode("utf-8")
     except (OSError, RuntimeError, UnicodeDecodeError) as exc:
         raise RuntimeError("replacement-free removal approval evidence is unreadable") from exc
+    archived_source_1438 = mail_root_arg != direct_mail_root
     if (
         stat.S_ISLNK(work_logs_root_stat.st_mode)
         or stat.S_ISLNK(mail_root_stat.st_mode)
         or not stat.S_ISDIR(mail_root_stat.st_mode)
         or mail_root_stat.st_uid != os.geteuid()
-        or mail_root_stat.st_mode & 0o077
+        or mail_root_stat.st_mode & (0o022 if archived_source_1438 else 0o077)
+        or (
+            archived_mail_parent_stat is not None
+            and (
+                stat.S_ISLNK(archived_mail_parent_stat.st_mode)
+                or not stat.S_ISDIR(archived_mail_parent_stat.st_mode)
+                or archived_mail_parent_stat.st_uid != os.geteuid()
+                or archived_mail_parent_stat.st_mode & 0o022
+            )
+        )
         or approval_arg.parent.resolve(strict=False) != mail_root
         or approval_path.parent != mail_root
         or hashlib.sha256(approval_bytes).hexdigest() != expected_sha256
         or expected_quote not in " ".join(approval_text.split())
-        or work_logs_root != mail_root.parent
+        or (not archived_source_1438 and work_logs_root != mail_root.parent)
+        or (archived_source_1438 and work_logs_root / SOURCE_1438_ARCHIVE_MONTH / "manager_mail" != mail_root)
     ):
         raise RuntimeError("replacement-free removal approval evidence does not match the supported Human source")
     if review_file is None:
