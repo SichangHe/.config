@@ -66,6 +66,8 @@ from omo_manager.omo_codex_start import (
     skip_codex_update_prompt,
     start,
     source1571_process_held_session,
+    source1571_held_rollouts,
+    source1571_native_codex_processes,
     stop_unverified_replacement,
     task_path,
     validate_task,
@@ -74,6 +76,7 @@ from omo_manager.omo_codex_start import (
     wait_resume_cwd_recovery,
 )
 from omo_manager.omo_codex_status import Report
+from omo_manager.omo_manager_rotation_contain import ProcessIdentity
 from omo_manager.omo_pending_watch import record_terminal_delivery_failure, terminal_delivery_failure
 from omo_manager.omo_pending_watch import PrePasteRejected, try_send_delivery_text
 from omo_manager.omo_task_status import authoritative_active_target_task_paths, root_membership_lock
@@ -1425,7 +1428,15 @@ class CodexStartTests(unittest.TestCase):
             }
             rollout.write_text(json.dumps(metadata, separators=(",", ":")) + "\n", encoding="utf-8")
             pane = Pane("cfg:2.0", "%2", "@2", "bunx", root, os.getpid())
-            with rollout.open("ab") as held, patch("omo_manager.omo_codex_start.SOURCE1571_SESSION_ROOT", session_root), patch("omo_manager.omo_codex_start.verify_same_process"):
+            with (
+                rollout.open("ab") as held,
+                patch("omo_manager.omo_codex_start.SOURCE1571_SESSION_ROOT", session_root),
+                patch("omo_manager.omo_codex_start.verify_same_process"),
+                patch(
+                    "omo_manager.omo_codex_start.source1571_native_codex_processes",
+                    side_effect=lambda tree, _proc_root: tuple(process for process in tree if process.pid == os.getpid()),
+                ),
+            ):
                 evidence = source1571_process_held_session(pane)
                 self.assertEqual(self.SESSION_ID, evidence.session_id)
                 self.assertEqual(rollout, evidence.path)
@@ -1437,6 +1448,37 @@ class CodexStartTests(unittest.TestCase):
                 with second.open("ab"), self.assertRaisesRegex(StartError, "exactly one root"):
                     source1571_process_held_session(pane)
                 self.assertFalse(held.closed)
+
+    def test_source1571_native_codex_process_name_is_exact(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            proc_root = Path(raw_root)
+            processes = tuple(ProcessIdentity(pid, 1, "S", pid, pid, 0, pid, str(pid)) for pid in (101, 102, 103))
+            for process, command in zip(processes, ("codex\n", "codex \n", "\tcodex\n"), strict=True):
+                process_root = proc_root / str(process.pid)
+                process_root.mkdir()
+                (process_root / "comm").write_text(command, encoding="utf-8")
+            self.assertEqual((processes[0],), source1571_native_codex_processes(processes, proc_root))
+
+    def test_source1571_rollout_scan_ignores_non_codex_descriptor_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            proc_root = root / "proc"
+            session_root = root / "sessions"
+            proc_root.mkdir()
+            session_root.mkdir()
+            rollout = session_root / f"rollout-test-{self.SESSION_ID}.jsonl"
+            rollout.write_text("{}\n", encoding="utf-8")
+            codex = ProcessIdentity(101, 1, "S", 101, 101, 0, 101, "a" * 64)
+            unrelated = ProcessIdentity(102, 101, "S", 102, 102, 0, 102, "b" * 64)
+            (proc_root / "101" / "fd").mkdir(parents=True)
+            (proc_root / "101" / "comm").write_text("codex\n", encoding="utf-8")
+            (proc_root / "101" / "fd" / "9").symlink_to(rollout)
+            (proc_root / "102").mkdir()
+            (proc_root / "102" / "comm").write_text("basedpyright\n", encoding="utf-8")
+            self.assertEqual(
+                {(rollout.stat().st_dev, rollout.stat().st_ino): (rollout, 101, 9)},
+                source1571_held_rollouts((codex, unrelated), session_root, proc_root),
+            )
 
     def test_source1571_rotation_snapshot_falls_back_to_process_held_rollout(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:

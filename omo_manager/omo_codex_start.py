@@ -948,13 +948,29 @@ def source1571_process_tree(root_pid: int) -> tuple[ProcessIdentity, ...]:
     return tuple(identities[pid] for pid in sorted(identities))
 
 
-def source1571_held_rollouts(tree: tuple[ProcessIdentity, ...], session_root: Path) -> dict[tuple[int, int], tuple[Path, int, int]]:
-    """Return exact Codex rollout inodes held by the incumbent process tree."""
+def source1571_native_codex_processes(tree: tuple[ProcessIdentity, ...], proc_root: Path = Path("/proc")) -> tuple[ProcessIdentity, ...]:
+    """Return the one native Codex process inside the bound pane tree."""
 
-    held: dict[tuple[int, int], tuple[Path, int, int]] = {}
+    codex_processes: list[ProcessIdentity] = []
     for process in tree:
         try:
-            descriptors = tuple((Path("/proc") / str(process.pid) / "fd").iterdir())
+            command = (proc_root / str(process.pid) / "comm").read_text(encoding="utf-8").removesuffix("\n")
+        except (OSError, UnicodeError) as error:
+            raise StartError(f"could not classify Source-1571 incumbent process {process.pid}: {error}") from error
+        if command == "codex":
+            codex_processes.append(process)
+    if len(codex_processes) != 1:
+        raise StartError("Source-1571 incumbent process tree does not contain exactly one native Codex process.")
+    return tuple(codex_processes)
+
+
+def source1571_held_rollouts(tree: tuple[ProcessIdentity, ...], session_root: Path, proc_root: Path = Path("/proc")) -> dict[tuple[int, int], tuple[Path, int, int]]:
+    """Return exact Codex rollout inodes held by the incumbent native Codex process."""
+
+    held: dict[tuple[int, int], tuple[Path, int, int]] = {}
+    for process in source1571_native_codex_processes(tree, proc_root):
+        try:
+            descriptors = tuple((proc_root / str(process.pid) / "fd").iterdir())
         except OSError as error:
             raise StartError(f"could not inspect Source-1571 incumbent descriptors: {error}") from error
         for descriptor_path in descriptors:
