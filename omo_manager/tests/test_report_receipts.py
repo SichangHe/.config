@@ -21,6 +21,7 @@ from omo_manager import omo_report_receipt
 from omo_manager.omo_report_receipt import OwnerPrefixBinding, ReceiptError, canonical_json, persist_consumed_closure_attestation, regular_file_tail, validate_committed_route_evidence, validate_consumed_closure_export
 from omo_manager.omo_task_status import Args as TaskStatusArgs
 from omo_manager.omo_task_status import validate_manager_consumed_report
+from omo_manager.omo_task_metadata import render_v1_pending_scalar
 
 
 OMO_DIR = Path(__file__).resolve().parents[1]
@@ -285,6 +286,7 @@ def export_archived_report(
     output: Path,
     *,
     session_evidence: tuple[Path, Path, str, str] | None = None,
+    no_mail_transcript: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [
         str(REPORT),
@@ -307,6 +309,8 @@ def export_archived_report(
                 published_commit,
             )
         )
+    if no_mail_transcript is not None:
+        command.extend(("--root-retained-no-mail-transcript", str(no_mail_transcript)))
     return subprocess.run(
         command,
         cwd=case.root.parent,
@@ -316,6 +320,217 @@ def export_archived_report(
         timeout=30,
         check=False,
     )
+
+
+def root_retained_no_mail_fixture(
+    tmp_path: Path,
+    *,
+    human_email: bool = False,
+    human_authority: bool = True,
+    authority_text: str = "Email me the result.",
+    close_authority: bool = True,
+    acknowledgment_after_removal: bool = False,
+) -> tuple[ReportFixture, Path, Path, Path, str]:
+    case, manager, _owner = active_manager_fixture(tmp_path)
+    task = case.root / "worker.md"
+    pending_item = (
+        "🧑 Finish the bounded classification and email the result."
+        if human_email
+        else "Finish the bounded classification:\v\u00a0report it privately."
+    )
+    pending_rendering = (
+        pending_item
+        if human_email
+        else '"Finish the bounded classification:\\v\u00a0report it privately."'
+    )
+    task_contract = (
+        "Classify the current TODO state and email the Human.\n"
+        if human_email
+        else "Classify the current TODO state, report privately, and do not email the Human.\n"
+    )
+    human_instruction = (
+        '<human_instruction authoritative="true" source="manager_mail/source.txt:1-1">\n'
+        f"{authority_text}"
+        + ("</human_instruction>\n" if close_authority else "</human_instruction_missing>\n")
+        if human_email and human_authority
+        else ""
+    )
+    if human_email and human_authority:
+        manager_mail = case.root / "manager_mail"
+        manager_mail.mkdir(mode=0o700)
+        source = manager_mail / "source.txt"
+        source.write_text(f"{authority_text}\n", encoding="utf-8")
+        source.chmod(0o600)
+    report_time_task = (
+        frontmatter(runat="cfg:7", managerat="vl:2").replace(
+            "pending_task_items: []",
+            f"pending_task_items:\n  - {pending_rendering}",
+        )
+        + '<manager_delegation from="vl:2">\n'
+        + task_contract
+        + "</manager_delegation>\n"
+        + human_instruction
+    )
+    task.write_text(report_time_task, encoding="utf-8")
+    draft = allocate_report_draft(case, b"root-retained no-mail report\n")
+    case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+    report_status = "in-progress" if human_email else "done"
+    pending = run_report_from(case, draft, status=report_status)
+    if pending.returncode != 0 or run_manager_watcher_once(case, manager).returncode != 0:
+        raise AssertionError(pending.stderr or "manager watcher did not consume the report")
+    report_result = pending
+    if not human_email:
+        report_result = run_report_from(case, draft, status="done")
+        if report_result.returncode != 0 or json.loads(report_result.stdout).get("accepted") is not True:
+            raise AssertionError(report_result.stderr or report_result.stdout)
+    transfer = json.loads(report_result.stdout)["transfer_receipt"]
+    replay_id = str(transfer["queue_item"]["replay_id"])
+    envelope = Path(str(transfer["queue_item"]["pointer"]).rsplit(" ", 1)[1][:-1])
+    removal_evidence = f"Completed the classification; private report replay {replay_id} was acknowledged."
+    completed = report_time_task.replace("status: running", "status: done", 1).replace(
+        f"pending_task_items:\n  - {pending_rendering}\n",
+        "pending_task_items: []\n",
+        1,
+    )
+    task.write_text(
+        completed + f"(verified removed pending item: {removal_evidence})\n",
+        encoding="utf-8",
+    )
+    (case.root / "TODO.md").write_text(
+        "current:\nmanager.md vl:2\n\nprevious:\nworker.md cfg:7\n",
+        encoding="utf-8",
+    )
+    session_id = "11111111-2222-3333-4444-555555555555"
+    turn_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    report_call_id = "call_report"
+    acknowledgment_call_id = "call_acknowledgment"
+    removal_call_id = "call_remove"
+    worker_dir = tmp_path / "worker"
+    worker_dir.mkdir()
+    report_command = f"omo_report.sh --status {report_status} --message-file {draft}"
+    if human_email:
+        acknowledgment_command = "omo_codex_status.py vl:2 --lines 24"
+        acknowledgment_output = (
+            f'<agent_message from="cfg:7">\n'
+            "Agent report received; review it and handle any follow-up:\n"
+            f"(from agent {envelope})\n"
+            "</agent_message>\n"
+        )
+        removal_command = (
+            f"omo_pending.py remove --item {shlex.quote(pending_item)} --evidence {shlex.quote(removal_evidence)} "
+            f"--completion-key {'a' * 64} --answer-subject-file /tmp/subject.txt "
+            "--answer-message-file /tmp/message.txt\ntimeout 20s omo_pending.py list"
+        )
+        removed_output = (
+            "Emailed the human\n"
+            "Message-ID: <completion@example.test>\n"
+            "removed 1 pending item(s); verify each item was actually done or cancelled\n"
+            "Emailed the human with the exact removed work and evidence.\n"
+        )
+    else:
+        removal_command = (
+            f"omo_pending.py remove --item {shlex.quote(pending_item)} --outcome completed "
+            f"--evidence {shlex.quote(removal_evidence)} --no-email\nomo_pending.py list"
+        )
+        removed_output = "removed 1 pending item(s) without email; verify each item was actually done or cancelled\n"
+
+    def command_records(
+        ordinal: int,
+        call_id: str,
+        command: str,
+        stdout: str,
+    ) -> list[dict[str, object]]:
+        return [
+            {
+                "ordinal": ordinal,
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "exec",
+                    "call_id": call_id,
+                    "input": f"const r = await tools.exec_command({json.dumps({'cmd': command})});",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": turn_id},
+                },
+            },
+            {
+                "ordinal": ordinal + 1,
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "thread_id": session_id,
+                    "turn_id": turn_id,
+                    "item": {
+                        "type": "CommandExecution",
+                        "command": ["/bin/sh", "-lc", command],
+                        "cwd": f"file://{worker_dir}",
+                        "status": "completed",
+                        "stdout": stdout,
+                        "stderr": "",
+                        "aggregated_output": stdout,
+                        "formatted_output": stdout,
+                        "exit_code": 0,
+                        "source": "unified_exec_startup",
+                    },
+                },
+            },
+            {
+                "ordinal": ordinal + 2,
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": call_id,
+                    "output": [{"type": "input_text", "text": stdout}],
+                    "internal_chat_message_metadata_passthrough": {"turn_id": turn_id},
+                },
+            },
+        ]
+
+    operation_records = command_records(1, report_call_id, report_command, report_result.stdout)
+    if human_email:
+        acknowledgment_records = command_records(
+            4 if not acknowledgment_after_removal else 7,
+            acknowledgment_call_id,
+            acknowledgment_command,
+            acknowledgment_output,
+        )
+        removal_records = command_records(
+            7 if not acknowledgment_after_removal else 4,
+            removal_call_id,
+            removal_command,
+            removed_output,
+        )
+        operation_records.extend(
+            removal_records + acknowledgment_records
+            if acknowledgment_after_removal
+            else acknowledgment_records + removal_records
+        )
+        terminal_ordinal = 10
+    else:
+        operation_records.extend(command_records(4, removal_call_id, removal_command, removed_output))
+        terminal_ordinal = 7
+    records: list[dict[str, object]] = [
+        {
+            "ordinal": 0,
+            "type": "session_meta",
+            "payload": {
+                "session_id": session_id,
+                "id": session_id,
+                "cwd": str(worker_dir),
+                "originator": "codex-tui",
+                "source": "cli",
+            },
+        },
+        *operation_records,
+        {
+            "ordinal": terminal_ordinal,
+            "type": "event_msg",
+            "payload": {"type": "task_complete", "turn_id": turn_id},
+        },
+    ]
+    transcript = tmp_path / f"rollout-2026-09-08T00-00-00-{session_id}.jsonl"
+    transcript.write_bytes(b"".join(canonical_json(record) for record in records))
+    transcript.chmod(0o600)
+    return case, envelope, task, transcript, replay_id
 
 
 def root_retained_session_fixture(
@@ -3809,6 +4024,280 @@ return 75
             validated = validate_export_from(case, exported)
             self.assertEqual(0, validated.returncode, validated.stderr)
             self.assertEqual(attestation, json.loads(validated.stdout))
+
+    def test_root_retained_no_mail_custody_authenticates_top_level_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, envelope, task, transcript, replay_id = root_retained_no_mail_fixture(tmp_path)
+            exported = tmp_path / "root-retained-no-mail.json"
+
+            result = export_archived_report(
+                case,
+                envelope,
+                exported,
+                no_mail_transcript=transcript,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            attestation = json.loads(result.stdout)
+            custody = attestation["archive_custody"]
+            binding = custody["git_provenance"]["commitment_binding"]
+            self.assertEqual("codex-top-level-no-mail-prefix", binding["kind"])
+            self.assertTrue(binding["no_human_email"])
+            self.assertEqual(replay_id, attestation["replay_id"])
+            self.assertEqual(hashlib.sha256(task.read_bytes()).hexdigest(), custody["task_sha256"])
+            with transcript.open("ab") as stream:
+                stream.write(canonical_json({"ordinal": 8, "type": "event_msg", "payload": {"type": "task_complete"}}))
+            validated = validate_export_from(case, exported)
+            self.assertEqual(0, validated.returncode, validated.stderr)
+            self.assertEqual(attestation, json.loads(validated.stdout))
+
+    def test_no_mail_reconstruction_matches_v1_double_quoted_renderer(self) -> None:
+        escaped = 'double " slash \\\\ controls \0\x07\x08\t\x0b\x0c\r\x1b\x85\u2028\u2029\ufeff\u00a0 emoji \U0001f642'
+        self.assertEqual(
+            render_v1_pending_scalar(escaped),
+            omo_report_receipt.yaml_double_quoted_scalar(escaped),
+        )
+
+    def test_root_retained_top_level_human_email_completion_after_routed_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, envelope, _task, transcript, replay_id = root_retained_no_mail_fixture(
+                tmp_path,
+                human_email=True,
+            )
+            exported = tmp_path / "root-retained-human-email.json"
+
+            result = export_archived_report(
+                case,
+                envelope,
+                exported,
+                no_mail_transcript=transcript,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            attestation = json.loads(result.stdout)
+            binding = attestation["archive_custody"]["git_provenance"]["commitment_binding"]
+            self.assertEqual(replay_id, attestation["replay_id"])
+            self.assertEqual("in-progress", binding["report_status"])
+            self.assertFalse(binding["report_was_accepted"])
+            self.assertEqual("human-email", binding["completion_mode"])
+            self.assertEqual("<completion@example.test>", binding["completion_email_message_id"])
+            self.assertEqual("manager_mail/source.txt:1-1", binding["human_instruction_source"])
+            validated = validate_export_from(case, exported)
+            self.assertEqual(0, validated.returncode, validated.stderr)
+            self.assertEqual(attestation, json.loads(validated.stdout))
+
+    def test_root_retained_human_email_completion_requires_human_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, envelope, _task, transcript, _replay_id = root_retained_no_mail_fixture(
+                tmp_path,
+                human_email=True,
+                human_authority=False,
+            )
+
+            result = export_archived_report(
+                case,
+                envelope,
+                tmp_path / "rejected.json",
+                no_mail_transcript=transcript,
+            )
+
+            self.assertEqual(2, result.returncode)
+            self.assertIn("Human authority", result.stderr)
+
+    def test_root_retained_human_email_completion_rejects_inauthentic_authority(self) -> None:
+        defects = ("missing source", "changed source", "unclosed block", "no email authority", "email prohibited")
+        for defect in defects:
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                authority_text = {
+                    "no email authority": "Review the result.",
+                    "email prohibited": "Do not email me the result.",
+                }.get(defect, "Email me the result.")
+                case, envelope, task, transcript, _replay_id = root_retained_no_mail_fixture(
+                    tmp_path,
+                    human_email=True,
+                    authority_text=authority_text,
+                    close_authority=defect != "unclosed block",
+                )
+                source = case.root / "manager_mail/source.txt"
+                if defect == "missing source":
+                    source.unlink()
+                elif defect == "changed source":
+                    source.write_text("Email me a different result.\n", encoding="utf-8")
+                    source.chmod(0o600)
+                result = export_archived_report(
+                    case,
+                    envelope,
+                    tmp_path / "rejected.json",
+                    no_mail_transcript=transcript,
+                )
+
+                self.assertEqual(2, result.returncode)
+                self.assertIn("Human authority", result.stderr)
+
+    def test_root_retained_human_email_completion_rejects_ambiguous_sequence(self) -> None:
+        defects = ("acknowledgment after removal", "forged acknowledgment", "malformed removal", "unbound email")
+        for defect in defects:
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                case, envelope, _task, transcript, _replay_id = root_retained_no_mail_fixture(
+                    tmp_path,
+                    human_email=True,
+                    acknowledgment_after_removal=defect == "acknowledgment after removal",
+                )
+                records = [json.loads(line) for line in transcript.read_text(encoding="utf-8").splitlines()]
+                if defect == "malformed removal":
+                    for record in records:
+                        payload = record.get("payload", {})
+                        item = payload.get("item", {})
+                        command = item.get("command")
+                        if isinstance(command, list) and "--completion-key" in command[-1]:
+                            command[-1] = command[-1].replace(
+                                "--answer-message-file /tmp/message.txt",
+                                "--answer-message-file",
+                            )
+                        raw_input = payload.get("input")
+                        if isinstance(raw_input, str) and "--completion-key" in raw_input:
+                            payload["input"] = raw_input.replace(
+                                "--answer-message-file /tmp/message.txt",
+                                "--answer-message-file",
+                            )
+                elif defect == "forged acknowledgment":
+                    forged = "printf 'omo_codex_status.py vl:2 --lines 24'"
+                    for record in records:
+                        payload = record.get("payload", {})
+                        item = payload.get("item", {})
+                        command = item.get("command")
+                        if isinstance(command, list) and "omo_codex_status.py" in command[-1]:
+                            command[-1] = forged
+                        raw_input = payload.get("input")
+                        if isinstance(raw_input, str) and "omo_codex_status.py" in raw_input:
+                            payload["input"] = f"const r = await tools.exec_command({json.dumps({'cmd': forged})});"
+                elif defect == "unbound email":
+                    records.insert(
+                        -1,
+                        {
+                            "ordinal": 9,
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "item_completed",
+                                "thread_id": records[0]["payload"]["id"],
+                                "turn_id": records[1]["payload"]["internal_chat_message_metadata_passthrough"]["turn_id"],
+                                "item": {
+                                    "type": "CommandExecution",
+                                    "command": ["/bin/sh", "-lc", "email_me.py --subject extra --message-file /tmp/extra"],
+                                },
+                            },
+                        },
+                    )
+                transcript.write_bytes(b"".join(canonical_json(record) for record in records))
+
+                result = export_archived_report(
+                    case,
+                    envelope,
+                    tmp_path / "rejected.json",
+                    no_mail_transcript=transcript,
+                )
+
+                self.assertEqual(2, result.returncode)
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_root_retained_no_mail_custody_rejects_ambiguous_provenance(self) -> None:
+        defects = (
+            "subagent",
+            "email",
+            "command substitution email",
+            "post-terminal email",
+            "removal evidence",
+            "extra note",
+            "report pending",
+            "call mismatch",
+        )
+        for defect in defects:
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                case, envelope, task, transcript, _replay_id = root_retained_no_mail_fixture(tmp_path)
+                records = [json.loads(line) for line in transcript.read_text(encoding="utf-8").splitlines()]
+                if defect == "subagent":
+                    records[0]["payload"]["thread_source"] = "subagent"
+                elif defect == "email":
+                    records.insert(
+                        -1,
+                        {
+                            "ordinal": 7,
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "item_completed",
+                                "thread_id": records[0]["payload"]["id"],
+                                "turn_id": records[1]["payload"]["internal_chat_message_metadata_passthrough"]["turn_id"],
+                                "item": {
+                                    "type": "CommandExecution",
+                                    "command": ["/bin/sh", "-lc", "email_me.py --subject done --message-file /tmp/done.md"],
+                                },
+                            },
+                        },
+                    )
+                elif defect == "post-terminal email":
+                    records.append(
+                        {
+                            "ordinal": 8,
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "item_completed",
+                                "thread_id": records[0]["payload"]["id"],
+                                "turn_id": "ffffffff-1111-2222-3333-444444444444",
+                                "item": {
+                                    "type": "CommandExecution",
+                                    "command": ["/bin/sh", "-lc", "email_me.py --subject done --message-file /tmp/done.md"],
+                                },
+                            },
+                        }
+                    )
+                elif defect == "command substitution email":
+                    records[5]["payload"]["item"]["command"][-1] += " $(email_me.py --subject x --message-file /tmp/x)"
+                elif defect == "call mismatch":
+                    records[1]["payload"]["input"] = "echo omo_report.sh --status --message-file"
+                elif defect == "removal evidence":
+                    task.write_text(
+                        task.read_text(encoding="utf-8").replace("Completed the classification", "Different evidence"),
+                        encoding="utf-8",
+                    )
+                elif defect == "extra note":
+                    task.write_text(task.read_text(encoding="utf-8") + "(verified removed pending item: extra)\n", encoding="utf-8")
+                else:
+                    report_record = records[2]["payload"]["item"]
+                    acceptance = json.loads(report_record["stdout"])
+                    acceptance["accepted"] = False
+                    changed = canonical_json(acceptance).decode()
+                    report_record["stdout"] = changed
+                    report_record["aggregated_output"] = changed
+                    report_record["formatted_output"] = changed
+                    records[3]["payload"]["output"][0]["text"] = changed
+                if defect in {
+                    "subagent",
+                    "email",
+                    "command substitution email",
+                    "post-terminal email",
+                    "report pending",
+                    "call mismatch",
+                }:
+                    transcript.write_bytes(b"".join(canonical_json(record) for record in records))
+
+                result = export_archived_report(
+                    case,
+                    envelope,
+                    tmp_path / "rejected.json",
+                    no_mail_transcript=transcript,
+                )
+
+                self.assertEqual(2, result.returncode)
+                self.assertRegex(
+                    result.stderr,
+                    "top-level Codex session|Human email command|exact verified removal note|does not authenticate|accepted report|command execution order",
+                )
 
     def test_root_retained_session_custody_rejects_changed_prefix_ack_task_and_publication(self) -> None:
         defects = ("prefix", "parent header", "ack", "report task", "removal note", "task", "publication")

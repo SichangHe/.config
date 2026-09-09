@@ -5404,7 +5404,10 @@ def validate_consumed_closure_attestation(
         session_binding = (
             commitment_binding
             if isinstance(commitment_binding, dict)
-            and commitment_binding.get("kind") == "codex-session-prefix"
+            and commitment_binding.get("kind") in {
+                "codex-session-prefix",
+                "codex-top-level-no-mail-prefix",
+            }
             else None
         )
         monthly_archive = (

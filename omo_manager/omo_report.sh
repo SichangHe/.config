@@ -211,6 +211,8 @@ ownership_acknowledgment_message_id=""
 ownership_acknowledgment_message_id_requested=0
 published_result_commit=""
 published_result_commit_requested=0
+root_retained_no_mail_transcript=""
+root_retained_no_mail_transcript_requested=0
 agent="${OMO_AGENT_NAME:-agent}"
 agent_explicit=0
 usage() {
@@ -218,7 +220,7 @@ usage() {
     "Usage: omo_report.sh --status STATUS --message-file FILE [--agent NAME] [--recover-moved REPLAY_ID]" \
     "       omo_report.sh --describe --status STATUS --message-file FILE [--agent NAME]" \
     "       omo_report.sh --verify-consumed [--consumed-attestation-output FILE] --status STATUS --message-file FILE [--agent NAME]" \
-    "       omo_report.sh --export-archived-consumed REPORT --consumed-attestation-output FILE [--root-retained-session-transcript FILE --root-retained-lifecycle-transcript FILE --ownership-acknowledgment-message-id MESSAGE_ID --published-result-commit COMMIT]" \
+    "       omo_report.sh --export-archived-consumed REPORT --consumed-attestation-output FILE [--root-retained-no-mail-transcript FILE | --root-retained-session-transcript FILE --root-retained-lifecycle-transcript FILE --ownership-acknowledgment-message-id MESSAGE_ID --published-result-commit COMMIT]" \
     "       omo_report.sh --validate-consumed-export FILE --expected-sha256 SHA256" \
     "       omo_report.sh --alloc-message-file" \
     "" \
@@ -228,7 +230,7 @@ usage() {
 }
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --status|--message-file|--agent|--recover-moved|--consumed-attestation-output|--validate-consumed-export|--expected-sha256|--export-archived-consumed|--root-retained-session-transcript|--root-retained-lifecycle-transcript|--ownership-acknowledgment-message-id|--published-result-commit)
+    --status|--message-file|--agent|--recover-moved|--consumed-attestation-output|--validate-consumed-export|--expected-sha256|--export-archived-consumed|--root-retained-session-transcript|--root-retained-lifecycle-transcript|--ownership-acknowledgment-message-id|--published-result-commit|--root-retained-no-mail-transcript)
       if [ "$#" -lt 2 ]; then echo "missing value for $1" >&2; usage >&2; exit 2; fi
       option="$1"
       value="$2"
@@ -245,6 +247,7 @@ while [ "$#" -gt 0 ]; do
         --root-retained-lifecycle-transcript) root_retained_lifecycle_transcript="$value"; root_retained_lifecycle_transcript_requested=$((root_retained_lifecycle_transcript_requested + 1)) ;;
         --ownership-acknowledgment-message-id) ownership_acknowledgment_message_id="$value"; ownership_acknowledgment_message_id_requested=$((ownership_acknowledgment_message_id_requested + 1)) ;;
         --published-result-commit) published_result_commit="$value"; published_result_commit_requested=$((published_result_commit_requested + 1)) ;;
+        --root-retained-no-mail-transcript) root_retained_no_mail_transcript="$value"; root_retained_no_mail_transcript_requested=$((root_retained_no_mail_transcript_requested + 1)) ;;
       esac
       shift 2
       ;;
@@ -255,7 +258,7 @@ while [ "$#" -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
-root_retained_evidence_requested=$((root_retained_session_transcript_requested + root_retained_lifecycle_transcript_requested + ownership_acknowledgment_message_id_requested + published_result_commit_requested))
+root_retained_evidence_requested=$((root_retained_session_transcript_requested + root_retained_lifecycle_transcript_requested + ownership_acknowledgment_message_id_requested + published_result_commit_requested + root_retained_no_mail_transcript_requested))
 if [ "$export_archived_consumed_requested" -eq 0 ] && [ "$root_retained_evidence_requested" -ne 0 ]; then
   echo "root-retained session evidence options require --export-archived-consumed" >&2
   exit 2
@@ -337,8 +340,8 @@ PY
 fi
 if [ "$export_archived_consumed_requested" -ne 0 ]; then
   evidence_requested="$root_retained_evidence_requested"
-  if [ "$export_archived_consumed_requested" -ne 1 ] || [ -z "$export_archived_consumed" ] || [ -z "$consumed_attestation_output" ] || [ -n "$status$message_file$recover_moved$validate_consumed_export$validate_consumed_export_sha256" ] || [ "$alloc_message_file" -ne 0 ] || [ "$describe" -ne 0 ] || [ "$verify_consumed" -ne 0 ] || [ "$agent_explicit" -ne 0 ] || { [ "$evidence_requested" -ne 0 ] && [ "$evidence_requested" -ne 4 ]; } || { [ "$evidence_requested" -eq 4 ] && { [ -z "$root_retained_session_transcript" ] || [ -z "$root_retained_lifecycle_transcript" ] || [ -z "$ownership_acknowledgment_message_id" ] || [ -z "$published_result_commit" ]; }; }; then
-    echo "--export-archived-consumed requires only REPORT, --consumed-attestation-output FILE, and either all or none of the root-retained session evidence options" >&2
+  if [ "$export_archived_consumed_requested" -ne 1 ] || [ -z "$export_archived_consumed" ] || [ -z "$consumed_attestation_output" ] || [ -n "$status$message_file$recover_moved$validate_consumed_export$validate_consumed_export_sha256" ] || [ "$alloc_message_file" -ne 0 ] || [ "$describe" -ne 0 ] || [ "$verify_consumed" -ne 0 ] || [ "$agent_explicit" -ne 0 ] || { [ "$evidence_requested" -ne 0 ] && [ "$evidence_requested" -ne 1 ] && [ "$evidence_requested" -ne 4 ]; } || { [ "$evidence_requested" -eq 1 ] && [ -z "$root_retained_no_mail_transcript" ]; } || { [ "$evidence_requested" -eq 4 ] && { [ -z "$root_retained_session_transcript" ] || [ -z "$root_retained_lifecycle_transcript" ] || [ -z "$ownership_acknowledgment_message_id" ] || [ -z "$published_result_commit" ] || [ -n "$root_retained_no_mail_transcript" ]; }; }; then
+    echo "--export-archived-consumed requires only REPORT, --consumed-attestation-output FILE, and either all or none of one no-mail transcript or all four reviewer/email session evidence options" >&2
     exit 2
   fi
   helper_path="${OMO_REPORT_HELPER_PATH:?}"
@@ -348,6 +351,8 @@ if [ "$export_archived_consumed_requested" -ne 0 ]; then
   root_retained_arguments=()
   if [ "$evidence_requested" -eq 4 ]; then
     root_retained_arguments=("$root_retained_session_transcript" "$root_retained_lifecycle_transcript" "$ownership_acknowledgment_message_id" "$published_result_commit")
+  elif [ "$evidence_requested" -eq 1 ]; then
+    root_retained_arguments=("$root_retained_no_mail_transcript")
   fi
   exec env OMO_REPORT_RECEIVER_BOOTSTRAP=1 PYTHONDONTWRITEBYTECODE=1 python3 -I -S - "$receiver_path" "$pending_digest_path" "$task_lock_path" "$helper_path" \
     --export-archived-consumed "$export_archived_consumed" "$consumed_attestation_output" "${root_retained_arguments[@]}" <<'PY'

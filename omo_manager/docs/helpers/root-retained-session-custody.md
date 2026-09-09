@@ -24,3 +24,19 @@ The helper derives all routing and report identity from the envelope and commitm
 - the exact sole `previous:` TODO row for the producer target.
 
 The export records both complete-line transcript prefix sizes and SHA-256 digests. Later append-only JSONL growth and later interactions with the same reviewer child are allowed; prefix edits, truncation, replacement, hard links, a mismatched imported parent header, task/TODO drift, or an `origin/main` race fail closed. `--describe-done-live-no-mail` additionally requires the current pane's Codex session ID to equal the owner transcript before it emits a close invocation.
+
+For a top-level task whose contract explicitly forbids Human email, use the narrower no-mail form:
+
+```bash
+omo_report.sh \
+  --export-archived-consumed PRIVATE_ENVELOPE \
+  --consumed-attestation-output OWNER_PRIVATE_EXPORT \
+  --root-retained-no-mail-transcript OWNER_CODEX_JSONL
+```
+
+This form requires one top-level Codex transcript to prove the private report, the matching queue removal, and the same-turn terminal completion. It reconstructs and verifies the committed report-time task from the final task and exact removal evidence. Two report/removal pairs are supported:
+
+- an acknowledged terminal `done` report followed by `--no-email`, with exactly one explicit no-Human-email contract and no Human-email command anywhere in the captured prefix;
+- an initially unacknowledged `in-progress` report, its exact manager consumption acknowledgment, then the normal completion-email removal, with one Human-owned queue item, completion key, and Message-ID. The complete authoritative Human-instruction block must quote exact lines from a safe private `manager_mail` source whose digest is bound in the export.
+
+Any mixed pair, missing authority, ambiguous report or removal, subagent transcript, or provenance shared between the two exceptional forms fails closed. The eventual pane close remains no-mail in both cases.
