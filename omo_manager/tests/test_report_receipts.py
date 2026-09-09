@@ -3994,6 +3994,82 @@ return 75
             self.assertEqual(1, custody["todo_reference_count"])
             self.assertEqual(0, validate_export_from(case, exported).returncode)
 
+    def test_root_retained_export_preserves_configured_main_manager_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case = fixture(tmp_path, body=b"configured main manager report\n")
+            draft = allocate_report_draft(case, b"configured main manager report\n")
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            pending = run_report_from(case, draft, status="done")
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            self.assertEqual(0, run_manager_watcher_once(case).returncode)
+            transfer = json.loads(pending.stdout)["transfer_receipt"]
+            envelope = Path(str(transfer["queue_item"]["pointer"]).rsplit(" ", 1)[1][:-1])
+            commitment = json.loads(Path(str(transfer["commitment_path"])).read_text(encoding="utf-8"))
+            route_sources = {item["path"] for item in commitment["preflight"]["routing_sources"]}
+            lock_sources = {item["source"] for item in commitment["preflight"]["locks"]["routing"]}
+            self.assertNotIn(str(case.manager), route_sources)
+            self.assertEqual({str(case.manager), *route_sources}, lock_sources)
+            task = case.root / "worker.md"
+            task.write_text(
+                task.read_text(encoding="utf-8").replace("status: running", "status: done", 1),
+                encoding="utf-8",
+            )
+            (case.root / "TODO.md").write_text(
+                "current:\n\nprevious:\nworker.md cfg:7\n",
+                encoding="utf-8",
+            )
+            exported = tmp_path / "configured-main-manager.json"
+
+            result = export_archived_report(case, envelope, exported)
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(0, validate_export_from(case, exported).returncode)
+
+    def test_historical_route_locks_reject_unknown_or_missing_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = root / "manager.md"
+            task = root / "worker.md"
+            route_sources = ({"exists": True, "path": str(task), "sha256": "0" * 64, "size_bytes": 0},)
+            expected = [
+                {"path": str(omo_report_receipt.task_file_lock_path(path)), "source": str(path)}
+                for path in sorted((manager, task), key=str)
+            ]
+            plan = SimpleNamespace(manager=manager)
+            self.assertEqual(
+                tuple((Path(item["source"]), Path(item["path"])) for item in expected),
+                omo_report_receipt.historical_route_locks(
+                    plan,
+                    {"locks": {"routing": expected}},
+                    route_sources,
+                ),
+            )
+            malformed_cases = (
+                (expected[:-1], route_sources),
+                ([*expected, {"path": str(root / "lock"), "source": str(root / "other.md")}], route_sources),
+                (
+                    [
+                        expected[0],
+                        {
+                            "path": str(omo_report_receipt.task_file_lock_path(root / "alias" / ".." / task.name)),
+                            "source": str(root / "alias" / ".." / task.name),
+                        },
+                    ],
+                    ({**route_sources[0], "path": str(root / "alias" / ".." / task.name)},),
+                ),
+            )
+            for malformed, malformed_sources in malformed_cases:
+                with self.subTest(malformed=malformed), self.assertRaisesRegex(
+                    ReceiptError,
+                    "route locks are inconsistent",
+                ):
+                    omo_report_receipt.historical_route_locks(
+                        plan,
+                        {"locks": {"routing": malformed}},
+                        malformed_sources,
+                    )
+
     def test_root_retained_session_custody_authenticates_queue_completion_and_later_appends(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

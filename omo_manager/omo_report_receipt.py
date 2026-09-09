@@ -3360,6 +3360,28 @@ def validate_committed_route_evidence(
     return tuple(committed[path] for path in sorted(committed, key=str))
 
 
+def historical_route_locks(
+    plan: Plan,
+    preflight: object,
+    routing_sources: tuple[dict[str, object], ...],
+) -> tuple[tuple[Path, Path], ...]:
+    """Reconstruct the exact route locks frozen by a historical commitment."""
+
+    locks = preflight.get("locks") if isinstance(preflight, dict) else None
+    committed = locks.get("routing") if isinstance(locks, dict) else None
+    source_targets = [Path(str(item["path"])) for item in routing_sources]
+    if any(target != target.resolve(strict=False) for target in (plan.manager, *source_targets)):
+        raise ReceiptError("historical transaction commitment route locks are inconsistent")
+    expected_targets = sorted({plan.manager, *source_targets}, key=str)
+    expected = [
+        {"path": str(task_file_lock_path(target)), "source": str(target)}
+        for target in expected_targets
+    ]
+    if committed != expected:
+        raise ReceiptError("historical transaction commitment route locks are inconsistent")
+    return tuple((target, Path(str(item["path"]))) for target, item in zip(expected_targets, expected, strict=True))
+
+
 def validate_committed_allocation_identity(plan: Plan, file_state: dict[str, object]) -> None:
     committed_dev = file_state.get("dev")
     committed_inode = file_state.get("inode")
@@ -3921,19 +3943,12 @@ def plan_for_historical_commitment(
             routing_sources,
             require_current=False,
         )
-        route_locks = tuple(
-            sorted(
-                (
-                    (Path(str(item["path"])), task_file_lock_path(Path(str(item["path"]))))
-                    for item in validated_routing_sources
-                ),
-                key=lambda pair: str(pair[0]),
-            )
-        )
+        route_locks = historical_route_locks(plan, preflight, validated_routing_sources)
         return replace(
             plan,
             route_evidence=validated_routing_sources,
             route_locks=route_locks,
+            task_lock=next(lock for target, lock in route_locks if target == plan.manager),
             replay_id=replay_id,
             manager_temporary=plan.manager.parent / f".{plan.manager.name}.omo-report-{replay_id}.tmp",
             envelope_temporary=plan.envelope_directory / f".{plan.envelope_final.name}.{replay_id}.tmp",
