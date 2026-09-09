@@ -10,16 +10,23 @@ from unittest.mock import patch
 
 from omo_manager.omo_human_worker_close import (
     CURRENT_MANAGER,
+    HISTORICAL_PANE_ID,
+    HISTORICAL_PANE_PID,
+    HISTORICAL_ROLLOUT_NAME,
+    HISTORICAL_SESSION_ID,
     ORIGINAL_MANAGER,
     REPLAY_ID,
     REPORT_MESSAGE_SHA256,
     TARGET,
     PanePin,
     lifecycle_state,
+    stop_input_guard,
     task_after,
     todo_after,
     validate_authority,
     validate_live,
+    validate_historical_absence,
+    validate_historical_rollout,
     validate_terminal_report,
 )
 from omo_manager.omo_task_metadata import TaskFrontmatterError, parse_task_metadata
@@ -142,6 +149,87 @@ previous:
         with self.assertRaises(TaskFrontmatterError):
             lifecycle_state(packet, after_task, before_todo)
 
+    def test_historical_rebind_requires_original_absence_and_rollout_evidence(self) -> None:
+        with (
+            patch("omo_manager.omo_human_worker_close.resolved_pane_id", return_value="") as pane,
+            patch("omo_manager.omo_human_worker_close.process_start_ticks", return_value=None),
+        ):
+            validate_historical_absence()
+            pane.assert_called_once_with(HISTORICAL_PANE_ID)
+        with patch("omo_manager.omo_human_worker_close.resolved_pane_id", return_value=HISTORICAL_PANE_ID):
+            with self.assertRaises(TaskFrontmatterError):
+                validate_historical_absence()
+        records = [
+            {
+                "ordinal": 39,
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "thread_id": HISTORICAL_SESSION_ID,
+                    "item": {
+                        "type": "CommandExecution",
+                        "stdout": f"session=dw2 window=0 pane=0 pid={HISTORICAL_PANE_PID} command=bunx dead=0\n",
+                    },
+                },
+            },
+            {
+                "ordinal": 127,
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "thread_id": HISTORICAL_SESSION_ID,
+                    "item": {
+                        "type": "CommandExecution",
+                        "stdout": f"pane={HISTORICAL_PANE_ID} pid={HISTORICAL_PANE_PID} command=bunx dead=0 width=80 height=24\n",
+                    },
+                },
+            },
+            {
+                "ordinal": 263,
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "thread_id": HISTORICAL_SESSION_ID,
+                    "item": {"type": "CommandExecution", "stdout": f'{{"replay_id":"{REPLAY_ID}"}}\n'},
+                },
+            },
+        ]
+        data = b"\n".join(json.dumps(record, separators=(",", ":")).encode() for record in records)
+        validate_historical_rollout(data, Path(HISTORICAL_ROLLOUT_NAME))
+        with self.assertRaises(TaskFrontmatterError):
+            validate_historical_rollout(data.replace(REPLAY_ID.encode(), b"0" * 64), Path(HISTORICAL_ROLLOUT_NAME))
+        unrelated = f'{{"ordinal":1,"thread_id":"{HISTORICAL_SESSION_ID}","text":"pid={HISTORICAL_PANE_PID} {REPLAY_ID}"}}'.encode()
+        with self.assertRaises(TaskFrontmatterError):
+            validate_historical_rollout(unrelated, Path(HISTORICAL_ROLLOUT_NAME))
+
+    def test_stop_input_guard_requires_empty_status_optional_status_then_empty(self) -> None:
+        pin = PanePin(TARGET, "%12", 123, 456, HISTORICAL_SESSION_ID)
+        protected: list[dict[str, object]] = []
+        with (
+            patch("omo_manager.omo_human_worker_close.validate_historical_absence"),
+            patch("omo_manager.omo_human_worker_close.protected_snapshots", return_value=protected),
+            patch("omo_manager.omo_human_worker_close.target_identity", return_value=("%12", 123, 456)),
+            patch("omo_manager.omo_human_worker_close.session_from_process", return_value=HISTORICAL_SESSION_ID),
+            patch(
+                "omo_manager.omo_human_worker_close.composer_input",
+                side_effect=["Use /skills to list available skills", "/status", "/status", "Use /skills to list available skills"],
+            ),
+        ):
+            guard = stop_input_guard(pin, protected)
+            guard()
+            guard()
+            guard()
+            guard()
+        with (
+            patch("omo_manager.omo_human_worker_close.validate_historical_absence"),
+            patch("omo_manager.omo_human_worker_close.protected_snapshots", return_value=protected),
+            patch("omo_manager.omo_human_worker_close.target_identity", return_value=("%12", 123, 456)),
+            patch("omo_manager.omo_human_worker_close.session_from_process", return_value=HISTORICAL_SESSION_ID),
+            patch("omo_manager.omo_human_worker_close.composer_input", return_value="unsafe staged text"),
+        ):
+            with self.assertRaises(TaskFrontmatterError):
+                stop_input_guard(pin, protected)()
+
     def test_prepare_scope_rejects_wrong_replay_before_pane_access(self) -> None:
         from omo_manager.omo_human_worker_close import prepare
 
@@ -156,6 +244,10 @@ previous:
             report.write_text("x")
             manager = root / "transport_closure_mgr.md"
             manager.write_text("x")
+            rollout = root / HISTORICAL_ROLLOUT_NAME
+            rollout.write_text("x")
+            composer = root / "composer.txt"
+            composer.write_text("x")
             private = root / "private"
             private.mkdir(mode=0o700)
             ns = argparse.Namespace(
@@ -174,6 +266,10 @@ previous:
                 manager_task=Path("transport_closure_mgr.md"),
                 manager_task_sha256="0" * 64,
                 manager_target=CURRENT_MANAGER,
+                historical_rollout=rollout,
+                historical_rollout_sha256="0" * 64,
+                composer_source=composer,
+                composer_source_sha256="0" * 64,
                 pane_id="%1",
                 pane_pid=2,
                 pane_start_ticks=3,

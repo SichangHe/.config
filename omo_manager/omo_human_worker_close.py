@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -25,8 +26,21 @@ if __package__ in {None, ""}:
 
 from omo_manager.omo_codex_status import exact_pane_id, exact_tail
 from omo_manager.omo_codex_stop import Args as CodexStopArgs
-from omo_manager.omo_codex_stop import bound_guarded_read, codex_status
+from omo_manager.omo_codex_stop import bound_guarded_read, codex_status, pane_id as resolved_pane_id
 from omo_manager.omo_codex_stop import stop as guarded_codex_stop
+from omo_manager.omo_tmux_send import (
+    CODEX_PLACEHOLDER_INPUT_TEXTS,
+    CodexRuntimeBinding,
+    CodexSendOptions,
+    ExistingInputAuthorization,
+    WrappedCodexCancelAuthorization,
+    cancel_existing_wrapped_codex_input,
+    capture_complete_input_lines,
+    exact_codex_runtime_binding,
+    exact_complete_input_text,
+    source_bound_wrapped_candidates,
+    wrap_agent_message,
+)
 from omo_manager.omo_exported_agent_close import (
     IndeterminateClose,
     read_regular,
@@ -57,8 +71,8 @@ from omo_manager.omo_task_status import (
     update_frontmatter_status,
 )
 
-SCHEMA = "omo-human-worker-close/v1"
-REVIEW_SCHEMA = "omo-human-worker-close-review/v1"
+SCHEMA = "omo-human-worker-rebind-close/v1"
+REVIEW_SCHEMA = "omo-human-worker-rebind-close-review/v1"
 TARGET = "config:16"
 TASK = "dw2_input_clear.md"
 BLOCKER = "config16_close.md"
@@ -72,6 +86,11 @@ REPORT_MESSAGE_SHA256 = "51629a0a165aca98a7b7d482a82df3dd9856dc55b8c8064632be783
 TERMINAL_REPORT_SHA256 = "784dfcd424f9a385dbec8098d305a61c72bfe4e48de7e0724ccaa922aab46ddc"
 TERMINAL_COMMITMENT_SHA256 = "d25ae8dc76d9da546fc1b6f5a4767be0fefb8eb35f152c19a2a05ba917395a84"
 PROTECTED_TARGETS = ("config:18", "config:19", "config:20")
+HISTORICAL_PANE_ID = "%432"
+HISTORICAL_PANE_PID = 388967
+HISTORICAL_SESSION_ID = "01a084f5-35e6-7492-af01-7eccf2a21bb3"
+HISTORICAL_ROLLOUT_NAME = "rollout-2026-09-08T23-57-37-01a084f5-35e6-7492-af01-7eccf2a21bb3.jsonl"
+COMPOSER_SOURCE_TARGET = "wl:1"
 SESSION_RE = re.compile(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 PACKET_KEYS = {
@@ -100,6 +119,16 @@ PACKET_KEYS = {
     "pane",
     "terminal_tail_sha256",
     "protected_targets",
+    "protected_panes",
+    "historical_pane_id",
+    "historical_pane_pid",
+    "historical_rollout",
+    "historical_rollout_sha256",
+    "composer_source",
+    "composer_source_sha256",
+    "composer_capture_sha256",
+    "composer_rendered_sha256s",
+    "composer_runtime",
     "audit",
     "destination_target",
     "inputs",
@@ -186,7 +215,14 @@ def inspect_target(target: str) -> str:
     return codex_status(target)
 
 
-def stop_target(target: str, pane_id: str, pane_pid: int, pane_start_ticks: int, session_id: str) -> None:
+def stop_target(
+    target: str,
+    pane_id: str,
+    pane_pid: int,
+    pane_start_ticks: int,
+    session_id: str,
+    pre_input_check: Callable[[], None],
+) -> None:
     observed = guarded_codex_stop(
         CodexStopArgs(
             target=target,
@@ -200,10 +236,162 @@ def stop_target(target: str, pane_id: str, pane_pid: int, pane_start_ticks: int,
             bound_pane_pid=pane_pid,
             bound_pane_start_ticks=pane_start_ticks,
             bound_expected_session_id=session_id,
+            bound_pre_input_check=pre_input_check,
         )
     )
     if observed.lower() != session_id.lower():
         raise TaskFrontmatterError("guarded closure did not return the exact bound Codex session.")
+
+
+def validate_historical_absence() -> None:
+    if resolved_pane_id(HISTORICAL_PANE_ID) or process_start_ticks(HISTORICAL_PANE_PID) is not None:
+        raise TaskFrontmatterError("the original config:16 pane or process is not absent.")
+
+
+def validate_historical_rollout(data: bytes, path: Path) -> None:
+    if path.name != HISTORICAL_ROLLOUT_NAME:
+        raise TaskFrontmatterError("historical rollout does not bind the original identity, session, and replay.")
+    events: dict[int, dict[str, object]] = {}
+    try:
+        for line in data.splitlines():
+            record = json.loads(line)
+            if isinstance(record, dict) and isinstance(record.get("ordinal"), int):
+                ordinal = int(record["ordinal"])
+                if ordinal in events:
+                    raise TaskFrontmatterError("historical rollout contains a duplicate event ordinal.")
+                events[ordinal] = record
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TaskFrontmatterError("historical rollout is not canonical JSONL.") from exc
+
+    def command_stdout(ordinal: int) -> str:
+        record = events.get(ordinal)
+        payload = record.get("payload") if isinstance(record, dict) else None
+        item = payload.get("item") if isinstance(payload, dict) else None
+        if (
+            record is None
+            or record.get("type") != "event_msg"
+            or not isinstance(payload, dict)
+            or payload.get("type") != "item_completed"
+            or payload.get("thread_id") != HISTORICAL_SESSION_ID
+            or not isinstance(item, dict)
+            or item.get("type") != "CommandExecution"
+            or not isinstance(item.get("stdout"), str)
+        ):
+            raise TaskFrontmatterError("historical rollout event shape changed.")
+        return str(item["stdout"])
+
+    if (
+        "session=dw2 window=0 pane=0 pid=388967 command=bunx dead=0" not in command_stdout(39)
+        or "pane=%432 pid=388967 command=bunx dead=0" not in command_stdout(127)
+        or '"replay_id":"205eec6dff48bc1feedd27d3521f86580d86d9943dad469056c63a33dec9d9dc"' not in command_stdout(263)
+    ):
+        raise TaskFrontmatterError("historical rollout does not bind the original identity, session, and replay.")
+
+
+def pane_snapshot(target: str) -> dict[str, object]:
+    pane_id, pane_pid, pane_start_ticks = target_identity(target)
+    if not pane_id:
+        raise TaskFrontmatterError(f"protected target {target} is absent.")
+    state = inspect_target(target)
+    captured, lines = exact_tail(target, 80)
+    if not captured or target_identity(target) != (pane_id, pane_pid, pane_start_ticks):
+        raise TaskFrontmatterError(f"protected target {target} changed during capture.")
+    return {
+        "target": target,
+        "state": state,
+        "pane_id": pane_id,
+        "pane_pid": pane_pid,
+        "pane_start_ticks": pane_start_ticks,
+        "tail_sha256": sha256("\n".join(lines).encode()),
+    }
+
+
+def protected_snapshots() -> list[dict[str, object]]:
+    return [pane_snapshot(target) for target in PROTECTED_TARGETS]
+
+
+def composer_snapshot(pin: PanePin, source: bytes) -> dict[str, object]:
+    if target_identity(pin.target) != (pin.pane_id, pin.pane_pid, pin.pane_start_ticks):
+        raise TaskFrontmatterError("config:16 changed before composer capture.")
+    source_text = source.decode("utf-8")
+    rendering = f"{wrap_agent_message(source_text, source_target=COMPOSER_SOURCE_TARGET, include_authority_reminder=True)}\n"
+    lines = capture_complete_input_lines(pin.pane_id, full_history=True)
+    ordinary, trailing = source_bound_wrapped_candidates(lines, rendering, True)
+    runtime = exact_codex_runtime_binding(pin.target)
+    if (runtime.pane_id, runtime.pane_pid) != (pin.pane_id, pin.pane_pid):
+        raise TaskFrontmatterError("config:16 runtime changed during composer capture.")
+    if target_identity(pin.target) != (pin.pane_id, pin.pane_pid, pin.pane_start_ticks):
+        raise TaskFrontmatterError("config:16 changed during composer capture.")
+    return {
+        "capture_sha256": sha256("\n".join(lines).encode()),
+        "rendered_sha256s": sorted((sha256(ordinary.encode()), sha256(trailing.encode()))),
+        "runtime": asdict(runtime),
+    }
+
+
+def composer_authorization(packet: dict[str, object], source: bytes) -> WrappedCodexCancelAuthorization:
+    source_text = source.decode("utf-8")
+    rendered = packet["composer_rendered_sha256s"]
+    runtime = packet["composer_runtime"]
+    if not isinstance(rendered, list) or len(rendered) != 2 or not all(isinstance(value, str) for value in rendered):
+        raise TaskFrontmatterError("composer rendering digest set is malformed.")
+    runtime_fields = {"pane_id", "pane_pid", "pane_command", "foreground_pid", "foreground_start_ticks", "foreground_cmdline_sha256"}
+    if not isinstance(runtime, dict) or set(runtime) != runtime_fields:
+        raise TaskFrontmatterError("composer runtime binding is malformed.")
+    try:
+        binding = CodexRuntimeBinding(**runtime)
+    except TypeError as exc:
+        raise TaskFrontmatterError("composer runtime binding is malformed.") from exc
+    return WrappedCodexCancelAuthorization(
+        ExistingInputAuthorization(sha256(source), source_text),
+        rendered[0],
+        rendered[1],
+        binding,
+        f"{wrap_agent_message(source_text, source_target=COMPOSER_SOURCE_TARGET, include_authority_reminder=True)}\n",
+        True,
+    )
+
+
+def composer_is_empty(pin: PanePin) -> bool:
+    try:
+        return composer_input(pin) in CODEX_PLACEHOLDER_INPUT_TEXTS
+    except TaskFrontmatterError:
+        return False
+
+
+def composer_input(pin: PanePin) -> str:
+    if target_identity(pin.target) != (pin.pane_id, pin.pane_pid, pin.pane_start_ticks):
+        raise TaskFrontmatterError("config:16 changed before composer-state verification.")
+    try:
+        return exact_complete_input_text(capture_complete_input_lines(pin.pane_id), allow_codex_footer_spacer=True)
+    except RuntimeError as exc:
+        raise TaskFrontmatterError("config:16 composer state is not exact.") from exc
+
+
+def stop_input_guard(pin: PanePin, protected: object) -> Callable[[], None]:
+    phase = 0
+
+    def check() -> None:
+        nonlocal phase
+        validate_historical_absence()
+        if protected_snapshots() != protected:
+            raise TaskFrontmatterError("a protected target changed before config:16 input.")
+        if target_identity(TARGET) != (pin.pane_id, pin.pane_pid, pin.pane_start_ticks):
+            raise TaskFrontmatterError("config:16 identity changed before guarded input.")
+        if session_from_process(pin.pane_pid) != pin.session_id:
+            raise TaskFrontmatterError("config:16 session changed before guarded input.")
+        current = composer_input(pin)
+        if phase == 0 and current not in CODEX_PLACEHOLDER_INPUT_TEXTS:
+            raise TaskFrontmatterError("config:16 composer was not empty before the status paste.")
+        if phase == 1 and current != "/status":
+            raise TaskFrontmatterError("config:16 composer was not the exact status query before Enter.")
+        if phase == 2 and current != "/status" and current not in CODEX_PLACEHOLDER_INPUT_TEXTS:
+            raise TaskFrontmatterError("config:16 composer changed before status fallback or interrupt.")
+        if phase > 2 and current not in CODEX_PLACEHOLDER_INPUT_TEXTS:
+            raise TaskFrontmatterError("config:16 composer was not empty before interrupt or close.")
+        phase += 1
+
+    return check
 
 
 def session_from_process(pane_pid: int, proc_root: Path = Path("/proc")) -> str:
@@ -336,6 +524,8 @@ def prepare(ns: argparse.Namespace) -> None:
     authority = ns.authority.resolve(strict=True)
     report_path = ns.terminal_report.resolve(strict=True)
     manager_task = (root / ns.manager_task).resolve(strict=True)
+    historical_rollout = ns.historical_rollout.resolve(strict=True)
+    composer_source = ns.composer_source.resolve(strict=True)
     if (
         relative_task_ref(root, task) != TASK
         or authority != root / AUTHORITY
@@ -347,10 +537,13 @@ def prepare(ns: argparse.Namespace) -> None:
         or ns.manager_target != CURRENT_MANAGER
         or ns.destination_target != CURRENT_MANAGER
         or tuple(sorted(ns.protected_target)) != PROTECTED_TARGETS
+        or historical_rollout.name != HISTORICAL_ROLLOUT_NAME
     ):
         raise TaskFrontmatterError("Source-1570 closure scope is not exact.")
     pin = parse_pin(ns)
-    input_paths = {task, todo, authority, report_path, manager_task}
+    if pin.session_id != HISTORICAL_SESSION_ID or pin.pane_id == HISTORICAL_PANE_ID or pin.pane_pid == HISTORICAL_PANE_PID:
+        raise TaskFrontmatterError("current config:16 is not the exact same-session rebind.")
+    input_paths = {task, todo, authority, report_path, manager_task, historical_rollout, composer_source}
     ns.packet = require_private_output(ns.packet, input_paths)
     ns.audit = require_private_output(ns.audit, input_paths | {ns.packet})
     with root_membership_lock(root), task_target_lock(root, TARGET), ExitStack() as locks:
@@ -361,7 +554,11 @@ def prepare(ns: argparse.Namespace) -> None:
         authority_data, _ = read_regular(authority, ns.authority_sha256)
         report_data, _ = read_regular(report_path, ns.terminal_report_sha256)
         manager_data, _ = read_regular(manager_task, ns.manager_task_sha256)
+        historical_data, _ = read_regular(historical_rollout, ns.historical_rollout_sha256)
+        composer_source_data, _ = read_regular(composer_source, ns.composer_source_sha256)
         validate_authority(authority_data, ns.authority_lines)
+        validate_historical_absence()
+        validate_historical_rollout(historical_data, historical_rollout)
         commitment = validate_terminal_report(report_data, report_path, root)
         commitment_data, _ = read_regular_unbound(commitment)
         if sha256(commitment_data) != TERMINAL_COMMITMENT_SHA256:
@@ -388,12 +585,17 @@ def prepare(ns: argparse.Namespace) -> None:
         after_task = task_after(root, task_data.decode(), authority)
         after_todo = todo_after(root, task, todo_data)
         tail_sha256 = validate_live(pin)
+        composer = composer_snapshot(pin, composer_source_data)
+        protected = protected_snapshots()
+        validate_historical_absence()
+        if validate_live(pin, tail_sha256) != tail_sha256:
+            raise TaskFrontmatterError("config:16 changed across rebind preparation.")
         inputs = []
         for path in sorted({*input_paths, commitment}, key=str):
             _, identity, ancestors = absolute_file_binding(
                 path,
                 f"Source-1570 closure input {path}",
-                private=path in {report_path, commitment},
+                private=path in {report_path, commitment, historical_rollout},
             )
             inputs.append({"file": asdict(identity), "ancestors": [asdict(item) for item in ancestors]})
         packet: dict[str, object] = {
@@ -422,6 +624,16 @@ def prepare(ns: argparse.Namespace) -> None:
             "pane": asdict(pin),
             "terminal_tail_sha256": tail_sha256,
             "protected_targets": list(PROTECTED_TARGETS),
+            "protected_panes": protected,
+            "historical_pane_id": HISTORICAL_PANE_ID,
+            "historical_pane_pid": HISTORICAL_PANE_PID,
+            "historical_rollout": str(historical_rollout),
+            "historical_rollout_sha256": ns.historical_rollout_sha256,
+            "composer_source": str(composer_source),
+            "composer_source_sha256": ns.composer_source_sha256,
+            "composer_capture_sha256": composer["capture_sha256"],
+            "composer_rendered_sha256s": composer["rendered_sha256s"],
+            "composer_runtime": composer["runtime"],
             "audit": str(ns.audit),
             "destination_target": ns.destination_target,
             "inputs": inputs,
@@ -483,7 +695,16 @@ def execute(ns: argparse.Namespace) -> None:
     if not isinstance(raw_inputs, list) or any(not isinstance(item, dict) or set(item) != {"file", "ancestors"} or not isinstance(item["ancestors"], list) for item in raw_inputs):
         raise TaskFrontmatterError("Source-1570 closure packet input binding is malformed.")
     lock_paths = {Path(file_identity_from(item["file"], "closure input").path) for item in raw_inputs}
-    expected_paths = {task, todo, Path(str(packet["authority"])), Path(str(packet["terminal_report"])), Path(str(packet["terminal_commitment"])), Path(str(packet["manager_task"]))}
+    expected_paths = {
+        task,
+        todo,
+        Path(str(packet["authority"])),
+        Path(str(packet["terminal_report"])),
+        Path(str(packet["terminal_commitment"])),
+        Path(str(packet["manager_task"])),
+        Path(str(packet["historical_rollout"])),
+        Path(str(packet["composer_source"])),
+    }
     if (
         str(root) != packet["root"]
         or task != root / TASK
@@ -498,6 +719,12 @@ def execute(ns: argparse.Namespace) -> None:
         or packet["authority_lines"] != [3, 4]
         or packet["destination_target"] != CURRENT_MANAGER
         or pin.target != TARGET
+        or pin.session_id != HISTORICAL_SESSION_ID
+        or pin.pane_id == HISTORICAL_PANE_ID
+        or pin.pane_pid == HISTORICAL_PANE_PID
+        or packet["historical_pane_id"] != HISTORICAL_PANE_ID
+        or packet["historical_pane_pid"] != HISTORICAL_PANE_PID
+        or Path(str(packet["historical_rollout"])).name != HISTORICAL_ROLLOUT_NAME
         or lock_paths != expected_paths
         or packet["protected_targets"] != list(PROTECTED_TARGETS)
         or packet["manager_target"] != CURRENT_MANAGER
@@ -535,7 +762,11 @@ def execute(ns: argparse.Namespace) -> None:
         authority_data, _ = read_regular(Path(str(packet["authority"])), str(packet["authority_sha256"]))
         report_data, _ = read_regular(Path(str(packet["terminal_report"])), str(packet["terminal_report_sha256"]))
         manager_data, _ = read_regular(Path(str(packet["manager_task"])), str(packet["manager_task_sha256"]))
+        historical_data, _ = read_regular(Path(str(packet["historical_rollout"])), str(packet["historical_rollout_sha256"]))
+        composer_source_data, _ = read_regular(Path(str(packet["composer_source"])), str(packet["composer_source_sha256"]))
         validate_authority(authority_data, tuple(packet["authority_lines"]))
+        validate_historical_absence()
+        validate_historical_rollout(historical_data, Path(str(packet["historical_rollout"])))
         if validate_terminal_report(report_data, Path(str(packet["terminal_report"])), root) != Path(str(packet["terminal_commitment"])):
             raise TaskFrontmatterError("terminal replay commitment changed.")
         read_regular(Path(str(packet["terminal_commitment"])), str(packet["terminal_commitment_sha256"]))
@@ -562,9 +793,24 @@ def execute(ns: argparse.Namespace) -> None:
         after_task = decode_after(packet, "task_after_base64", "task_after_sha256")
         if owners != expected_owners or (todo_sha256 == packet["todo_before_sha256"] and todo_after(root, task, todo_data) != after_todo):
             raise TaskFrontmatterError("task ownership or TODO custody drifted before closure.")
+        if protected_snapshots() != packet["protected_panes"]:
+            raise TaskFrontmatterError("a protected target changed before closure.")
         live_identity = target_identity(TARGET)
+        composer_present = False
         if live_identity == (pin.pane_id, pin.pane_pid, pin.pane_start_ticks):
-            validate_live(pin, str(packet["terminal_tail_sha256"]))
+            if prepared_exists and composer_is_empty(pin):
+                if session_from_process(pin.pane_pid) != pin.session_id:
+                    raise TaskFrontmatterError("config:16 Codex session identity changed during recovery.")
+            else:
+                validate_live(pin, str(packet["terminal_tail_sha256"]))
+                composer = composer_snapshot(pin, composer_source_data)
+                if (
+                    composer["capture_sha256"] != packet["composer_capture_sha256"]
+                    or composer["rendered_sha256s"] != packet["composer_rendered_sha256s"]
+                    or composer["runtime"] != packet["composer_runtime"]
+                ):
+                    raise TaskFrontmatterError("config:16 composer bytes changed before closure.")
+                composer_present = True
         elif not (prepared_exists and live_identity == ("", 0, 0)):
             raise TaskFrontmatterError("config:16 pane identity drifted before closure.")
         publish_or_validate(prepared_path, prepared, "Source-1570 prepared close audit")
@@ -572,9 +818,32 @@ def execute(ns: argparse.Namespace) -> None:
             read_regular(Path(str(packet["audit"])), sha256(committed))
             return
         if live_identity != ("", 0, 0):
-            stop_target(TARGET, pin.pane_id, pin.pane_pid, pin.pane_start_ticks, pin.session_id)
+            if composer_present:
+                cancel_existing_wrapped_codex_input(
+                    TARGET,
+                    composer_authorization(packet, composer_source_data),
+                    CodexSendOptions(enter_count=1, enter_delay_s=0.15, dry_run=False, submit_verify_timeout_s=10.0),
+                )
+            if not composer_is_empty(pin):
+                raise IndeterminateClose("config:16 composer was not proven empty after guarded cancellation.")
+            if protected_snapshots() != packet["protected_panes"]:
+                raise IndeterminateClose("a protected target changed across the config:16 composer cancellation.")
+            validate_historical_absence()
+            if target_identity(TARGET) != (pin.pane_id, pin.pane_pid, pin.pane_start_ticks) or session_from_process(pin.pane_pid) != pin.session_id:
+                raise IndeterminateClose("config:16 identity changed across guarded composer cancellation.")
+
+            stop_target(
+                TARGET,
+                pin.pane_id,
+                pin.pane_pid,
+                pin.pane_start_ticks,
+                pin.session_id,
+                stop_input_guard(pin, packet["protected_panes"]),
+            )
         if target_identity(TARGET) != ("", 0, 0):
             raise IndeterminateClose("config:16 remains after its exact guarded close.")
+        if protected_snapshots() != packet["protected_panes"]:
+            raise IndeterminateClose("a protected target changed across the config:16 close.")
         if todo_sha256 == packet["todo_before_sha256"]:
             replace_held(held[todo], after_todo.decode())
         try:
@@ -584,7 +853,7 @@ def execute(ns: argparse.Namespace) -> None:
             if todo_sha256 == packet["todo_before_sha256"] and not isinstance(exc, IndeterminateClose):
                 restore_exact_after(todo, str(packet["todo_after_sha256"]), todo_data.decode())
             raise
-        if authoritative_active_target_task_paths(root, TARGET) or target_identity(TARGET) != ("", 0, 0):
+        if authoritative_active_target_task_paths(root, TARGET) or target_identity(TARGET) != ("", 0, 0) or protected_snapshots() != packet["protected_panes"]:
             restore_exact_after(task, str(packet["task_after_sha256"]), task_data.decode())
             restore_exact_after(todo, str(packet["todo_after_sha256"]), todo_data.decode())
             raise TaskFrontmatterError("post-close lifecycle verification failed; task/TODO bytes restored.")
@@ -611,6 +880,10 @@ def parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--manager-task", type=Path, required=True)
     prepare_parser.add_argument("--manager-task-sha256", required=True)
     prepare_parser.add_argument("--manager-target", required=True)
+    prepare_parser.add_argument("--historical-rollout", type=Path, required=True)
+    prepare_parser.add_argument("--historical-rollout-sha256", required=True)
+    prepare_parser.add_argument("--composer-source", type=Path, required=True)
+    prepare_parser.add_argument("--composer-source-sha256", required=True)
     prepare_parser.add_argument("--pane-id", required=True)
     prepare_parser.add_argument("--pane-pid", type=int, required=True)
     prepare_parser.add_argument("--pane-start-ticks", type=int, required=True)

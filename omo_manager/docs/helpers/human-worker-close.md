@@ -3,14 +3,20 @@
 - purpose
   - close the exact completed blocked/current `config:16` worker authorized by Human Source 1570
   - bridge its terminal report routed to the former manager with current `wl:21` custody
+  - permit only the current rebind of the original completed Codex session
 - prepare
-  - bind Human source, task, TODO, terminal replay and commitment, current manager task, protected targets, pane, process, start ticks, session, and unchanged terminal/composer tail
+  - prove original pane `%432` and PID `388967` absent through the historical rollout
+  - bind Human source, task, TODO, terminal replay and commitment, current manager task, current pane/process/start/session, and exact source-derived composer capture
+  - bind every protected target by state, pane/process/start, and tail
   - publish one owner-private immutable packet without changing pane or lifecycle state
 - review
   - require an authenticated PASS report from a target other than `config:16` and `wl:21`
 - execute
   - revalidate every packet input under lifecycle locks
+  - reject original-identity revival, session change, composer drift, ownership drift, or any protected-target change before input
   - publish a recoverable prepared audit
+  - authenticate the exact source-derived composer and cancel it with one guarded `Ctrl+C`
+  - permit stop input only as empty, exact `/status`, optional exact `/status` fallback, then empty before interrupts or close
   - close only the exact session-bound `config:16` pane with no feedback or mail
   - recoverably move the task from blocked/current to done/previous and publish the committed audit
 - exclusions
