@@ -59,6 +59,10 @@ RESUME_RE = re.compile(rf"(?i)\bcodex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
 EXIT_RESUME_RE = re.compile(rf"(?i)\bTo\s+(?:resume|continue this session),\s+run:?\s+codex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
 EXIT_SELECTOR_RE = re.compile(r"(?m)^Or run codex resume and select [^\r\n]+\.$")
 STATUS_SESSION_RE = re.compile(rf"\bSession:\s*({UUID_RE})\b")
+STATUS_MENU_ROWS = (
+    "/status      show current session configuration and token usage",
+    "/statusline  configure which items appear in the status line",
+)
 DONE_LIVE_CLOSE_OPERATION = "done-live-no-mail-close"
 STALE_PREDECESSOR_CLOSE_OPERATION = "stale-predecessor-no-mail-close"
 WEBCONF_EXITED_CLOSE_OPERATION = "webconf-exited-shell-no-mail-close"
@@ -129,6 +133,12 @@ class Args:
     bound_pre_input_check: Callable[[], None] | None = None
     bound_close_operation: str = ""
     bound_close_audit_sha256: str = ""
+    # A status query temporarily changes an otherwise-ready pane into one
+    # exact, submittable ``/status`` input.  Lifecycle callers that require a
+    # ready precondition use this separate guard for that intermediate state.
+    # Keep new internal fields appended so historical positional callers are
+    # not reinterpreted.
+    bound_staged_status_check: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -805,6 +815,19 @@ def input_has_status_prompt(text: str) -> bool:
     return any(line.lstrip().startswith("› ") and "/status" in line for line in text.splitlines()[-20:])
 
 
+def exact_submittable_status_input(text: str) -> bool:
+    """Return whether a capture contains one exact, safely submittable `/status`."""
+
+    lines = [line.rstrip() for line in text.splitlines()]
+    while lines and not lines[-1]:
+        lines.pop()
+    menu = ["› /status", "", *(f"  {row}" for row in STATUS_MENU_ROWS)]
+    if len(lines) >= len(menu) and lines[-len(menu) :] == menu:
+        return True
+    report = report_from_lines(lines)
+    return report.status == "stuck_input" and report.input_text == "/status" and report.can_submit_input and not report.input_blocker
+
+
 def query_status_session_id(
     target: str,
     n_lines: int,
@@ -814,6 +837,7 @@ def query_status_session_id(
     strict_status_response: bool = False,
     expected_pane_pid: int = 0,
     pre_input_check: Callable[[], None] | None = None,
+    staged_status_check: Callable[[], None] | None = None,
 ) -> tuple[str, str]:
     """Return a status UUID, optionally only from the newly submitted `/status`."""
     if identity_is_current is not None and not identity_is_current():
@@ -827,7 +851,18 @@ def query_status_session_id(
         guarded_paste_text(target, "/status", *tmux_guard, expected_pane_pid)
     if identity_is_current is not None and not identity_is_current():
         raise RuntimeError("tmux pane identity changed before status submission")
-    if pre_input_check is not None:
+    if staged_status_check is not None:
+        if tmux_guard is None:
+            raise RuntimeError("staged status guard requires a guarded tmux target")
+        staged = guarded_capture(target, n_lines, tmux_guard, expected_pane_pid)
+        if not exact_submittable_status_input(staged):
+            raise RuntimeError("status query did not stage one exact submittable /status input")
+        staged_status_check()
+        if identity_is_current is not None and not identity_is_current():
+            raise RuntimeError("tmux pane identity changed before status submission")
+        if guarded_capture(target, n_lines, tmux_guard, expected_pane_pid) != staged:
+            raise RuntimeError("staged /status input changed before submission")
+    elif pre_input_check is not None:
         pre_input_check()
     if tmux_guard is None:
         _ = tmux(["send-keys", "-t", target, "Enter"], check=True)
@@ -845,7 +880,15 @@ def query_status_session_id(
         if not fallback_sent and input_has_status_prompt(after):
             if identity_is_current is not None and not identity_is_current():
                 raise RuntimeError("tmux pane identity changed before fallback status submission")
-            if pre_input_check is not None:
+            if staged_status_check is not None:
+                if not exact_submittable_status_input(after):
+                    raise RuntimeError("fallback status query is not one exact submittable /status input")
+                staged_status_check()
+                if identity_is_current is not None and not identity_is_current():
+                    raise RuntimeError("tmux pane identity changed before fallback status submission")
+                if tmux_guard is None or guarded_capture(target, n_lines, tmux_guard, expected_pane_pid) != after:
+                    raise RuntimeError("staged /status input changed before fallback submission")
+            elif pre_input_check is not None:
                 pre_input_check()
             if tmux_guard is None:
                 _ = tmux(["send-keys", "-t", target, "Enter"], check=True)
@@ -2297,7 +2340,12 @@ def stop(args: Args) -> str:
         # Re-read both durable authority bindings after the pane is pinned and
         # immediately before the first human-pane input.
         validate_human_close_authorization(args)
-    if args.bound_pre_input_check is not None and (tmux_guard is None or not all(proof_fields) or (not human_authorized and not args.bound_expected_session_id)):
+    if (args.bound_pre_input_check is not None or args.bound_staged_status_check is not None) and (
+        tmux_guard is None
+        or not all(proof_fields)
+        or (not human_authorized and not args.bound_expected_session_id)
+        or (args.bound_staged_status_check is not None and args.bound_pre_input_check is None)
+    ):
         raise RuntimeError("bound pre-input check requires a session-bound guarded close capability")
     identity_check = identity_is_current if human_authorized or args.bound_symbolic_target else None
     if task_tool(args) == "cursor":
@@ -2317,6 +2365,7 @@ def stop(args: Args) -> str:
             strict_status_response=bool(resolved_args.bound_expected_session_id),
             expected_pane_pid=resolved_args.bound_pane_pid,
             pre_input_check=resolved_args.bound_pre_input_check,
+            staged_status_check=resolved_args.bound_staged_status_check,
         )
     if resolved_args.bound_expected_session_id and session_id.lower() != resolved_args.bound_expected_session_id.lower():
         raise RuntimeError(f"bound Codex session id mismatch before interrupt: expected {resolved_args.bound_expected_session_id.lower()}, found {session_id or '<missing>'}")

@@ -309,6 +309,13 @@ def validate_ready_predecessor(pin: PanePin) -> None:
         raise TaskFrontmatterError("completed predecessor resumed or changed.")
 
 
+def validate_staged_status_predecessor(pin: PanePin) -> None:
+    """Accept the same live Codex process while its guarded `/status` is staged."""
+
+    if not current_pin(pin) or pinned_current_command(pin) in SHELL_COMMANDS:
+        raise TaskFrontmatterError("completed predecessor resumed or changed.")
+
+
 def proc_fields(pid: int, proc_root: Path = Path("/proc")) -> tuple[int, int]:
     try:
         fields = (proc_root / str(pid) / "stat").read_text().rsplit(") ", 1)[1].split()
@@ -1207,6 +1214,12 @@ def execute(args: argparse.Namespace) -> None:
             ):
                 raise TaskFrontmatterError("protected successor changed during guarded close.")
 
+        def staged_status_unchanged() -> None:
+            """Recheck durable custody while `/status` is staged for Enter."""
+
+            protected_unchanged()
+            validate_staged_status_predecessor(predecessor)
+
         def shell_unchanged() -> None:
             protected_unchanged()
             if pinned_current_command(predecessor) not in SHELL_COMMANDS:
@@ -1260,6 +1273,7 @@ def execute(args: argparse.Namespace) -> None:
                         bound_pane_start_ticks=predecessor.pane_start_ticks,
                         bound_expected_session_id=str(packet["predecessor_session_id"]),
                         bound_pre_input_check=unchanged,
+                        bound_staged_status_check=staged_status_unchanged,
                         bound_close_proof_path=str(proof_path),
                         bound_close_audit_path=str(prepared_path),
                         bound_close_proof_secret=str(packet["close_proof_secret"]),

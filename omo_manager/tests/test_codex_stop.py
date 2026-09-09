@@ -30,6 +30,7 @@ from omo_manager.omo_codex_stop import (
     extract_new_status_session_id,
     extract_resume_id,
     extract_status_session_id,
+    exact_submittable_status_input,
     feedback_prompt,
     main,
     maybe_request_feedback,
@@ -593,6 +594,68 @@ class CodexStopTests(unittest.TestCase):
             )
         paste.assert_not_called()
         send.assert_not_called()
+
+    def test_guarded_status_query_submits_exact_menu_and_then_held_status(self) -> None:
+        session_id = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"
+        before = "› Use /skills to list available skills\n\n  gpt-5.6-sol high · /tmp\n"
+        menu = f"{before}› /status\n\n  /status      show current session configuration and token usage\n  /statusline  configure which items appear in the status line\n"
+        held = f"{before}› /status\n\n  gpt-5.6-sol high · /tmp\n"
+        response = f"/status\n│  Session:              {session_id}       │\n"
+        after = before + response
+        ready_checks: list[bool] = []
+        staged_checks: list[bool] = []
+        with (
+            patch(
+                "omo_manager.omo_codex_stop.guarded_capture",
+                side_effect=[before, menu, menu, held, held, after],
+            ),
+            patch("omo_manager.omo_codex_stop.guarded_paste_text") as paste,
+            patch("omo_manager.omo_codex_stop.guarded_tmux_command") as submit,
+            patch("omo_manager.omo_codex_stop.time.sleep"),
+        ):
+            observed = query_status_session_id(
+                "%42",
+                2000,
+                0.1,
+                lambda: True,
+                ("dw8:0", "%42"),
+                True,
+                4242,
+                lambda: ready_checks.append(True),
+                lambda: staged_checks.append(True),
+            )
+        self.assertEqual((session_id, response.removeprefix("/status")), observed)
+        paste.assert_called_once_with("%42", "/status", "dw8:0", "%42", 4242)
+        self.assertEqual(2, submit.call_count)
+        self.assertEqual([True], ready_checks)
+        self.assertEqual([True, True], staged_checks)
+
+    def test_guarded_status_query_rejects_staged_capture_race_before_enter(self) -> None:
+        before = "› Use /skills to list available skills\n\n  gpt-5.6-sol high · /tmp\n"
+        staged = f"{before}› /status\n\n  gpt-5.6-sol high · /tmp\n"
+        with (
+            patch("omo_manager.omo_codex_stop.guarded_capture", side_effect=[before, staged, staged + "drift\n"]),
+            patch("omo_manager.omo_codex_stop.guarded_paste_text"),
+            patch("omo_manager.omo_codex_stop.guarded_tmux_command") as submit,
+            self.assertRaisesRegex(RuntimeError, "changed before submission"),
+        ):
+            query_status_session_id(
+                "%42",
+                2000,
+                0.1,
+                lambda: True,
+                ("dw8:0", "%42"),
+                True,
+                4242,
+                lambda: None,
+                lambda: None,
+            )
+        submit.assert_not_called()
+
+    def test_exact_submittable_status_input_rejects_adversarial_menu(self) -> None:
+        exact = "older output\n› /status\n\n  /status      show current session configuration and token usage\n  /statusline  configure which items appear in the status line\n"
+        self.assertTrue(exact_submittable_status_input(exact))
+        self.assertFalse(exact_submittable_status_input(exact.replace("/statusline", "/review")))
 
     def test_close_exited_codex_shell_rejects_ambiguous_or_changed_state(self) -> None:
         session_id = "11111111-2222-3333-4444-555555555555"
@@ -1295,7 +1358,14 @@ class CodexStopTests(unittest.TestCase):
                 ),
                 patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=999),
                 patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%caller"),
-                patch("omo_manager.omo_codex_stop.guarded_capture", return_value="› ready\n"),
+                patch(
+                    "omo_manager.omo_codex_stop.guarded_capture",
+                    side_effect=(
+                        "› ready\n",
+                        "› ready\n",
+                        "› /status\n\n  /status      show current session configuration and token usage\n  /statusline  configure which items appear in the status line\n",
+                    ),
+                ),
                 patch("omo_manager.omo_codex_stop.report_from_lines", return_value=Report("ready", [])),
                 patch("omo_manager.omo_codex_stop.guarded_paste_text"),
                 patch("omo_manager.omo_codex_stop.guarded_tmux_command") as tmux_input,
@@ -1322,6 +1392,7 @@ class CodexStopTests(unittest.TestCase):
                         bound_pane_start_ticks=999,
                         bound_expected_session_id=session_id,
                         bound_pre_input_check=guard,
+                        bound_staged_status_check=guard,
                     )
                 )
         tmux_input.assert_not_called()

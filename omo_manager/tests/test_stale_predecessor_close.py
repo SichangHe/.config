@@ -35,6 +35,7 @@ from omo_manager.omo_stale_predecessor_close import (
     validate_source1485_manager_transition,
     validate_inputs,
     validate_ready_predecessor,
+    validate_staged_status_predecessor,
     validate_packet,
     validate_successor,
 )
@@ -454,6 +455,27 @@ class StalePredecessorCloseTests(unittest.TestCase):
         ):
             validate_ready_predecessor(predecessor)
 
+    def test_staged_status_check_accepts_same_live_codex_process_without_requiring_ready(self) -> None:
+        predecessor = PanePin("dw8:0", "%1", 101, 201)
+        with (
+            patch("omo_manager.omo_stale_predecessor_close.current_pin", return_value=True),
+            patch("omo_manager.omo_stale_predecessor_close.pinned_current_command", return_value="codex"),
+            patch("omo_manager.omo_stale_predecessor_close.codex_status") as status,
+        ):
+            validate_staged_status_predecessor(predecessor)
+        status.assert_not_called()
+
+    def test_staged_status_check_rejects_shell_or_identity_drift(self) -> None:
+        predecessor = PanePin("dw8:0", "%1", 101, 201)
+        for current, command in ((False, "codex"), (True, "zsh")):
+            with (
+                self.subTest(current=current, command=command),
+                patch("omo_manager.omo_stale_predecessor_close.current_pin", return_value=current),
+                patch("omo_manager.omo_stale_predecessor_close.pinned_current_command", return_value=command),
+                self.assertRaisesRegex(TaskFrontmatterError, "resumed or changed"),
+            ):
+                validate_staged_status_predecessor(predecessor)
+
     def test_child_audit_rejects_extra_field(self) -> None:
         record: dict[str, object] = {key: "" for key in AUDIT_KEYS}
         record["extra"] = True
@@ -497,6 +519,50 @@ class StalePredecessorCloseTests(unittest.TestCase):
             close_shell.assert_called_once()
             self.assertEqual(OPERATION, close_shell.call_args.args[-2])
             self.assertEqual(2, publish.call_count)
+
+    def test_execute_supplies_distinct_ready_and_staged_status_guards(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            record = packet_record(tmp)
+            predecessor = PanePin("dw8:0", "%1", 101, 201)
+            protected = PanePin("dw8:1", "%2", 102, 202)
+            args = argparse.Namespace(
+                packet=tmp / "packet.json",
+                packet_sha256="f" * 64,
+                review_report=tmp / "review.json",
+                review_report_sha256="e" * 64,
+            )
+
+            def guarded_stop(stop_args: object) -> str:
+                ready = getattr(stop_args, "bound_pre_input_check")
+                staged = getattr(stop_args, "bound_staged_status_check")
+                self.assertIsNotNone(ready)
+                self.assertIsNotNone(staged)
+                ready()
+                staged()
+                return str(record["predecessor_session_id"])
+
+            with (
+                patch("omo_manager.omo_stale_predecessor_close.read_private", return_value=b"packet"),
+                patch("omo_manager.omo_stale_predecessor_close.validate_packet", return_value=record),
+                patch("omo_manager.omo_stale_predecessor_close.validate_review"),
+                patch("omo_manager.omo_stale_predecessor_close.task_target_lock", side_effect=lambda *_args: contextlib.nullcontext()),
+                patch("omo_manager.omo_stale_predecessor_close.task_file_lock", side_effect=lambda *_args: contextlib.nullcontext()),
+                patch("omo_manager.omo_stale_predecessor_close.pin_is_absent", return_value=False),
+                patch("omo_manager.omo_stale_predecessor_close.path_entry_exists", return_value=False),
+                patch("omo_manager.omo_stale_predecessor_close.current_pin", return_value=True),
+                patch("omo_manager.omo_stale_predecessor_close.pinned_current_command", return_value="codex"),
+                patch("omo_manager.omo_stale_predecessor_close.codex_status", return_value="ready"),
+                patch("omo_manager.omo_stale_predecessor_close.live_evidence", return_value=(predecessor, protected)),
+                patch("omo_manager.omo_stale_predecessor_close.prepared_audit", return_value=b"{}\n"),
+                patch("omo_manager.omo_stale_predecessor_close.publish_or_validate"),
+                patch("omo_manager.omo_stale_predecessor_close.has_bound_close_proof", side_effect=[False, True]),
+                patch("omo_manager.omo_stale_predecessor_close.exact_pane_id", side_effect=["%1", "%1", ""]),
+                patch("omo_manager.omo_stale_predecessor_close.session_from_process", return_value=record["protected_session_id"]),
+                patch("omo_manager.omo_stale_predecessor_close.process_start_ticks", return_value=None),
+                patch("omo_manager.omo_stale_predecessor_close.guarded_codex_stop", side_effect=guarded_stop),
+            ):
+                execute(args)
 
 
 if __name__ == "__main__":
