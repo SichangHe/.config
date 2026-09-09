@@ -49,6 +49,18 @@ class DirectTmuxDeliveryCallerTests(unittest.TestCase):
         self.assertIsNone(captured["root"])
         self.assertEqual("", captured["delivery_id"])
 
+    def test_pending_watcher_routes_omnigent_without_tmux_preflight(self) -> None:
+        completed: Future[None] = Future()
+        completed.set_result(None)
+        with patch("omo_manager.omo_pending_watch.require_sendable_codex_target") as require, patch(
+            "omo_manager.omo_pending_watch.submit_send", return_value=completed
+        ) as submit:
+            result = omo_pending_watch.send_to_codex("omnigent://session-1", "hello\n")
+
+        self.assertIs(completed, result)
+        require.assert_not_called()
+        self.assertEqual("omnigent://session-1", submit.call_args.args[0])
+
     def test_pending_delivery_calls_sender_directly_after_marker_check(self) -> None:
         calls = []
 

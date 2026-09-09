@@ -6918,6 +6918,31 @@ with exclusive_watcher_root(root):
                 self.assertTrue(watcher.push_agent_pending_item_reminders(args, seen, 1001.0 + args.agent_problem_repeat_s + 1))
                 self.assertEqual(2, push.call_count)
 
+    def test_pending_item_reminder_uses_omnigent_readiness_without_tmux_transcript(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+        from omo_manager.omo_omnigent import SessionSnapshot
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = "omnigent://session-1"
+            (root / "TODO.md").write_text(f"current:\ncontact.md {target}\n", encoding="utf-8")
+            (root / "contact.md").write_text(
+                task_frontmatter(status="long_running", runat=target, managerat="wl:1", pending_items=("continue review",)),
+                encoding="utf-8",
+            )
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+            snapshot = SessionSnapshot("session-1", "idle", "codex", True, True)
+            with patch.object(watcher, "omnigent_session_snapshot", return_value=snapshot), patch.object(
+                watcher, "inspect_codex"
+            ) as inspect, patch.object(watcher, "ready_report_context") as report, patch.object(
+                watcher, "try_send_delivery_text", return_value=watcher.DeliveryResult(watcher.ASYNC_DELIVERY_STARTED)
+            ) as push:
+                self.assertTrue(watcher.push_agent_pending_item_reminders(args, {}, 1000.0))
+
+            inspect.assert_not_called()
+            report.assert_not_called()
+            self.assertEqual(target, push.call_args.args[2])
+
     def test_timed_out_problem_scan_still_sends_pending_item_reminder(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 

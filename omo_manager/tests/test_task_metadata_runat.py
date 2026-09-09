@@ -23,7 +23,7 @@ resolved_task_items: []
 version: {version}
 status: running
 runat: {runat}
-tool: omnigent
+tool: codex
 managerat: manager:1
 is_manager: false
 {v2_fields}pending_task_items: []
@@ -64,39 +64,66 @@ class TaskMetadataRunatTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskFrontmatterError, "managerat.*tmux"):
             _ = parse_task_metadata(text)
 
-    def test_omnigent_runat_requires_matching_tool(self) -> None:
-        text = task("v1.0.0", "omnigent://session-123").replace("tool: omnigent", "tool: codex")
-        with self.assertRaisesRegex(TaskFrontmatterError, "requires `tool: omnigent`"):
+    def test_omnigent_runat_keeps_actual_harness_tool(self) -> None:
+        metadata = parse_task_metadata(task("v1.0.0", "omnigent://session-123"))
+        assert metadata is not None
+        self.assertEqual("codex", metadata.tool)
+        text = task("v1.0.0", "omnigent://session-123").replace("tool: codex", "tool: omnigent")
+        with self.assertRaisesRegex(TaskFrontmatterError, "actual `tool` harness"):
             _ = parse_task_metadata(text)
 
-    def test_agent_status_does_not_inspect_omnigent_as_tmux(self) -> None:
+    @patch("omo_manager.omo_agent_status.omnigent_session_snapshot")
+    def test_agent_status_inspects_omnigent_without_tmux(self, snapshot) -> None:
+        from omo_manager.omo_omnigent import SessionSnapshot
+
+        snapshot.return_value = SessionSnapshot("session-123", "idle", "codex", True, True)
         target = "omnigent://session-123"
         task_line = TaskLine("task.md", "task-file", "", target, None, "running")
         with patch("omo_manager.omo_agent_status.inspect") as inspect:
             row = classify_task(task_line, None, auto_unstick=True)
         inspect.assert_not_called()
-        self.assertEqual("error", row.status)
-        self.assertIn("status_adapter=unsupported", row.evidence)
+        self.assertEqual("ready", row.status)
+        self.assertIn("session_status=idle", row.evidence)
+        self.assertIn("unstick=not_needed:omnigent", row.evidence)
 
-    def test_tmux_delivery_rejects_omnigent_before_side_effects(self) -> None:
-        with patch("omo_manager.omo_tmux_send.write_private_temp") as write_temp, self.assertRaisesRegex(RuntimeError, "requires a tmux target"):
+    def test_delivery_routes_omnigent_without_tmux_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": tmp}), patch(
+            "omo_manager.omo_tmux_send.write_private_temp"
+        ) as write_temp, patch("omo_manager.omo_tmux_send.send_omnigent_message") as send:
             send_to_codex("omnigent://session-123", "message", CodexSendOptions(1, 0, False))
-        write_temp.assert_not_called()
+            write_temp.assert_not_called()
+        send.assert_called_once()
 
-    def test_async_tmux_delivery_rejects_omnigent_before_launch(self) -> None:
-        with patch("omo_manager.omo_tmux_send.launch_async") as launch_async, self.assertRaises(SystemExit) as raised:
-            _ = tmux_send_main(["--target", "omnigent://session-123", "--message-file", "unused", "--async"])
-        self.assertEqual(2, raised.exception.code)
-        launch_async.assert_not_called()
+    def test_async_delivery_accepts_omnigent_target(self) -> None:
+        with tempfile.NamedTemporaryFile() as message_file, patch("omo_manager.omo_tmux_send.launch_async") as launch_async:
+            self.assertEqual(0, tmux_send_main(["--target", "omnigent://session-123", "--message-file", message_file.name, "--async"]))
+        launch_async.assert_called_once()
 
-    def test_task_status_rejects_omnigent_without_mutation(self) -> None:
+    def test_task_status_mutates_omnigent_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task_path = root / "task.md"
             original = task("v1.0.0", "omnigent://session-123")
             _ = task_path.write_text(original, encoding="utf-8")
-            self.assertEqual(2, task_status_main(["--root", str(root), "task.md", "blocked", "--blocked-on", "waiting"]))
-            self.assertEqual(original, task_path.read_text(encoding="utf-8"))
+            _ = (root / "TODO.md").write_text("current:\ntask.md omnigent://session-123\n", encoding="utf-8")
+            self.assertEqual(0, task_status_main(["--root", str(root), "task.md", "blocked", "--blocked-on", "waiting"]))
+            self.assertIn("status: blocked", task_path.read_text(encoding="utf-8"))
+
+    @patch("omo_manager.omo_task_status.require_owner_done_email", return_value=True)
+    @patch("omo_manager.omo_task_status.stop", return_value="session-123")
+    def test_task_status_done_stops_omnigent_and_records_close(self, stop, _done_email) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path = root / "task.md"
+            _ = task_path.write_text(task("v1.0.0", "omnigent://session-123"), encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\ntask.md omnigent://session-123\n\nprevious:\n", encoding="utf-8")
+            self.assertEqual(0, task_status_main(["--root", str(root), "--completion-key", "a" * 64, "task.md", "done"]))
+            stopped_args = stop.call_args.args[0]
+            self.assertEqual("omnigent://session-123", stopped_args.target)
+            task_text = task_path.read_text(encoding="utf-8")
+            self.assertIn("status: done", task_text)
+            self.assertIn("manager stopped OmniGent agent", task_text)
+            self.assertIn("previous:\ntask.md omnigent://session-123", (root / "TODO.md").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

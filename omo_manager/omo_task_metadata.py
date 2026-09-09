@@ -388,8 +388,9 @@ def parse_common(values: Mapping[str, object], allowed: set[str]) -> tuple[str, 
     if canonical_target(runat) == canonical_target(managerat):
         raise TaskFrontmatterError("`managerat` must be different from `runat`.")
     tool = require_text(values["tool"], "tool")
-    if target_kind == "omnigent" and tool != "omnigent":
-        raise TaskFrontmatterError("an OmniGent `runat` requires `tool: omnigent`.")
+    # 🧑 "Tool should still be codex or something. Omnigent is just the metaframework, not the actual harness. The runat should be enough for tools to know it’s omnigent"
+    if target_kind == "omnigent" and tool not in {"codex", "cursor"}:
+        raise TaskFrontmatterError("an OmniGent `runat` requires the actual `tool` harness (`codex` or `cursor`).")
     if "session_id" in values and tool != "codex":
         raise TaskFrontmatterError("`session_id` is only valid for ordinary Codex tasks.")
     is_manager = values["is_manager"]

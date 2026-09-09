@@ -23,6 +23,8 @@ DEFAULT_TMUX_ENTER_COUNT = int(os.environ.get("OMO_MANAGER_TMUX_ENTER_COUNT", os
 DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S", "5"))
 
 try:
+    from omo_manager.omo_omnigent import send_message as send_omnigent_message
+    from omo_manager.omo_task_metadata import runat_kind
     from omo_manager.omo_codex_status import (
         CODEX_EMPTY_INPUT_TEXTS,
         CODEX_RUNNING_EMPTY_INPUT_TEXTS,
@@ -57,6 +59,8 @@ try:
     from omo_manager.omo_codex_status import Args as StatusArgs, Report
     from omo_manager.omo_tmux_input_lock import tmux_input_lock
 except ModuleNotFoundError:
+    from omo_omnigent import send_message as send_omnigent_message
+    from omo_task_metadata import runat_kind
     from omo_codex_status import (
         CODEX_EMPTY_INPUT_TEXTS,
         CODEX_RUNNING_EMPTY_INPUT_TEXTS,
@@ -461,14 +465,17 @@ def parse_args(argv: list[str]) -> Args:
         )
     if not parsed.target:
         parser.error("--target is required.")
-    if TMUX_DELIVERY_TARGET_RE.fullmatch(parsed.target) is None:
-        parser.error("--target must be a tmux target.")
+    target_kind = runat_kind(parsed.target)
+    if target_kind not in {"tmux", "omnigent"}:
+        parser.error("--target must be a tmux or `omnigent://SESSION_ID` target.")
     submit_existing = parsed.submit_existing_file is not None or bool(parsed.submit_existing_sha256)
     cancel_existing = parsed.cancel_existing_file is not None or bool(parsed.cancel_existing_sha256)
     cancel_existing_wrapped = parsed.cancel_existing_wrapped_file is not None
     describe_existing_wrapped = parsed.describe_existing_wrapped_file is not None
     partial_cursor_recovery = parsed.describe_partial_cursor or bool(parsed.clear_partial_cursor_sha256)
     existing_recovery = submit_existing or cancel_existing or cancel_existing_wrapped or describe_existing_wrapped or partial_cursor_recovery
+    if target_kind == "omnigent" and existing_recovery:
+        parser.error("existing-input recovery is tmux-only.")
     if parsed.message_file is not None and existing_recovery:
         parser.error("--message-file cannot be used with existing-input recovery.")
     if sum((submit_existing, cancel_existing, cancel_existing_wrapped, describe_existing_wrapped, partial_cursor_recovery)) > 1:
@@ -701,6 +708,9 @@ def send_to_codex(target: str, message: str, options: CodexSendOptions | None = 
 
     selected = options or CodexSendOptions(1, 0.15, False)
     validate_options(selected)
+    if runat_kind(target) == "omnigent":
+        run_omnigent(target, wrap_agent_message(message), escape_agent_message_envelope_tags(message), selected, before_paste=before_paste)
+        return
     run_tmux(target, message, selected, before_paste=before_paste)
 
 
@@ -715,6 +725,9 @@ def send_system_to_codex(
 
     selected = options or CodexSendOptions(1, 0.15, False)
     validate_options(selected)
+    if runat_kind(target) == "omnigent":
+        run_omnigent(target, message, message, selected, before_paste=before_paste)
+        return
     _run_tmux_payload(target, message, selected, before_paste=before_paste)
 
 
@@ -2516,6 +2529,50 @@ def run_tmux(target: str, message: str, options: CodexSendOptions, *, before_pas
 
     verification_message = escape_agent_message_envelope_tags(message)
     _run_tmux_payload(target, wrap_agent_message(message), options, before_paste=before_paste, probe_message=verification_message)
+
+
+def run_omnigent(
+    target: str,
+    payload: str,
+    verification_message: str,
+    options: CodexSendOptions,
+    *,
+    before_paste: Callable[[], None] | None = None,
+) -> None:
+    """Post one event with the same bounded at-most-once guard as tmux."""
+
+    if options.dry_run:
+        send_omnigent_message(target, payload, dry_run=True)
+        return
+    bypass_checks = options.dangerously_bypass_all_sender_safety_checks
+    if not bypass_checks and has_recent_tmux_delivery(target, verification_message):
+        print("omo_tmux_send: skipped duplicate recent delivery")
+        return
+    claim_owned = False
+    delivery_may_have_happened = False
+    try:
+        if not bypass_checks:
+            if not claim_recent_tmux_delivery(target, verification_message):
+                print("omo_tmux_send: skipped duplicate recent delivery")
+                return
+            claim_owned = True
+        if before_paste is not None:
+            before_paste()
+        # A transport timeout can happen after the server queued the event.
+        # Retain the claim from this point so an exact retry cannot duplicate it.
+        delivery_may_have_happened = True
+        send_omnigent_message(target, payload)
+        if bypass_checks:
+            try:
+                record_recent_tmux_delivery(target, verification_message)
+            except (OSError, RuntimeError, ValueError) as exc:
+                print(f"omo_tmux_send: forced delivery succeeded but dedupe recording failed: {exc}", file=sys.stderr)
+    finally:
+        if claim_owned and not delivery_may_have_happened:
+            try:
+                release_recent_tmux_delivery(target, verification_message)
+            except RuntimeError as exc:
+                print(f"omo_tmux_send: failed to release undelivered claim: {exc}", file=sys.stderr)
 
 
 def run_control_to_codex(target: str, command: str, options: CodexSendOptions) -> None:

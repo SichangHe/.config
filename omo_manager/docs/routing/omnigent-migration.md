@@ -19,33 +19,27 @@ target contract
 - OmniGent `omnigent://SESSION_ID`
   - session id uses ASCII letters, digits, `.`, `_`, or `-`
   - URI-like syntax cannot overlap tmux syntax
-  - requires `tool: omnigent`
+  - `tool` names the real harness, currently `codex` or `cursor`
   - example: `omnigent:123` remains tmux
   - example: `omnigent://019f0000-0000-7000-8000-000000000123` is OmniGent
 - `managerat`
   - remains tmux-only in this slice
 
-migration slices
+first migration step
 
-- represent
-  - parse and classify an OmniGent session `runat`
-  - status reports an unsupported adapter without pane inspection
-  - task-status mutation and tmux delivery reject the target
-- observe
-  - resolve OmniGent liveness and status without pane inspection
-  - compare results with existing task status in shadow mode
-- deliver
-  - route prompts, agent messages, pending notices, and reports by target kind
-  - preserve stable ids and replay receipts
-- control
-  - add explicit OmniGent start, attach, stop, and recovery adapters
-  - never infer lifecycle completion from runtime output
-- cut over
-  - switch one helper capability after parity and rollback checks
-  - remove its tmux dependency only after no active task needs it
+- opt in one task at launch with `omo_task.py --omnigent --tool codex ...`
+- create its session through OmniGent's `/v1/sessions` API on the selected online host
+- store the returned durable session as `runat: omnigent://SESSION_ID`
+- send prompts and later messages through `/v1/sessions/SESSION_ID/events`
+- inspect the session snapshot through `/v1/sessions/SESSION_ID`
+- stop one session with the `stop_session` event when its task is completed
+- update normal task statuses with the existing task-file and TODO transactions
+- do not auto-unstick OmniGent sessions
+- leave every tmux launch, delivery, status, and stop path unchanged
 
-current limit
+current boundary
 
-- an OmniGent-backed record can be represented
-- launch, stop, pane status, task-status mutation, and delivery remain tmux-only
-- this slice creates or changes no live session
+- `managerat` remains tmux-only
+- launch supports the installed native `codex` and `cursor` harnesses
+- the server URL, bearer token, and explicit host may be configured with `OMO_MANAGER_OMNIGENT_URL`, `OMO_MANAGER_OMNIGENT_TOKEN`, and `OMO_MANAGER_OMNIGENT_HOST_ID`
+- task completion stops but does not delete OmniGent history

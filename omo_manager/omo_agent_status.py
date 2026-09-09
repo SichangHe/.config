@@ -49,6 +49,10 @@ from omo_manager.omo_task_metadata import UniqueKeyLoader
 from omo_manager.omo_task_metadata import frontmatter_parts
 from omo_manager.omo_task_metadata import parse_task_metadata
 from omo_manager.omo_task_metadata import runat_kind
+from omo_manager.omo_omnigent import manager_status as omnigent_manager_status
+from omo_manager.omo_omnigent import SessionNotFoundError
+from omo_manager.omo_omnigent import session_snapshot as omnigent_session_snapshot
+from omo_manager.omo_omnigent import status_evidence as omnigent_status_evidence
 
 
 def default_state_dir() -> Path:
@@ -103,6 +107,7 @@ HUMAN_TOKEN_QUOTA_PAUSE_RE = re.compile(
     r"\Ahuman token-quota pause from 202607/manager_mail/85c5dff58359-729\.txt: keep all VL paths closed until explicit resume\Z",
 )
 TARGET_SESSION_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):")
+TODO_TARGET_RE = re.compile(r"omnigent://[A-Za-z0-9._-]+|[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?")
 LOOSE_TARGET_RE = re.compile(r"\b([a-z][A-Za-z0-9_-]*)\s+(\d+)\b")
 PORT_RE = re.compile(r"\bport [`']?(\d{2,5})[`']?")
 TASK_BATCH_PREFIX_RE = re.compile(r"^(?:active\s+batch|batch|tasks?)\s*:$", re.IGNORECASE)
@@ -302,11 +307,15 @@ Use --problems-only --no-auto-unstick for a read-only one-shot diagnosis.""",
 
 def target_aliases(target: str) -> set[str]:
     """Return tmux pane forms that name the same pane with or without `.0`."""
+    if runat_kind(target) == "omnigent":
+        return {target}
     return {target, target[:-2] if target.endswith(".0") else f"{target}.0"} if target else set()
 
 
 def same_tmux_target(left: str, right: str) -> bool:
-    """Compare tmux targets after accepting the common implicit `.0` pane."""
+    """Compare run targets while preserving tmux implicit-pane compatibility."""
+    if runat_kind(left) == "omnigent" or runat_kind(right) == "omnigent":
+        return left == right and runat_kind(left) == "omnigent"
     return bool(target_aliases(left) & target_aliases(right))
 
 
@@ -1181,7 +1190,7 @@ def parse_task_text(text: str) -> list[TaskLine]:
                 continue
             next_start = matches[index + 1].start() if index + 1 < len(matches) else len(line)
             segment = line[match.end() : next_start]
-            target_match = TARGET_RE.search(segment)
+            target_match = TODO_TARGET_RE.search(segment)
             loose_target_match = LOOSE_TARGET_RE.search(segment) if target_match is None else None
             port_match = PORT_RE.search(segment)
             has_target = target_match is not None or loose_target_match is not None
@@ -1194,7 +1203,7 @@ def parse_task_text(text: str) -> list[TaskLine]:
                     continue
             target = ""
             if target_match is not None:
-                target = target_match.group(1)
+                target = target_match.group(0)
             elif loose_target_match is not None:
                 target = f"{loose_target_match.group(1)}:{loose_target_match.group(2)}"
             line_tasks.append(
@@ -1703,10 +1712,18 @@ def classify_target(task_file: str, target: str, persistent_role: bool = False, 
     if not target:
         return StatusRow(task_file, "missing", "target=", persistent_role, task_status)
     if runat_kind(target) == "omnigent":
-        evidence = f"target={target} runtime=omnigent status_adapter=unsupported"
+        try:
+            snapshot = omnigent_session_snapshot(target)
+            runtime_status = omnigent_manager_status(snapshot)
+            evidence = f"target={target} {omnigent_status_evidence(snapshot)}"
+        except RuntimeError as exc:
+            runtime_status = "missing" if isinstance(exc, SessionNotFoundError) else "error"
+            evidence = f"target={target} runtime=omnigent error={' '.join(str(exc).split())}"
         if task_status:
             evidence += f" task_status={task_status}"
-        return StatusRow(task_file, "error", evidence, persistent_role, task_status, target)
+        if auto_unstick:
+            evidence += " unstick=not_needed:omnigent"
+        return StatusRow(task_file, runtime_status, evidence, persistent_role, task_status, target)
     report = recover_capacity_error(report or inspect(StatusArgs(target, 80)))
     evidence = f"target={target}"
     unstick = ""

@@ -38,6 +38,7 @@ try:
     from .omo_guest_images import GUEST_HEES_ADDRESS as GUEST_IMAGE_SENDER
     from .omo_guest_images import GuestImageError, store_message_images
     from .omo_agent_status import TaskFrontmatterError, parse_task_metadata
+    from .omo_task_metadata import runat_kind
     from .omo_task_lock import task_file_lock
     from .omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_system_to_codex as send_to_codex
 except ImportError:
@@ -48,6 +49,7 @@ except ImportError:
         from omo_guest_images import GUEST_HEES_ADDRESS as GUEST_IMAGE_SENDER
         from omo_guest_images import GuestImageError, store_message_images
         from omo_agent_status import TaskFrontmatterError, parse_task_metadata
+        from omo_task_metadata import runat_kind
         from omo_task_lock import task_file_lock
         from omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_system_to_codex as send_to_codex
     except ImportError:
@@ -600,6 +602,8 @@ def subject_manager_target(subject: str) -> str:
 def target_aliases(target: str) -> set[str]:
     if not target:
         return set()
+    if runat_kind(target) == "omnigent":
+        return {target}
     aliases = {target}
     window_target, dot, _pane = target.rpartition(".")
     if dot and ":" in window_target:
@@ -724,6 +728,8 @@ def current_route_for_owner(args: Args, owner_target: str) -> EmailRoute | None:
 def sendable_codex_target(target: str) -> bool:
     if not target:
         return False
+    if runat_kind(target) == "omnigent":
+        return True
     try:
         require_sendable_codex_target(target)
     except Exception:
