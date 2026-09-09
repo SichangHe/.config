@@ -19,6 +19,7 @@ from omo_manager.omo_stale_predecessor_close import (
     SCHEMA,
     SOURCE1485_PACKET_KEYS,
     SOURCE1485_SCHEMA,
+    SOURCE1485_SUCCESSOR_BLOCKER,
     PanePin,
     audit_authorizes,
     audit_authorizes_after_close,
@@ -30,10 +31,12 @@ from omo_manager.omo_stale_predecessor_close import (
     predecessor_snapshots,
     reconstruct_predecessor,
     sha256,
+    source1485_live_custody,
     validate_source1485_manager_transition,
     validate_inputs,
     validate_ready_predecessor,
     validate_packet,
+    validate_successor,
 )
 from omo_manager.omo_task_metadata import TaskFrontmatterError
 
@@ -44,6 +47,11 @@ def task_text(body: str = "first\n(done)\nnew work\n") -> bytes:
 
 def manager_text() -> str:
     return "---\nversion: v1.0.0\nstatus: running\nrunat: dw:0\ntool: codex\nmanagerat: wl:1\nis_manager: true\npending_task_items: []\n---\n"
+
+
+def source1485_successor_text(*, blocker: str = SOURCE1485_SUCCESSOR_BLOCKER, queue: str = "[]", status: str = "blocked") -> bytes:
+    blocked_on = f"blocked_on: {blocker}\n" if blocker else ""
+    return (f"---\nversion: v1.0.0\nstatus: {status}\n{blocked_on}runat: dw8:1\ntool: codex\nmanagerat: dw:15\nis_manager: false\npending_task_items: {queue}\n---\ncompleted\n").encode()
 
 
 def source1485_audit(tmp: Path) -> tuple[Path, str]:
@@ -260,12 +268,69 @@ class StalePredecessorCloseTests(unittest.TestCase):
                 patch("omo_manager.omo_stale_predecessor_close.parse_task_metadata", return_value=current_manager),
                 patch("omo_manager.omo_stale_predecessor_close.validate_consumed_export", return_value=consumed) as validate_consumed,
                 patch("omo_manager.omo_stale_predecessor_close.file_input", return_value={}),
-                patch("omo_manager.omo_stale_predecessor_close.authoritative_active_target_task_paths", return_value=()),
+                patch(
+                    "omo_manager.omo_stale_predecessor_close.authoritative_active_target_task_paths",
+                    side_effect=lambda _root, target: (tmp / "dw_root_new.md",) if target == "dw:15" else (),
+                ),
                 patch("omo_manager.omo_stale_predecessor_close.current_pin", return_value=True),
                 patch("omo_manager.omo_stale_predecessor_close.codex_status", return_value="ready"),
             ):
                 live_evidence(record, query_sessions=False)
             self.assertEqual("dw:0", validate_consumed.call_args.args[-1])
+
+    def test_only_source1485_accepts_exact_completed_blocked_successor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            task = tmp / "worker.md"
+            todo = b"worker.md dw8:1\n"
+            task.write_bytes(source1485_successor_text())
+            with (
+                patch("omo_manager.omo_stale_predecessor_close.current_target_task_paths", return_value=(task,)),
+                patch("omo_manager.omo_stale_predecessor_close.authoritative_active_target_task_paths", return_value=(task,)),
+            ):
+                validate_successor(task, task.read_bytes(), todo, tmp, "dw8:1", "dw:15", source1485=True)
+                with self.assertRaisesRegex(TaskFrontmatterError, "lifecycle identity"):
+                    validate_successor(task, task.read_bytes(), todo, tmp, "dw8:1", "dw:15")
+            header, _body = predecessor_snapshots(task.read_bytes(), tmp, "dw8:0", source1485=True)
+            self.assertIn(b"managerat: dw:0\n", header)
+            with self.assertRaisesRegex(TaskFrontmatterError, "active non-manager"):
+                predecessor_snapshots(task.read_bytes(), tmp, "dw8:0")
+
+    def test_source1485_rejects_other_blocked_states_and_noncurrent_todo(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            task = tmp / "worker.md"
+            todo = b"worker.md dw8:1\n"
+            cases = (
+                (source1485_successor_text(blocker="other.md: waiting"), (task,)),
+                (source1485_successor_text(queue="\n  - remaining work"), (task,)),
+                (source1485_successor_text(status="running", blocker=""), (task,)),
+                (source1485_successor_text(), ()),
+            )
+            for data, current in cases:
+                with (
+                    self.subTest(data=data, current=current),
+                    patch("omo_manager.omo_stale_predecessor_close.current_target_task_paths", return_value=current),
+                    patch("omo_manager.omo_stale_predecessor_close.authoritative_active_target_task_paths", return_value=(task,)),
+                    self.assertRaisesRegex(TaskFrontmatterError, "lifecycle identity"),
+                ):
+                    validate_successor(task, data, todo, tmp, "dw8:1", "dw:15", source1485=True)
+
+    def test_source1485_live_custody_requires_ready_pane_and_singular_current_manager(self) -> None:
+        root = Path("/tmp/work-logs")
+        manager = root / "dw_root_new.md"
+        for status, owners in (("running", (manager,)), ("ready", ()), ("ready", (manager, root / "other.md"))):
+            with (
+                self.subTest(status=status, owners=owners),
+                patch("omo_manager.omo_stale_predecessor_close.codex_status", return_value=status),
+                patch("omo_manager.omo_stale_predecessor_close.authoritative_active_target_task_paths", return_value=owners),
+            ):
+                self.assertFalse(source1485_live_custody(root, "dw8:1", "dw:15", manager))
+        with (
+            patch("omo_manager.omo_stale_predecessor_close.codex_status", return_value="ready"),
+            patch("omo_manager.omo_stale_predecessor_close.authoritative_active_target_task_paths", return_value=(manager,)),
+        ):
+            self.assertTrue(source1485_live_custody(root, "dw8:1", "dw:15", manager))
 
     def test_packet_rejects_target_overlap(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

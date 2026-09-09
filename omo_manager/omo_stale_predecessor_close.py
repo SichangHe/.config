@@ -53,7 +53,7 @@ from omo_manager.omo_repository_custody import (
 from omo_manager.omo_report_receipt import bound_receipt_id
 from omo_manager.omo_task_lock import process_start_ticks, task_file_lock, task_target_lock
 from omo_manager.omo_task_metadata import TaskFrontmatterError, canonical_target, parse_task_metadata
-from omo_manager.omo_task_status import authoritative_active_target_task_paths
+from omo_manager.omo_task_status import authoritative_active_target_task_paths, current_target_task_paths
 
 SCHEMA = "omo-stale-predecessor-close/v1"
 SOURCE1485_SCHEMA = "omo-stale-predecessor-close/v2"
@@ -67,6 +67,7 @@ TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 MAX_FILE_BYTES = 4 * 1024 * 1024
 SOURCE1485_ROOT_AUDIT_SHA256 = "dd2cd04c1c6cd6c4050c7cd537d893e3c24aec45c504c1db3dbe0e4c0c792f2b"
 SOURCE1485_ROOT_AUDIT_PATH = Path("/tmp/config4-source1485-root.83gryy/audit.json")
+SOURCE1485_SUCCESSOR_BLOCKER = "dw_rotate_exec.md: stale predecessor dw8:0 remains in incomplete /status view; await supported recovery and fresh reviewed closure packet"
 PACKET_KEYS = {
     "schema",
     "root",
@@ -399,17 +400,21 @@ def current_session_id(pin: PanePin, protected: tuple[PanePin, ...]) -> str:
     return session_id.lower()
 
 
-def predecessor_snapshots(task_data: bytes, root: Path, predecessor_target: str) -> tuple[bytes, bytes]:
+def predecessor_snapshots(task_data: bytes, root: Path, predecessor_target: str, *, source1485: bool = False) -> tuple[bytes, bytes]:
     try:
         task_text = task_data.decode()
     except UnicodeDecodeError as exc:
         raise TaskFrontmatterError("protected task is not UTF-8.") from exc
     metadata = parse_task_metadata(task_text, root)
     parts = task_data.split(b"---\n", 2)
-    if metadata is None or metadata.status not in {"running", "long_running"} or metadata.runat == predecessor_target or metadata.is_manager or metadata.tool != "codex" or len(parts) != 3:
+    allowed_status = metadata is not None and (
+        metadata.status in {"running", "long_running"} or (source1485 and metadata.status == "blocked" and metadata.blocked_on == SOURCE1485_SUCCESSOR_BLOCKER and not metadata.pending_task_items)
+    )
+    if metadata is None or not allowed_status or metadata.runat == predecessor_target or metadata.is_manager or metadata.tool != "codex" or len(parts) != 3:
         raise TaskFrontmatterError("protected task is not one active non-manager successor record.")
     body = parts[2]
-    header = (f"---\nversion: v1.0.0\nstatus: running\nrunat: {predecessor_target}\ntool: codex\nmanagerat: {metadata.managerat}\nis_manager: false\npending_task_items: []\n---\n").encode()
+    historical_manager = "dw:0" if source1485 else metadata.managerat
+    header = (f"---\nversion: v1.0.0\nstatus: running\nrunat: {predecessor_target}\ntool: codex\nmanagerat: {historical_manager}\nis_manager: false\npending_task_items: []\n---\n").encode()
     return header, body
 
 
@@ -421,8 +426,10 @@ def reconstruct_predecessor(
     running_size: int,
     done_sha256: str,
     done_size: int,
+    *,
+    source1485: bool = False,
 ) -> tuple[bytes, bytes]:
-    header, body = predecessor_snapshots(task_data, root, predecessor_target)
+    header, body = predecessor_snapshots(task_data, root, predecessor_target, source1485=source1485)
     candidates: list[bytes] = []
     for end in [match.end() for match in re.finditer(rb"\n", body)]:
         candidate = header + body[:end]
@@ -445,6 +452,8 @@ def validate_consumed_export(
     root: Path,
     predecessor_target: str,
     manager_target: str,
+    *,
+    source1485: bool = False,
 ) -> tuple[dict[str, object], bytes, bytes, Path, tuple[Path, ...]]:
     export = canonical_object(read_private(export_path, export_sha256, "consumed export"), "consumed export")
     if set(export) != {"attestation", "export_id", "schema", "verification"} or export.get("schema") != "omo-report-consumed-export/v1":
@@ -499,7 +508,16 @@ def validate_consumed_export(
         or not commitment_path.is_absolute()
     ):
         raise TaskFrontmatterError("consumed export predecessor binding is inconsistent.")
-    running, done = reconstruct_predecessor(task_data, root, predecessor_target, running_sha, running_size, done_sha, done_size)
+    running, done = reconstruct_predecessor(
+        task_data,
+        root,
+        predecessor_target,
+        running_sha,
+        running_size,
+        done_sha,
+        done_size,
+        source1485=source1485,
+    )
     report_data, report_identity, _ = absolute_file_binding(report_path, "historical report", private=True)
     if sha256(report_data) != input_info.get("sha256") or len(report_data) != input_info.get("size_bytes"):
         raise TaskFrontmatterError("historical report differs from the consumed input.")
@@ -547,13 +565,27 @@ def validate_consumed_export(
     return attestation, running, done, manager_path, (report_path, envelope_path, commitment_path, ledger_path)
 
 
-def validate_successor(task_path: Path, task_data: bytes, todo_data: bytes, root: Path, protected_target: str, manager_target: str) -> None:
+def validate_successor(
+    task_path: Path,
+    task_data: bytes,
+    todo_data: bytes,
+    root: Path,
+    protected_target: str,
+    manager_target: str,
+    *,
+    source1485: bool = False,
+) -> None:
     metadata = parse_task_metadata(task_data.decode(), root)
     ref = task_path.relative_to(root).as_posix()
     rows = [line for line in todo_data.decode().splitlines() if ref in line.split()]
+    expected_state = metadata is not None and (
+        (metadata.status == "blocked" and metadata.blocked_on == SOURCE1485_SUCCESSOR_BLOCKER and not metadata.pending_task_items and current_target_task_paths(root, protected_target) == (task_path,))
+        if source1485
+        else metadata.status in {"running", "long_running"}
+    )
     if (
         metadata is None
-        or metadata.status not in {"running", "long_running"}
+        or not expected_state
         or metadata.runat != protected_target
         or metadata.managerat != manager_target
         or metadata.is_manager
@@ -562,6 +594,10 @@ def validate_successor(task_path: Path, task_data: bytes, todo_data: bytes, root
         or authoritative_active_target_task_paths(root, protected_target) != (task_path,)
     ):
         raise TaskFrontmatterError("protected successor lifecycle identity is invalid.")
+
+
+def source1485_live_custody(root: Path, protected_target: str, manager_target: str, manager_path: Path) -> bool:
+    return codex_status(protected_target) == "ready" and authoritative_active_target_task_paths(root, manager_target) == (manager_path,)
 
 
 def file_input(path: Path, label: str, *, private: bool = False) -> dict[str, object]:
@@ -672,7 +708,16 @@ def live_evidence(
     todo_data = read_private_or_owned(todo_path, str(packet["todo_sha256"]), "TODO")
     manager_data = read_private_or_owned(manager_path, str(packet["manager_task_sha256"]), "manager task")
     read_private_or_owned(Path(str(packet["helper"])), str(packet["helper_sha256"]), "stale-predecessor helper")
-    validate_successor(task_path, task_data, todo_data, root, str(packet["protected_target"]), str(packet["manager_target"]))
+    source1485 = packet.get("schema") == SOURCE1485_SCHEMA
+    validate_successor(
+        task_path,
+        task_data,
+        todo_data,
+        root,
+        str(packet["protected_target"]),
+        str(packet["manager_target"]),
+        source1485=source1485,
+    )
     manager = parse_task_metadata(manager_data.decode(), root)
     if manager is None or not manager.is_manager or manager.runat != packet["manager_target"] or manager.status not in {"running", "long_running"}:
         raise TaskFrontmatterError("manager task is no longer the active reporting owner.")
@@ -685,6 +730,7 @@ def live_evidence(
         root,
         str(packet["predecessor_target"]),
         historical_target,
+        source1485=source1485,
     )
     if (
         observed_manager != historical_manager
@@ -702,7 +748,7 @@ def live_evidence(
         raise TaskFrontmatterError("completed predecessor target has an active lifecycle owner.")
     predecessor = parse_pin(packet["predecessor_pane"], "predecessor pane")
     protected = parse_pin(packet["protected_pane"], "protected pane")
-    if predecessor.target == protected.target or not current_pin(protected):
+    if predecessor.target == protected.target or not current_pin(protected) or (source1485 and not source1485_live_custody(root, protected.target, str(packet["manager_target"]), manager_path)):
         raise TaskFrontmatterError("predecessor or protected pane identity changed.")
     if predecessor_absent and predecessor_shell:
         raise TaskFrontmatterError("predecessor recovery state is ambiguous.")
@@ -784,7 +830,12 @@ def prepare(args: argparse.Namespace) -> None:
     protected_identity = target_identity(args.protected_target)
     predecessor = PanePin(args.predecessor_target, *predecessor_identity)
     protected = PanePin(args.protected_target, *protected_identity)
-    if not current_pin(predecessor) or not current_pin(protected) or codex_status(predecessor.target) != "ready":
+    if (
+        not current_pin(predecessor)
+        or not current_pin(protected)
+        or codex_status(predecessor.target) != "ready"
+        or (source_audit_supplied and not source1485_live_custody(root, protected.target, args.manager_target, manager_path))
+    ):
         raise TaskFrontmatterError("live predecessor/protected pane binding is unavailable.")
     predecessor_session = current_session_id(predecessor, (protected,))
     protected_session = current_session_id(protected, (predecessor,))
@@ -796,10 +847,19 @@ def prepare(args: argparse.Namespace) -> None:
         root,
         args.predecessor_target,
         historical_target,
+        source1485=source_audit_supplied,
     )
     if observed_manager != historical_manager:
         raise TaskFrontmatterError("consumed report manager differs from the authenticated historical reporting manager.")
-    validate_successor(task_path, task_data, todo_data, root, args.protected_target, args.manager_target)
+    validate_successor(
+        task_path,
+        task_data,
+        todo_data,
+        root,
+        args.protected_target,
+        args.manager_target,
+        source1485=source_audit_supplied,
+    )
     if authoritative_active_target_task_paths(root, args.predecessor_target):
         raise TaskFrontmatterError("completed predecessor target still has active lifecycle ownership.")
     secret = secrets.token_hex(32)
@@ -886,7 +946,16 @@ def _audit_authorizes(
         todo_data = read_private_or_owned(todo, str(record["todo_sha256"]), "TODO")
         manager_data = read_private_or_owned(manager_path, str(record["manager_task_sha256"]), "manager task")
         read_private_or_owned(Path(str(record["helper"])), str(record["helper_sha256"]), "stale-predecessor helper")
-        validate_successor(task, task_data, todo_data, root, protected.target, str(record["manager_target"]))
+        source1485 = record.get("schema") == SOURCE1485_SCHEMA
+        validate_successor(
+            task,
+            task_data,
+            todo_data,
+            root,
+            protected.target,
+            str(record["manager_target"]),
+            source1485=source1485,
+        )
         manager = parse_task_metadata(manager_data.decode(), root)
         historical_manager, historical_target, _source_audit = manager_evidence(record)
         attestation, running, done, observed_manager, evidence_paths = validate_consumed_export(
@@ -897,6 +966,7 @@ def _audit_authorizes(
             root,
             predecessor.target,
             historical_target,
+            source1485=source1485,
         )
         expected_inputs = [file_input(path, label, private=private) for path, label, private in evidence_input_specs(record, task, todo, manager_path, evidence_paths)]
         if predecessor_absent:
@@ -905,7 +975,7 @@ def _audit_authorizes(
         else:
             predecessor_state_matches = pinned_current_command(predecessor) in SHELL_COMMANDS
             predecessor_session = record.get("predecessor_session_id")
-        protected_current = current_pin(protected)
+        protected_current = current_pin(protected) and (not source1485 or source1485_live_custody(root, protected.target, str(record["manager_target"]), manager_path))
         protected_session = session_from_process(protected)
         protected_current = protected_current and current_pin(protected)
         predecessor_owners = authoritative_active_target_task_paths(root, predecessor.target)
@@ -1048,6 +1118,7 @@ def validate_review(path: Path, expected_sha256: str, packet: dict[str, object],
 def execute(args: argparse.Namespace) -> None:
     data = read_private(args.packet, args.packet_sha256, "stale-predecessor packet")
     packet = validate_packet(data, args.packet_sha256)
+    source1485 = packet.get("schema") == SOURCE1485_SCHEMA
     if args.review_report is None:
         raise TaskFrontmatterError("execute requires one independent PASS report.")
     validate_review(args.review_report, args.review_report_sha256, packet, args.packet_sha256)
@@ -1055,7 +1126,13 @@ def execute(args: argparse.Namespace) -> None:
     input_records = packet.get("inputs")
     if not isinstance(input_records, list):
         raise TaskFrontmatterError("packet input set is invalid.")
-    with task_target_lock(root, str(packet["predecessor_target"])), task_target_lock(root, str(packet["protected_target"])), ExitStack() as stack:
+    with (
+        task_target_lock(root, str(packet["predecessor_target"])),
+        task_target_lock(root, str(packet["protected_target"])),
+        ExitStack() as stack,
+    ):
+        if source1485:
+            stack.enter_context(task_target_lock(root, str(packet["manager_target"])))
         for path in sorted({Path(str(packet["task"])), Path(str(packet["todo"])), Path(str(packet["manager_task"]))}, key=str):
             stack.enter_context(task_file_lock(path))
         held = []
@@ -1093,7 +1170,15 @@ def execute(args: argparse.Namespace) -> None:
             nonlocal predecessor_was_ready
             for current in held:
                 validate_held_absolute(current)
-            if not current_pin(protected):
+            if not current_pin(protected) or (
+                source1485
+                and not source1485_live_custody(
+                    root,
+                    protected.target,
+                    str(packet["manager_target"]),
+                    Path(str(packet["manager_task"])),
+                )
+            ):
                 raise TaskFrontmatterError("protected successor changed before guarded close.")
             predecessor_command = pinned_current_command(predecessor)
             if predecessor_command in SHELL_COMMANDS:
@@ -1106,7 +1191,20 @@ def execute(args: argparse.Namespace) -> None:
         def protected_unchanged() -> None:
             for current in held:
                 validate_held_absolute(current)
-            if not current_pin(protected) or session_from_process(protected) != packet["protected_session_id"] or not current_pin(protected):
+            if (
+                not current_pin(protected)
+                or session_from_process(protected) != packet["protected_session_id"]
+                or not current_pin(protected)
+                or (
+                    source1485
+                    and not source1485_live_custody(
+                        root,
+                        protected.target,
+                        str(packet["manager_target"]),
+                        Path(str(packet["manager_task"])),
+                    )
+                )
+            ):
                 raise TaskFrontmatterError("protected successor changed during guarded close.")
 
         def shell_unchanged() -> None:
