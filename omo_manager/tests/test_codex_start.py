@@ -1639,6 +1639,25 @@ class CodexStartTests(unittest.TestCase):
         args = parse_args(common)
         self.assertEqual(Path("/tmp/sessions/2026/09/08/rollout-id.jsonl"), args.reconciliation_rollout)
         self.assertEqual(("first old item", "second old item"), args.expected_audit_pending_items)
+        pending_index = common.index("--expected-pending-item")
+        empty_current = common[:pending_index] + common[pending_index + 2 :]
+        empty_args = parse_args([*empty_current, "--expected-current-queue-empty"])
+        self.assertTrue(empty_args.expected_current_queue_empty)
+        self.assertEqual((), empty_args.expected_pending_items)
+        with self.assertRaises(SystemExit):
+            parse_args([*common, "--expected-current-queue-empty"])
+        audit_index = empty_current.index("--expected-audit-task-sha256")
+        with self.assertRaises(SystemExit):
+            parse_args([*empty_current[:audit_index], "--expected-current-queue-empty"])
+        rotation = [
+            "--task-file", "worker.md", "--target", "cfg:2", "--model", "gpt-5.6-terra",
+            "--reasoning-effort", "max", "--rotate-worker", "--expected-task-sha256", "b" * 64,
+            "--expected-status", "blocked", "--expected-blocker", "current blocker",
+            "--expected-owner-target", "cfg:1", "--expected-current-queue-empty",
+            "--protected-target", "protected:9", "--audit-output", "/tmp/rotation-output.audit",
+        ]
+        with self.assertRaises(SystemExit):
+            parse_args(rotation)
         for missing in (
             "--session-root", "--expected-current-pane-start-ticks", "--expected-rollout-device", "--expected-rollout-inode",
             "--expected-rollout-holder-pid", "--expected-rollout-holder-start-ticks", "--expected-rollout-fd",
@@ -1648,6 +1667,38 @@ class CodexStartTests(unittest.TestCase):
             with self.subTest(missing=missing), self.assertRaises(SystemExit):
                 index = common.index(missing)
                 parse_args(common[:index] + common[index + 2 :])
+
+    def test_reconciliation_binding_accepts_explicit_empty_advanced_current_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root, 5252)
+            original_task_sha256 = hashlib.sha256((root / "worker.md").read_bytes()).hexdigest()
+            self.write_failed_rotation_audit(root, pane)
+            self.write_task(root, status="blocked", pending=[])
+            (root / "TODO.md").write_text(
+                (root / "TODO.md").read_text(encoding="utf-8").replace("current:", "human pending:"),
+                encoding="utf-8",
+            )
+            args = self.reconciliation_args(
+                root,
+                pane,
+                reconciliation_rollout=root / "sessions" / "2026" / "09" / "08" / "rollout-id.jsonl",
+                expected_task_sha256=hashlib.sha256((root / "worker.md").read_bytes()).hexdigest(),
+                expected_pending_items=(),
+                expected_current_queue_empty=True,
+                expected_audit_task_sha256=original_task_sha256,
+                expected_audit_status="blocked",
+                expected_audit_blocker="model capacity",
+                expected_audit_owner_target="cfg:1",
+                expected_audit_pending_items=("preserve exact queue",),
+            )
+
+            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane):
+                binding = reconciliation_binding(args)
+
+            self.assertEqual((), binding.task.pending_task_items)
+            self.assertEqual("todo:human pending", binding.task_todo_section)
 
     def test_reconcile_rotation_audit_records_later_uuid_without_launch_or_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:

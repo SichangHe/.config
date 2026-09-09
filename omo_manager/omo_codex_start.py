@@ -223,6 +223,7 @@ class Args:
     expected_audit_blocker: str | None = None
     expected_audit_owner_target: str = ""
     expected_audit_pending_items: tuple[str, ...] = ()
+    expected_current_queue_empty: bool = False
     recover_resume_cwd_prompt: bool = False
     resume_cwd_choice: str = ""
     expected_session_directory: Path | None = None
@@ -407,6 +408,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--expected-audit-blocker", help="Original exact blocker recorded by the failed audit; pass an empty value when it was empty.")
     _ = parser.add_argument("--expected-audit-owner-target", help="Original manager target recorded by the failed audit.")
     _ = parser.add_argument("--expected-audit-pending-item", action="append", default=[], help="Original exact pending item in audit order; repeat for the complete original queue.")
+    _ = parser.add_argument("--expected-current-queue-empty", action="store_true", help="Assert that an advanced current task has an empty queue; valid only for rollout reconciliation with a separately bound original audit queue.")
     _ = parser.add_argument(
         "--recover-update-prompt",
         action="store_true",
@@ -472,8 +474,12 @@ def parse_args(argv: list[str]) -> Args:
     if parsed.rotate_worker or parsed.reconcile_rotation_audit:
         if parsed.prompt_file or parsed.session_id:
             parser.error("rotation and reconciliation modes do not accept --prompt-file or --session-id.")
-        if not all((parsed.expected_task_sha256, parsed.expected_status, parsed.expected_owner_target, parsed.expected_pending_item, parsed.protected_target)):
-            parser.error("rotation and reconciliation require task digest, status, owner, full nonempty pending queue, and protected-target assertions.")
+        if not all((parsed.expected_task_sha256, parsed.expected_status, parsed.expected_owner_target, parsed.protected_target)):
+            parser.error("rotation and reconciliation require task digest, status, owner, queue, and protected-target assertions.")
+        if bool(parsed.expected_pending_item) == parsed.expected_current_queue_empty:
+            parser.error("rotation and reconciliation require exactly one current-queue assertion.")
+        if parsed.rotate_worker and parsed.expected_current_queue_empty:
+            parser.error("--expected-current-queue-empty is invalid with --rotate-worker.")
         if SHA256_RE.fullmatch(parsed.expected_task_sha256) is None:
             parser.error("--expected-task-sha256 must be a lowercase SHA-256 value.")
         if any(target_identity(target) is None for target in parsed.protected_target):
@@ -537,6 +543,10 @@ def parse_args(argv: list[str]) -> Args:
                     parsed.expected_audit_pending_item,
                 )):
                     parser.error("advanced-task reconciliation requires every exact original audit task, status, blocker, owner, and ordered-queue assertion.")
+            if parsed.expected_current_queue_empty and not (
+                parsed.reconciliation_rollout is not None and parsed.expected_audit_task_sha256
+            ):
+                parser.error("an empty current queue is supported only for advanced-task rollout reconciliation.")
             if parsed.audit_output or parsed.assert_legacy_missing_session_id or parsed.stop_unverified_replacement:
                 parser.error("rotation mutation assertions are invalid with --reconcile-rotation-audit.")
             if parsed.dry_run:
@@ -571,6 +581,7 @@ def parse_args(argv: list[str]) -> Args:
             parsed.expected_audit_blocker is not None,
             parsed.expected_audit_owner_target,
             parsed.expected_audit_pending_item,
+            parsed.expected_current_queue_empty,
         )
     ):
         parser.error("rotation assertions are only valid with --rotate-worker.")
@@ -674,6 +685,7 @@ def parse_args(argv: list[str]) -> Args:
         expected_audit_blocker=parsed.expected_audit_blocker,
         expected_audit_owner_target=parsed.expected_audit_owner_target or "",
         expected_audit_pending_items=tuple(parsed.expected_audit_pending_item),
+        expected_current_queue_empty=parsed.expected_current_queue_empty,
         recover_resume_cwd_prompt=parsed.recover_resume_cwd_prompt,
         resume_cwd_choice=parsed.resume_cwd_choice or "",
         expected_session_directory=parsed.expected_session_directory.expanduser().resolve(strict=False) if parsed.expected_session_directory else None,
