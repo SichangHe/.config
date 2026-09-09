@@ -52,6 +52,11 @@ FROZEN_SOURCE1290_HELPER_COMMIT = "7a03a04969d883f4fb07d0095d23b09836bb2656"
 FROZEN_SOURCE1290_HELPER_PATH = "omo_manager/omo_source1290_done_reconcile.py"
 
 
+def styled_fish_tail(host: str = "host", cwd_name: str = "worktree", suffix: str = "") -> str:
+    spaces = " " * 30
+    return f"\x1b[2m⏎\x1b[0m\n\x1b[32m❯\x1b[39m{spaces}\x1b[1m\x1b[31m{host}\x1b[0m \x1b[35m{cwd_name}\x1b[39m{suffix}"
+
+
 def exited_session_payload(
     session_id: str,
     receipt: str,
@@ -228,6 +233,108 @@ class CodexStopTests(unittest.TestCase):
         ):
             observed = validate_exited_codex_shell("cfg:1", "%42", session_id, "specific-token")
         self.assertEqual(hashlib.sha256(transcript.encode()).hexdigest(), observed)
+
+    def test_validate_exited_codex_shell_accepts_exact_exit_marker_before_prompt(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f"/status\nSession: {session_id}\n/status\nSession: {session_id}\nterminal report sent\nTo continue this session, run:\n  codex resume {session_id}\nOr run codex resume and select Follow manager worker defaults.\n⏎\n❯                              host worktree"
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.pane_target", return_value="cfg:1.0"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="fish"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["❯ host worktree"])),
+            patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
+            patch("omo_manager.omo_codex_stop.capture_styled", return_value=styled_fish_tail()),
+            patch("omo_manager.omo_codex_stop.pane_prompt_identity", return_value=(2, "fish", "host", "worktree")),
+        ):
+            observed = validate_exited_codex_shell_with_consumed_report("cfg:1", "%42", session_id, "specific-token")
+        self.assertEqual(hashlib.sha256(transcript.encode()).hexdigest(), observed)
+
+    def test_validate_exited_codex_shell_rejects_activity_after_exact_exit_marker(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f"terminal report sent\nTo continue this session, run:\n  codex resume {session_id}\n⏎\ncommand output\n❯ idle prompt"
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.pane_target", return_value="cfg:1.0"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="zsh"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["❯ idle prompt"])),
+            patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
+            self.assertRaisesRegex(RuntimeError, "shell activity"),
+        ):
+            validate_exited_codex_shell_with_consumed_report("cfg:1", "%42", session_id, "specific-token")
+
+    def test_validate_exited_codex_shell_rejects_typed_command_after_exact_exit_marker(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f"terminal report sent\nTo continue this session, run:\n  codex resume {session_id}\n⏎\n❯ command"
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.pane_target", return_value="cfg:1.0"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="fish"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["❯ command"])),
+            patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
+            patch("omo_manager.omo_codex_stop.capture_styled", return_value="\x1b[2m⏎\x1b[0m\n\x1b[32m❯\x1b[39m command"),
+            patch("omo_manager.omo_codex_stop.pane_prompt_identity", return_value=(10, "fish", "host", "worktree")),
+            self.assertRaisesRegex(RuntimeError, "shell activity"),
+        ):
+            validate_exited_codex_shell_with_consumed_report("cfg:1", "%42", session_id, "specific-token")
+
+    def test_validate_exited_codex_shell_rejects_spaced_typed_command_after_exact_exit_marker(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f"terminal report sent\nTo continue this session, run:\n  codex resume {session_id}\n⏎\n❯  host worktree  rm -rf /tmp/example                              host worktree"
+        styled_tail = (
+            "\x1b[2m⏎\x1b[0m\n\x1b[32m❯\x1b[39m  \x1b[38;2;255;0;0mhost\x1b[39m "
+            "\x1b[38;2;0;175;255mworktree\x1b[39m  \x1b[38;2;0;175;255mrm -rf /tmp/example\x1b[39m"
+            "                              \x1b[1m\x1b[31mhost\x1b[0m \x1b[35mworktree\x1b[39m"
+        )
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.pane_target", return_value="cfg:1.0"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="fish"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["❯  rm -rf /tmp/example"])),
+            patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
+            patch("omo_manager.omo_codex_stop.capture_styled", return_value=styled_tail),
+            patch("omo_manager.omo_codex_stop.pane_prompt_identity", return_value=(2, "fish", "host", "worktree")),
+            self.assertRaisesRegex(RuntimeError, "shell activity"),
+        ):
+            validate_exited_codex_shell_with_consumed_report("cfg:1", "%42", session_id, "specific-token")
+
+    def test_validate_exited_codex_shell_rejects_idle_cursor_drift(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f"terminal report sent\nTo continue this session, run:\n  codex resume {session_id}\n⏎\n❯                              host worktree"
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.pane_target", return_value="cfg:1.0"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="fish"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["❯ host worktree"])),
+            patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
+            patch("omo_manager.omo_codex_stop.capture_styled", return_value=styled_fish_tail()),
+            patch(
+                "omo_manager.omo_codex_stop.pane_prompt_identity",
+                side_effect=((2, "fish", "host", "worktree"), (2, "fish", "host", "elsewhere")),
+            ),
+            self.assertRaisesRegex(RuntimeError, "changed during recovery"),
+        ):
+            validate_exited_codex_shell_with_consumed_report("cfg:1", "%42", session_id, "specific-token")
+
+    def test_validate_exited_codex_shell_rejects_fish_prompt_shape_under_zsh(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f"terminal report sent\nTo continue this session, run:\n  codex resume {session_id}\n⏎\n❯                              host worktree"
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.pane_target", return_value="cfg:1.0"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="zsh"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["❯ host worktree"])),
+            patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
+            patch("omo_manager.omo_codex_stop.capture_styled", return_value=styled_fish_tail()),
+            patch("omo_manager.omo_codex_stop.pane_prompt_identity", return_value=(2, "zsh", "host", "worktree")),
+            self.assertRaisesRegex(RuntimeError, "shell activity"),
+        ):
+            validate_exited_codex_shell_with_consumed_report("cfg:1", "%42", session_id, "specific-token")
 
     def test_validate_exited_codex_shell_clean_exit_still_rejects_report_after_resume_marker(self) -> None:
         session_id = "11111111-2222-3333-4444-555555555555"
@@ -448,13 +555,19 @@ class CodexStopTests(unittest.TestCase):
         message_id = "123.456.789@example.com"
         task_payload = (f"accepted report receipt {receipt}\ncompletion notice was accepted as Message-ID <{message_id}>\n").encode()
         session_payload = exited_session_payload(session_id, receipt, message_id)
-        transcript = f"Conversation interrupted\nTo continue this session, run codex resume {session_id}\n$ "
+        transcript = (
+            f"Conversation interrupted\nTo continue this session, run codex resume {session_id}\n"
+            "Or run codex resume and select Follow manager worker defaults.\n"
+            "⏎\n❯                              host worktree"
+        )
         with (
             patch("omo_manager.omo_codex_stop.pane_id", side_effect=["%42", "%42", "%42", "%42", ""]),
             patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
-            patch("omo_manager.omo_codex_stop.current_command", return_value="zsh"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="fish"),
             patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["$ "])),
             patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
+            patch("omo_manager.omo_codex_stop.capture_styled", return_value=styled_fish_tail()),
+            patch("omo_manager.omo_codex_stop.pane_prompt_identity", return_value=(2, "fish", "host", "worktree")),
             patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
         ):
             close_exited_codex_shell_with_task_receipt(

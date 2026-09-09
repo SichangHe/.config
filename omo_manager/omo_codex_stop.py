@@ -58,6 +58,9 @@ UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA
 RESUME_RE = re.compile(rf"(?i)\bcodex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
 EXIT_RESUME_RE = re.compile(rf"(?i)\bTo\s+(?:resume|continue this session),\s+run:?\s+codex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
 EXIT_SELECTOR_RE = re.compile(r"(?m)^Or run codex resume and select [^\r\n]+\.$")
+EXIT_IDLE_MARKER = "⏎"
+EXIT_IDLE_CURSOR_X = 2
+ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;:]*[ -/]*[@-~]")
 STATUS_SESSION_RE = re.compile(rf"\bSession:\s*({UUID_RE})\b")
 STATUS_MENU_ROWS = (
     "/status      show current session configuration and token usage",
@@ -251,6 +254,17 @@ def current_command(target: str) -> str:
     return out.stdout.strip() if out.returncode == 0 else ""
 
 
+def pane_prompt_identity(target: str) -> tuple[int, str, str, str] | None:
+    out = tmux(["display-message", "-p", "-t", target, "#{cursor_x}\t#{pane_current_command}\t#{host}\t#{pane_current_path}"])
+    fields = out.stdout.rstrip("\n").split("\t") if out.returncode == 0 else []
+    if len(fields) != 4 or not all(fields[1:]):
+        return None
+    try:
+        return int(fields[0]), fields[1], fields[2], Path(fields[3]).name
+    except ValueError:
+        return None
+
+
 def window_panes(target: str) -> int:
     out = tmux(["display-message", "-p", "-t", target, "#{window_panes}"])
     try:
@@ -261,6 +275,11 @@ def window_panes(target: str) -> int:
 
 def capture(target: str, n_lines: int) -> str:
     out = tmux(["capture-pane", "-p", "-t", target, "-S", f"-{n_lines}"])
+    return out.stdout if out.returncode == 0 else ""
+
+
+def capture_styled(target: str, n_lines: int) -> str:
+    out = tmux(["capture-pane", "-p", "-e", "-t", target, "-S", f"-{n_lines}"])
     return out.stdout if out.returncode == 0 else ""
 
 
@@ -2012,7 +2031,8 @@ def _validate_exited_codex_shell(
         raise RuntimeError(f"refusing to close the current pane: {expected_pane_id}")
     numeric_target = pane_target(expected_pane_id)
     report = inspect(StatusArgs(numeric_target, 80)) if numeric_target else None
-    if report is None or report.status != "not_codex" or current_command(expected_pane_id) not in SHELL_COMMANDS:
+    shell_command = current_command(expected_pane_id)
+    if report is None or report.status != "not_codex" or shell_command not in SHELL_COMMANDS:
         actual = report.status if report is not None else "missing"
         raise RuntimeError(f"expected an exited non-Codex shell: {expected_pane_id} status={actual}")
     before = capture(expected_pane_id, n_lines)
@@ -2031,15 +2051,23 @@ def _validate_exited_codex_shell(
         raise RuntimeError("terminal report evidence is absent before the final Codex exit marker")
     shell_tail = exit_text[resume_matches[0].end() :].strip("\r\n")
     shell_tail = EXIT_SELECTOR_RE.sub("", shell_tail, count=1).strip("\r\n")
-    if not shell_tail or len(shell_tail.splitlines()) != 1:
+    marker_mode = len(shell_tail.splitlines()) == 2 and shell_tail.startswith(f"{EXIT_IDLE_MARKER}\n")
+    prompt_identity = pane_prompt_identity(expected_pane_id) if marker_mode else None
+    styled_before = capture_styled(expected_pane_id, n_lines) if marker_mode else ""
+    styled_tail = "\n".join(styled_before.rstrip("\r\n").splitlines()[-2:])
+    if (marker_mode and shell_command != "fish") or not exited_shell_tail_is_idle(shell_tail, styled_tail, prompt_identity):
         raise RuntimeError("pane contains shell activity after the terminal Codex exit")
+    final_shell_command = current_command(expected_pane_id)
     if (
         pane_id(target) != expected_pane_id
         or pane_id(expected_pane_id) != expected_pane_id
         or pane_target(expected_pane_id) != numeric_target
-        or current_command(expected_pane_id) not in SHELL_COMMANDS
+        or final_shell_command not in SHELL_COMMANDS
+        or (marker_mode and final_shell_command != "fish")
         or inspect(StatusArgs(numeric_target, 80)).status != "not_codex"
         or capture(expected_pane_id, n_lines) != before
+        or (marker_mode and pane_prompt_identity(expected_pane_id) != prompt_identity)
+        or (marker_mode and capture_styled(expected_pane_id, n_lines) != styled_before)
     ):
         raise RuntimeError("pane identity or shell evidence changed during recovery; retry")
     return hashlib.sha256(before.encode()).hexdigest()
@@ -2049,6 +2077,28 @@ def validate_exited_codex_shell(target: str, expected_pane_id: str, session_id: 
     """Authenticate a shell pane retaining exact visible accepted-report evidence."""
 
     return _validate_exited_codex_shell(target, expected_pane_id, session_id, terminal_evidence, n_lines)
+
+
+def exited_shell_tail_is_idle(shell_tail: str, styled_shell_tail: str, prompt_identity: tuple[int, str, str, str] | None) -> bool:
+    """Recognize the legacy tail or an exact idle Fish prompt after the exit marker."""
+
+    lines = shell_tail.splitlines()
+    if len(lines) == 1:
+        return True
+    if len(lines) != 2 or lines[0] != EXIT_IDLE_MARKER or prompt_identity is None:
+        return False
+    cursor_x, command, host, cwd_name = prompt_identity
+    styled_lines = styled_shell_tail.splitlines()
+    styled_prompt = rf"\x1b\[32m❯\x1b\[39m[ \t]{{2,}}\x1b\[1m\x1b\[31m{re.escape(host)}\x1b\[0m \x1b\[35m{re.escape(cwd_name)}\x1b\[39m(?:[ \t].*)?"
+    return (
+        len(styled_lines) == 2
+        and cursor_x == EXIT_IDLE_CURSOR_X
+        and command == "fish"
+        and bool(cwd_name)
+        and styled_lines[0] == "\x1b[2m⏎\x1b[0m"
+        and re.fullmatch(styled_prompt, styled_lines[1]) is not None
+        and ANSI_CSI_RE.sub("", styled_shell_tail) == shell_tail
+    )
 
 
 def validate_exited_codex_shell_with_consumed_report(
@@ -2183,7 +2233,8 @@ def close_exited_codex_shell_with_task_receipt(
         raise RuntimeError(f"refusing to close the current pane: {expected_pane_id}")
     numeric_target = pane_target(expected_pane_id)
     report = inspect(StatusArgs(numeric_target, 80)) if numeric_target else None
-    if report is None or report.status != "not_codex" or current_command(expected_pane_id) not in SHELL_COMMANDS:
+    shell_command = current_command(expected_pane_id)
+    if report is None or report.status != "not_codex" or shell_command not in SHELL_COMMANDS:
         actual = report.status if report is not None else "missing"
         raise RuntimeError(f"expected an exited non-Codex shell: {expected_pane_id} status={actual}")
     before = capture(expected_pane_id, n_lines)
@@ -2195,15 +2246,24 @@ def close_exited_codex_shell_with_task_receipt(
     if len(resume_matches) != 1 or resume_matches[0].group(1) != session_id or extract_resume_id(exit_text) != session_id:
         raise RuntimeError("captured terminal Codex session does not match the supplied session id")
     shell_tail = exit_text[resume_matches[0].end() :].strip("\r\n")
-    if not shell_tail or len(shell_tail.splitlines()) != 1:
+    shell_tail = EXIT_SELECTOR_RE.sub("", shell_tail, count=1).strip("\r\n")
+    marker_mode = len(shell_tail.splitlines()) == 2 and shell_tail.startswith(f"{EXIT_IDLE_MARKER}\n")
+    prompt_identity = pane_prompt_identity(expected_pane_id) if marker_mode else None
+    styled_before = capture_styled(expected_pane_id, n_lines) if marker_mode else ""
+    styled_tail = "\n".join(styled_before.rstrip("\r\n").splitlines()[-2:])
+    if (marker_mode and shell_command != "fish") or not exited_shell_tail_is_idle(shell_tail, styled_tail, prompt_identity):
         raise RuntimeError("pane contains shell activity after the terminal Codex exit")
+    final_shell_command = current_command(expected_pane_id)
     if (
         pane_id(target) != expected_pane_id
         or pane_id(expected_pane_id) != expected_pane_id
         or pane_target(expected_pane_id) != numeric_target
-        or current_command(expected_pane_id) not in SHELL_COMMANDS
+        or final_shell_command not in SHELL_COMMANDS
+        or (marker_mode and final_shell_command != "fish")
         or inspect(StatusArgs(numeric_target, 80)).status != "not_codex"
         or capture(expected_pane_id, n_lines) != before
+        or (marker_mode and pane_prompt_identity(expected_pane_id) != prompt_identity)
+        or (marker_mode and capture_styled(expected_pane_id, n_lines) != styled_before)
     ):
         raise RuntimeError("pane identity or cross-bound evidence changed during recovery; retry")
     close_tmux_target(expected_pane_id)
