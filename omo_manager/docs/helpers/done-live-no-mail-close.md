@@ -65,3 +65,21 @@ boundaries
 - do not use this mode for running, blocked, queued, manager, v2, Cursor, PCODX, or human-owned tasks
 - do not delete the completed audit or its sibling `.owner-stopped` proof; successful completion leaves no `.owner-close-started` name
 - the helper never calls the completion-email path
+
+source-bound WebConf recovery
+
+- `omo_webconf_exited_shell_close.py` is the incident-scoped path for the exact
+  `webconf_list_email.md` worker at `dw:19` left as an exited shell after its
+  private report was routed, while the task remains `blocked` only on
+  `done_close_in_progress`
+- it binds the complete task and TODO digests, the authoritative Source-1524
+  file and embedded Human envelope, the registered report commitment and
+  report bytes, the empty queue and sole ownership, the fixed resume UUID, and
+  the pane id/PID/start-ticks/capture digest
+- the helper sends no pane input, never resumes Codex, and never sends Human
+  mail; its only pane mutation is a tmux-server-guarded close of the exact
+  already-exited shell
+- use a fresh absolute owner-private audit path; retries accept only the exact
+  prepared, shell-closed, or completed transition associated with the same
+  immutable invocation, and conflicting task, TODO, pane, process, report,
+  source, ownership, or audit state fails closed

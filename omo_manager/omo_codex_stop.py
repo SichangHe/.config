@@ -61,10 +61,12 @@ EXIT_SELECTOR_RE = re.compile(r"(?m)^Or run codex resume and select [^\r\n]+\.$"
 STATUS_SESSION_RE = re.compile(rf"\bSession:\s*({UUID_RE})\b")
 DONE_LIVE_CLOSE_OPERATION = "done-live-no-mail-close"
 STALE_PREDECESSOR_CLOSE_OPERATION = "stale-predecessor-no-mail-close"
+WEBCONF_EXITED_CLOSE_OPERATION = "webconf-exited-shell-no-mail-close"
 BOUND_CLOSE_OPERATIONS = frozenset(
     {
         DONE_LIVE_CLOSE_OPERATION,
         STALE_PREDECESSOR_CLOSE_OPERATION,
+        WEBCONF_EXITED_CLOSE_OPERATION,
     }
 )
 DONE_LIVE_CLOSE_AUDIT_KEYS = frozenset(
@@ -1123,6 +1125,19 @@ def validate_bound_close_audit_file(
             pane_pid,
             pane_start_ticks,
             expected_audit_sha256,
+        )
+        return
+    if operation == WEBCONF_EXITED_CLOSE_OPERATION:
+        module_name = "omo_manager.omo_webconf_exited_shell_close" if __package__ else "omo_webconf_exited_shell_close"
+        getattr(importlib.import_module(module_name), "validate_close_authority_file")(
+            audit_path,
+            commitment,
+            target,
+            pane_id_value,
+            pane_pid,
+            pane_start_ticks,
+            expected_audit_sha256,
+            closed_identity=closed_identity,
         )
         return
     if operation != STALE_PREDECESSOR_CLOSE_OPERATION:
