@@ -940,6 +940,29 @@ def validate_lifecycle(
         raise TaskFrontmatterError("current predecessor/successor lifecycle custody is invalid.")
 
 
+def rebind_todo_recovery_input(
+    raw_inputs: list[object],
+    expected_inputs: list[dict[str, object]],
+    path: str,
+    sha256_digest: object,
+    label: str,
+) -> None:
+    """Replace one current input with its uniquely positioned prepared binding."""
+
+    raw_matches: list[tuple[int, dict[str, object], str]] = []
+    for index, value in enumerate(raw_inputs):
+        item = object_map(value, "disposition packet input")
+        identity = file_identity_from(item.get("file"), "disposition packet input")
+        if identity.path == path:
+            raw_matches.append((index, item, identity.sha256))
+    expected_matches = [
+        index for index, value in enumerate(expected_inputs) if file_identity_from(object_map(value, "expected disposition input").get("file"), "expected disposition input").path == path
+    ]
+    if len(raw_matches) != 1 or len(expected_matches) != 1 or raw_matches[0][0] != expected_matches[0] or raw_matches[0][2] != sha256_digest:
+        raise TaskFrontmatterError(f"prepared disposition {label} recovery binding is invalid.")
+    expected_inputs[expected_matches[0]] = raw_matches[0][1]
+
+
 def static_evidence(
     packet: dict[str, object],
     *,
@@ -1046,21 +1069,9 @@ def static_evidence(
     if todo_recovery is not None:
         if not is_recoverable_prepared_packet(packet) or not isinstance(raw_inputs, list) or len(raw_inputs) != len(expected_inputs):
             raise TaskFrontmatterError("prepared disposition TODO recovery binding is invalid.")
-        prior_todo_input = object_map(raw_inputs[-3], "recoverable TODO input")
-        prior_todo_identity = file_identity_from(prior_todo_input.get("file"), "recoverable TODO input")
-        prior_manager_input = object_map(raw_inputs[-2], "recoverable manager input")
-        prior_manager_identity = file_identity_from(prior_manager_input.get("file"), "recoverable manager input")
-        prior_task_input = object_map(raw_inputs[-4], "recoverable protected task input")
-        prior_task_identity = file_identity_from(prior_task_input.get("file"), "recoverable protected task input")
-        if prior_todo_identity.path != str(packet["todo"]) or prior_todo_identity.sha256 != packet["todo_sha256"]:
-            raise TaskFrontmatterError("prepared disposition TODO recovery binding is invalid.")
-        if prior_manager_identity.path != str(packet["manager_task"]) or prior_manager_identity.sha256 != packet["manager_task_sha256"]:
-            raise TaskFrontmatterError("prepared disposition manager recovery binding is invalid.")
-        if prior_task_identity.path != str(packet["task"]) or prior_task_identity.sha256 != packet["task_sha256"]:
-            raise TaskFrontmatterError("prepared disposition task recovery binding is invalid.")
-        expected_inputs[-4] = prior_task_input
-        expected_inputs[-3] = prior_todo_input
-        expected_inputs[-2] = prior_manager_input
+        rebind_todo_recovery_input(raw_inputs, expected_inputs, str(packet["task"]), packet["task_sha256"], "task")
+        rebind_todo_recovery_input(raw_inputs, expected_inputs, str(packet["todo"]), packet["todo_sha256"], "TODO")
+        rebind_todo_recovery_input(raw_inputs, expected_inputs, str(packet["manager_task"]), packet["manager_task_sha256"], "manager")
     if rebind_recoverable_helper:
         if not is_recoverable_prepared_packet(packet) or not isinstance(raw_inputs, list) or len(raw_inputs) != len(expected_inputs):
             raise TaskFrontmatterError("prepared disposition helper recovery binding is invalid.")

@@ -54,6 +54,25 @@ def disposition_packet(tmp: Path) -> dict[str, object]:
 
 
 class StalePredecessorInputDispositionTests(unittest.TestCase):
+    def source1485_recovery_inputs_fixture(self, tmp: Path) -> tuple[dict[str, object], list[object], list[dict[str, object]]]:
+        paths = [tmp / f"input-{index}" for index in range(14)]
+        for index, path in enumerate(paths):
+            path.write_text(f"input {index}\n")
+        raw_inputs: list[object] = [subject.file_input(path, f"input {index}") for index, path in enumerate(paths)]
+        expected_inputs = [subject.file_input(path, f"input {index}") for index, path in enumerate(paths)]
+        packet: dict[str, object] = {
+            "schema": subject.SOURCE1485_SCHEMA,
+            "task": str(paths[9]),
+            "task_sha256": subject.sha256(paths[9].read_bytes()),
+            "todo": str(paths[10]),
+            "todo_sha256": subject.sha256(paths[10].read_bytes()),
+            "manager_task": str(paths[11]),
+            "manager_task_sha256": subject.sha256(paths[11].read_bytes()),
+            "source1485_root_audit": str(paths[12]),
+            "helper": str(paths[13]),
+        }
+        return packet, raw_inputs, expected_inputs
+
     def todo_recovery_fixture(self, tmp: Path) -> tuple[dict[str, object], dict[str, object], Path]:
         task = tmp / "worker.md"
         todo = tmp / "TODO.md"
@@ -302,6 +321,38 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             packet, recovery, _todo = self.todo_recovery_fixture(Path(directory))
             current, _task, _manager, _target, _parent = subject.validate_todo_recovery_current(packet, recovery)
             self.assertEqual(b"current:\nworker.md dw8:1\nother.md config:2\n", current)
+
+    def test_source1485_todo_recovery_locates_shifted_inputs_by_exact_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, raw_inputs, expected_inputs = self.source1485_recovery_inputs_fixture(Path(directory))
+            for key, digest_key, label in (
+                ("task", "task_sha256", "task"),
+                ("todo", "todo_sha256", "TODO"),
+                ("manager_task", "manager_task_sha256", "manager"),
+            ):
+                subject.rebind_todo_recovery_input(raw_inputs, expected_inputs, str(packet[key]), packet[digest_key], label)
+            self.assertEqual(raw_inputs, expected_inputs)
+
+    def test_source1485_todo_recovery_rejects_swapped_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, raw_inputs, expected_inputs = self.source1485_recovery_inputs_fixture(Path(directory))
+            raw_inputs[9], raw_inputs[10] = raw_inputs[10], raw_inputs[9]
+            with self.assertRaisesRegex(TaskFrontmatterError, "task recovery binding is invalid"):
+                subject.rebind_todo_recovery_input(raw_inputs, expected_inputs, str(packet["task"]), packet["task_sha256"], "task")
+
+    def test_source1485_todo_recovery_rejects_duplicate_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, raw_inputs, expected_inputs = self.source1485_recovery_inputs_fixture(Path(directory))
+            raw_inputs[12] = raw_inputs[9]
+            with self.assertRaisesRegex(TaskFrontmatterError, "task recovery binding is invalid"):
+                subject.rebind_todo_recovery_input(raw_inputs, expected_inputs, str(packet["task"]), packet["task_sha256"], "task")
+
+    def test_source1485_todo_recovery_rejects_missing_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, raw_inputs, expected_inputs = self.source1485_recovery_inputs_fixture(Path(directory))
+            raw_inputs[9] = raw_inputs[12]
+            with self.assertRaisesRegex(TaskFrontmatterError, "task recovery binding is invalid"):
+                subject.rebind_todo_recovery_input(raw_inputs, expected_inputs, str(packet["task"]), packet["task_sha256"], "task")
 
     def test_fresh_packet_authenticates_source1485_migration_custody(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
