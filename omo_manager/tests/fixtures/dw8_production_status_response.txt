@@ -1,0 +1,27 @@
+╭──────────────────────────────────────────────────────────────────────────────╮
+│  >_ OpenAI Codex (v0.153.4)                                                  │
+│                                                                              │
+│ Visit https://chatgpt.com/codex/settings/usage for up-to-date                │
+│ information on rate limits and credits                                       │
+│                                                                              │
+│  Model:                       gpt-5.6-sol (reasoning high, summaries auto)   │
+│  Model provider:              OpenAI - http://localhost:18181                │
+│  Directory:                   /ssd1/sichangheagent/dw8                       │
+│  Permissions:                 Full Access                                    │
+│  Agents.md:                   ~/.codex/AGENTS.md, AGENTS.md                  │
+│  Account:                     team@mi.inc (Pro)                              │
+│  Thread name:                 Define manager worker defaults                 │
+│  Collaboration mode:          Default                                        │
+│  Session:                     01a07f0f-ffbd-7f13-89f1-4936c50be5c2           │
+│                                                                              │
+│  Context window:              30% left (183K used / 258K)                    │
+│  gpt-reserve Weekly limit:    [████████████████████] 100% left               │
+│                               (resets 19:36 on 15 Sep)                       │
+│  Weekly limit:                [████████████░░░░░░░░] 58% left                │
+│                               (resets 18:22 on 14 Sep)                       │
+│  GPT-5.3-Codex-Spark limit:                                                  │
+│  5h limit:                    [███████████████████░] 95% left (resets 23:36) │
+│  Weekly limit:                [████████████████████] 98% left                │
+│                               (resets 18:36 on 15 Sep)                       │
+│  Warning:                     limits may be stale - run /status again shortl │
+╰──────────────────────────────────────────────────────────────────────────────╯

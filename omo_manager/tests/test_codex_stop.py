@@ -2790,6 +2790,62 @@ class CodexStopTests(unittest.TestCase):
         with patch("omo_manager.omo_codex_stop.capture", side_effect=[before, after]), patch("omo_manager.omo_codex_stop.paste_text"), patch("omo_manager.omo_codex_stop.tmux"):
             self.assertEqual((new, response), query_status_session_id("cfg:1.0", 10, 0.1, strict_status_response=True))
 
+    def test_query_status_session_id_strictly_handles_production_status_card_and_footer_redraw(self) -> None:
+        session_id = "01a07f0f-ffbd-7f13-89f1-4936c50be5c2"
+        old_card = f"""/status
+
+╭─────────────────────────────────────────────────────────────────────────────╮
+│  >_ OpenAI Codex (v0.153.4)                                                  │
+│  Session:                     {session_id}           │
+│  Weekly limit:                [████████████░░░░░░░░] 58% left                │
+╰────────────────────────────────────────────────────────────────────────────╯
+"""
+        new_response = f"""
+╭─────────────────────────────────────────────────────────────────────────────╮
+│  >_ OpenAI Codex (v0.153.4)                                                  │
+│  Model:                       gpt-5.6-sol (reasoning high, summaries auto)   │
+│  Directory:                   /ssd1/sichangheagent/dw8                       │
+│  Session:                     {session_id}           │
+│  Weekly limit:                [████████████░░░░░░░░] 58% left                │
+╰───────────────────────────────────────────────────────────────────────────╯
+"""
+        before = f"history\n{old_card}\n\n› Ask Codex to do anything\n\n  gpt-5.6-sol high · weekly 60% left\n"
+        after = f"history\n{old_card}/status\n{new_response}\n\n› Ask Codex to do anything\n\n  gpt-5.6-sol high · weekly 57% left · 6.82M used · …\n"
+        with patch("omo_manager.omo_codex_stop.capture", side_effect=[before, after]), patch("omo_manager.omo_codex_stop.paste_text"), patch("omo_manager.omo_codex_stop.tmux"):
+            self.assertEqual(
+                (session_id, new_response),
+                query_status_session_id("cfg:1.0", 10, 0.1, strict_status_response=True),
+            )
+
+    def test_submitted_status_response_rejects_rewritten_existing_status_card(self) -> None:
+        session_id = "01a07f0f-ffbd-7f13-89f1-4936c50be5c2"
+        before = f"/status\n\n╭─╮\n│ >_ OpenAI Codex (v0.153.4) │\n│ Session: {session_id} │\n╰─╯\nready\n"
+        after = before.replace("v0.153.4", "v0.153.5").replace("ready", "redrawn")
+        self.assertEqual("", submitted_status_response(before, after))
+
+    def test_submitted_status_response_accepts_exact_production_card_across_composer_redraw(self) -> None:
+        response = (Path(__file__).with_name("fixtures") / "dw8_production_status_response.txt").read_text()
+        old_card = response.replace("58% left", "60% left")
+        before = f"history\n/status\n\n{old_card}\n\n› Ask Codex to do anything\nold footer\n"
+        after = f"history\n/status\n\n{old_card}\n/status\n\n{response}\n\n› Ask Codex to do anything\nnew footer\n"
+        self.assertEqual(f"\n{response}", submitted_status_response(before, after))
+
+    def test_submitted_status_response_rejects_two_new_complete_status_cards(self) -> None:
+        session_id = "01a07f0f-ffbd-7f13-89f1-4936c50be5c2"
+        card = f"/status\n\n╭─╮\n│ >_ OpenAI Codex (v0.153.4) │\n│ Session: {session_id} │\n╰─╯\n"
+        self.assertEqual("", submitted_status_response("ready\n", f"{card}{card}redrawn\n"))
+
+    def test_submitted_status_response_rejects_incomplete_new_status_card(self) -> None:
+        session_id = "01a07f0f-ffbd-7f13-89f1-4936c50be5c2"
+        after = f"/status\n\n╭─╮\n│ >_ OpenAI Codex (v0.153.4) │\n│ Session: {session_id} │\nredrawn\n"
+        self.assertEqual("", submitted_status_response("ready\n", after))
+
+    def test_submitted_status_response_rejects_complete_and_malformed_new_status_cards(self) -> None:
+        session_id = "01a07f0f-ffbd-7f13-89f1-4936c50be5c2"
+        complete = f"/status\n\n╭─╮\n│ >_ OpenAI Codex (v0.153.4) │\n│ Session: {session_id} │\n╰─╯\n"
+        malformed = f"/status\n\n╭─╮\n│ >_ OpenAI Codex (v0.153.4) │\n│ Session: {session_id} │\nredrawn\n"
+        self.assertEqual("", submitted_status_response("ready\n", f"{complete}{malformed}"))
+
     def test_query_status_session_id_prefers_proven_insertion_over_ambiguous_ring(self) -> None:
         old = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"
         new = "019f670b-6a2f-7463-b9be-9aa6ff0cec43"

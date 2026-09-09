@@ -292,6 +292,33 @@ def extract_new_status_session_id(before: str, after: str) -> str:
     return extract_status_session_id(after.rsplit("/status", 1)[-1])
 
 
+def complete_status_responses(text: str) -> list[str]:
+    """Return structurally complete Codex status panels following exact commands."""
+
+    lines = text.splitlines(keepends=True)
+    marker_positions = [index for index, line in enumerate(lines) if line.strip() == "/status"]
+    responses: list[str] = []
+    for marker_index, marker_position in enumerate(marker_positions):
+        limit = marker_positions[marker_index + 1] if marker_index + 1 < len(marker_positions) else len(lines)
+        start = marker_position + 1
+        while start < limit and not lines[start].strip():
+            start += 1
+        if start >= limit or not re.fullmatch(r"╭─+╮", lines[start].strip()):
+            continue
+        end = start + 1
+        while end < limit and not re.fullmatch(r"╰─+╯", lines[end].strip()):
+            if not (lines[end].lstrip().startswith("│") and lines[end].rstrip().endswith("│")):
+                break
+            end += 1
+        if end >= limit or not re.fullmatch(r"╰─+╯", lines[end].strip()):
+            continue
+        response = "".join(lines[marker_position + 1 : end + 1])
+        if ">_ OpenAI Codex (" not in response or len(STATUS_SESSION_RE.findall(response)) != 1:
+            continue
+        responses.append(response)
+    return responses
+
+
 def submitted_status_response(before: str, after: str) -> str:
     """Return only output appended after this invocation's `/status`."""
     if after.startswith(before):
@@ -319,6 +346,17 @@ def submitted_status_response(before: str, after: str) -> str:
                 if before_lines[-n_lines:] == after_lines[:n_lines]:
                     appended = "".join(after_lines[n_lines:])
                     break
+        if not appended:
+            before_responses = complete_status_responses(before)
+            after_responses = complete_status_responses(after)
+            before_markers = sum(line.strip() == "/status" for line in before.splitlines())
+            after_markers = sum(line.strip() == "/status" for line in after.splitlines())
+            if after_markers == before_markers + 1 and len(after_responses) == len(before_responses) + 1:
+                response_candidates = [
+                    after_responses[split] for split in range(len(after_responses)) if before_responses[:split] == after_responses[:split] and before_responses[split:] == after_responses[split + 1 :]
+                ]
+                if len(response_candidates) == 1:
+                    return response_candidates[0]
     appended_lines = appended.splitlines(keepends=True)
     marker_positions = [index for index, line in enumerate(appended_lines) if line.strip() == "/status"]
     if marker_positions:
