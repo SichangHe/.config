@@ -2103,6 +2103,10 @@ def cmd_locate_replacement(args: argparse.Namespace) -> int:
     if not args.subject or "\n" in args.subject or "\r" in args.subject:
         print("one nonempty exact subject is required", file=sys.stderr)
         return 2
+    gmail_message_id = getattr(args, "gmail_message_id", "")
+    if gmail_message_id and (not gmail_message_id.isascii() or not gmail_message_id.isdecimal()):
+        print("Gmail message identity must contain only digits", file=sys.stderr)
+        return 2
     client, config = open_mailbox(readonly=True)
     try:
         sender_email, recipient_email = mail_boundary(config)
@@ -2113,6 +2117,9 @@ def cmd_locate_replacement(args: argparse.Namespace) -> int:
         select_mailbox(client, all_mailbox, readonly=True)
         records, _skipped = accepted_manager_headers(client, manager_candidate_uids(client, sender_email), sender_email, recipient_email)
         matches = [record for record in records if record.subject == args.subject]
+        if gmail_message_id:
+            matching_uids = set(gmail_message_uids(client, gmail_message_id))
+            matches = [record for record in matches if record.uid in matching_uids]
         if len(matches) != 1:
             print(f"replacement_subject_matches={len(matches)}", file=sys.stderr)
             return 1
@@ -4724,8 +4731,13 @@ This command moves the old message only from Inbox to recoverable Gmail Trash an
     )
     inspect_explicit.add_argument("--task-id", required=True, help="Task identity assigned to every selected source.")
     inspect_explicit.set_defaults(func=cmd_inspect_explicit)
-    locate_replacement = sub.add_parser("locate-replacement", help="Find the unique exact current manager-mail subject and print its RFC Message-ID.")
+    locate_replacement = sub.add_parser("locate-replacement", help="Find one exact current manager message and print its RFC Message-ID.")
     locate_replacement.add_argument("--subject", required=True, help="Exact current subject, including any manager prefix.")
+    locate_replacement.add_argument(
+        "--gmail-message-id",
+        default="",
+        help="Optional numeric Gmail message identity that disambiguates duplicate exact subjects.",
+    )
     locate_replacement.set_defaults(func=cmd_locate_replacement)
     review = sub.add_parser(
         "build-replacement-free-review",
