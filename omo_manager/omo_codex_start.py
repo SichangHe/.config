@@ -38,6 +38,7 @@ try:
     from omo_manager.omo_task_lock import task_file_lock, task_target_lock
     from omo_manager.omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, frontmatter_parts, parse_task_metadata
     from omo_manager.omo_task_status import authoritative_active_target_task_paths, root_membership_lock
+    from omo_manager.omo_manager_rotation_contain import ContainmentError, ProcessIdentity, process_stat, stable_process_identity
 except ModuleNotFoundError:
     from omo_codex_status import Args as StatusArgs
     from omo_codex_status import CODEX_FOOTER_RE, current_block, current_input_text, exact_tail, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
@@ -46,6 +47,7 @@ except ModuleNotFoundError:
     from omo_task_lock import task_file_lock, task_target_lock
     from omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, frontmatter_parts, parse_task_metadata
     from omo_task_status import authoritative_active_target_task_paths, root_membership_lock  # pyright: ignore[reportImplicitRelativeImport]
+    from omo_manager_rotation_contain import ContainmentError, ProcessIdentity, process_stat, stable_process_identity  # pyright: ignore[reportImplicitRelativeImport]
 
 HELPER_DIR = Path(__file__).resolve().parent
 WORKER_DEFAULTS = HELPER_DIR / "WORKER_DEFAULTS.md"
@@ -98,6 +100,8 @@ SOURCE1571_AUTHORITY_SHA256 = "22e1d871f9c6c43ad5e90eda3a3d0626f9f5b0ac9b73f6248
 SOURCE1571_TASK_FILE = "dw1291_generation.md"
 SOURCE1571_TARGET = "dw5:0.0"
 SOURCE1571_AUDIT_PATH = (Path.home() / ".local/state/omo-manager/rotations/worker-rotation-source1571.audit").resolve(strict=False)
+SOURCE1571_SESSION_ROOT = (Path.home() / ".codex/sessions").resolve(strict=False)
+SOURCE1571_SESSION_META_MAX_BYTES = 1_000_000
 # Delivery IDs are persisted as filenames.  Keep them opaque but basename-safe
 # so a malformed CLI value can never escape the dedicated event directory.
 DELIVERY_ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
@@ -223,6 +227,7 @@ class RotationSnapshot:
     pane: Pane
     task: TaskBinding
     old_session_id: str
+    old_rollout: Source1571Rollout | None
     task_path: Path
     protected_targets: tuple[str, ...]
     audit_path: Path
@@ -271,6 +276,18 @@ class Source1206Authority:
     pane_id: str
     window_id: str
     pane_pid: int
+
+
+@dataclass(frozen=True)
+class Source1571Rollout:
+    path: Path
+    device: int
+    inode: int
+    holder_pid: int
+    holder_start_ticks: int
+    descriptor: int
+    session_meta_sha256: str
+    session_id: str
 
 
 @dataclass(frozen=True)
@@ -906,7 +923,166 @@ def rotation_owner_path(args: Args, pane: Pane) -> Path:
     return expected
 
 
-def rotation_snapshot_sha256(args: Args, pane: Pane, task: TaskBinding, old_session_id: str, owner: Path, todo_sha256: str) -> str:
+def source1571_process_tree(root_pid: int) -> tuple[ProcessIdentity, ...]:
+    """Bind the exact live process tree rooted at the incumbent pane."""
+
+    pending = [root_pid]
+    identities: dict[int, ProcessIdentity] = {}
+    while pending:
+        pid = pending.pop()
+        if pid in identities:
+            continue
+        try:
+            identity = process_stat(pid)
+            thread_roots = tuple((Path("/proc") / str(pid) / "task").iterdir())
+            children: set[int] = set()
+            for thread_root in thread_roots:
+                if thread_root.name.isdigit():
+                    children.update(int(value) for value in (thread_root / "children").read_text(encoding="ascii").split())
+        except (ContainmentError, OSError, UnicodeError, ValueError) as error:
+            raise StartError(f"could not bind Source-1571 incumbent process tree: {error}") from error
+        if identity.state == "Z":
+            raise StartError("Source-1571 incumbent process tree contains a zombie.")
+        identities[pid] = identity
+        pending.extend(sorted(children - identities.keys(), reverse=True))
+    return tuple(identities[pid] for pid in sorted(identities))
+
+
+def source1571_held_rollouts(tree: tuple[ProcessIdentity, ...], session_root: Path) -> dict[tuple[int, int], tuple[Path, int, int]]:
+    """Return exact Codex rollout inodes held by the incumbent process tree."""
+
+    held: dict[tuple[int, int], tuple[Path, int, int]] = {}
+    for process in tree:
+        try:
+            descriptors = tuple((Path("/proc") / str(process.pid) / "fd").iterdir())
+        except OSError as error:
+            raise StartError(f"could not inspect Source-1571 incumbent descriptors: {error}") from error
+        for descriptor_path in descriptors:
+            try:
+                descriptor = int(descriptor_path.name)
+                destination = Path(os.readlink(descriptor_path))
+            except ValueError:
+                continue
+            except FileNotFoundError:
+                # File descriptors may close after /proc/<pid>/fd is listed.
+                # A held rollout must survive both complete snapshots below;
+                # unrelated transient descriptors are not custody evidence.
+                continue
+            except OSError as error:
+                raise StartError(f"could not inspect Source-1571 descriptor {descriptor_path}: {error}") from error
+            if not destination.is_absolute() or session_root not in destination.parents or not destination.name.startswith("rollout-") or destination.suffix != ".jsonl":
+                continue
+            try:
+                descriptor_info = descriptor_path.stat()
+                path = destination.resolve(strict=True)
+                path_info = path.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise StartError(f"could not bind Source-1571 rollout descriptor {descriptor_path}: {error}") from error
+            if (
+                session_root not in path.parents
+                or not stat.S_ISREG(path_info.st_mode)
+                or path_info.st_uid != os.getuid()
+                or stat.S_IMODE(path_info.st_mode) & 0o022
+                or (descriptor_info.st_dev, descriptor_info.st_ino) != (path_info.st_dev, path_info.st_ino)
+            ):
+                raise StartError("Source-1571 rollout descriptor does not name one same-UID protected regular file.")
+            identity = (path_info.st_dev, path_info.st_ino)
+            candidate = (path, process.pid, descriptor)
+            if identity in held and held[identity] != candidate:
+                raise StartError("Source-1571 incumbent holds one rollout through multiple descriptors.")
+            held[identity] = candidate
+    return held
+
+
+def source1571_session_metadata(path: Path, identity: tuple[int, int]) -> tuple[bytes, dict[str, object]]:
+    """Read one bounded immutable session-metadata line by rollout inode."""
+
+    fd = -1
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != identity:
+            raise StartError("Source-1571 rollout changed before metadata read.")
+        prefix = os.read(fd, SOURCE1571_SESSION_META_MAX_BYTES + 1)
+    except OSError as error:
+        raise StartError(f"could not read Source-1571 rollout metadata: {error}") from error
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    first_line, separator, _remainder = prefix.partition(b"\n")
+    if not separator or len(first_line) + 1 > SOURCE1571_SESSION_META_MAX_BYTES:
+        raise StartError("Source-1571 rollout lacks one bounded complete metadata line.")
+
+    def object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise StartError("Source-1571 rollout metadata contains duplicate keys.")
+            result[key] = value
+        return result
+
+    try:
+        record = json.loads(first_line, object_pairs_hook=object_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise StartError(f"Source-1571 rollout metadata is invalid JSON: {error}") from error
+    if not isinstance(record, dict):
+        raise StartError("Source-1571 rollout metadata is not one JSON object.")
+    return first_line + b"\n", record
+
+
+def source1571_process_held_session(pane: Pane) -> Source1571Rollout:
+    """Authenticate the busy incumbent UUID through its exact open root rollout."""
+
+    try:
+        session_root = SOURCE1571_SESSION_ROOT.resolve(strict=True)
+    except OSError as error:
+        raise StartError(f"Source-1571 Codex session root is unavailable: {error}") from error
+    verify_same_process(pane)
+    tree_before = source1571_process_tree(pane.pane_pid)
+    held_before = source1571_held_rollouts(tree_before, session_root)
+    matches: list[Source1571Rollout] = []
+    parent_keys = {"parent", "parent_id", "parent_session_id", "parent_thread_id", "fork", "fork_id", "forked_from", "forked_from_id"}
+    for identity, (path, holder_pid, descriptor) in held_before.items():
+        metadata_bytes, metadata = source1571_session_metadata(path, identity)
+        payload = metadata.get("payload")
+        if metadata.get("type") != "session_meta" or not isinstance(payload, dict):
+            continue
+        session_id = payload.get("id")
+        cwd = payload.get("cwd")
+        if (
+            metadata.get("ordinal") != 0
+            or not isinstance(session_id, str)
+            or UUID_RE.fullmatch(session_id) is None
+            or payload.get("session_id") != session_id
+            or payload.get("originator") != "codex-tui"
+            or payload.get("source") != "cli"
+            or payload.get("thread_source") != "user"
+            or not isinstance(cwd, str)
+            or Path(cwd).resolve(strict=True) != pane.workdir.resolve(strict=True)
+            or any(key in metadata or key in payload for key in parent_keys)
+            or not path.name.endswith(f"-{session_id}.jsonl")
+        ):
+            continue
+        holder = next((process for process in tree_before if process.pid == holder_pid), None)
+        if holder is None:
+            raise StartError("Source-1571 rollout holder left the incumbent process tree.")
+        matches.append(Source1571Rollout(path, identity[0], identity[1], holder_pid, holder.start_ticks, descriptor, hashlib.sha256(metadata_bytes).hexdigest(), session_id))
+    if len(matches) != 1:
+        raise StartError("Source-1571 incumbent process tree does not hold exactly one root Codex rollout.")
+    tree_after = source1571_process_tree(pane.pane_pid)
+    held_after = source1571_held_rollouts(tree_after, session_root)
+    verify_same_process(pane)
+    if (
+        tuple(stable_process_identity(process) for process in tree_after) != tuple(stable_process_identity(process) for process in tree_before)
+        or held_after != held_before
+    ):
+        raise StartError("Source-1571 incumbent process tree or rollout descriptors changed during authentication.")
+    return matches[0]
+
+
+def rotation_snapshot_sha256(args: Args, pane: Pane, task: TaskBinding, old_session_id: str, old_rollout: Source1571Rollout | None, owner: Path, todo_sha256: str) -> str:
     """Hash every immutable pre-rotation identity and custody assertion."""
 
     fields = (
@@ -921,6 +1097,7 @@ def rotation_snapshot_sha256(args: Args, pane: Pane, task: TaskBinding, old_sess
         str(pane.pane_pid),
         pane.command,
         old_session_id,
+        *(old_rollout_fields(old_rollout)),
         *args.protected_targets,
         owner.relative_to(args.root.resolve()).as_posix(),
         str(args.audit_output),
@@ -930,7 +1107,27 @@ def rotation_snapshot_sha256(args: Args, pane: Pane, task: TaskBinding, old_sess
     return hashlib.sha256("\0".join(fields).encode()).hexdigest()
 
 
-def capture_rotation_snapshot(args: Args, pane: Pane, task: TaskBinding) -> RotationSnapshot:
+def old_rollout_fields(evidence: Source1571Rollout | None) -> tuple[str, ...]:
+    """Return stable hash fields for optional process-held incumbent proof."""
+
+    if evidence is None:
+        # Preserve the historical rotation snapshot digest when the incumbent
+        # UUID came from the normal status-query path.
+        return ()
+    return (
+        "process-held-rollout",
+        str(evidence.path),
+        str(evidence.device),
+        str(evidence.inode),
+        str(evidence.holder_pid),
+        str(evidence.holder_start_ticks),
+        str(evidence.descriptor),
+        evidence.session_meta_sha256,
+        evidence.session_id,
+    )
+
+
+def capture_rotation_snapshot(args: Args, pane: Pane, task: TaskBinding, authority: Source1206Authority | None = None) -> RotationSnapshot:
     """Capture the old UUID once and bind it to stable pane and custody state."""
 
     require_restartable_codex(pane)
@@ -943,6 +1140,10 @@ def capture_rotation_snapshot(args: Args, pane: Pane, task: TaskBinding) -> Rota
     )
     if not old_session_id:
         old_session_id = query_exact_status_session_id(pane, 240, min(10.0, args.startup_timeout_s))
+    old_rollout = None
+    if not old_session_id and authority is not None and authority.source_name == "Source-1571":
+        old_rollout = source1571_process_held_session(pane)
+        old_session_id = old_rollout.session_id
     if args.assert_legacy_missing_session_id:
         if old_session_id:
             raise StartError("legacy missing-session assertion is false because the old worker UUID is recoverable; the pane was not replaced.")
@@ -963,11 +1164,12 @@ def capture_rotation_snapshot(args: Args, pane: Pane, task: TaskBinding) -> Rota
         current,
         current_task,
         old_session_id,
+        old_rollout,
         owner,
         args.protected_targets,
         audit_path,
         todo_sha256,
-        rotation_snapshot_sha256(args, current, current_task, old_session_id, owner, todo_sha256),
+        rotation_snapshot_sha256(args, current, current_task, old_session_id, old_rollout, owner, todo_sha256),
     )
 
 
@@ -997,7 +1199,8 @@ def verify_rotation_snapshot(args: Args, expected: RotationSnapshot, *, replacem
         or args.protected_targets != expected.protected_targets
         or args.audit_output != expected.audit_path
         or hashlib.sha256((args.root / "TODO.md").read_bytes()).hexdigest() != expected.todo_sha256
-        or rotation_snapshot_sha256(args, expected.pane, current_task, expected.old_session_id, owner, expected.todo_sha256) != expected.sha256
+        or (replacement is None and expected.old_rollout is not None and source1571_process_held_session(current) != expected.old_rollout)
+        or rotation_snapshot_sha256(args, expected.pane, current_task, expected.old_session_id, expected.old_rollout, owner, expected.todo_sha256) != expected.sha256
     ):
         raise StartError("task, ordered queue, manager, target, protected set, audit, or sole ownership drifted from the atomic rotation snapshot.")
     return current
@@ -2872,7 +3075,7 @@ def start(args: Args) -> str:
                     raise StartError("live PCODX state changed during session capture; the pane was not replaced.")
                 effective_args = replace(args, session_id=session_id)
         if args.rotate_worker:
-            rotation_snapshot = capture_rotation_snapshot(args, pane, task_binding)
+            rotation_snapshot = capture_rotation_snapshot(args, pane, task_binding, source1206_authority)
             effective_args = replace(args, prompt_file=path, session_id="")
         text = prompt_text(effective_args, False if args.rotate_worker else task_binding.is_manager)
         prompt_path: Path | None = None

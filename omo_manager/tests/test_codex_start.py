@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import stat
 import subprocess
@@ -28,6 +29,8 @@ from omo_manager.omo_codex_start import (
     RECOVERY_EVENT_DIRNAME,
     RECOVERY_RECEIPT_DIRNAME,
     StartError,
+    Source1206Authority,
+    Source1571Rollout,
     TaskBinding,
     capture_rotation_snapshot,
     choose_resume_cwd_prompt,
@@ -62,6 +65,7 @@ from omo_manager.omo_codex_start import (
     respawn_codex,
     skip_codex_update_prompt,
     start,
+    source1571_process_held_session,
     stop_unverified_replacement,
     task_path,
     validate_task,
@@ -1400,6 +1404,59 @@ class CodexStartTests(unittest.TestCase):
             self.assertRaisesRegex(StartError, "did not stop"),
         ):
             stop_unverified_replacement(replacement, 1.0)
+
+    def test_source1571_authenticates_one_process_held_root_rollout(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            session_root = root / "sessions"
+            session_root.mkdir()
+            rollout = session_root / f"rollout-test-{self.SESSION_ID}.jsonl"
+            metadata = {
+                "ordinal": 0,
+                "type": "session_meta",
+                "payload": {
+                    "id": self.SESSION_ID,
+                    "session_id": self.SESSION_ID,
+                    "cwd": str(root),
+                    "originator": "codex-tui",
+                    "source": "cli",
+                    "thread_source": "user",
+                },
+            }
+            rollout.write_text(json.dumps(metadata, separators=(",", ":")) + "\n", encoding="utf-8")
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root, os.getpid())
+            with rollout.open("ab") as held, patch("omo_manager.omo_codex_start.SOURCE1571_SESSION_ROOT", session_root), patch("omo_manager.omo_codex_start.verify_same_process"):
+                evidence = source1571_process_held_session(pane)
+                self.assertEqual(self.SESSION_ID, evidence.session_id)
+                self.assertEqual(rollout, evidence.path)
+                second = session_root / "rollout-test-119f670b-6a2f-7463-b9be-9aa6ff0cec43.jsonl"
+                second_metadata = json.loads(json.dumps(metadata))
+                second_metadata["payload"]["id"] = "119f670b-6a2f-7463-b9be-9aa6ff0cec43"
+                second_metadata["payload"]["session_id"] = "119f670b-6a2f-7463-b9be-9aa6ff0cec43"
+                second.write_text(json.dumps(second_metadata, separators=(",", ":")) + "\n", encoding="utf-8")
+                with second.open("ab"), self.assertRaisesRegex(StartError, "exactly one root"):
+                    source1571_process_held_session(pane)
+                self.assertFalse(held.closed)
+
+    def test_source1571_rotation_snapshot_falls_back_to_process_held_rollout(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root, 4242)
+            args = self.rotation_args(root)
+            task = validate_task(args, pane, verify_target=False)
+            evidence = Source1571Rollout(root / "rollout.jsonl", 1, 2, 4243, 100, 9, "a" * 64, self.SESSION_ID)
+            authority = Source1206Authority(root / "source1571.txt", (3, 9), 1, 2, 3, 4, "b" * 64, "Source-1571", pane.target, pane.pane_id, pane.window_id, pane.pane_pid)
+            with (
+                patch("omo_manager.omo_codex_start.require_restartable_codex"),
+                patch("omo_manager.omo_codex_start.query_status_session_id", return_value=("", "")),
+                patch("omo_manager.omo_codex_start.query_exact_status_session_id", return_value=""),
+                patch("omo_manager.omo_codex_start.source1571_process_held_session", return_value=evidence),
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+            ):
+                snapshot = capture_rotation_snapshot(args, pane, task, authority)
+            self.assertEqual(self.SESSION_ID, snapshot.old_session_id)
+            self.assertEqual(evidence, snapshot.old_rollout)
 
     def test_status_or_checkpoint_fault_stops_observed_replacement(self) -> None:
         for fault in ("status", "checkpoint", "unsupported"):
