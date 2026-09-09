@@ -178,6 +178,9 @@ SOURCE1485_PACKET_KEYS = PACKET_KEYS | {
     "original_manager_task",
     "original_manager_target",
 }
+SOURCE1485_INPUT_COUNT = 14
+SOURCE1485_MANAGER_INPUT_INDEX = 11
+SOURCE1485_ROOT_AUDIT_INPUT_INDEX = 12
 AUDIT_KEYS = {
     "schema",
     "operation",
@@ -1756,6 +1759,49 @@ def authorize_prepared_helper_recovery(
     return True
 
 
+def validate_todo_recovery_execution_paths(
+    packet: dict[str, object],
+    recovery: dict[str, object],
+    raw_inputs: list[object],
+    *,
+    packet_path: Path,
+    review_path: Path,
+    prepared_path: Path,
+    complete_path: Path,
+    recovery_path: Path,
+    recovery_review_path: Path,
+    prior_controls: set[Path],
+) -> None:
+    """Allow only exact manager/root-audit self-bindings among recovery paths."""
+
+    manager = Path(str(recovery["current_manager_task"])).resolve(strict=True)
+    root_audit = Path(str(recovery["source1485_root_audit"])).resolve(strict=True)
+    identities = [file_identity_from(object_map(item, "disposition packet input").get("file"), "disposition packet input") for item in raw_inputs]
+    manager_matches = [identity for identity in identities if Path(identity.path) == manager]
+    root_audit_matches = [identity for identity in identities if Path(identity.path) == root_audit]
+    envelopes = {packet_path, review_path, prepared_path, complete_path, recovery_path, recovery_review_path}
+    overlap_invalid = bool({manager, root_audit} & (envelopes | prior_controls))
+    if packet.get("schema") == SOURCE1485_SCHEMA:
+        packet_manager = Path(str(packet["manager_task"])).resolve(strict=True)
+        packet_root_audit = Path(str(packet["source1485_root_audit"])).resolve(strict=True)
+        overlap_invalid = overlap_invalid or (
+            len(identities) != SOURCE1485_INPUT_COUNT
+            or manager != packet_manager
+            or root_audit != packet_root_audit
+            or manager == root_audit
+            or len(manager_matches) != 1
+            or manager_matches[0] != identities[SOURCE1485_MANAGER_INPUT_INDEX]
+            or manager_matches[0].sha256 != packet.get("manager_task_sha256")
+            or len(root_audit_matches) != 1
+            or root_audit_matches[0] != identities[SOURCE1485_ROOT_AUDIT_INPUT_INDEX]
+            or root_audit_matches[0].sha256 != packet.get("source1485_root_audit_sha256")
+        )
+    else:
+        overlap_invalid = overlap_invalid or bool(manager_matches or root_audit_matches)
+    if overlap_invalid:
+        raise TaskFrontmatterError("TODO recovery paths overlap immutable evidence or disposition outputs.")
+
+
 def execute(args: argparse.Namespace) -> None:
     packet_path = args.packet.resolve(strict=False)
     packet = validate_packet(read_bound(packet_path, args.packet_sha256, "input disposition packet", private=True), args.packet_sha256)
@@ -1797,11 +1843,18 @@ def execute(args: argparse.Namespace) -> None:
             read_bound(recovery_path, args.todo_recovery_packet_sha256, "TODO recovery packet", private=True),
             "TODO recovery packet",
         )
-        if {
-            Path(str(todo_recovery["source1485_root_audit"])).resolve(strict=True),
-            Path(str(todo_recovery["current_manager_task"])).resolve(strict=True),
-        } & ({prepared_path, complete_path, recovery_path, recovery_review_path} | reserved):
-            raise TaskFrontmatterError("TODO recovery paths overlap immutable evidence or disposition outputs.")
+        validate_todo_recovery_execution_paths(
+            packet,
+            todo_recovery,
+            raw_inputs,
+            packet_path=packet_path,
+            review_path=review_path,
+            prepared_path=prepared_path,
+            complete_path=complete_path,
+            recovery_path=recovery_path,
+            recovery_review_path=recovery_review_path,
+            prior_controls=prior_close_control_paths(prior_complete, prior_prepared),
+        )
 
     with (
         tmux_input_lock(predecessor.target),

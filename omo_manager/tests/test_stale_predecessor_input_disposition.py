@@ -54,6 +54,50 @@ def disposition_packet(tmp: Path) -> dict[str, object]:
 
 
 class StalePredecessorInputDispositionTests(unittest.TestCase):
+    def recovery_execution_paths_fixture(self, tmp: Path) -> tuple[dict[str, object], dict[str, object], list[object], dict[str, Path]]:
+        paths = {name: tmp / name for name in ("manager", "root-audit", "packet", "review", "prepared", "complete", "recovery", "recovery-review")}
+        paths.update({f"input-{index}": tmp / f"input-{index}" for index in range(subject.SOURCE1485_INPUT_COUNT)})
+        for name, path in paths.items():
+            path.write_text(f"{name}\n")
+        paths["root-audit"].chmod(0o600)
+        manager_sha256 = subject.sha256(paths["manager"].read_bytes())
+        root_audit_sha256 = subject.sha256(paths["root-audit"].read_bytes())
+        packet: dict[str, object] = {
+            "schema": subject.SOURCE1485_SCHEMA,
+            "manager_task": str(paths["manager"]),
+            "manager_task_sha256": manager_sha256,
+            "source1485_root_audit": str(paths["root-audit"]),
+            "source1485_root_audit_sha256": root_audit_sha256,
+        }
+        recovery: dict[str, object] = {
+            "current_manager_task": str(paths["manager"]),
+            "source1485_root_audit": str(paths["root-audit"]),
+        }
+        raw_inputs: list[object] = [subject.file_input(paths[f"input-{index}"], f"input {index}") for index in range(subject.SOURCE1485_INPUT_COUNT)]
+        raw_inputs[subject.SOURCE1485_MANAGER_INPUT_INDEX] = subject.file_input(paths["manager"], "manager task")
+        raw_inputs[subject.SOURCE1485_ROOT_AUDIT_INPUT_INDEX] = subject.file_input(paths["root-audit"], "Source-1485 root audit", private=True)
+        return packet, recovery, raw_inputs, paths
+
+    def validate_recovery_execution_paths(
+        self,
+        packet: dict[str, object],
+        recovery: dict[str, object],
+        raw_inputs: list[object],
+        paths: dict[str, Path],
+    ) -> None:
+        subject.validate_todo_recovery_execution_paths(
+            packet,
+            recovery,
+            raw_inputs,
+            packet_path=paths["packet"],
+            review_path=paths["review"],
+            prepared_path=paths["prepared"],
+            complete_path=paths["complete"],
+            recovery_path=paths["recovery"],
+            recovery_review_path=paths["recovery-review"],
+            prior_controls=set(),
+        )
+
     def source1485_recovery_inputs_fixture(self, tmp: Path) -> tuple[dict[str, object], list[object], list[dict[str, object]]]:
         paths = [tmp / f"input-{index}" for index in range(14)]
         for index, path in enumerate(paths):
@@ -332,6 +376,69 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             ):
                 subject.rebind_todo_recovery_input(raw_inputs, expected_inputs, str(packet[key]), packet[digest_key], label)
             self.assertEqual(raw_inputs, expected_inputs)
+
+    def test_execute_allows_exact_source1485_manager_and_root_audit_input_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, raw_inputs, paths = self.recovery_execution_paths_fixture(Path(directory))
+            self.validate_recovery_execution_paths(packet, recovery, raw_inputs, paths)
+
+    def test_execute_rejects_manager_overlap_with_disposition_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, raw_inputs, paths = self.recovery_execution_paths_fixture(Path(directory))
+            paths["prepared"] = paths["manager"]
+            with self.assertRaisesRegex(TaskFrontmatterError, "paths overlap"):
+                self.validate_recovery_execution_paths(packet, recovery, raw_inputs, paths)
+
+    def test_execute_rejects_manager_overlap_with_different_evidence_role(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, raw_inputs, paths = self.recovery_execution_paths_fixture(Path(directory))
+            paths["packet"] = paths["manager"]
+            with self.assertRaisesRegex(TaskFrontmatterError, "paths overlap"):
+                self.validate_recovery_execution_paths(packet, recovery, raw_inputs, paths)
+
+    def test_execute_rejects_missing_duplicate_or_mismatched_manager_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, raw_inputs, paths = self.recovery_execution_paths_fixture(Path(directory))
+            manager_index = subject.SOURCE1485_MANAGER_INPUT_INDEX
+            for changed in (
+                [*raw_inputs[:manager_index], *raw_inputs[manager_index + 1 :]],
+                [*raw_inputs, raw_inputs[manager_index]],
+            ):
+                with self.subTest(count=len(changed)), self.assertRaisesRegex(TaskFrontmatterError, "paths overlap"):
+                    self.validate_recovery_execution_paths(packet, recovery, changed, paths)
+            packet["manager_task_sha256"] = "f" * 64
+            with self.assertRaisesRegex(TaskFrontmatterError, "paths overlap"):
+                self.validate_recovery_execution_paths(packet, recovery, raw_inputs, paths)
+
+    def test_execute_rejects_manager_or_root_audit_in_a_different_input_role(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, raw_inputs, paths = self.recovery_execution_paths_fixture(Path(directory))
+            for role_index in (subject.SOURCE1485_MANAGER_INPUT_INDEX, subject.SOURCE1485_ROOT_AUDIT_INPUT_INDEX):
+                changed = list(raw_inputs)
+                changed[0], changed[role_index] = changed[role_index], changed[0]
+                with self.subTest(role_index=role_index), self.assertRaisesRegex(TaskFrontmatterError, "paths overlap"):
+                    self.validate_recovery_execution_paths(packet, recovery, changed, paths)
+
+    def test_execute_rejects_missing_duplicate_or_mismatched_root_audit_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, raw_inputs, paths = self.recovery_execution_paths_fixture(Path(directory))
+            audit_index = subject.SOURCE1485_ROOT_AUDIT_INPUT_INDEX
+            for changed in (
+                [*raw_inputs[:audit_index], *raw_inputs[audit_index + 1 :]],
+                [*raw_inputs, raw_inputs[audit_index]],
+            ):
+                with self.subTest(count=len(changed)), self.assertRaisesRegex(TaskFrontmatterError, "paths overlap"):
+                    self.validate_recovery_execution_paths(packet, recovery, changed, paths)
+            packet["source1485_root_audit_sha256"] = "f" * 64
+            with self.assertRaisesRegex(TaskFrontmatterError, "paths overlap"):
+                self.validate_recovery_execution_paths(packet, recovery, raw_inputs, paths)
+
+    def test_execute_keeps_root_audit_output_overlap_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, raw_inputs, paths = self.recovery_execution_paths_fixture(Path(directory))
+            paths["recovery-review"] = paths["root-audit"]
+            with self.assertRaisesRegex(TaskFrontmatterError, "paths overlap"):
+                self.validate_recovery_execution_paths(packet, recovery, raw_inputs, paths)
 
     def test_source1485_todo_recovery_rejects_swapped_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
