@@ -651,6 +651,56 @@ with exclusive_watcher_root(root):
             self.assertEqual("wl:1", calls[0][calls[0].index("--manager-target") + 1])
             self.assertIn('<snippet file="manager_mail/123.txt:1-3">', calls[0][1])
 
+    def test_linked_email_for_manager_is_not_redispatched_to_worker(self) -> None:
+        from omo_manager.omo_pending_watch import scan_once
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "1526.txt"
+            mail.parent.mkdir()
+            mail.write_text(
+                "Subject: Re: DeepWiki replacement evidence is incomplete\n\n"
+                "For a manager, close this agent. I don't think they need to do any task at all.\n",
+                encoding="utf-8",
+            )
+            path = root / "worker.md"
+            path.write_text(
+                f"{task_frontmatter(runat='config:4', managerat='config:1')}\n"
+                "(pending)\n"
+                "(record and delegate manager_mail/1526.txt)\n",
+                encoding="utf-8",
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root,
+                manager_url="",
+                state=root / "seen.tsv",
+                interval_s=1.0,
+                full_scan_interval_s=1.0,
+                idle_status_interval_s=1800.0,
+                status_script=Path("/bin/false"),
+                once=True,
+                dry_run=False,
+                manager_target="main:0.0",
+                reminder_random=lambda: 0.0,
+                reminder_choice=lambda reminders: reminders[0],
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(scan_once(args, {}, [path]))
+            text = calls[0][1]
+            self.assertEqual("config:1", calls[0][calls[0].index("--manager-target") + 1])
+            self.assertIn("Handle and acknowledge this request yourself", text)
+            self.assertIn("do not dispatch it to the task's worker", text)
+            self.assertNotIn("fully dispatch the task", text)
+            self.assertNotIn("responsible agent must immediately email the Human", text)
+            self.assertNotIn("delegate work", text)
+            self.assertNotIn("hand off each task", text)
+
     def test_for_manager_marker_ignores_case_and_punctuation(self) -> None:
         from omo_manager.omo_pending_watch import text_marks_for_manager
 

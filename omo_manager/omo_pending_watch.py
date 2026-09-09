@@ -2745,12 +2745,17 @@ def join_without_outer_blank_lines(lines: Sequence[str]) -> str:
     return "\n".join(lines[start:end])
 
 
-def manager_pending_instruction(marker: Marker) -> str:
+def manager_pending_instruction(marker: Marker, *, manager_only: bool = False) -> str:
     if marker.origin == "human":
+        handling = (
+            "Handle and acknowledge this request yourself; do not dispatch it to the task's worker:"
+            if manager_only
+            else "Then fully dispatch the task; the responsible agent must immediately email the Human to acknowledge acceptance:"
+        )
         return (
             f"{PENDING_CONSUMPTION_INSTRUCTION}\n"
             "Record every open item with human provenance and clear `(pending)` using `omo_record_pending.py`. "
-            f"Source: `{marker.file}:{marker.line}`. Then fully dispatch the task; the responsible agent must immediately email the Human to acknowledge acceptance:"
+            f"Source: `{marker.file}:{marker.line}`. {handling}"
         )
     return (
         f"{PENDING_CONSUMPTION_INSTRUCTION}\n"
@@ -2890,8 +2895,10 @@ def direct_message_text(marker: Marker, attachments: Sequence[SourceAttachment])
     return "\n\n".join(part for part in (excerpt, "\n".join(pointers)) if part)
 
 
-def marker_delivery_text(marker: Marker, attachments: Sequence[SourceAttachment] = (), prefix: str = "") -> str:
-    parts = [manager_pending_instruction(marker)]
+def marker_delivery_text(
+    marker: Marker, attachments: Sequence[SourceAttachment] = (), prefix: str = "", *, manager_only: bool = False
+) -> str:
+    parts = [manager_pending_instruction(marker, manager_only=manager_only)]
     if prefix:
         parts.append(prefix)
     parts.extend(marker_snippet_parts(marker, attachments))
@@ -3819,12 +3826,12 @@ def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, a
         text = (
             manager_delegation_delivery_text(args, marker, attachments)
             if marker.origin == "agent"
-            else marker_delivery_text(marker, attachments)
+            else marker_delivery_text(marker, attachments, manager_only=for_manager)
         )
         status = push_marker_text_or_escalate(
             args,
             marker,
-            with_manager_policy_reminder(args, text, reminders),
+            text if for_manager else with_manager_policy_reminder(args, text, reminders),
             manager_target,
             manager_pending_delivery_event(error_key, now_s),
         )
@@ -3836,14 +3843,14 @@ def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, a
     text = (
         manager_delegation_delivery_text(args, marker, attachments)
         if marker.origin == "agent"
-        else marker_delivery_text(marker, attachments)
+        else marker_delivery_text(marker, attachments, manager_only=for_manager)
     )
     if repeated_manager_delivery_is_busy(args, seen, marker_key, manager_target, now_s):
         return 1
     status = push_marker_text_or_escalate(
         args,
         marker,
-        with_manager_policy_reminder(args, text, reminders),
+        text if for_manager else with_manager_policy_reminder(args, text, reminders),
         manager_target,
         manager_pending_delivery_event(marker_key, now_s),
     )
