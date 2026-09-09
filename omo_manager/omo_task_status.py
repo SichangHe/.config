@@ -338,8 +338,8 @@ shutdown.""",
     _ = parser.add_argument("--describe-done-live-no-mail", action="store_true", help="Authenticate and print current evidence for one exact close-done-live-no-mail invocation without closing the pane.")
     _ = parser.add_argument("--missing-target", default="", help="Exact absent target required with --reconcile-missing-target or --close-missing-target.")
     _ = parser.add_argument("--reconcile-long-running-human-index", action="store_true", help="Move one unchanged long_running task with exact human blocker from TODO current to human pending without changing task or pane state.")
-    _ = parser.add_argument("--reconcile-blocked-index", action="store_true", help="Move one digest-bound v1 blocked worker with an open queue from TODO previous or low priority to human pending without changing task or pane state.")
-    _ = parser.add_argument("--reconcile-dependency-blocked-current", action="store_true", help="Move one digest-bound v1 task blocked on one active task from TODO human pending to current without changing task or pane state.")
+    _ = parser.add_argument("--reconcile-blocked-index", action="store_true", help="Move one digest-bound v1 blocked worker with an open queue from TODO previous, low priority, or current when blocked exactly on human, to human pending without changing task or pane state.")
+    _ = parser.add_argument("--reconcile-dependency-blocked-current", action="store_true", help="Move one digest-bound v1 task blocked on an active or queued Human-blocked task from TODO human pending to current without changing task or pane state.")
     _ = parser.add_argument("--session-id", default="", help="Session id captured by the prior close, if available.")
     _ = parser.add_argument("--replacement-task", type=Path, help="Active replacement task file; required with --finish-replaced-done.")
     _ = parser.add_argument("--stale-target", help="Exact stopped target recorded by the stale task; required with --finish-replaced-done.")
@@ -4497,7 +4497,10 @@ def reconcile_previous_blocked_index(args: Args, path: Path, text: str, before: 
         raise TaskFrontmatterError("TODO.md is not a regular file.")
     if path == todo:
         raise TaskFrontmatterError("blocked index reconciliation requires a task file distinct from TODO.md.")
-    with ExitStack() as locks:
+    input_metadata = parse_task_metadata(text, args.root)
+    if input_metadata is None or TARGET_RE.fullmatch(input_metadata.runat) is None:
+        raise TaskFrontmatterError("blocked index reconciliation requires valid source metadata and target.")
+    with root_membership_lock(args.root), task_target_lock(args.root, input_metadata.runat), ExitStack() as locks:
         for locked_path in sorted({path, todo}, key=lambda candidate: str(candidate)):
             locks.enter_context(task_file_lock(locked_path))
         current_before = path.stat()
@@ -4532,9 +4535,13 @@ def reconcile_previous_blocked_index(args: Args, path: Path, text: str, before: 
         low_priority_headers_valid = headers["low priority"] <= 1 and (task_sections != ["low priority"] or headers["low priority"] == 1)
         if not base_headers_valid or not low_priority_headers_valid or invalid_headers:
             raise TaskFrontmatterError("blocked index reconciliation requires one canonical current, human pending, and previous TODO section, plus one canonical low priority section when it contains the source row.")
-        updated_todo = reconcile_todo_text(args.root, path, todo_text, metadata.runat, "human pending", ("previous", "low priority"))
+        if task_sections == ["current"] and metadata.blocked_on != "human":
+            raise TaskFrontmatterError("blocked index reconciliation moves a current row only when the task is blocked exactly on human.")
+        if task_sections == ["current"] and authoritative_active_target_task_paths(args.root, metadata.runat) != (path,):
+            raise TaskFrontmatterError("blocked index reconciliation requires exactly one active task owner for a current source row.")
+        updated_todo = reconcile_todo_text(args.root, path, todo_text, metadata.runat, "human pending", ("current", "previous", "low priority"))
         if updated_todo == todo_text:
-            raise TaskFrontmatterError("blocked index reconciliation requires the sole TODO row to move from previous or low priority to human pending.")
+            raise TaskFrontmatterError("blocked index reconciliation requires the sole TODO row to move from current, previous, or low priority to human pending.")
         replace_if_unchanged_locked(todo, updated_todo, todo_before)
 
 
@@ -4556,6 +4563,7 @@ def exact_dependency_todo_rows(
     source_target: str,
     dependency: Path,
     dependency_target: str,
+    dependency_section: str,
     todo_text: str,
 ) -> str:
     """Bind only the two relevant TODO rows while tolerating unrelated row changes."""
@@ -4584,13 +4592,14 @@ def exact_dependency_todo_rows(
         raise TaskFrontmatterError("dependency-blocked current reconciliation requires one canonical current and human pending TODO section.")
     if source_rows not in ([('human pending', source_row)], [('current', source_row)]):
         raise TaskFrontmatterError("dependency-blocked current reconciliation requires one exact source row in human pending or current.")
-    if dependency_rows != [("current", dependency_row)]:
-        raise TaskFrontmatterError("dependency-blocked current reconciliation requires one exact active dependency row in current.")
+    if dependency_rows != [(dependency_section, dependency_row)]:
+        raise TaskFrontmatterError(f"dependency-blocked current reconciliation requires one exact dependency row in {dependency_section}.")
     return source_rows[0][0]
 
 
+# 🧑 "Continue until each item is complete or cancelled."
 def reconcile_dependency_blocked_current(args: Args, path: Path, text: str, before: os.stat_result) -> None:
-    """Move one task blocked on an active task from `human pending` to `current`."""
+    """Move one task blocked on an active or Human-blocked dependency to `current`."""
 
     source_metadata = parse_task_metadata(text, args.root)
     if source_metadata is None:
@@ -4631,20 +4640,33 @@ def reconcile_dependency_blocked_current(args: Args, path: Path, text: str, befo
         if (
             current_metadata.version == V2_VERSION
             or current_metadata.status != "blocked"
-            or not current_metadata.pending_task_items
             or has_pending_marker(current_text)
             or current_metadata.blocked_on != relative_task_ref(args.root, dependency)
             or TARGET_RE.fullmatch(current_metadata.runat) is None
             or current_metadata.runat.partition(":")[0].startswith("h")
         ):
-            raise TaskFrontmatterError("source must be one queued v1 non-human task blocked exactly on the asserted dependency.")
+            raise TaskFrontmatterError("source must be one v1 non-human task blocked exactly on the asserted dependency, without a live pending marker.")
+        dependency_is_active = current_dependency_metadata.status in {"running", "long_running"}
+        dependency_is_human_blocked = (
+            current_dependency_metadata.status == "blocked"
+            and not current_dependency_metadata.is_manager
+            and current_dependency_metadata.blocked_on == "human"
+            and bool(current_dependency_metadata.pending_task_items)
+            and not has_pending_marker(current_dependency_text)
+        )
+        source_matches_dependency_kind = (
+            (dependency_is_active and bool(current_metadata.pending_task_items))
+            or (dependency_is_human_blocked and not current_metadata.is_manager and not current_metadata.pending_task_items)
+        )
         if (
             current_dependency_metadata.version == V2_VERSION
-            or current_dependency_metadata.status not in {"running", "long_running"}
+            or not (dependency_is_active or dependency_is_human_blocked)
             or TARGET_RE.fullmatch(current_dependency_metadata.runat) is None
             or current_dependency_metadata.runat.partition(":")[0].startswith("h")
         ):
-            raise TaskFrontmatterError("dependency must be one active v1 task with a non-human owner target.")
+            raise TaskFrontmatterError("dependency must be one active v1 task or one queued v1 task blocked exactly on human, with a non-human owner target.")
+        if not source_matches_dependency_kind:
+            raise TaskFrontmatterError("source must retain a nonempty queue behind an active dependency, or be an empty-queue non-manager behind a Human-blocked dependency.")
         if authoritative_active_target_task_paths(args.root, current_metadata.runat) != (path,):
             raise TaskFrontmatterError("source target does not have exactly one active task owner.")
         if authoritative_active_target_task_paths(args.root, current_dependency_metadata.runat) != (dependency,):
@@ -4657,6 +4679,7 @@ def reconcile_dependency_blocked_current(args: Args, path: Path, text: str, befo
             current_metadata.runat,
             dependency,
             current_dependency_metadata.runat,
+            "current" if dependency_is_active else "human pending",
             todo_text,
         )
         if source_section == "current":
