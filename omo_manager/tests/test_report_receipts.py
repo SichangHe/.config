@@ -331,7 +331,11 @@ def root_retained_no_mail_fixture(
     close_authority: bool = True,
     acknowledgment_after_removal: bool = False,
     no_mail_task_contract: str | None = None,
+    manager_pending_done: bool = False,
+    combined_describe: bool = False,
 ) -> tuple[ReportFixture, Path, Path, Path, str]:
+    if human_email and manager_pending_done:
+        raise AssertionError("terminal manager-pending fixtures are no-mail only")
     case, manager, _owner = active_manager_fixture(tmp_path)
     task = case.root / "worker.md"
     pending_item = (
@@ -383,7 +387,7 @@ def root_retained_no_mail_fixture(
     if pending.returncode != 0 or run_manager_watcher_once(case, manager).returncode != 0:
         raise AssertionError(pending.stderr or "manager watcher did not consume the report")
     report_result = pending
-    if not human_email:
+    if not human_email and not manager_pending_done:
         report_result = run_report_from(case, draft, status="done")
         if report_result.returncode != 0 or json.loads(report_result.stdout).get("accepted") is not True:
             raise AssertionError(report_result.stderr or report_result.stdout)
@@ -391,6 +395,12 @@ def root_retained_no_mail_fixture(
     replay_id = str(transfer["queue_item"]["replay_id"])
     envelope = Path(str(transfer["queue_item"]["pointer"]).rsplit(" ", 1)[1][:-1])
     removal_evidence = f"Completed the classification; private report replay {replay_id} was acknowledged."
+    if manager_pending_done:
+        report_sha256 = str(json.loads(report_result.stdout)["input"]["sha256"])
+        removal_evidence = (
+            f"Completed the classification; private report SHA-256 {report_sha256} was routed as "
+            f"replay {replay_id} and the manager confirmed the one-shot work complete."
+        )
     completed = report_time_task.replace("status: running", "status: done", 1).replace(
         f"pending_task_items:\n  - {pending_rendering}\n",
         "pending_task_items: []\n",
@@ -412,6 +422,21 @@ def root_retained_no_mail_fixture(
     worker_dir = tmp_path / "worker"
     worker_dir.mkdir()
     report_command = f"omo_report.sh --status {report_status} --message-file {draft}"
+    report_output = report_result.stdout
+    if combined_describe:
+        acceptance = json.loads(report_result.stdout)
+        description = {
+            "input": acceptance["input"],
+            "receipt": {"replay_id": acceptance["replay_id"]},
+            "routing": acceptance["routing"],
+            "schema": "omo-report-description/v1",
+            "status": report_status,
+        }
+        report_command = (
+            f"omo_report.sh --describe --status {report_status} --message-file {draft} "
+            f"&& timeout 30s omo_report.sh --status {report_status} --message-file {draft}"
+        )
+        report_output = (canonical_json(description) + canonical_json(acceptance)).decode()
     if human_email:
         acknowledgment_command = "omo_codex_status.py vl:2 --lines 24"
         acknowledgment_output = (
@@ -489,7 +514,7 @@ def root_retained_no_mail_fixture(
             },
         ]
 
-    operation_records = command_records(1, report_call_id, report_command, report_result.stdout)
+    operation_records = command_records(1, report_call_id, report_command, report_output)
     if human_email:
         acknowledgment_records = command_records(
             4 if not acknowledgment_after_removal else 7,
@@ -509,6 +534,48 @@ def root_retained_no_mail_fixture(
             else acknowledgment_records + removal_records
         )
         terminal_ordinal = 10
+    elif manager_pending_done:
+        manager_directive = (
+            '<agent_message from="vl:2">\n'
+            "Your one-shot evaluation is complete. Remove your exact evaluation pending item "
+            "using `omo_pending.py remove --help`, citing your immutable report, with no Human email.\n"
+            "</agent_message>"
+        )
+        operation_records.extend(
+            [
+                {
+                    "ordinal": 4,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": manager_directive}],
+                        "internal_chat_message_metadata_passthrough": {"turn_id": turn_id},
+                    },
+                },
+                {
+                    "ordinal": 5,
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "item_completed",
+                        "thread_id": session_id,
+                        "turn_id": turn_id,
+                        "item": {
+                            "type": "UserMessage",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": manager_directive,
+                                    "text_elements": [],
+                                }
+                            ],
+                        },
+                    },
+                },
+            ]
+        )
+        operation_records.extend(command_records(6, removal_call_id, removal_command, removed_output))
+        terminal_ordinal = 9
     else:
         operation_records.extend(command_records(4, removal_call_id, removal_command, removed_output))
         terminal_ordinal = 7
@@ -4211,6 +4278,121 @@ return 75
             self.assertEqual(0, validated.returncode, validated.stderr)
             self.assertEqual(attestation, json.loads(validated.stdout))
 
+    def test_archived_no_mail_custody_authenticates_manager_consumed_terminal_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, envelope, task, transcript, replay_id = root_retained_no_mail_fixture(
+                tmp_path,
+                manager_pending_done=True,
+                combined_describe=True,
+            )
+            archived = archive_root_retained_no_mail_task(case, task)
+            exported = tmp_path / "manager-consumed-terminal.json"
+
+            result = export_archived_report(
+                case,
+                envelope,
+                exported,
+                no_mail_transcript=transcript,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            attestation = json.loads(result.stdout)
+            binding = attestation["archive_custody"]["git_provenance"]["commitment_binding"]
+            terminal = binding["terminal_provenance"]["commitment_binding"]
+            self.assertEqual(str(archived), attestation["archive_custody"]["task"])
+            self.assertEqual(replay_id, attestation["replay_id"])
+            self.assertFalse(terminal["report_was_accepted"])
+            self.assertEqual("done", terminal["report_status"])
+            self.assertEqual("no-email", terminal["completion_mode"])
+            self.assertIn("manager_completion_directive_sha256", terminal)
+            self.assertIn("manager_completion_event_sha256", terminal)
+            validated = validate_export_from(case, exported)
+            self.assertEqual(0, validated.returncode, validated.stderr)
+            self.assertEqual(attestation, json.loads(validated.stdout))
+
+    def test_manager_consumed_terminal_report_rejects_directive_and_binding_tamper(self) -> None:
+        defects = (
+            "wrong manager",
+            "unpaired directive",
+            "mail permission missing",
+            "report digest",
+            "manager confirmation",
+            "description routing",
+        )
+        for defect in defects:
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                case, envelope, task, transcript, _replay_id = root_retained_no_mail_fixture(
+                    tmp_path,
+                    manager_pending_done=True,
+                    combined_describe=True,
+                )
+                records = [json.loads(line) for line in transcript.read_text(encoding="utf-8").splitlines()]
+                if defect == "wrong manager":
+                    for record in records[4:6]:
+                        payload = record["payload"]
+                        content = payload.get("content") or payload["item"]["content"]
+                        content[0]["text"] = content[0]["text"].replace(
+                            'from="vl:2"',
+                            'from="vl:9"',
+                        )
+                elif defect == "unpaired directive":
+                    records[5]["payload"]["item"]["content"][0]["text"] += " changed"
+                elif defect == "mail permission missing":
+                    for record in records[4:6]:
+                        payload = record["payload"]
+                        content = payload.get("content") or payload["item"]["content"]
+                        content[0]["text"] = content[0]["text"].replace(
+                            "with no Human email",
+                            "after a later decision",
+                        )
+                elif defect in {"report digest", "manager confirmation"}:
+                    acceptance = json.loads(records[2]["payload"]["item"]["stdout"].splitlines()[1])
+                    old = (
+                        acceptance["input"]["sha256"]
+                        if defect == "report digest"
+                        else "manager confirmed"
+                    )
+                    new = "0" * 64 if defect == "report digest" else "coordinator noted"
+                    task.write_text(
+                        task.read_text(encoding="utf-8").replace(old, new),
+                        encoding="utf-8",
+                    )
+                    for record in records[6:8]:
+                        payload = record["payload"]
+                        raw_input = payload.get("input")
+                        if isinstance(raw_input, str):
+                            payload["input"] = raw_input.replace(old, new)
+                        item = payload.get("item")
+                        command = item.get("command") if isinstance(item, dict) else None
+                        if isinstance(command, list):
+                            command[-1] = command[-1].replace(old, new)
+                else:
+                    event_item = records[2]["payload"]["item"]
+                    description_line, acceptance_line = event_item["stdout"].splitlines()
+                    description = json.loads(description_line)
+                    description["routing"] = {**description["routing"], "manager": "/changed.md"}
+                    changed = (canonical_json(description) + acceptance_line.encode() + b"\n").decode()
+                    for key in ("stdout", "aggregated_output", "formatted_output"):
+                        event_item[key] = changed
+                    records[3]["payload"]["output"][0]["text"] = changed
+                transcript.write_bytes(b"".join(canonical_json(record) for record in records))
+                archive_root_retained_no_mail_task(case, task)
+
+                result = export_archived_report(
+                    case,
+                    envelope,
+                    tmp_path / "rejected.json",
+                    no_mail_transcript=transcript,
+                )
+
+                self.assertEqual(2, result.returncode)
+                self.assertRegex(
+                    result.stderr,
+                    "manager completion directive|manager-consumption evidence|accepted report",
+                )
+
     def test_root_retained_no_mail_custody_composes_with_exact_archive_rename(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -4422,6 +4604,26 @@ return 75
             validated = validate_export_from(case, exported)
             self.assertEqual(0, validated.returncode, validated.stderr)
             self.assertEqual(attestation, json.loads(validated.stdout))
+
+    def test_root_retained_human_email_completion_rejects_combined_description(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, envelope, _task, transcript, _replay_id = root_retained_no_mail_fixture(
+                tmp_path,
+                human_email=True,
+                combined_describe=True,
+            )
+
+            result = export_archived_report(
+                case,
+                envelope,
+                tmp_path / "rejected.json",
+                no_mail_transcript=transcript,
+            )
+
+            self.assertEqual(2, result.returncode)
+            self.assertIn("one exact accepted report", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
 
     def test_root_retained_human_email_completion_requires_human_authority(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -37,7 +37,10 @@ omo_report.sh \
 This form requires one top-level Codex transcript to prove the private report, the matching queue removal, and the same-turn terminal completion. It reconstructs and verifies the committed report-time task from the final task and exact removal evidence. Two report/removal pairs are supported:
 
 - an acknowledged terminal `done` report followed by `--no-email`, with exactly one explicit no-Human-email contract and no Human-email command anywhere in the captured prefix;
+- an initially unacknowledged terminal `done` report followed by one same-turn manager completion directive and `--no-email`; the directive's paired Codex user-message records, exact manager sender, report digest and replay in the removal evidence, no-mail instruction, and ordering are all bound;
 - an initially unacknowledged `in-progress` report, its exact manager consumption acknowledgment, then the normal completion-email removal, with one Human-owned queue item, completion key, and Message-ID. The complete authoritative Human-instruction block must quote exact lines from a safe private `manager_mail` source whose digest is bound in the export.
+
+The terminal no-mail report execution may be the exact send alone or one canonical read-only `--describe` immediately chained to that same `done` send. For the chained form, the description and acceptance must be canonical, share status, input, routing, replay, and message file, and be the only two output records. The Human-email path accepts only the established single-send execution.
 
 An earlier unrelated queue removal in the same top-level session is ignored only when it cannot reconstruct the commitment-bound report-time task. Two removals that both reconstruct those bytes remain ambiguous and fail closed.
 
