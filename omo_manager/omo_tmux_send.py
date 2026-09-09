@@ -47,6 +47,7 @@ try:
         is_cursor_retained_submitted_composer,
         pane_has_exact_cursor_process,
         pane_has_exact_managed_agent_process,
+        process_terminal_identity,
         report_from_lines,
         status,
         tail,
@@ -80,6 +81,7 @@ except ModuleNotFoundError:
         is_cursor_retained_submitted_composer,
         pane_has_exact_cursor_process,
         pane_has_exact_managed_agent_process,
+        process_terminal_identity,
         report_from_lines,
         status,
         tail,
@@ -156,6 +158,13 @@ class Args:
     expected_pane_id: str = ""
     expected_pane_pid: int = 0
     expected_pane_command: str = ""
+    expected_foreground_pid: int = 0
+    expected_foreground_start_ticks: int = 0
+    expected_foreground_cmdline_sha256: str = ""
+    wrapped_agent_source: str = ""
+    wrapped_authority_reminder: bool = False
+    wrapped_allow_one_space_blank: bool = False
+    describe_existing_wrapped_file: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +185,22 @@ class CodexRuntimeBinding:
     pane_id: str
     pane_pid: int
     pane_command: str
+    foreground_pid: int = 0
+    foreground_start_ticks: int = 0
+    foreground_cmdline_sha256: str = ""
+
+
+@dataclass(frozen=True)
+class ForegroundProcessSnapshot:
+    pid: int
+    parent_pid: int
+    process_group: int
+    session: int
+    tty: int
+    foreground_group: int
+    start_ticks: int
+    cmdline_sha256: str
+    argv: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -184,6 +209,8 @@ class WrappedCodexCancelAuthorization:
     rendered_sha256: str
     rendered_trailing_blank_sha256: str
     runtime: CodexRuntimeBinding
+    rendering_source: str = ""
+    allow_one_space_blank: bool = False
 
 
 @dataclass(frozen=True)
@@ -313,6 +340,13 @@ class ParsedArgs(argparse.Namespace):
     expected_pane_id: str = ""
     expected_pane_pid: int = 0
     expected_pane_command: str = ""
+    expected_foreground_pid: int = 0
+    expected_foreground_start_ticks: int = 0
+    expected_foreground_cmdline_sha256: str = ""
+    wrapped_agent_source: str = ""
+    wrapped_authority_reminder: bool = False
+    wrapped_allow_one_space_blank: bool = False
+    describe_existing_wrapped_file: Path | None = None
     describe_partial_cursor: bool = False
     clear_partial_cursor_sha256: str = ""
     enter_count: int = 1
@@ -347,12 +381,23 @@ def parse_args(argv: list[str]) -> Args:
         type=Path,
         help="Cancel one hard-wrapped Codex composer only after source, rendering, and runtime authentication.",
     )
+    _ = parser.add_argument(
+        "--describe-existing-wrapped-file",
+        type=Path,
+        help="Read-only: authenticate one source-bound wrapped composer from complete tmux history.",
+    )
     _ = parser.add_argument("--cancel-existing-source-sha256", metavar="SHA256", help=argparse.SUPPRESS)
     _ = parser.add_argument("--cancel-existing-rendered-sha256", metavar="SHA256", help=argparse.SUPPRESS)
     _ = parser.add_argument("--cancel-existing-rendered-trailing-blank-sha256", metavar="SHA256", help=argparse.SUPPRESS)
     _ = parser.add_argument("--expected-pane-id", help=argparse.SUPPRESS)
     _ = parser.add_argument("--expected-pane-pid", type=int, default=0, help=argparse.SUPPRESS)
     _ = parser.add_argument("--expected-pane-command", help=argparse.SUPPRESS)
+    _ = parser.add_argument("--expected-foreground-pid", type=int, default=0, help=argparse.SUPPRESS)
+    _ = parser.add_argument("--expected-foreground-start-ticks", type=int, default=0, help=argparse.SUPPRESS)
+    _ = parser.add_argument("--expected-foreground-cmdline-sha256", default="", help=argparse.SUPPRESS)
+    _ = parser.add_argument("--wrapped-agent-source", default="", help=argparse.SUPPRESS)
+    _ = parser.add_argument("--wrapped-authority-reminder", action="store_true", help=argparse.SUPPRESS)
+    _ = parser.add_argument("--wrapped-allow-one-space-blank", action="store_true", help=argparse.SUPPRESS)
     _ = parser.add_argument(
         "--describe-partial-cursor",
         action="store_true",
@@ -421,11 +466,12 @@ def parse_args(argv: list[str]) -> Args:
     submit_existing = parsed.submit_existing_file is not None or bool(parsed.submit_existing_sha256)
     cancel_existing = parsed.cancel_existing_file is not None or bool(parsed.cancel_existing_sha256)
     cancel_existing_wrapped = parsed.cancel_existing_wrapped_file is not None
+    describe_existing_wrapped = parsed.describe_existing_wrapped_file is not None
     partial_cursor_recovery = parsed.describe_partial_cursor or bool(parsed.clear_partial_cursor_sha256)
-    existing_recovery = submit_existing or cancel_existing or cancel_existing_wrapped or partial_cursor_recovery
+    existing_recovery = submit_existing or cancel_existing or cancel_existing_wrapped or describe_existing_wrapped or partial_cursor_recovery
     if parsed.message_file is not None and existing_recovery:
         parser.error("--message-file cannot be used with existing-input recovery.")
-    if sum((submit_existing, cancel_existing, cancel_existing_wrapped, partial_cursor_recovery)) > 1:
+    if sum((submit_existing, cancel_existing, cancel_existing_wrapped, describe_existing_wrapped, partial_cursor_recovery)) > 1:
         parser.error("choose one existing-input recovery operation.")
     if parsed.describe_partial_cursor and parsed.clear_partial_cursor_sha256:
         parser.error("choose either partial Cursor describe or clear.")
@@ -447,6 +493,11 @@ def parse_args(argv: list[str]) -> Args:
         parsed.expected_pane_pid,
         parsed.expected_pane_command,
     )
+    foreground_values = (
+        parsed.expected_foreground_pid,
+        parsed.expected_foreground_start_ticks,
+        parsed.expected_foreground_cmdline_sha256,
+    )
     if cancel_existing_wrapped:
         if (
             any(SHA256_RE.fullmatch(value) is None for value in wrapped_values[:3])
@@ -456,8 +507,21 @@ def parse_args(argv: list[str]) -> Args:
             or parsed.cancel_existing_rendered_sha256 == parsed.cancel_existing_rendered_trailing_blank_sha256
         ):
             parser.error("wrapped cancellation requires distinct lowercase source/rendering digests and exact Codex pane, PID, and command bindings.")
-    elif any(wrapped_values):
+        if any(foreground_values):
+            parser.error("shell-started wrapped cancellation is unsupported.")
+    elif describe_existing_wrapped:
+        if SHA256_RE.fullmatch(parsed.cancel_existing_source_sha256) is None:
+            parser.error("wrapped description requires an exact lowercase source digest.")
+        if any((*wrapped_values[1:], *foreground_values)):
+            parser.error("wrapped description derives rendering and runtime bindings read-only.")
+    elif any((*wrapped_values, *foreground_values)):
         parser.error("wrapped cancellation bindings require --cancel-existing-wrapped-file.")
+    if parsed.wrapped_agent_source and AGENT_MESSAGE_SOURCE_RE.fullmatch(parsed.wrapped_agent_source) is None:
+        parser.error("--wrapped-agent-source must be one canonical agent target.")
+    if parsed.wrapped_authority_reminder and not parsed.wrapped_agent_source:
+        parser.error("--wrapped-authority-reminder requires --wrapped-agent-source.")
+    if (parsed.wrapped_agent_source or parsed.wrapped_allow_one_space_blank) and not (cancel_existing_wrapped or describe_existing_wrapped):
+        parser.error("wrapped rendering options require wrapped cancellation or description.")
     if existing_recovery and (parsed.async_mode or parsed.async_worker):
         parser.error("--async cannot be used with existing-input recovery.")
     if parsed.message_file is None and not existing_recovery:
@@ -486,6 +550,13 @@ def parse_args(argv: list[str]) -> Args:
         parsed.expected_pane_id,
         parsed.expected_pane_pid,
         parsed.expected_pane_command,
+        parsed.expected_foreground_pid,
+        parsed.expected_foreground_start_ticks,
+        parsed.expected_foreground_cmdline_sha256,
+        parsed.wrapped_agent_source,
+        parsed.wrapped_authority_reminder,
+        parsed.wrapped_allow_one_space_blank,
+        parsed.describe_existing_wrapped_file,
     )
 
 
@@ -511,6 +582,12 @@ def text_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def wrapped_rendering_source(text: str, args: Args) -> str:
+    if not args.wrapped_agent_source:
+        return ""
+    return f"{wrap_agent_message(text, source_target=args.wrapped_agent_source, include_authority_reminder=args.wrapped_authority_reminder)}\n"
+
+
 def wrapped_cancel_authorization(args: Args) -> WrappedCodexCancelAuthorization:
     if args.cancel_existing_wrapped_file is None:
         raise RuntimeError("wrapped cancellation authorization file is required")
@@ -519,11 +596,21 @@ def wrapped_cancel_authorization(args: Args) -> WrappedCodexCancelAuthorization:
         raise RuntimeError("wrapped cancellation authorization file is empty")
     source = ExistingInputAuthorization(args.cancel_existing_source_sha256, text)
     require_authorized_existing_input_text(text, source)
+    rendering_source = wrapped_rendering_source(text, args)
     return WrappedCodexCancelAuthorization(
         source,
         args.cancel_existing_rendered_sha256,
         args.cancel_existing_rendered_trailing_blank_sha256,
-        CodexRuntimeBinding(args.expected_pane_id, args.expected_pane_pid, args.expected_pane_command),
+        CodexRuntimeBinding(
+            args.expected_pane_id,
+            args.expected_pane_pid,
+            args.expected_pane_command,
+            args.expected_foreground_pid,
+            args.expected_foreground_start_ticks,
+            args.expected_foreground_cmdline_sha256,
+        ),
+        rendering_source,
+        args.wrapped_allow_one_space_blank,
     )
 
 
@@ -878,7 +965,81 @@ def send_cancel_input(target: str) -> None:
     _ = subprocess.run(["tmux", "send-keys", "-t", target, "C-c"], timeout=5, check=True)
 
 
-def exact_codex_runtime_binding(target: str) -> CodexRuntimeBinding:
+def foreground_process_snapshot(pid: int) -> ForegroundProcessSnapshot:
+    process = Path(f"/proc/{pid}")
+    try:
+        state = process.stat()
+        raw_stat = (process / "stat").read_text(encoding="ascii")
+        raw_cmdline = (process / "cmdline").read_bytes()
+        final_state = process.stat()
+        final_stat = (process / "stat").read_text(encoding="ascii")
+        final_cmdline = (process / "cmdline").read_bytes()
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeError("target foreground Codex process cannot be authenticated") from exc
+    separator = raw_stat.rfind(") ")
+    fields = raw_stat[separator + 2 :].split() if separator >= 0 else []
+    identity = process_terminal_identity(process)
+    try:
+        parent_pid = int(fields[1])
+        argv = tuple(os.fsdecode(part) for part in raw_cmdline[:-1].split(b"\0"))
+    except (IndexError, ValueError):
+        parent_pid = 0
+        argv = ()
+    if (
+        state.st_uid != os.getuid()
+        or (final_state.st_dev, final_state.st_ino, final_state.st_uid) != (state.st_dev, state.st_ino, state.st_uid)
+        or raw_stat != final_stat
+        or raw_cmdline != final_cmdline
+        or not raw_cmdline
+        or len(raw_cmdline) > 1_000_000
+        or not raw_cmdline.endswith(b"\0")
+        or not argv
+        or identity is None
+        or parent_pid <= 1
+    ):
+        raise RuntimeError("target foreground Codex process cannot be authenticated")
+    return ForegroundProcessSnapshot(
+        pid,
+        parent_pid,
+        identity.process_group,
+        identity.session,
+        identity.tty,
+        identity.foreground_group,
+        identity.start_ticks,
+        hashlib.sha256(raw_cmdline).hexdigest(),
+        argv,
+    )
+
+
+def shell_started_codex_binding(target: str, pane_id: str, pane_pid: int, pane_command: str) -> CodexRuntimeBinding:
+    pane = foreground_process_snapshot(pane_pid)
+    foreground = foreground_process_snapshot(pane.foreground_group)
+    if (
+        pane.process_group != pane_pid
+        or pane.session != pane_pid
+        or pane.tty <= 0
+        or foreground.pid <= 1
+        or foreground.process_group != foreground.pid
+        or foreground.session != pane.session
+        or foreground.tty != pane.tty
+        or foreground.foreground_group != foreground.pid
+        or not exact_codex_launch(pane_command, list(foreground.argv))
+        or foreground_process_snapshot(pane_pid) != pane
+        or foreground_process_snapshot(foreground.pid) != foreground
+        or exact_pane_id(target) != pane_id
+    ):
+        raise RuntimeError("target foreground Codex process cannot be authenticated")
+    return CodexRuntimeBinding(
+        pane_id,
+        pane_pid,
+        pane_command,
+        foreground.pid,
+        foreground.start_ticks,
+        foreground.cmdline_sha256,
+    )
+
+
+def exact_codex_runtime_binding(target: str, *, allow_shell: bool = False) -> CodexRuntimeBinding:
     try:
         result = subprocess.run(
             ["tmux", "display-message", "-p", "-t", target, "#{pane_id}\t#{pane_pid}\t#{pane_current_command}"],
@@ -900,17 +1061,21 @@ def exact_codex_runtime_binding(target: str) -> CodexRuntimeBinding:
     ):
         raise RuntimeError("target Codex runtime cannot be authenticated")
     process = exact_pane_process(target, fields[0])
-    if process is None or not exact_codex_launch(*process):
-        raise RuntimeError("target Codex runtime is not a direct authenticated launch")
-    return CodexRuntimeBinding(fields[0], int(fields[1]), fields[2])
+    if process is not None and exact_codex_launch(*process):
+        return CodexRuntimeBinding(fields[0], int(fields[1]), fields[2])
+    if allow_shell:
+        return shell_started_codex_binding(target, fields[0], int(fields[1]), fields[2])
+    raise RuntimeError("target Codex runtime is not a direct authenticated launch")
 
 
 def require_same_wrapped_codex_target(target: str, expected: CodexRuntimeBinding, phase: str) -> None:
-    if exact_codex_runtime_binding(target) != expected:
+    if exact_codex_runtime_binding(target, allow_shell=bool(expected.foreground_pid)) != expected:
         raise RuntimeError(f"target Codex pane or process changed {phase}")
 
 
 def send_guarded_wrapped_codex_cancel(target: str, runtime: CodexRuntimeBinding) -> None:
+    if runtime.foreground_pid:
+        raise RuntimeError("shell-started wrapped cancellation is unsupported")
     condition = (
         f"#{{&&:#{{==:#{{pane_id}},{runtime.pane_id}}},"
         f"#{{&&:#{{==:#{{pane_pid}},{runtime.pane_pid}}},#{{==:#{{pane_current_command}},{runtime.pane_command}}}}}}}"
@@ -1284,12 +1449,22 @@ def exact_existing_input_text(
     return text
 
 
-def capture_complete_input_lines(pane_id: str) -> list[str]:
+def capture_complete_input_lines(pane_id: str, *, full_history: bool = False) -> list[str]:
     if re.fullmatch(r"%[0-9]+", pane_id) is None:
         raise RuntimeError("target input capture requires an exact tmux pane id")
     try:
         result = subprocess.run(
-            ["tmux", "capture-pane", "-p", "-J", "-N", "-t", pane_id, "-S", f"-{EXISTING_INPUT_CAPTURE_LINES}"],
+            [
+                "tmux",
+                "capture-pane",
+                "-p",
+                "-J",
+                "-N",
+                "-t",
+                pane_id,
+                "-S",
+                "-" if full_history else f"-{EXISTING_INPUT_CAPTURE_LINES}",
+            ],
             capture_output=True,
             text=True,
             timeout=5,
@@ -1431,34 +1606,34 @@ def require_wrapped_codex_cancel_candidates(
 ) -> set[str]:
     """Authenticate the two observed renderings of one hard-wrapped source."""
 
-    source = authorization.source.text
+    source = authorization.rendering_source or authorization.source.text
     if source is None or not source.endswith("\n\n"):
         raise RuntimeError("wrapped cancellation source has an unsupported newline shape")
-    candidates = file_cancel_trailing_blank_candidates(lines)
-    by_digest = {text_sha256(candidate): candidate for candidate in candidates}
+    ordinary, trailing = source_bound_wrapped_candidates(lines, source, authorization.allow_one_space_blank)
+    candidates = {ordinary, trailing}
     expected_digests = {
         authorization.rendered_sha256,
         authorization.rendered_trailing_blank_sha256,
     }
-    if len(candidates) != 2 or set(by_digest) != expected_digests:
+    if {text_sha256(candidate) for candidate in candidates} != expected_digests:
         raise RuntimeError("target wrapped input does not match both authorized rendering digests")
-    unpadded = by_digest[authorization.rendered_sha256]
-    padded = by_digest[authorization.rendered_trailing_blank_sha256]
-    if not is_deterministic_codex_wrap(unpadded, source[:-1]):
-        raise RuntimeError("target input is not the authorized deterministic hard-wrap rendering")
-    if not is_deterministic_codex_wrap(padded, f"{source[:-1]} "):
-        raise RuntimeError("target input has an unauthorized trailing-blank rendering")
     return candidates
 
 
-def is_deterministic_codex_wrap(rendered: str, source: str) -> bool:
-    """Match only source newlines or source spaces rendered as LF plus two spaces."""
+def is_deterministic_codex_wrap(rendered: str, source: str, expected_one_space_blanks: int = 0) -> bool:
+    """Match hard wraps and an explicitly counted one-space blank rendering."""
 
     source_idx = 0
     rendered_idx = 0
     n_hard_wraps = 0
+    n_one_space_blanks = 0
     while source_idx < len(source) and rendered_idx < len(rendered):
         source_char = source[source_idx]
+        if source.startswith("\n\n", source_idx) and rendered.startswith("\n ", rendered_idx):
+            n_one_space_blanks += 1
+            source_idx += 1
+            rendered_idx += 2
+            continue
         if source_char in {" ", "\n"} and rendered.startswith("\n  ", rendered_idx):
             n_hard_wraps += source_char == " "
             source_idx += 1
@@ -1469,7 +1644,64 @@ def is_deterministic_codex_wrap(rendered: str, source: str) -> bool:
             rendered_idx += 1
             continue
         return False
-    return source_idx == len(source) and rendered_idx == len(rendered) and n_hard_wraps > 0
+    return (
+        source_idx == len(source)
+        and rendered_idx == len(rendered)
+        and n_hard_wraps > 0
+        and n_one_space_blanks == expected_one_space_blanks
+    )
+
+
+def source_bound_wrapped_candidates(
+    lines: list[str],
+    rendering_source: str,
+    allow_one_space_blank: bool,
+) -> tuple[str, str]:
+    if not rendering_source.endswith("\n\n"):
+        raise RuntimeError("wrapped source has an unsupported newline shape")
+    candidates = file_cancel_trailing_blank_candidates(lines)
+    if len(candidates) != 2:
+        raise RuntimeError("target wrapped input does not have two exact trailing-blank candidates")
+    expected_one_space_blanks = 1 if allow_one_space_blank else 0
+    ordinary = {
+        candidate
+        for candidate in candidates
+        if is_deterministic_codex_wrap(candidate, rendering_source[:-1], expected_one_space_blanks)
+    }
+    trailing = {
+        candidate
+        for candidate in candidates
+        if is_deterministic_codex_wrap(candidate, f"{rendering_source[:-1]} ", expected_one_space_blanks)
+    }
+    if len(ordinary) != 1 or len(trailing) != 1 or ordinary == trailing:
+        raise RuntimeError("target wrapped input is not an exact source-bound rendering")
+    return ordinary.pop(), trailing.pop()
+
+
+def describe_source_bound_wrapped_input(target: str, args: Args) -> None:
+    source_file = args.describe_existing_wrapped_file
+    if source_file is None:
+        raise RuntimeError("wrapped description source file is required")
+    source = read_exact_message_file(source_file)
+    require_authorized_existing_input_text(source, ExistingInputAuthorization(args.cancel_existing_source_sha256, source))
+    rendering_source = wrapped_rendering_source(source, args) or source
+    runtime = exact_codex_runtime_binding(target, allow_shell=True)
+    lines = capture_complete_input_lines(runtime.pane_id, full_history=True)
+    require_same_wrapped_codex_target(target, runtime, "after full-history wrapped capture")
+    ordinary, trailing = source_bound_wrapped_candidates(lines, rendering_source, args.wrapped_allow_one_space_blank)
+    print(f"source_bytes: {len(source.encode('utf-8'))}")
+    print(f"source_sha256: {text_sha256(source)}")
+    print(f"rendered_bytes: {len(ordinary.encode('utf-8'))}")
+    print(f"rendered_sha256: {text_sha256(ordinary)}")
+    print(f"rendered_trailing_blank_bytes: {len(trailing.encode('utf-8'))}")
+    print(f"rendered_trailing_blank_sha256: {text_sha256(trailing)}")
+    print(f"pane_id: {runtime.pane_id}")
+    print(f"pane_pid: {runtime.pane_pid}")
+    print(f"pane_command: {runtime.pane_command}")
+    if runtime.foreground_pid:
+        print(f"foreground_pid: {runtime.foreground_pid}")
+        print(f"foreground_start_ticks: {runtime.foreground_start_ticks}")
+        print(f"foreground_cmdline_sha256: {runtime.foreground_cmdline_sha256}")
 
 
 def require_authorized_existing_input_text(text: str, authorization: ExistingInputAuthorization) -> None:
@@ -2686,6 +2918,10 @@ def main(argv: list[str]) -> int:
         if args.cancel_existing_file is not None or args.cancel_existing_sha256:
             with tmux_input_lock(args.target):
                 cancel_existing_codex_input(args.target, existing_input_authorization(args), args.options)
+            return 0
+        if args.describe_existing_wrapped_file is not None:
+            with tmux_input_lock(args.target):
+                describe_source_bound_wrapped_input(args.target, args)
             return 0
         if args.cancel_existing_wrapped_file is not None:
             with tmux_input_lock(args.target):
