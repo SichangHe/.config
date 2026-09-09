@@ -3,22 +3,22 @@
 - purpose
   - close the exact completed blocked/current `config:16` worker authorized by Human Source 1570
   - bridge its terminal report routed to the former manager with current `wl:21` custody
-  - permit only the current rebind of the original completed Codex session
+  - permit only authenticated current `config:16` continuity with the completed Codex session
 - prepare
-  - prove original pane `%432` and PID `388967` absent through the historical rollout
+  - prove historical pane `%432` and PID `388967` belong to protected `dw2:0` through same-session rollout events
   - bind Human source, task, TODO, terminal replay and commitment, current manager task, current pane/process/start/session, and exact source-derived composer capture
-  - bind every protected target by state, pane/process/start, and tail
+  - bind `config:18`, `config:19`, `config:20`, and `dw2:0` by state, pane/process/start, and tail
   - publish one owner-private immutable packet without changing pane or lifecycle state
 - review
   - require an authenticated PASS report from a target other than `config:16` and `wl:21`
 - execute
   - revalidate every packet input under lifecycle locks
-  - reject original-identity revival, session change, composer drift, ownership drift, or any protected-target change before input
+  - reject session change, composer drift, ownership drift, or any protected-target change before input
   - publish a recoverable prepared audit
   - authenticate the exact source-derived composer and cancel it with one guarded `Ctrl+C`
   - permit stop input only as empty, exact `/status`, optional exact `/status` fallback, then empty before interrupts or close
   - close only the exact session-bound `config:16` pane with no feedback or mail
   - recoverably move the task from blocked/current to done/previous and publish the committed audit
 - exclusions
-  - any source, replay, manager, task, TODO, pane, process, session, tail, reviewer, or protected-target drift
+  - any source, replay, manager, task, TODO, pane, process, session, tail, reviewer, or protected-target drift, including `dw2:0`
   - all Human-owned targets and every target other than `config:16`

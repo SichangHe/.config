@@ -10,8 +10,9 @@ from unittest.mock import patch
 
 from omo_manager.omo_human_worker_close import (
     CURRENT_MANAGER,
-    HISTORICAL_PANE_ID,
-    HISTORICAL_PANE_PID,
+    DW2_PANE_ID,
+    DW2_PANE_PID,
+    DW2_TARGET,
     HISTORICAL_ROLLOUT_NAME,
     HISTORICAL_SESSION_ID,
     ORIGINAL_MANAGER,
@@ -25,8 +26,8 @@ from omo_manager.omo_human_worker_close import (
     todo_after,
     validate_authority,
     validate_live,
-    validate_historical_absence,
     validate_historical_rollout,
+    validate_protected_dw2,
     validate_terminal_report,
 )
 from omo_manager.omo_task_metadata import TaskFrontmatterError, parse_task_metadata
@@ -149,16 +150,7 @@ previous:
         with self.assertRaises(TaskFrontmatterError):
             lifecycle_state(packet, after_task, before_todo)
 
-    def test_historical_rebind_requires_original_absence_and_rollout_evidence(self) -> None:
-        with (
-            patch("omo_manager.omo_human_worker_close.resolved_pane_id", return_value="") as pane,
-            patch("omo_manager.omo_human_worker_close.process_start_ticks", return_value=None),
-        ):
-            validate_historical_absence()
-            pane.assert_called_once_with(HISTORICAL_PANE_ID)
-        with patch("omo_manager.omo_human_worker_close.resolved_pane_id", return_value=HISTORICAL_PANE_ID):
-            with self.assertRaises(TaskFrontmatterError):
-                validate_historical_absence()
+    def test_historical_rollout_binds_protected_dw2_identity_and_replay(self) -> None:
         records = [
             {
                 "ordinal": 39,
@@ -168,7 +160,7 @@ previous:
                     "thread_id": HISTORICAL_SESSION_ID,
                     "item": {
                         "type": "CommandExecution",
-                        "stdout": f"session=dw2 window=0 pane=0 pid={HISTORICAL_PANE_PID} command=bunx dead=0\n",
+                        "stdout": f"session=dw2 window=0 pane=0 pid={DW2_PANE_PID} command=bunx dead=0\n",
                     },
                 },
             },
@@ -180,7 +172,7 @@ previous:
                     "thread_id": HISTORICAL_SESSION_ID,
                     "item": {
                         "type": "CommandExecution",
-                        "stdout": f"pane={HISTORICAL_PANE_ID} pid={HISTORICAL_PANE_PID} command=bunx dead=0 width=80 height=24\n",
+                        "stdout": f"pane={DW2_PANE_ID} pid={DW2_PANE_PID} command=bunx dead=0 width=80 height=24\n",
                     },
                 },
             },
@@ -198,15 +190,20 @@ previous:
         validate_historical_rollout(data, Path(HISTORICAL_ROLLOUT_NAME))
         with self.assertRaises(TaskFrontmatterError):
             validate_historical_rollout(data.replace(REPLAY_ID.encode(), b"0" * 64), Path(HISTORICAL_ROLLOUT_NAME))
-        unrelated = f'{{"ordinal":1,"thread_id":"{HISTORICAL_SESSION_ID}","text":"pid={HISTORICAL_PANE_PID} {REPLAY_ID}"}}'.encode()
+        unrelated = f'{{"ordinal":1,"thread_id":"{HISTORICAL_SESSION_ID}","text":"pid={DW2_PANE_PID} {REPLAY_ID}"}}'.encode()
         with self.assertRaises(TaskFrontmatterError):
             validate_historical_rollout(unrelated, Path(HISTORICAL_ROLLOUT_NAME))
+
+    def test_protected_dw2_requires_authenticated_pane_and_process(self) -> None:
+        snapshot: dict[str, object] = {"target": DW2_TARGET, "pane_id": DW2_PANE_ID, "pane_pid": DW2_PANE_PID}
+        validate_protected_dw2([snapshot])
+        with self.assertRaises(TaskFrontmatterError):
+            validate_protected_dw2([{**snapshot, "pane_pid": 999}])
 
     def test_stop_input_guard_requires_empty_status_optional_status_then_empty(self) -> None:
         pin = PanePin(TARGET, "%12", 123, 456, HISTORICAL_SESSION_ID)
         protected: list[dict[str, object]] = []
         with (
-            patch("omo_manager.omo_human_worker_close.validate_historical_absence"),
             patch("omo_manager.omo_human_worker_close.protected_snapshots", return_value=protected),
             patch("omo_manager.omo_human_worker_close.target_identity", return_value=("%12", 123, 456)),
             patch("omo_manager.omo_human_worker_close.session_from_process", return_value=HISTORICAL_SESSION_ID),
@@ -221,7 +218,6 @@ previous:
             guard()
             guard()
         with (
-            patch("omo_manager.omo_human_worker_close.validate_historical_absence"),
             patch("omo_manager.omo_human_worker_close.protected_snapshots", return_value=protected),
             patch("omo_manager.omo_human_worker_close.target_identity", return_value=("%12", 123, 456)),
             patch("omo_manager.omo_human_worker_close.session_from_process", return_value=HISTORICAL_SESSION_ID),
@@ -274,7 +270,7 @@ previous:
                 pane_pid=2,
                 pane_start_ticks=3,
                 session_id="01a00000-0000-7000-8000-000000000000",
-                protected_target=["config:18", "config:19", "config:20"],
+                protected_target=["config:18", "config:19", "config:20", DW2_TARGET],
                 destination_target=CURRENT_MANAGER,
                 audit=private / "audit",
                 packet=private / "packet",

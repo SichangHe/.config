@@ -26,7 +26,7 @@ if __package__ in {None, ""}:
 
 from omo_manager.omo_codex_status import exact_pane_id, exact_tail
 from omo_manager.omo_codex_stop import Args as CodexStopArgs
-from omo_manager.omo_codex_stop import bound_guarded_read, codex_status, pane_id as resolved_pane_id
+from omo_manager.omo_codex_stop import bound_guarded_read, codex_status
 from omo_manager.omo_codex_stop import stop as guarded_codex_stop
 from omo_manager.omo_tmux_send import (
     CODEX_PLACEHOLDER_INPUT_TEXTS,
@@ -71,8 +71,8 @@ from omo_manager.omo_task_status import (
     update_frontmatter_status,
 )
 
-SCHEMA = "omo-human-worker-rebind-close/v1"
-REVIEW_SCHEMA = "omo-human-worker-rebind-close-review/v1"
+SCHEMA = "omo-human-worker-continuity-close/v1"
+REVIEW_SCHEMA = "omo-human-worker-continuity-close-review/v1"
 TARGET = "config:16"
 TASK = "dw2_input_clear.md"
 BLOCKER = "config16_close.md"
@@ -85,9 +85,10 @@ REPLAY_ID = "205eec6dff48bc1feedd27d3521f86580d86d9943dad469056c63a33dec9d9dc"
 REPORT_MESSAGE_SHA256 = "51629a0a165aca98a7b7d482a82df3dd9856dc55b8c8064632be78362c6eef27"
 TERMINAL_REPORT_SHA256 = "784dfcd424f9a385dbec8098d305a61c72bfe4e48de7e0724ccaa922aab46ddc"
 TERMINAL_COMMITMENT_SHA256 = "d25ae8dc76d9da546fc1b6f5a4767be0fefb8eb35f152c19a2a05ba917395a84"
-PROTECTED_TARGETS = ("config:18", "config:19", "config:20")
-HISTORICAL_PANE_ID = "%432"
-HISTORICAL_PANE_PID = 388967
+DW2_TARGET = "dw2:0"
+DW2_PANE_ID = "%432"
+DW2_PANE_PID = 388967
+PROTECTED_TARGETS = ("config:18", "config:19", "config:20", DW2_TARGET)
 HISTORICAL_SESSION_ID = "01a084f5-35e6-7492-af01-7eccf2a21bb3"
 HISTORICAL_ROLLOUT_NAME = "rollout-2026-09-08T23-57-37-01a084f5-35e6-7492-af01-7eccf2a21bb3.jsonl"
 COMPOSER_SOURCE_TARGET = "wl:1"
@@ -120,8 +121,9 @@ PACKET_KEYS = {
     "terminal_tail_sha256",
     "protected_targets",
     "protected_panes",
-    "historical_pane_id",
-    "historical_pane_pid",
+    "dw2_target",
+    "dw2_pane_id",
+    "dw2_pane_pid",
     "historical_rollout",
     "historical_rollout_sha256",
     "composer_source",
@@ -243,14 +245,9 @@ def stop_target(
         raise TaskFrontmatterError("guarded closure did not return the exact bound Codex session.")
 
 
-def validate_historical_absence() -> None:
-    if resolved_pane_id(HISTORICAL_PANE_ID) or process_start_ticks(HISTORICAL_PANE_PID) is not None:
-        raise TaskFrontmatterError("the original config:16 pane or process is not absent.")
-
-
 def validate_historical_rollout(data: bytes, path: Path) -> None:
     if path.name != HISTORICAL_ROLLOUT_NAME:
-        raise TaskFrontmatterError("historical rollout does not bind the original identity, session, and replay.")
+        raise TaskFrontmatterError("historical rollout does not bind protected dw2:0, session, and replay.")
     events: dict[int, dict[str, object]] = {}
     try:
         for line in data.splitlines():
@@ -282,10 +279,10 @@ def validate_historical_rollout(data: bytes, path: Path) -> None:
 
     if (
         "session=dw2 window=0 pane=0 pid=388967 command=bunx dead=0" not in command_stdout(39)
-        or "pane=%432 pid=388967 command=bunx dead=0" not in command_stdout(127)
+        or f"pane={DW2_PANE_ID} pid={DW2_PANE_PID} command=bunx dead=0" not in command_stdout(127)
         or '"replay_id":"205eec6dff48bc1feedd27d3521f86580d86d9943dad469056c63a33dec9d9dc"' not in command_stdout(263)
     ):
-        raise TaskFrontmatterError("historical rollout does not bind the original identity, session, and replay.")
+        raise TaskFrontmatterError("historical rollout does not bind protected dw2:0, session, and replay.")
 
 
 def pane_snapshot(target: str) -> dict[str, object]:
@@ -308,6 +305,14 @@ def pane_snapshot(target: str) -> dict[str, object]:
 
 def protected_snapshots() -> list[dict[str, object]]:
     return [pane_snapshot(target) for target in PROTECTED_TARGETS]
+
+
+def validate_protected_dw2(snapshots: object) -> None:
+    if not isinstance(snapshots, list):
+        raise TaskFrontmatterError("protected target snapshots are malformed.")
+    dw2 = [snapshot for snapshot in snapshots if isinstance(snapshot, dict) and snapshot.get("target") == DW2_TARGET]
+    if len(dw2) != 1 or dw2[0].get("pane_id") != DW2_PANE_ID or dw2[0].get("pane_pid") != DW2_PANE_PID:
+        raise TaskFrontmatterError("protected dw2:0 does not match the authenticated historical pane and process.")
 
 
 def composer_snapshot(pin: PanePin, source: bytes) -> dict[str, object]:
@@ -373,7 +378,6 @@ def stop_input_guard(pin: PanePin, protected: object) -> Callable[[], None]:
 
     def check() -> None:
         nonlocal phase
-        validate_historical_absence()
         if protected_snapshots() != protected:
             raise TaskFrontmatterError("a protected target changed before config:16 input.")
         if target_identity(TARGET) != (pin.pane_id, pin.pane_pid, pin.pane_start_ticks):
@@ -541,8 +545,8 @@ def prepare(ns: argparse.Namespace) -> None:
     ):
         raise TaskFrontmatterError("Source-1570 closure scope is not exact.")
     pin = parse_pin(ns)
-    if pin.session_id != HISTORICAL_SESSION_ID or pin.pane_id == HISTORICAL_PANE_ID or pin.pane_pid == HISTORICAL_PANE_PID:
-        raise TaskFrontmatterError("current config:16 is not the exact same-session rebind.")
+    if pin.session_id != HISTORICAL_SESSION_ID or pin.pane_id == DW2_PANE_ID or pin.pane_pid == DW2_PANE_PID:
+        raise TaskFrontmatterError("current config:16 is not the exact same-session continuity target.")
     input_paths = {task, todo, authority, report_path, manager_task, historical_rollout, composer_source}
     ns.packet = require_private_output(ns.packet, input_paths)
     ns.audit = require_private_output(ns.audit, input_paths | {ns.packet})
@@ -557,7 +561,6 @@ def prepare(ns: argparse.Namespace) -> None:
         historical_data, _ = read_regular(historical_rollout, ns.historical_rollout_sha256)
         composer_source_data, _ = read_regular(composer_source, ns.composer_source_sha256)
         validate_authority(authority_data, ns.authority_lines)
-        validate_historical_absence()
         validate_historical_rollout(historical_data, historical_rollout)
         commitment = validate_terminal_report(report_data, report_path, root)
         commitment_data, _ = read_regular_unbound(commitment)
@@ -587,7 +590,7 @@ def prepare(ns: argparse.Namespace) -> None:
         tail_sha256 = validate_live(pin)
         composer = composer_snapshot(pin, composer_source_data)
         protected = protected_snapshots()
-        validate_historical_absence()
+        validate_protected_dw2(protected)
         if validate_live(pin, tail_sha256) != tail_sha256:
             raise TaskFrontmatterError("config:16 changed across rebind preparation.")
         inputs = []
@@ -625,8 +628,9 @@ def prepare(ns: argparse.Namespace) -> None:
             "terminal_tail_sha256": tail_sha256,
             "protected_targets": list(PROTECTED_TARGETS),
             "protected_panes": protected,
-            "historical_pane_id": HISTORICAL_PANE_ID,
-            "historical_pane_pid": HISTORICAL_PANE_PID,
+            "dw2_target": DW2_TARGET,
+            "dw2_pane_id": DW2_PANE_ID,
+            "dw2_pane_pid": DW2_PANE_PID,
             "historical_rollout": str(historical_rollout),
             "historical_rollout_sha256": ns.historical_rollout_sha256,
             "composer_source": str(composer_source),
@@ -720,16 +724,18 @@ def execute(ns: argparse.Namespace) -> None:
         or packet["destination_target"] != CURRENT_MANAGER
         or pin.target != TARGET
         or pin.session_id != HISTORICAL_SESSION_ID
-        or pin.pane_id == HISTORICAL_PANE_ID
-        or pin.pane_pid == HISTORICAL_PANE_PID
-        or packet["historical_pane_id"] != HISTORICAL_PANE_ID
-        or packet["historical_pane_pid"] != HISTORICAL_PANE_PID
+        or pin.pane_id == DW2_PANE_ID
+        or pin.pane_pid == DW2_PANE_PID
+        or packet["dw2_target"] != DW2_TARGET
+        or packet["dw2_pane_id"] != DW2_PANE_ID
+        or packet["dw2_pane_pid"] != DW2_PANE_PID
         or Path(str(packet["historical_rollout"])).name != HISTORICAL_ROLLOUT_NAME
         or lock_paths != expected_paths
         or packet["protected_targets"] != list(PROTECTED_TARGETS)
         or packet["manager_target"] != CURRENT_MANAGER
     ):
         raise TaskFrontmatterError("Source-1570 closure packet input or protection set is incomplete.")
+    validate_protected_dw2(packet["protected_panes"])
     audit = {key: packet[key] for key in PACKET_KEYS - {"task_after_base64", "todo_after_base64", "inputs"}}
     prepared = canonical({**audit, "state": "prepared"})
     committed = canonical({**audit, "state": "committed"})
@@ -765,7 +771,6 @@ def execute(ns: argparse.Namespace) -> None:
         historical_data, _ = read_regular(Path(str(packet["historical_rollout"])), str(packet["historical_rollout_sha256"]))
         composer_source_data, _ = read_regular(Path(str(packet["composer_source"])), str(packet["composer_source_sha256"]))
         validate_authority(authority_data, tuple(packet["authority_lines"]))
-        validate_historical_absence()
         validate_historical_rollout(historical_data, Path(str(packet["historical_rollout"])))
         if validate_terminal_report(report_data, Path(str(packet["terminal_report"])), root) != Path(str(packet["terminal_commitment"])):
             raise TaskFrontmatterError("terminal replay commitment changed.")
@@ -828,7 +833,6 @@ def execute(ns: argparse.Namespace) -> None:
                 raise IndeterminateClose("config:16 composer was not proven empty after guarded cancellation.")
             if protected_snapshots() != packet["protected_panes"]:
                 raise IndeterminateClose("a protected target changed across the config:16 composer cancellation.")
-            validate_historical_absence()
             if target_identity(TARGET) != (pin.pane_id, pin.pane_pid, pin.pane_start_ticks) or session_from_process(pin.pane_pid) != pin.session_id:
                 raise IndeterminateClose("config:16 identity changed across guarded composer cancellation.")
 
