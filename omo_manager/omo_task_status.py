@@ -5238,7 +5238,14 @@ def validate_manager_consumed_report(
                 raise TaskFrontmatterError(f"manager-consumed report export is invalid: {exc}") from exc
             if attestation != prevalidated_attestation:
                 raise TaskFrontmatterError("manager-consumed report transaction changed after strict validation.")
-        validate_consumed_closure_attestation(args, path, attestation, archived_task_payload)
+        verification = loaded.get("verification")
+        validate_consumed_closure_attestation(
+            args,
+            path,
+            attestation,
+            archived_task_payload,
+            verification if isinstance(verification, dict) else None,
+        )
         return True
     if not isinstance(loaded, dict) or set(loaded) != DONE_LIVE_CONSUMED_RECEIPT_KEYS:
         raise TaskFrontmatterError("manager-consumed report receipt schema is invalid.")
@@ -5327,6 +5334,7 @@ def validate_consumed_closure_attestation(
     path: Path,
     attestation: dict[str, object],
     archived_task_payload: bytes | None = None,
+    export_verification: dict[str, object] | None = None,
 ) -> None:
     """Bind a strictly revalidated consumed export to this exact close."""
 
@@ -5343,6 +5351,9 @@ def validate_consumed_closure_attestation(
     queue_item = transfer.get("queue_item")
     routing = transfer.get("routing")
     manager_path = Path(str(transfer.get("receiver", "")))
+    pointer = queue_item.get("pointer") if isinstance(queue_item, dict) else None
+    consumption = attestation.get("consumption_evidence")
+    transition = consumption.get("transition") if isinstance(consumption, dict) else None
     archive = attestation.get("archive_custody")
     archived = archive is not None
     original_task = str(archive.get("original_task", "")) if isinstance(archive, dict) else str(path)
@@ -5352,6 +5363,45 @@ def validate_consumed_closure_attestation(
     # completed and archived the task, regardless of whether a detached manager
     # acceptance receipt was available.
     allowed_statuses = {"done", "in-progress"} if archived else {"done"}
+    resolved_manager_target = routing.get("resolved_manager_target") if isinstance(routing, dict) else None
+    fallback_route = (
+        isinstance(routing, dict)
+        and routing.get("route_kind") == "main-manager-fallback"
+        and isinstance(queue_item, dict)
+        and isinstance(export_verification, dict)
+        and export_verification.get("root") == str(args.root)
+        and export_verification.get("task") == original_task
+        and export_verification.get("manager") == str(manager_path)
+        and export_verification.get("producer_target") == args.active_target
+        and export_verification.get("requested_manager_target") == args.manager_target
+        and export_verification.get("resolved_manager_target") == resolved_manager_target
+        and export_verification.get("route_kind") == "main-manager-fallback"
+        and export_verification.get("manager_route_selection") == "not-applicable"
+        and export_verification.get("manager_frontmatter_sha256") == "not-applicable"
+        and export_verification.get("status") == attestation.get("status")
+        and export_verification.get("route_note")
+        == f"Target manager `{args.manager_target}` has no active manager task file. Main manager: find where that manager moved or reassign this report."
+        and re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(export_verification.get("route_local_date", ""))) is not None
+        and TARGET_RE.fullmatch(str(resolved_manager_target)) is not None
+        and resolved_manager_target != args.manager_target
+        and not str(resolved_manager_target).partition(":")[0].startswith("h")
+        and manager_path.parent == args.root
+        and re.fullmatch(r"work_manager_\d{4}-\d{2}-\d{2}\.md", manager_path.name) is not None
+        and (export_verification.get("archived_task") is True) == archived
+        and (not archived or export_verification.get("archived_task_path") == str(path))
+        and (not archived or export_verification.get("recovery_replay_id") == attestation.get("replay_id"))
+        and queue_item.get("manager") == str(manager_path)
+        and queue_item.get("producer") == original_task
+        and queue_item.get("replay_id") == attestation.get("replay_id")
+        and queue_item.get("input_sha256") == input_info.get("sha256")
+        and isinstance(pointer, str)
+        and isinstance(consumption, dict)
+        and consumption.get("schema") == "omo-pending-watch-consumed-report/v1"
+        and isinstance(transition, dict)
+        and transition.get("protocol") == "watcher-locked-pointer-transition-v1"
+        and transition.get("manager_path_sha256") == hashlib.sha256(str(manager_path).encode()).hexdigest()
+        and transition.get("pointer_sha256") == hashlib.sha256(pointer.encode()).hexdigest()
+    )
     expected_reason = (
         "manager acknowledged routed report"
         if accepted
@@ -5373,7 +5423,7 @@ def validate_consumed_closure_attestation(
         or routing.get("task") != original_task
         or routing.get("producer_target") != args.active_target
         or routing.get("requested_manager_target") != args.manager_target
-        or routing.get("resolved_manager_target") != args.manager_target
+        or (resolved_manager_target != args.manager_target and not fallback_route)
         or routing.get("manager") != str(manager_path)
     ):
         raise TaskFrontmatterError("manager-consumed report attestation binding is inconsistent.")
@@ -5450,14 +5500,17 @@ def validate_consumed_closure_attestation(
     except (OSError, UnicodeDecodeError, ValueError) as exc:
         raise TaskFrontmatterError("manager-consumed report manager route is unavailable.") from exc
     manager_metadata = parse_task_metadata(manager_text, args.root)
-    pointer = queue_item.get("pointer")
+    direct_route_valid = (
+        resolved_manager_target == args.manager_target
+        and manager_metadata is not None
+        and manager_metadata.is_manager
+        and manager_metadata.runat == args.manager_target
+    )
     if (
         not isinstance(pointer, str)
         or not pointer
         or pointer in manager_text
-        or manager_metadata is None
-        or not manager_metadata.is_manager
-        or manager_metadata.runat != args.manager_target
+        or not (direct_route_valid or fallback_route)
     ):
         raise TaskFrontmatterError("manager-consumed report attestation transaction is inconsistent.")
 
@@ -5506,7 +5559,13 @@ def prevalidate_manager_consumed_export(
         if infer_terminal_evidence
         else args
     )
-    validate_consumed_closure_attestation(bound_args, path, attestation)
+    verification = loaded.get("verification")
+    validate_consumed_closure_attestation(
+        bound_args,
+        path,
+        attestation,
+        export_verification=verification if isinstance(verification, dict) else None,
+    )
     return attestation, consumed_attestation_manager_path(args.root, attestation)
 
 
