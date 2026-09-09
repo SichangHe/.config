@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import stat
 import subprocess
@@ -12,6 +13,7 @@ from contextlib import ExitStack
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import yaml
@@ -24,6 +26,7 @@ from omo_manager.omo_codex_start import (
     HCFG_RESTART_AUTHORITY_LINES,
     HCFG_RESTART_AUTHORITY_SHA256,
     HCFG_RESTART_TASK_FILE,
+    LEGACY_FAILED_ROTATION_AUDIT_FIELDS,
     Pane,
     RECOVERY_EVENT_DIRNAME,
     RECOVERY_RECEIPT_DIRNAME,
@@ -43,7 +46,11 @@ from omo_manager.omo_codex_start import (
     prompt_text,
     query_exact_status_session_id,
     query_reconciliation_session_id,
+    process_held_reconciliation_rollout,
+    process_held_rollouts,
+    strict_reconciliation_process_tree,
     reconcile_rotation_audit,
+    reconciliation_binding,
     record_recovery_evidence,
     retire_recovery_receipt,
     recovery_issuance_path,
@@ -65,10 +72,12 @@ from omo_manager.omo_codex_start import (
     stop_unverified_replacement,
     task_path,
     validate_task,
+    validate_audit_bound_replacement_process,
     verify_rotation_snapshot,
     wait_started,
     wait_resume_cwd_recovery,
 )
+from omo_manager.omo_manager_rotation_contain import ContainmentError, ProcessIdentity
 from omo_manager.omo_codex_status import Report
 from omo_manager.omo_pending_watch import record_terminal_delivery_failure, terminal_delivery_failure
 from omo_manager.omo_pending_watch import PrePasteRejected, try_send_delivery_text
@@ -77,6 +86,11 @@ from omo_manager.omo_task_status import authoritative_active_target_task_paths, 
 
 class CodexStartTests(unittest.TestCase):
     SESSION_ID = "019f670b-6a2f-7463-b9be-9aa6ff0cec43"
+
+    def setUp(self) -> None:
+        self.audit_process_guard = patch("omo_manager.omo_codex_start.validate_audit_bound_replacement_process")
+        self.audit_process_guard.start()
+        self.addCleanup(self.audit_process_guard.stop)
 
     def recovery_task(self, pane: Pane) -> TaskBinding:
         return TaskBinding(
@@ -132,6 +146,17 @@ class CodexStartTests(unittest.TestCase):
     def write_failed_rotation_audit(self, root: Path, pane: Pane, **changes: str) -> Path:
         task = root / "worker.md"
         protected = ("protected:9",)
+        launch_argv = (
+            "bunx",
+            "@openai/codex@latest",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--model",
+            "gpt-5.6-terra",
+            "--config",
+            'model_reasoning_effort="max"',
+            "--config",
+            "check_for_update_on_startup=false",
+        )
         fields = {
             "operation": "rotate-worker",
             "task-file": "worker.md",
@@ -163,6 +188,8 @@ class CodexStartTests(unittest.TestCase):
             "replacement-window-id": pane.window_id,
             "replacement-pane-pid": str(pane.pane_pid),
             "replacement-command": pane.command,
+            "replacement-pane-start-ticks": "7001",
+            "replacement-argv-sha256": hashlib.sha256("\0".join(launch_argv).encode()).hexdigest(),
             "failure-kind": "post-respawn-new-session-id-capture-failed",
             "captured-response-sha256": hashlib.sha256(b"").hexdigest(),
             "final-result": "failed",
@@ -1594,12 +1621,44 @@ class CodexStartTests(unittest.TestCase):
             with self.subTest(incompatible=incompatible), self.assertRaises(SystemExit):
                 parse_args([*common, incompatible])
 
+    def test_process_held_rollout_reconciliation_parser_requires_complete_source_bindings(self) -> None:
+        common = [
+            "--task-file", "worker.md", "--target", "cfg:2", "--model", "gpt-5.6-terra", "--reasoning-effort", "max",
+            "--reconcile-rotation-audit", "--rotation-audit", "/tmp/rotation.audit", "--expected-rotation-audit-sha256", "a" * 64,
+            "--reconciliation-receipt", "/tmp/reconciliation.receipt", "--expected-task-sha256", "b" * 64, "--expected-status", "blocked",
+            "--expected-blocker", "current blocker", "--expected-owner-target", "cfg:1", "--expected-pending-item", "current item",
+            "--protected-target", "protected:9", "--expected-current-pane-pid", "5252", "--expected-current-command", "bunx",
+            "--reconciliation-rollout", "/tmp/sessions/2026/09/08/rollout-id.jsonl", "--session-root", "/tmp/sessions",
+            "--expected-current-pane-start-ticks", "7001", "--expected-rollout-device", "23", "--expected-rollout-inode", "42",
+            "--expected-rollout-holder-pid", "5253", "--expected-rollout-holder-start-ticks", "7002", "--expected-rollout-fd", "56",
+            "--expected-rollout-session-meta-sha256", "c" * 64,
+            "--expected-audit-task-sha256", "d" * 64, "--expected-audit-status", "running", "--expected-audit-blocker", "",
+            "--expected-audit-owner-target", "cfg:1", "--expected-audit-pending-item", "first old item",
+            "--expected-audit-pending-item", "second old item",
+        ]
+        args = parse_args(common)
+        self.assertEqual(Path("/tmp/sessions/2026/09/08/rollout-id.jsonl"), args.reconciliation_rollout)
+        self.assertEqual(("first old item", "second old item"), args.expected_audit_pending_items)
+        for missing in (
+            "--session-root", "--expected-current-pane-start-ticks", "--expected-rollout-device", "--expected-rollout-inode",
+            "--expected-rollout-holder-pid", "--expected-rollout-holder-start-ticks", "--expected-rollout-fd",
+            "--expected-rollout-session-meta-sha256", "--expected-audit-task-sha256", "--expected-audit-status",
+            "--expected-audit-blocker", "--expected-audit-owner-target",
+        ):
+            with self.subTest(missing=missing), self.assertRaises(SystemExit):
+                index = common.index(missing)
+                parse_args(common[:index] + common[index + 2 :])
+
     def test_reconcile_rotation_audit_records_later_uuid_without_launch_or_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
             self.write_task(root, status="blocked", pending=["preserve exact queue"])
             pane = Pane("cfg:2.0", "%2", "@2", "bunx", root, 5252)
             audit = self.write_failed_rotation_audit(root, pane)
+            original_todo_sha256 = hashlib.sha256((root / "TODO.md").read_bytes()).hexdigest()
+            with (root / "TODO.md").open("a", encoding="utf-8") as todo:
+                todo.write("\nother.md cfg:8\n")
+            current_todo_sha256 = hashlib.sha256((root / "TODO.md").read_bytes()).hexdigest()
             args = self.reconciliation_args(root, pane)
             task_before = (root / "worker.md").read_bytes()
             audit_before = audit.read_bytes()
@@ -1623,7 +1682,297 @@ class CodexStartTests(unittest.TestCase):
             self.assertIn(f"original-audit-path: {audit}\n", receipt)
             self.assertIn(f"original-audit-content-hex: {audit_before.hex()}\n", receipt)
             self.assertIn(f"old-session-id: {self.SESSION_ID}\ncurrent-pane-pid: 5252\n", receipt)
+            self.assertIn(f"original-todo-sha256: {original_todo_sha256}\n", receipt)
+            self.assertIn(f"current-todo-sha256: {current_todo_sha256}\n", receipt)
+            self.assertIn("todo-authority-scope: exact-bound-task-row-only\n", receipt)
             self.assertIn(f"current-session-id: {new_session}\nfinal-result: success\n", receipt)
+
+    def test_legacy_status_reconciliation_rejects_human_pending_without_query(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root, 5252)
+            self.write_failed_rotation_audit(root, pane)
+            todo = root / "TODO.md"
+            todo.write_text(todo.read_text(encoding="utf-8").replace("current:", "human pending:"), encoding="utf-8")
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.query_reconciliation_session_id") as query,
+                self.assertRaises(StartError),
+            ):
+                reconcile_rotation_audit(self.reconciliation_args(root, pane))
+            query.assert_not_called()
+            self.assertFalse((root / "reconciliation.receipt").exists())
+
+    def test_status_reconciliation_rejects_changed_audit_bound_process_before_query(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root, 5252)
+            self.write_failed_rotation_audit(root, pane)
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.validate_audit_bound_replacement_process", side_effect=StartError("changed replacement")),
+                patch("omo_manager.omo_codex_start.query_reconciliation_session_id") as query,
+                self.assertRaisesRegex(StartError, "changed replacement"),
+            ):
+                reconcile_rotation_audit(self.reconciliation_args(root, pane))
+            query.assert_not_called()
+            self.assertFalse((root / "reconciliation.receipt").exists())
+
+    def test_audit_bound_replacement_process_rejects_start_tick_or_argv_drift(self) -> None:
+        argv = ("bunx", "@openai/codex@latest")
+        digest = hashlib.sha256("\0".join(argv).encode()).hexdigest()
+        fields = {key: "" for key in LEGACY_FAILED_ROTATION_AUDIT_FIELDS}
+        fields.update({"replacement-pane-start-ticks": "7001", "replacement-argv-sha256": digest})
+        binding = SimpleNamespace(audit=SimpleNamespace(fields=fields), pane_pid=5252)
+        for case, process in (
+            ("start", ProcessIdentity(5252, 1, "S", 5252, 5252, 2, 7002, digest)),
+            ("argv", ProcessIdentity(5252, 1, "S", 5252, 5252, 2, 7001, "0" * 64)),
+        ):
+            with (
+                self.subTest(case=case),
+                patch("omo_manager.omo_codex_start.process_stat", return_value=process),
+                patch("omo_manager.omo_codex_start.process_argv", return_value=argv),
+                self.assertRaisesRegex(StartError, "exact replacement process"),
+            ):
+                validate_audit_bound_replacement_process(binding)
+
+    def test_process_held_rollouts_fails_closed_on_unreadable_process_fds(self) -> None:
+        process = ProcessIdentity(5252, 1, "S", 5252, 5252, 2, 7001, "a" * 64)
+        session_root = Path("/tmp/sessions")
+        with patch.object(Path, "iterdir", side_effect=OSError("denied")), self.assertRaisesRegex(StartError, "enumerate descriptors"):
+            process_held_rollouts((process,), session_root)
+        descriptor = Path("/proc/5252/fd/56")
+        with (
+            patch.object(Path, "iterdir", return_value=iter((descriptor,))),
+            patch("os.readlink", side_effect=OSError("raced")),
+            self.assertRaisesRegex(StartError, "inspect replacement-tree descriptor"),
+        ):
+            process_held_rollouts((process,), session_root)
+
+    def test_strict_reconciliation_process_tree_rejects_unreadable_child_identity(self) -> None:
+        root = ProcessIdentity(5252, 1, "S", 5252, 5252, 2, 7001, "a" * 64)
+
+        def bind(pid: int) -> ProcessIdentity:
+            if pid == root.pid:
+                return root
+            raise ContainmentError("child raced")
+
+        with (
+            patch("omo_manager.omo_codex_start.process_stat", side_effect=bind),
+            patch.object(Path, "iterdir", return_value=iter((Path("/proc/5252/task/5252"),))),
+            patch.object(Path, "read_text", return_value="5253"),
+            self.assertRaisesRegex(StartError, "replacement-tree PID 5253"),
+        ):
+            strict_reconciliation_process_tree(root.pid)
+
+    def test_source_bound_legacy_audit_never_enters_status_query_path(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root, 5252)
+            self.write_failed_rotation_audit(root, pane)
+            args = self.reconciliation_args(root, pane)
+            legacy_fields = {key: "" for key in LEGACY_FAILED_ROTATION_AUDIT_FIELDS}
+            with (
+                patch("omo_manager.omo_codex_start.read_failed_rotation_audit", return_value=SimpleNamespace(fields=legacy_fields)),
+                patch("omo_manager.omo_codex_start.query_reconciliation_session_id") as query,
+                self.assertRaisesRegex(StartError, "no-input rollout"),
+            ):
+                reconcile_rotation_audit(args)
+            query.assert_not_called()
+            self.assertFalse((root / "reconciliation.receipt").exists())
+
+    def test_reconcile_rotation_audit_rejects_duplicate_bound_task_todo_custody(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root, 5252)
+            self.write_failed_rotation_audit(root, pane)
+            with (root / "TODO.md").open("a", encoding="utf-8") as todo:
+                todo.write("\nprevious:\n\nworker.md cfg:2\n")
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.query_reconciliation_session_id") as query,
+                self.assertRaisesRegex(StartError, "one exact active TODO row"),
+            ):
+                reconcile_rotation_audit(self.reconciliation_args(root, pane))
+            query.assert_not_called()
+            self.assertFalse((root / "reconciliation.receipt").exists())
+
+    def test_reconcile_rotation_audit_accepts_one_exact_process_held_rollout_without_input(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root, 5252)
+            original_task_sha256 = hashlib.sha256((root / "worker.md").read_bytes()).hexdigest()
+            session_id = "119f670b-6a2f-7463-b9be-9aa6ff0cec43"
+            session_root = root / "sessions"
+            session_day = session_root / "2026" / "09" / "08"
+            session_day.mkdir(parents=True)
+            rollout = session_day / f"rollout-2026-09-08T17-42-35-{session_id}.jsonl"
+            started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            metadata = {
+                "timestamp": started_at,
+                "ordinal": 0,
+                "type": "session_meta",
+                "payload": {
+                    "session_id": session_id,
+                    "id": session_id,
+                    "timestamp": started_at,
+                    "cwd": str(root),
+                    "originator": "codex-tui",
+                    "source": "cli",
+                    "thread_source": "user",
+                },
+            }
+            metadata_line = json.dumps(metadata, separators=(",", ":")).encode() + b"\n"
+            rollout.write_bytes(metadata_line + b'{"type":"event_msg"}\n')
+            audit = self.write_failed_rotation_audit(root, pane)
+            self.write_task(root, status="blocked", pending=["current item"])
+            (root / "TODO.md").write_text((root / "TODO.md").read_text(encoding="utf-8").replace("current:", "human pending:"), encoding="utf-8")
+            rollout_info = rollout.stat()
+            launch_argv = (
+                "bunx",
+                "@openai/codex@latest",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--model",
+                "gpt-5.6-terra",
+                "--config",
+                'model_reasoning_effort="max"',
+                "--config",
+                "check_for_update_on_startup=false",
+            )
+            launch_argv_sha256 = hashlib.sha256("\0".join(launch_argv).encode()).hexdigest()
+            root_process = ProcessIdentity(5252, 1, "S", 5252, 5252, 2, 7001, launch_argv_sha256)
+            holder = ProcessIdentity(5253, 5252, "S", 5252, 5252, 2, 7002, "b" * 64)
+            held = {(rollout_info.st_dev, rollout_info.st_ino): (rollout, holder.pid, 56)}
+            args = self.reconciliation_args(
+                root,
+                pane,
+                reconciliation_rollout=rollout,
+                session_root=session_root,
+                expected_current_pane_start_ticks=root_process.start_ticks,
+                expected_rollout_device=rollout_info.st_dev,
+                expected_rollout_inode=rollout_info.st_ino,
+                expected_rollout_holder_pid=holder.pid,
+                expected_rollout_holder_start_ticks=holder.start_ticks,
+                expected_rollout_fd=56,
+                expected_rollout_session_meta_sha256=hashlib.sha256(metadata_line).hexdigest(),
+                expected_pending_items=("current item",),
+                expected_audit_task_sha256=original_task_sha256,
+                expected_audit_status="blocked",
+                expected_audit_blocker="model capacity",
+                expected_audit_owner_target="cfg:1",
+                expected_audit_pending_items=("preserve exact queue",),
+            )
+            task_before = (root / "worker.md").read_bytes()
+            audit_before = audit.read_bytes()
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.strict_reconciliation_process_tree", return_value=(root_process, holder)),
+                patch("omo_manager.omo_codex_start.process_argv", return_value=launch_argv),
+                patch("omo_manager.omo_codex_start.process_held_rollouts", return_value=held),
+                patch("omo_manager.omo_codex_start.query_reconciliation_session_id") as query,
+                patch("omo_manager.omo_codex_start.guarded_reconciliation_tmux") as pane_input,
+                patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
+            ):
+                self.assertEqual("rotation-audit-reconciled", reconcile_rotation_audit(args))
+            query.assert_not_called()
+            pane_input.assert_not_called()
+            respawn.assert_not_called()
+            self.assertEqual(task_before, (root / "worker.md").read_bytes())
+            self.assertEqual(audit_before, audit.read_bytes())
+            receipt = (root / "reconciliation.receipt").read_text(encoding="utf-8")
+            self.assertIn("evidence-kind: process-held-rollout-no-input\n", receipt)
+            self.assertIn(f"rollout-device: {rollout_info.st_dev}\nrollout-inode: {rollout_info.st_ino}\n", receipt)
+            self.assertIn("rollout-holder-pid: 5253\nrollout-holder-start-ticks: 7002\nrollout-fd: 56\n", receipt)
+            self.assertIn(f"current-session-id: {session_id}\nfinal-result: success\n", receipt)
+
+    def test_process_held_rollout_reconciliation_fails_closed_on_ambiguous_or_unbound_sources(self) -> None:
+        cases = (
+            "multiple", "argv", "holder", "metadata digest", "old session", "pid reuse", "audit argv",
+            "missing payload session", "nonroot ordinal", "parent marker", "fork marker",
+            "timestamp mismatch",
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                self.write_task(root, status="blocked", pending=["preserve exact queue"])
+                pane = Pane("cfg:2.0", "%2", "@2", "bunx", root, 5252)
+                session_id = self.SESSION_ID if case == "old session" else "119f670b-6a2f-7463-b9be-9aa6ff0cec43"
+                session_root = root / "sessions"
+                session_day = session_root / "2026" / "09" / "08"
+                session_day.mkdir(parents=True)
+                rollout = session_day / f"rollout-x-{session_id}.jsonl"
+                started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                metadata = {
+                    "timestamp": started_at,
+                    "ordinal": 1 if case == "nonroot ordinal" else 0,
+                    "type": "session_meta",
+                    "payload": {"session_id": session_id, "id": session_id, "timestamp": started_at, "cwd": str(root), "originator": "codex-tui", "source": "cli", "thread_source": "user"},
+                }
+                if case == "missing payload session":
+                    del metadata["payload"]["session_id"]
+                if case == "parent marker":
+                    metadata["payload"]["parent_thread_id"] = self.SESSION_ID
+                if case == "fork marker":
+                    metadata["payload"]["forked_from_id"] = self.SESSION_ID
+                if case == "timestamp mismatch":
+                    metadata["timestamp"] = "2026-09-08T17:41:35Z"
+                metadata_line = json.dumps(metadata, separators=(",", ":")).encode() + b"\n"
+                rollout.write_bytes(metadata_line)
+                self.write_failed_rotation_audit(root, pane, **({"replacement-argv-sha256": "0" * 64} if case == "audit argv" else {}))
+                with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane):
+                    binding = reconciliation_binding(self.reconciliation_args(root, pane))
+                info = rollout.stat()
+                valid_launch_argv = (
+                    "bunx",
+                    "@openai/codex@latest",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "--model",
+                    "gpt-5.6-terra",
+                    "--config",
+                    'model_reasoning_effort="max"',
+                    "--config",
+                    "check_for_update_on_startup=false",
+                )
+                root_process = ProcessIdentity(5252, 1, "S", 5252, 5252, 2, 7003 if case == "pid reuse" else 7001, hashlib.sha256("\0".join(valid_launch_argv).encode()).hexdigest())
+                holder = ProcessIdentity(5253, 5252, "S", 5252, 5252, 2, 7002, "b" * 64)
+                held = {(info.st_dev, info.st_ino): (rollout, holder.pid, 56)}
+                if case == "multiple":
+                    held[(info.st_dev, info.st_ino + 1)] = (rollout, holder.pid, 57)
+                args = replace(
+                    self.reconciliation_args(root, pane),
+                    reconciliation_rollout=rollout,
+                    session_root=session_root,
+                    expected_current_pane_start_ticks=root_process.start_ticks,
+                    expected_rollout_device=info.st_dev,
+                    expected_rollout_inode=info.st_ino,
+                    expected_rollout_holder_pid=9999 if case == "holder" else holder.pid,
+                    expected_rollout_holder_start_ticks=holder.start_ticks,
+                    expected_rollout_fd=56,
+                    expected_rollout_session_meta_sha256="0" * 64 if case == "metadata digest" else hashlib.sha256(metadata_line).hexdigest(),
+                )
+                launch_argv = (
+                    "bunx",
+                    "@openai/codex@latest",
+                    "resume" if case == "argv" else "--dangerously-bypass-approvals-and-sandbox",
+                    "--model",
+                    args.model,
+                    "--config",
+                    f'model_reasoning_effort="{args.reasoning_effort}"',
+                    "--config",
+                    "check_for_update_on_startup=false",
+                )
+                with (
+                    patch("omo_manager.omo_codex_start.strict_reconciliation_process_tree", return_value=(root_process, holder)),
+                    patch("omo_manager.omo_codex_start.process_argv", return_value=launch_argv),
+                    patch("omo_manager.omo_codex_start.process_held_rollouts", return_value=held),
+                    self.assertRaises(StartError),
+                ):
+                    process_held_reconciliation_rollout(args, binding)
 
     def test_rotation_marks_only_empty_post_startup_uuid_capture_as_reconcilable(self) -> None:
         for case in ("empty UUID", "startup error", "task or pane error", "same old UUID", "unrelated error"):
@@ -1658,6 +2007,13 @@ class CodexStartTests(unittest.TestCase):
                     stack.enter_context(patch("omo_manager.omo_codex_start.query_exact_status_session_id", return_value=""))
                     stack.enter_context(patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"))
                     stack.enter_context(patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn))
+                    launch_argv = (
+                        "bunx", "@openai/codex@latest", "--dangerously-bypass-approvals-and-sandbox", "--model",
+                        "gpt-5.6-terra", "--config", 'model_reasoning_effort="max"', "--config", "check_for_update_on_startup=false",
+                    )
+                    launch_digest = hashlib.sha256("\0".join(launch_argv).encode()).hexdigest()
+                    stack.enter_context(patch("omo_manager.omo_codex_start.process_snapshot", return_value={5252: ProcessIdentity(5252, 1, "S", 5252, 5252, 2, 7001, launch_digest)}))
+                    stack.enter_context(patch("omo_manager.omo_codex_start.process_argv", return_value=launch_argv))
                     stack.enter_context(patch("omo_manager.omo_codex_start.wait_started", side_effect=startup_error if case == "startup error" else None, return_value="running"))
                     if verification_error is not None:
                         stack.enter_context(patch("omo_manager.omo_codex_start.verify_fresh_rotation", side_effect=verification_error))

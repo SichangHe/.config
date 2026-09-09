@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 try:
+    from omo_manager.omo_agent_status import parse_task_text
     from omo_manager.omo_codex_status import Args as StatusArgs
     from omo_manager.omo_codex_status import CODEX_FOOTER_RE, current_block, current_input_text, exact_tail, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
     from omo_manager.omo_codex_status import status as classify_status
@@ -38,7 +39,9 @@ try:
     from omo_manager.omo_task_lock import task_file_lock, task_target_lock
     from omo_manager.omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, frontmatter_parts, parse_task_metadata
     from omo_manager.omo_task_status import authoritative_active_target_task_paths, root_membership_lock
+    from omo_manager.omo_manager_rotation_contain import ContainmentError, ProcessIdentity, process_argv, process_snapshot, process_stat, stable_process_identity
 except ModuleNotFoundError:
+    from omo_agent_status import parse_task_text  # pyright: ignore[reportImplicitRelativeImport]
     from omo_codex_status import Args as StatusArgs
     from omo_codex_status import CODEX_FOOTER_RE, current_block, current_input_text, exact_tail, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
     from omo_codex_status import status as classify_status
@@ -46,6 +49,7 @@ except ModuleNotFoundError:
     from omo_task_lock import task_file_lock, task_target_lock
     from omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, frontmatter_parts, parse_task_metadata
     from omo_task_status import authoritative_active_target_task_paths, root_membership_lock  # pyright: ignore[reportImplicitRelativeImport]
+    from omo_manager_rotation_contain import ContainmentError, ProcessIdentity, process_argv, process_snapshot, process_stat, stable_process_identity  # pyright: ignore[reportImplicitRelativeImport]
 
 HELPER_DIR = Path(__file__).resolve().parent
 WORKER_DEFAULTS = HELPER_DIR / "WORKER_DEFAULTS.md"
@@ -107,7 +111,29 @@ CODEX_PACKAGE = "@openai/codex@latest"
 SUPPORTED_CODEX_PACKAGES = {"@openai/codex", CODEX_PACKAGE}
 SUPPORTED_CODEX_PROCESS_COMMANDS = {"bun", "bunx", "codex"}
 ROTATION_AUDIT_MAX_BYTES = 64 * 1024
+ROLLOUT_METADATA_MAX_BYTES = 256 * 1024
 RECONCILABLE_ROTATION_FAILURE_KIND = "post-respawn-new-session-id-capture-failed"
+LEGACY_REPLACEMENT_PROCESS_BINDINGS = {
+    # The sole pre-schema audit accepted by the rollout-only repair path.  This
+    # source-level binding was captured while the exact replacement was live;
+    # arbitrary old audits remain ineligible.
+    "018a760d6ac506e6d1991650719fd4fef565f26f778f7ae32025395d77e6eabd": (
+        34143855,
+        "5b42f98d0d71226cd629984407d1aceb3677865feecda0f908ab943ff61e7cea",
+    ),
+}
+LEGACY_SESSION_META_TIMESTAMPS = {
+    # Exact first-line digest for the same bounded pre-schema incident.  That
+    # Codex version wrote the record envelope after startup; its payload time
+    # remains the process/session start identity.
+    (
+        "018a760d6ac506e6d1991650719fd4fef565f26f778f7ae32025395d77e6eabd",
+        "00d89247f316e61b7a57894f7f623695aea31bbc47e1d0bc7f7cf1ff5e1a18e1",
+    ): (
+        "2026-09-09T00:51:24.425Z",
+        "2026-09-09T00:42:35.656Z",
+    ),
+}
 ROTATION_ELIGIBILITY_XATTR = "user.omo_rotation_reconciliation_eligible_sha256"
 PCODX_LAUNCH_COMMAND = str(HELPER_DIR / "pcodx")
 UPDATE_AVAILABLE_RE = re.compile(r"^✨\s*Update available! [0-9]+\.[0-9]+\.[0-9]+ -> [0-9]+\.[0-9]+\.[0-9]+$")
@@ -183,6 +209,20 @@ class Args:
     reconciliation_receipt: Path | None = None
     expected_current_pane_pid: int = 0
     expected_current_command: str = ""
+    reconciliation_rollout: Path | None = None
+    session_root: Path | None = None
+    expected_current_pane_start_ticks: int = 0
+    expected_rollout_device: int = 0
+    expected_rollout_inode: int = 0
+    expected_rollout_holder_pid: int = 0
+    expected_rollout_holder_start_ticks: int = 0
+    expected_rollout_fd: int = -1
+    expected_rollout_session_meta_sha256: str = ""
+    expected_audit_task_sha256: str = ""
+    expected_audit_status: str = ""
+    expected_audit_blocker: str | None = None
+    expected_audit_owner_target: str = ""
+    expected_audit_pending_items: tuple[str, ...] = ()
     recover_resume_cwd_prompt: bool = False
     resume_cwd_choice: str = ""
     expected_session_directory: Path | None = None
@@ -288,11 +328,29 @@ class ReconciliationBinding:
     window_id: str
     pane_pid: int
     command: str
+    workdir: Path
     todo_device: int
     todo_inode: int
     todo_size: int
     todo_mtime_ns: int
     todo_sha256: str
+    task_todo_entry_sha256: str
+    task_todo_section: str
+
+
+@dataclass(frozen=True)
+class ReconciliationRolloutBinding:
+    path: Path
+    device: int
+    inode: int
+    holder_pid: int
+    holder_start_ticks: int
+    descriptor: int
+    pane_start_ticks: int
+    session_meta_sha256: str
+    session_id: str
+    started_at: str
+    cwd: Path
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -329,12 +387,26 @@ def parse_args(argv: list[str]) -> Args:
         help="Stop the exact replacement into an empty shell if fresh UUID proof fails; valid only with --rotate-worker.",
     )
     _ = parser.add_argument("--expected-blocker", help="Exact preserved lifecycle blocker; required only with --assert-legacy-missing-session-id.")
-    _ = parser.add_argument("--reconcile-rotation-audit", action="store_true", help="Record later UUID evidence without launching; the sole input is one identity-guarded `/status` query.")
+    _ = parser.add_argument("--reconcile-rotation-audit", action="store_true", help="Record later UUID evidence without launching, from one guarded `/status` query or one exact process-held rollout.")
     _ = parser.add_argument("--rotation-audit", type=Path, help="Exact existing failed rotation audit for --reconcile-rotation-audit.")
     _ = parser.add_argument("--expected-rotation-audit-sha256", help="Expected lowercase SHA-256 of the failed rotation audit.")
     _ = parser.add_argument("--reconciliation-receipt", type=Path, help="New owner-private receipt path for later reconciliation evidence.")
     _ = parser.add_argument("--expected-current-pane-pid", type=int, help="Exact current pane process id asserted for reconciliation.")
     _ = parser.add_argument("--expected-current-command", help="Exact supported current Codex process command asserted for reconciliation.")
+    _ = parser.add_argument("--reconciliation-rollout", type=Path, help="Exact rollout held open by the replacement process tree; selects the no-input reconciliation path.")
+    _ = parser.add_argument("--session-root", type=Path, help="Exact Codex session root containing --reconciliation-rollout.")
+    _ = parser.add_argument("--expected-current-pane-start-ticks", type=int, help="Exact /proc start ticks for the replacement pane process.")
+    _ = parser.add_argument("--expected-rollout-device", type=int, help="Expected device number of the process-held rollout.")
+    _ = parser.add_argument("--expected-rollout-inode", type=int, help="Expected inode number of the process-held rollout.")
+    _ = parser.add_argument("--expected-rollout-holder-pid", type=int, help="Exact replacement-tree process holding the rollout open.")
+    _ = parser.add_argument("--expected-rollout-holder-start-ticks", type=int, help="Exact /proc start ticks for the rollout holder.")
+    _ = parser.add_argument("--expected-rollout-fd", type=int, help="Exact holder file descriptor for the rollout.")
+    _ = parser.add_argument("--expected-rollout-session-meta-sha256", help="SHA-256 of the rollout's canonical first session_meta line, including LF.")
+    _ = parser.add_argument("--expected-audit-task-sha256", help="Original task SHA-256 recorded by the failed audit when current lifecycle bytes have advanced.")
+    _ = parser.add_argument("--expected-audit-status", choices=sorted(ROTATION_TASK_STATUSES), help="Original task status recorded by the failed audit.")
+    _ = parser.add_argument("--expected-audit-blocker", help="Original exact blocker recorded by the failed audit; pass an empty value when it was empty.")
+    _ = parser.add_argument("--expected-audit-owner-target", help="Original manager target recorded by the failed audit.")
+    _ = parser.add_argument("--expected-audit-pending-item", action="append", default=[], help="Original exact pending item in audit order; repeat for the complete original queue.")
     _ = parser.add_argument(
         "--recover-update-prompt",
         action="store_true",
@@ -419,6 +491,52 @@ def parse_args(argv: list[str]) -> Args:
                 parser.error("--expected-current-pane-pid must be positive.")
             if parsed.expected_current_command not in SUPPORTED_CODEX_PROCESS_COMMANDS:
                 parser.error("--expected-current-command must name a supported Codex process.")
+            rollout_values = (
+                parsed.reconciliation_rollout,
+                parsed.session_root,
+                parsed.expected_current_pane_start_ticks,
+                parsed.expected_rollout_device,
+                parsed.expected_rollout_inode,
+                parsed.expected_rollout_holder_pid,
+                parsed.expected_rollout_holder_start_ticks,
+                parsed.expected_rollout_fd is not None,
+                parsed.expected_rollout_session_meta_sha256,
+            )
+            if any(bool(value) for value in rollout_values):
+                if parsed.reconciliation_rollout is None or parsed.session_root is None or not all(
+                    (
+                        (parsed.expected_current_pane_start_ticks or 0) > 1,
+                        (parsed.expected_rollout_device or 0) > 0,
+                        (parsed.expected_rollout_inode or 0) > 0,
+                        (parsed.expected_rollout_holder_pid or 0) > 1,
+                        (parsed.expected_rollout_holder_start_ticks or 0) > 1,
+                        parsed.expected_rollout_fd is not None and parsed.expected_rollout_fd >= 0,
+                        SHA256_RE.fullmatch(parsed.expected_rollout_session_meta_sha256 or "") is not None,
+                    )
+                ):
+                    parser.error("process-held rollout reconciliation requires every exact rollout, holder, pane-start, and session-meta assertion.")
+                if not parsed.model or not parsed.reasoning_effort:
+                    parser.error("process-held rollout reconciliation requires --model and --reasoning-effort to bind the fresh launch command.")
+                if not parsed.reconciliation_rollout.is_absolute() or not parsed.session_root.is_absolute():
+                    parser.error("--reconciliation-rollout and --session-root must be absolute paths.")
+            audit_task_values = (
+                parsed.expected_audit_task_sha256,
+                parsed.expected_audit_status,
+                parsed.expected_audit_blocker is not None,
+                parsed.expected_audit_owner_target,
+                parsed.expected_audit_pending_item,
+            )
+            if any(bool(value) for value in audit_task_values):
+                if parsed.reconciliation_rollout is None:
+                    parser.error("advanced-task reconciliation is supported only with exact process-held rollout evidence.")
+                if not all((
+                    SHA256_RE.fullmatch(parsed.expected_audit_task_sha256 or "") is not None,
+                    parsed.expected_audit_status,
+                    parsed.expected_audit_blocker is not None,
+                    parsed.expected_audit_owner_target,
+                    parsed.expected_audit_pending_item,
+                )):
+                    parser.error("advanced-task reconciliation requires every exact original audit task, status, blocker, owner, and ordered-queue assertion.")
             if parsed.audit_output or parsed.assert_legacy_missing_session_id or parsed.stop_unverified_replacement:
                 parser.error("rotation mutation assertions are invalid with --reconcile-rotation-audit.")
             if parsed.dry_run:
@@ -439,6 +557,20 @@ def parse_args(argv: list[str]) -> Args:
             parsed.reconciliation_receipt,
             parsed.expected_current_pane_pid,
             parsed.expected_current_command,
+            parsed.reconciliation_rollout,
+            parsed.session_root,
+            parsed.expected_current_pane_start_ticks,
+            parsed.expected_rollout_device,
+            parsed.expected_rollout_inode,
+            parsed.expected_rollout_holder_pid,
+            parsed.expected_rollout_holder_start_ticks,
+            parsed.expected_rollout_fd is not None,
+            parsed.expected_rollout_session_meta_sha256,
+            parsed.expected_audit_task_sha256,
+            parsed.expected_audit_status,
+            parsed.expected_audit_blocker is not None,
+            parsed.expected_audit_owner_target,
+            parsed.expected_audit_pending_item,
         )
     ):
         parser.error("rotation assertions are only valid with --rotate-worker.")
@@ -528,6 +660,20 @@ def parse_args(argv: list[str]) -> Args:
         reconciliation_receipt=Path(os.path.abspath(parsed.reconciliation_receipt.expanduser())) if parsed.reconciliation_receipt else None,
         expected_current_pane_pid=parsed.expected_current_pane_pid or 0,
         expected_current_command=parsed.expected_current_command or "",
+        reconciliation_rollout=parsed.reconciliation_rollout,
+        session_root=parsed.session_root,
+        expected_current_pane_start_ticks=parsed.expected_current_pane_start_ticks or 0,
+        expected_rollout_device=parsed.expected_rollout_device or 0,
+        expected_rollout_inode=parsed.expected_rollout_inode or 0,
+        expected_rollout_holder_pid=parsed.expected_rollout_holder_pid or 0,
+        expected_rollout_holder_start_ticks=parsed.expected_rollout_holder_start_ticks or 0,
+        expected_rollout_fd=parsed.expected_rollout_fd if parsed.expected_rollout_fd is not None else -1,
+        expected_rollout_session_meta_sha256=parsed.expected_rollout_session_meta_sha256 or "",
+        expected_audit_task_sha256=parsed.expected_audit_task_sha256 or "",
+        expected_audit_status=parsed.expected_audit_status or "",
+        expected_audit_blocker=parsed.expected_audit_blocker,
+        expected_audit_owner_target=parsed.expected_audit_owner_target or "",
+        expected_audit_pending_items=tuple(parsed.expected_audit_pending_item),
         recover_resume_cwd_prompt=parsed.recover_resume_cwd_prompt,
         resume_cwd_choice=parsed.resume_cwd_choice or "",
         expected_session_directory=parsed.expected_session_directory.expanduser().resolve(strict=False) if parsed.expected_session_directory else None,
@@ -1477,7 +1623,12 @@ def finish_rotation_audit(
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
-        if failure_kind == RECONCILABLE_ROTATION_FAILURE_KIND and stopped_replacement is None:
+        if (
+            failure_kind == RECONCILABLE_ROTATION_FAILURE_KIND
+            and stopped_replacement is None
+            and "replacement-pane-start-ticks: " in prepared
+            and "replacement-argv-sha256: " in prepared
+        ):
             os.setxattr(path, ROTATION_ELIGIBILITY_XATTR, hashlib.sha256(finalized.encode()).hexdigest().encode(), follow_symlinks=False)
     except OSError as error:
         rollback_error: OSError | None = None
@@ -1537,6 +1688,20 @@ def checkpoint_rotation_replacement(path: Path, prepared: str, snapshot: Rotatio
         if time.monotonic() >= deadline_s:
             raise StartError("rotation replacement checkpoint did not observe a new supported Codex process before timeout.")
         time.sleep(0.05)
+    replacement_identity_fields: tuple[str, ...] = ()
+    try:
+        replacement_process = process_snapshot().get(current.pane_pid)
+        replacement_argv = process_argv(current.pane_pid)
+        replacement_argv_sha256 = hashlib.sha256("\0".join(replacement_argv).encode()).hexdigest()
+        if replacement_process is not None and replacement_argv and replacement_process.argv_sha256 == replacement_argv_sha256:
+            replacement_identity_fields = (
+                f"replacement-pane-start-ticks: {replacement_process.start_ticks}",
+                f"replacement-argv-sha256: {replacement_argv_sha256}",
+            )
+    except ContainmentError:
+        # The rotation can still be recorded, but this audit will deliberately
+        # lack the eligibility commit needed by later reconciliation.
+        pass
     checkpointed = prepared + "\n".join(
         (
             "replacement-observed: true",
@@ -1545,6 +1710,7 @@ def checkpoint_rotation_replacement(path: Path, prepared: str, snapshot: Rotatio
             f"replacement-window-id: {current.window_id}",
             f"replacement-pane-pid: {current.pane_pid}",
             f"replacement-command: {current.command}",
+            *replacement_identity_fields,
             "",
         )
     )
@@ -1611,9 +1777,16 @@ FAILED_ROTATION_AUDIT_FIELDS = {
     "replacement-window-id",
     "replacement-pane-pid",
     "replacement-command",
+    "replacement-pane-start-ticks",
+    "replacement-argv-sha256",
     "failure-kind",
     "captured-response-sha256",
     "final-result",
+}
+
+LEGACY_FAILED_ROTATION_AUDIT_FIELDS = FAILED_ROTATION_AUDIT_FIELDS - {
+    "replacement-pane-start-ticks",
+    "replacement-argv-sha256",
 }
 
 
@@ -1675,7 +1848,10 @@ def read_failed_rotation_audit(path: Path, expected_sha256: str) -> RotationAudi
         if not separator or not key or key in fields:
             raise StartError("rotation audit has invalid or duplicate fields.")
         fields[key] = value
-    if set(fields) != FAILED_ROTATION_AUDIT_FIELDS:
+    schema = set(fields)
+    if schema != FAILED_ROTATION_AUDIT_FIELDS and not (
+        schema == LEGACY_FAILED_ROTATION_AUDIT_FIELDS and digest in LEGACY_REPLACEMENT_PROCESS_BINDINGS
+    ):
         raise StartError("rotation audit does not have the exact failed-rotation schema.")
     if (
         fields["operation"] != "rotate-worker"
@@ -1742,12 +1918,28 @@ def finish_reconciliation_receipt(path: Path, prepared: str, result: str, curren
             temporary.unlink(missing_ok=True)
 
 
+# 🧑 Manager delegation: "preserve the exact bound task and ordered-queue evidence and never broaden authority to unrelated TODO rows"
+def reconciliation_task_todo_entry(args: Args, task: TaskBinding, todo_text: str, *, allow_human_pending: bool) -> tuple[str, str]:
+    """Bind only the task's sole canonical current TODO row."""
+
+    task_file = task_ref(args.root, task_path(args.root, args.task_file))
+    expected_line = f"{task_file} {task.runat}"
+    claims = tuple((claim.section, claim.line, claim.target) for claim in parse_task_text(todo_text) if claim.task_file == task_file)
+    accepted_sections = {"todo:current", "todo:human pending"} if allow_human_pending else {"todo:current"}
+    if len(claims) != 1 or claims[0][0] not in accepted_sections or claims[0][1:] != (expected_line, task.runat):
+        raise StartError("reconciliation requires one exact active TODO row for only the bound task.")
+    section = claims[0][0]
+    return section, hashlib.sha256(f"{section}\0{expected_line}".encode()).hexdigest()
+
+
 def reconciliation_binding(args: Args) -> ReconciliationBinding:
     audit_path = args.rotation_audit
     if audit_path is None:
         raise StartError("--rotation-audit is required for reconciliation.")
     audit = read_failed_rotation_audit(audit_path, args.expected_rotation_audit_sha256)
     fields = audit.fields
+    if set(fields) == LEGACY_FAILED_ROTATION_AUDIT_FIELDS and args.reconciliation_rollout is None:
+        raise StartError("the source-bound pre-schema rotation audit is eligible only for no-input rollout reconciliation.")
     if args.target.partition(":")[0].startswith("h"):
         raise StartError("rotation audit reconciliation cannot inspect a human-owned `h*` session.")
     if target_is_fresh_rotation_protected(args.target, args.protected_targets):
@@ -1755,8 +1947,17 @@ def reconciliation_binding(args: Args) -> ReconciliationBinding:
     pane = resolve_pane(args.target)
     if os.environ.get("TMUX_PANE") == pane.pane_id:
         raise StartError("rotation audit reconciliation cannot query the caller's pane.")
-    task = validate_task(args, pane)
-    queue_sha256 = hashlib.sha256("\0".join(task.pending_task_items).encode()).hexdigest()
+    rollout_mode = args.reconciliation_rollout is not None
+    task = validate_task(args, pane, allow_human_pending=rollout_mode)
+    advanced_task = bool(args.expected_audit_task_sha256)
+    audit_task_sha256 = args.expected_audit_task_sha256 if advanced_task else task.task_sha256
+    audit_status = args.expected_audit_status if advanced_task else task.status
+    audit_blocker = args.expected_audit_blocker if advanced_task else task.blocked_on
+    audit_owner_target = args.expected_audit_owner_target if advanced_task else task.managerat
+    audit_pending_items = args.expected_audit_pending_items if advanced_task else task.pending_task_items
+    if audit_blocker is None:
+        raise StartError("original audit blocker assertion is missing.")
+    queue_sha256 = hashlib.sha256("\0".join(audit_pending_items).encode()).hexdigest()
     protected_sha256 = hashlib.sha256("\0".join(args.protected_targets).encode()).hexdigest()
     if task.is_manager or task.tool != "codex" or task.runat != args.target:
         raise StartError("reconciliation requires the exact non-manager Codex task and target.")
@@ -1779,10 +1980,11 @@ def reconciliation_binding(args: Args) -> ReconciliationBinding:
         or fields["target"] != pane.target
         or fields["pane-id"] != pane.pane_id
         or fields["window-id"] != pane.window_id
-        or fields["task-sha256"] != task.task_sha256
-        or fields["status"] != task.status
-        or fields["blocker-sha256"] != hashlib.sha256(task.blocked_on.encode()).hexdigest()
-        or fields["manager-target"] != task.managerat
+        or fields["task-sha256"] != audit_task_sha256
+        or fields["status"] != audit_status
+        or fields["blocker-sha256"] != hashlib.sha256(audit_blocker.encode()).hexdigest()
+        or fields["manager-target"] != audit_owner_target
+        or audit_owner_target != task.managerat
         or fields["pending-items-sha256"] != queue_sha256
         or protected_count != len(args.protected_targets)
         or fields["protected-targets-sha256"] != protected_sha256
@@ -1806,10 +2008,10 @@ def reconciliation_binding(args: Args) -> ReconciliationBinding:
     owner = rotation_owner_path(args, pane)
     snapshot_fields = (
         args.task_file,
-        fields["task-sha256"],
-        fields["status"],
-        fields["manager-target"],
-        *args.expected_pending_items,
+        audit_task_sha256,
+        audit_status,
+        audit_owner_target,
+        *audit_pending_items,
         fields["target"],
         fields["pane-id"],
         fields["window-id"],
@@ -1839,8 +2041,15 @@ def reconciliation_binding(args: Args) -> ReconciliationBinding:
     if todo_identity(todo_before) != todo_identity(todo_after):
         raise StartError("TODO changed while its reconciliation binding was read.")
     todo_sha256 = hashlib.sha256(todo_bytes).hexdigest()
-    if fields["todo-sha256"] != todo_sha256:
-        raise StartError("rotation audit does not match the preserved TODO custody bytes.")
+    try:
+        task_todo_section, task_todo_entry_sha256 = reconciliation_task_todo_entry(
+            args,
+            task,
+            todo_bytes.decode("utf-8"),
+            allow_human_pending=rollout_mode,
+        )
+    except UnicodeDecodeError as error:
+        raise StartError("TODO is not valid UTF-8.") from error
     return ReconciliationBinding(
         audit,
         task,
@@ -1849,11 +2058,331 @@ def reconciliation_binding(args: Args) -> ReconciliationBinding:
         pane.window_id,
         pane.pane_pid,
         pane.command,
+        pane.workdir.resolve(strict=True),
         todo_before.st_dev,
         todo_before.st_ino,
         todo_before.st_size,
         todo_before.st_mtime_ns,
         todo_sha256,
+        task_todo_entry_sha256,
+        task_todo_section,
+    )
+
+
+def json_object_without_duplicates(raw: bytes, label: str) -> dict[str, object]:
+    """Decode one JSON object while rejecting duplicate keys."""
+
+    def object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise StartError(f"{label} contains a duplicate JSON key.")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(raw, object_pairs_hook=object_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise StartError(f"{label} is not one canonical JSON object: {error}") from error
+    if not isinstance(value, dict):
+        raise StartError(f"{label} is not one JSON object.")
+    return value
+
+
+def process_held_rollouts(tree: tuple[ProcessIdentity, ...], session_root: Path) -> dict[tuple[int, int], tuple[Path, int, int]]:
+    """Return rollout inodes held by the exact live replacement tree."""
+
+    held: dict[tuple[int, int], tuple[Path, int, int]] = {}
+    for process in tree:
+        fd_root = Path("/proc") / str(process.pid) / "fd"
+        try:
+            descriptors = tuple(fd_root.iterdir())
+        except OSError as error:
+            raise StartError(f"could not enumerate descriptors for replacement-tree PID {process.pid}: {error}") from error
+        for descriptor_path in descriptors:
+            try:
+                descriptor = int(descriptor_path.name)
+                destination = Path(os.readlink(descriptor_path))
+            except ValueError:
+                continue
+            except OSError as error:
+                raise StartError(f"could not inspect replacement-tree descriptor {descriptor_path}: {error}") from error
+            if not destination.is_absolute() or session_root not in destination.parents or not destination.name.startswith("rollout-") or destination.suffix != ".jsonl":
+                continue
+            try:
+                descriptor_info = descriptor_path.stat()
+                resolved = destination.resolve(strict=True)
+                path_info = resolved.stat(follow_symlinks=False)
+            except OSError as error:
+                raise StartError(f"could not bind candidate rollout descriptor {descriptor_path}: {error}") from error
+            if (
+                not stat.S_ISREG(path_info.st_mode)
+                or session_root not in resolved.parents
+                or not resolved.name.startswith("rollout-")
+                or resolved.suffix != ".jsonl"
+                or (descriptor_info.st_dev, descriptor_info.st_ino) != (path_info.st_dev, path_info.st_ino)
+            ):
+                continue
+            identity = (path_info.st_dev, path_info.st_ino)
+            candidate = (resolved, process.pid, descriptor)
+            if identity in held and held[identity] != candidate:
+                raise StartError("replacement process tree holds one rollout inode through multiple descriptors.")
+            held[identity] = candidate
+    return held
+
+
+def strict_reconciliation_process_tree(root_pid: int) -> tuple[ProcessIdentity, ...]:
+    """Bind every descendant through strict per-thread kernel child lists."""
+
+    pending = [root_pid]
+    seen: set[int] = set()
+    identities: dict[int, ProcessIdentity] = {}
+    while pending:
+        pid = pending.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        try:
+            identity = process_stat(pid)
+        except ContainmentError as error:
+            raise StartError(f"could not bind replacement-tree PID {pid}: {error}") from error
+        if identity.state == "Z":
+            raise StartError(f"replacement-tree PID {pid} became a zombie during binding.")
+        task_root = Path("/proc") / str(pid) / "task"
+        try:
+            threads = tuple(task_root.iterdir())
+        except OSError as error:
+            raise StartError(f"could not enumerate threads for replacement-tree PID {pid}: {error}") from error
+        child_pids: set[int] = set()
+        for thread in threads:
+            if not thread.name.isdigit():
+                continue
+            try:
+                child_text = (thread / "children").read_text(encoding="ascii")
+                child_pids.update(int(value) for value in child_text.split())
+            except (OSError, UnicodeError, ValueError) as error:
+                raise StartError(f"could not enumerate children for replacement-tree thread {thread}: {error}") from error
+        identities[pid] = identity
+        pending.extend(sorted(child_pids - seen, reverse=True))
+    return tuple(identities[pid] for pid in sorted(identities))
+
+
+def held_rollout_metadata(path: Path, identity: tuple[int, int]) -> tuple[bytes, dict[str, object]]:
+    """Read one complete process-held rollout metadata line by inode."""
+
+    fd = -1
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or stat.S_IMODE(opened.st_mode) & 0o022
+            or (opened.st_dev, opened.st_ino) != identity
+        ):
+            raise StartError("process-held rollout is not the exact same-UID non-writable regular file.")
+        prefix = os.read(fd, ROLLOUT_METADATA_MAX_BYTES + 1)
+    except OSError as error:
+        raise StartError(f"could not read one exact process-held rollout: {error}") from error
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    first_line, separator, _remainder = prefix.partition(b"\n")
+    if not separator or len(first_line) + 1 > ROLLOUT_METADATA_MAX_BYTES:
+        raise StartError("process-held rollout lacks one bounded complete metadata line.")
+    return first_line + b"\n", json_object_without_duplicates(first_line, "rollout session metadata")
+
+
+def validate_audit_bound_replacement_process(binding: ReconciliationBinding) -> None:
+    """Verify a full-schema audit still names the exact live process."""
+
+    fields = binding.audit.fields
+    if set(fields) != FAILED_ROTATION_AUDIT_FIELDS:
+        raise StartError("only full-schema audits may use status-query reconciliation.")
+    try:
+        expected_start_ticks = int(fields["replacement-pane-start-ticks"])
+        before = process_stat(binding.pane_pid)
+        argv = process_argv(binding.pane_pid)
+        after = process_stat(binding.pane_pid)
+    except (ContainmentError, ValueError) as error:
+        raise StartError(f"could not bind the status-query replacement process: {error}") from error
+    argv_sha256 = hashlib.sha256("\0".join(argv).encode()).hexdigest()
+    if (
+        stable_process_identity(before) != stable_process_identity(after)
+        or before.start_ticks != expected_start_ticks
+        or before.argv_sha256 != argv_sha256
+        or fields["replacement-argv-sha256"] != argv_sha256
+    ):
+        raise StartError("status-query target is not the exact replacement process bound by the failed audit.")
+
+
+def process_held_reconciliation_rollout(args: Args, binding: ReconciliationBinding) -> ReconciliationRolloutBinding:
+    """Authenticate one UUID from the exact replacement tree's open rollout."""
+
+    asserted_path = args.reconciliation_rollout
+    asserted_root = args.session_root
+    if asserted_path is None or asserted_root is None:
+        raise StartError("process-held rollout reconciliation requires --reconciliation-rollout and --session-root.")
+    try:
+        session_root = asserted_root.resolve(strict=True)
+        rollout = asserted_path.resolve(strict=True)
+    except OSError as error:
+        raise StartError(f"could not resolve the asserted rollout evidence: {error}") from error
+    if not session_root.is_dir() or session_root not in rollout.parents or rollout.parent == session_root:
+        raise StartError("asserted rollout is not beneath the exact dated session-root hierarchy.")
+    if asserted_root != session_root or asserted_path != rollout:
+        raise StartError("rollout reconciliation paths must be canonical, resolved absolute paths.")
+    try:
+        tree_before = strict_reconciliation_process_tree(binding.pane_pid)
+    except StartError:
+        raise
+    root_process = next((process for process in tree_before if process.pid == binding.pane_pid), None)
+    if root_process is None or root_process.start_ticks != args.expected_current_pane_start_ticks:
+        raise StartError("replacement pane process does not match the exact asserted start ticks.")
+    try:
+        root_argv = process_argv(binding.pane_pid)
+    except ContainmentError as error:
+        raise StartError(f"could not bind the replacement launch command: {error}") from error
+    if root_argv != (
+        root_argv[0] if root_argv else "",
+        CODEX_PACKAGE,
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--model",
+        args.model,
+        "--config",
+        f'model_reasoning_effort="{args.reasoning_effort}"',
+        "--config",
+        "check_for_update_on_startup=false",
+    ) or Path(root_argv[0]).name != CODEX_LAUNCH_COMMAND:
+        raise StartError("replacement pane process is not the exact supported fresh Codex launch command.")
+    root_argv_sha256 = hashlib.sha256("\0".join(root_argv).encode()).hexdigest()
+    audit_start_ticks = binding.audit.fields.get("replacement-pane-start-ticks")
+    audit_argv_sha256 = binding.audit.fields.get("replacement-argv-sha256")
+    if audit_start_ticks is None or audit_argv_sha256 is None:
+        legacy_binding = LEGACY_REPLACEMENT_PROCESS_BINDINGS.get(binding.audit.sha256)
+        if legacy_binding is None:
+            raise StartError("rotation audit does not bind the observed replacement process identity.")
+        expected_start_ticks, expected_argv_sha256 = legacy_binding
+    else:
+        try:
+            expected_start_ticks = int(audit_start_ticks)
+        except ValueError as error:
+            raise StartError("rotation audit has invalid replacement start ticks.") from error
+        expected_argv_sha256 = audit_argv_sha256
+    if (
+        expected_start_ticks != root_process.start_ticks
+        or expected_argv_sha256 != root_argv_sha256
+        or root_process.argv_sha256 != root_argv_sha256
+    ):
+        raise StartError("live process is not the exact replacement identity bound by the failed audit.")
+    held_before = process_held_rollouts(tree_before, session_root)
+    asserted_identity = (args.expected_rollout_device, args.expected_rollout_inode)
+    selected = held_before.get(asserted_identity)
+    if selected is None:
+        raise StartError("replacement process tree does not hold the exact asserted Codex rollout inode.")
+    held_path, holder_pid, descriptor = selected
+    device, inode = asserted_identity
+    holder = next((process for process in tree_before if process.pid == holder_pid), None)
+    if holder is None:
+        raise StartError("rollout holder is not in the replacement process tree.")
+    if (
+        held_path != rollout
+        or device != args.expected_rollout_device
+        or inode != args.expected_rollout_inode
+        or holder_pid != args.expected_rollout_holder_pid
+        or holder.start_ticks != args.expected_rollout_holder_start_ticks
+        or descriptor != args.expected_rollout_fd
+    ):
+        raise StartError("process-held rollout does not match the exact path, inode, holder, or descriptor assertions.")
+    root_sessions: list[tuple[int, int]] = []
+    selected_metadata_bytes = b""
+    selected_metadata: dict[str, object] | None = None
+    for identity, (path, _pid, _descriptor) in held_before.items():
+        metadata_bytes, metadata = held_rollout_metadata(path, identity)
+        payload = metadata.get("payload")
+        if not isinstance(payload, dict):
+            raise StartError("process-held rollout does not begin with session metadata.")
+        if metadata.get("type") == "session_meta" and payload.get("originator") == "codex-tui" and payload.get("source") == "cli" and payload.get("thread_source") == "user":
+            root_sessions.append(identity)
+        if identity == asserted_identity:
+            selected_metadata_bytes = metadata_bytes
+            selected_metadata = metadata
+    if root_sessions != [asserted_identity] or selected_metadata is None:
+        raise StartError("replacement process tree does not hold exactly one asserted root Codex rollout.")
+    metadata_bytes = selected_metadata_bytes
+    if hashlib.sha256(metadata_bytes).hexdigest() != args.expected_rollout_session_meta_sha256:
+        raise StartError("rollout session metadata does not match its explicit SHA-256 assertion.")
+    metadata = selected_metadata
+    payload = metadata.get("payload")
+    if metadata.get("type") != "session_meta" or not isinstance(payload, dict):
+        raise StartError("process-held rollout does not begin with Codex session metadata.")
+    session_id = payload.get("id")
+    payload_session_id = payload.get("session_id")
+    record_timestamp = metadata.get("timestamp")
+    started_at = payload.get("timestamp")
+    cwd = payload.get("cwd")
+    if (
+        not isinstance(session_id, str)
+        or UUID_RE.fullmatch(session_id) is None
+        or payload_session_id != session_id
+        or metadata.get("ordinal") != 0
+        or not isinstance(record_timestamp, str)
+        or any(key in metadata or key in payload for key in ("parent", "parent_id", "parent_session_id", "parent_thread_id", "fork", "fork_id", "forked_from", "forked_from_id"))
+        or not rollout.name.endswith(f"-{session_id}.jsonl")
+        or session_id == binding.audit.fields["old-session-id"]
+        or payload.get("source") != "cli"
+        or payload.get("originator") != "codex-tui"
+        or payload.get("thread_source") != "user"
+        or not isinstance(started_at, str)
+        or not isinstance(cwd, str)
+    ):
+        raise StartError("process-held rollout metadata is not one fresh supported Codex session identity.")
+    try:
+        parsed_record_timestamp = datetime.fromisoformat(record_timestamp.replace("Z", "+00:00"))
+        parsed_started_at = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        rollout_cwd = Path(cwd).resolve(strict=True)
+    except (OSError, ValueError) as error:
+        raise StartError(f"process-held rollout has invalid timestamp or working-directory evidence: {error}") from error
+    metadata_sha256 = hashlib.sha256(metadata_bytes).hexdigest()
+    timestamp_pair = (record_timestamp, started_at)
+    if (
+        parsed_record_timestamp.tzinfo is None
+        or parsed_started_at.tzinfo is None
+        or (
+            record_timestamp != started_at
+            and LEGACY_SESSION_META_TIMESTAMPS.get((binding.audit.sha256, metadata_sha256)) != timestamp_pair
+        )
+        or rollout_cwd != binding.workdir
+    ):
+        raise StartError("process-held rollout timestamp or working directory does not match the replacement.")
+    audit_finalized_at = datetime.fromtimestamp(binding.audit.mtime_ns / 1_000_000_000, timezone.utc)
+    if not (audit_finalized_at.timestamp() - 300 <= parsed_started_at.timestamp() <= audit_finalized_at.timestamp() + 1):
+        raise StartError("process-held rollout does not fall within the failed rotation's bounded startup interval.")
+    try:
+        tree_after = strict_reconciliation_process_tree(binding.pane_pid)
+        root_argv_after = process_argv(binding.pane_pid)
+    except (ContainmentError, StartError) as error:
+        raise StartError(f"replacement process tree changed while rollout evidence was read: {error}") from error
+    held_after = process_held_rollouts(tree_after, session_root)
+    if (
+        tuple(stable_process_identity(process) for process in tree_after)
+        != tuple(stable_process_identity(process) for process in tree_before)
+        or held_after != held_before
+        or root_argv_after != root_argv
+    ):
+        raise StartError("replacement process tree or held rollout changed while evidence was read.")
+    return ReconciliationRolloutBinding(
+        rollout,
+        device,
+        inode,
+        holder_pid,
+        holder.start_ticks,
+        descriptor,
+        root_process.start_ticks,
+        metadata_sha256,
+        session_id,
+        started_at,
+        rollout_cwd,
     )
 
 
@@ -1908,7 +2437,7 @@ def query_reconciliation_session_id(pane: Pane | ReconciliationBinding, n_lines:
 
 
 def reconcile_rotation_audit_locked(args: Args) -> str:
-    """Record later UUID evidence with only one guarded `/status` input query."""
+    """Record later UUID evidence from one guarded query or one process-held rollout."""
 
     receipt = args.reconciliation_receipt
     if receipt is None:
@@ -1917,10 +2446,30 @@ def reconcile_rotation_audit_locked(args: Args) -> str:
     if receipt == initial.audit.path:
         raise StartError("reconciliation receipt must be distinct from the original audit.")
     fields = initial.audit.fields
+    rollout_evidence = process_held_reconciliation_rollout(args, initial) if args.reconciliation_rollout is not None else None
+    if rollout_evidence is None:
+        validate_audit_bound_replacement_process(initial)
+    evidence_kind = "process-held-rollout-no-input" if rollout_evidence is not None else "later-status-reconciliation-only"
+    evidence_fields = (
+        (
+            f"rollout-path: {rollout_evidence.path}",
+            f"rollout-device: {rollout_evidence.device}",
+            f"rollout-inode: {rollout_evidence.inode}",
+            f"rollout-holder-pid: {rollout_evidence.holder_pid}",
+            f"rollout-holder-start-ticks: {rollout_evidence.holder_start_ticks}",
+            f"rollout-fd: {rollout_evidence.descriptor}",
+            f"current-pane-start-ticks: {rollout_evidence.pane_start_ticks}",
+            f"rollout-session-meta-sha256: {rollout_evidence.session_meta_sha256}",
+            f"rollout-started-at: {rollout_evidence.started_at}",
+            f"rollout-cwd: {rollout_evidence.cwd}",
+        )
+        if rollout_evidence is not None
+        else ()
+    )
     prepared = "\n".join(
         (
             "operation: reconcile-rotation-audit",
-            "evidence-kind: later-reconciliation-only",
+            f"evidence-kind: {evidence_kind}",
             "claim: does-not-rewrite-original-failure-or-explain-immediate-capture-failure",
             f"original-audit-path: {initial.audit.path}",
             f"original-audit-device: {initial.audit.device}",
@@ -1945,11 +2494,16 @@ def reconcile_rotation_audit_locked(args: Args) -> str:
             f"old-session-id: {fields['old-session-id']}",
             f"current-pane-pid: {initial.pane_pid}",
             f"current-command: {initial.command}",
+            *evidence_fields,
             f"todo-device: {initial.todo_device}",
             f"todo-inode: {initial.todo_inode}",
             f"todo-size: {initial.todo_size}",
             f"todo-mtime-ns: {initial.todo_mtime_ns}",
-            f"todo-sha256: {initial.todo_sha256}",
+            f"original-todo-sha256: {fields['todo-sha256']}",
+            f"current-todo-sha256: {initial.todo_sha256}",
+            f"task-todo-entry-sha256: {initial.task_todo_entry_sha256}",
+            f"task-todo-section: {initial.task_todo_section}",
+            "todo-authority-scope: exact-bound-task-row-only",
             "is-manager: false",
             "tool: codex",
             "completion: unknown-until-finalized",
@@ -1960,13 +2514,23 @@ def reconcile_rotation_audit_locked(args: Args) -> str:
     try:
         if reconciliation_binding(args) != initial:
             raise StartError("audit, task, or pane binding changed after receipt reservation.")
-        current_session_id = query_reconciliation_session_id(initial, 240, min(10.0, args.startup_timeout_s))
+        if rollout_evidence is not None:
+            if process_held_reconciliation_rollout(args, initial) != rollout_evidence:
+                raise StartError("process-held rollout binding changed after receipt reservation.")
+            current_session_id = rollout_evidence.session_id
+        else:
+            validate_audit_bound_replacement_process(initial)
+            current_session_id = query_reconciliation_session_id(initial, 240, min(10.0, args.startup_timeout_s))
         if UUID_RE.fullmatch(current_session_id) is None:
-            raise StartError("reconciliation status query did not return one valid current Codex UUID.")
+            raise StartError("reconciliation evidence did not return one valid current Codex UUID.")
         if current_session_id == fields["old-session-id"]:
-            raise StartError("reconciliation status query returned the failed rotation's old UUID.")
+            raise StartError("reconciliation evidence returned the failed rotation's old UUID.")
         if reconciliation_binding(args) != initial:
-            raise StartError("audit, task, or pane binding changed during the status query.")
+            raise StartError("audit, task, or pane binding changed during reconciliation.")
+        if rollout_evidence is None:
+            validate_audit_bound_replacement_process(initial)
+        if rollout_evidence is not None and process_held_reconciliation_rollout(args, initial) != rollout_evidence:
+            raise StartError("process-held rollout binding changed during reconciliation.")
     except Exception as reconciliation_error:
         try:
             finish_reconciliation_receipt(receipt, prepared, "failed")
