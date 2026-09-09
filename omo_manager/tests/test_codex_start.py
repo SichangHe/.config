@@ -1347,6 +1347,45 @@ class CodexStartTests(unittest.TestCase):
         with self.assertRaisesRegex(StartError, "exact one-use audit path"):
             require_source1206_authority(args, pane)
 
+    def test_source1571_authority_is_exactly_scoped(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            source = root / "manager_mail/source1571.txt"
+            source.parent.mkdir(mode=0o700)
+            data = b"subject\n\nFor manager\n\nforwarded\nwrote\n\n> Forum manager replaced this stupid agent, Previously\n> we have 246 sites\n"
+            source.write_bytes(data)
+            source.chmod(0o600)
+            audit = root / "source1571.audit"
+            pane = Pane("dw5:0.0", "%753", "@746", "bunx", root, 1973759)
+            exact = self.args(
+                root,
+                task_file="dw1291_generation.md",
+                target="dw5:0",
+                session_id="",
+                rotate_worker=True,
+                stop_unverified_replacement=True,
+                audit_output=audit,
+                human_email_file=Path("manager_mail/source1571.txt"),
+                human_email_lines=(3, 9),
+            )
+            with (
+                patch("omo_manager.omo_codex_start.SOURCE1206_ROOT", root),
+                patch("omo_manager.omo_codex_start.SOURCE1571_AUTHORITY_FILE", Path("manager_mail/source1571.txt")),
+                patch("omo_manager.omo_codex_start.SOURCE1571_AUTHORITY_SHA256", hashlib.sha256(data).hexdigest()),
+                patch("omo_manager.omo_codex_start.SOURCE1571_AUDIT_PATH", audit),
+            ):
+                authority = require_source1206_authority(exact, pane)
+                self.assertEqual("Source-1571", authority.source_name if authority else "")
+                for changed, changed_pane in (
+                    (replace(exact, task_file="other.md"), pane),
+                    (exact, replace(pane, target="dw5:1.0")),
+                    (replace(exact, human_email_lines=(3, 8)), pane),
+                    (replace(exact, human_email_file=Path("manager_mail/other.txt")), pane),
+                    (replace(exact, audit_output=root / "other.audit"), pane),
+                ):
+                    with self.assertRaises(StartError):
+                        require_source1206_authority(changed, changed_pane)
+
     def test_source1206_stop_fails_closed_if_replacement_child_survives(self) -> None:
         replacement = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"), 5252)
         shell = replace(replacement, command="sh", pane_pid=6262)
@@ -1361,6 +1400,59 @@ class CodexStartTests(unittest.TestCase):
             self.assertRaisesRegex(StartError, "did not stop"),
         ):
             stop_unverified_replacement(replacement, 1.0)
+
+    def test_status_or_checkpoint_fault_stops_observed_replacement(self) -> None:
+        for fault in ("status", "checkpoint", "unsupported"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                self.write_task(root, status="blocked", pending=["preserve exact queue"])
+                initial = Pane("cfg:2.0", "%2", "@2", "bunx", root, 4242)
+                replacement = replace(initial, command="node" if fault == "unsupported" else "bunx", pane_pid=5252)
+                shell = replace(initial, command="sh", pane_pid=6262)
+                state = "initial"
+
+                def resolve(_target: str) -> Pane:
+                    return shell if state == "shell" else replacement if state == "replacement" else initial
+
+                def respawn(_pane: Pane, _command: str) -> None:
+                    nonlocal state
+                    state = "replacement"
+
+                def tmux(command: list[str], *, timeout_s: float = 10.0) -> subprocess.CompletedProcess[str]:
+                    nonlocal state
+                    del timeout_s
+                    if "/bin/sh" in " ".join(command):
+                        state = "shell"
+                    return subprocess.CompletedProcess(command, 0, "", "")
+
+                if fault == "checkpoint":
+                    fault_patch = patch("omo_manager.omo_codex_start.checkpoint_rotation_replacement", side_effect=StartError("checkpoint write failed"))
+                elif fault == "status":
+                    fault_patch = patch("omo_manager.omo_codex_start.query_exact_status_session_id", side_effect=StartError("status rejected"))
+                else:
+                    fault_patch = patch("omo_manager.omo_codex_start.query_exact_status_session_id", return_value=self.SESSION_ID)
+                with (
+                    patch("omo_manager.omo_codex_start.require_source1206_authority", return_value=None),
+                    patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                    patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                    patch("omo_manager.omo_codex_start.query_status_session_id", return_value=(self.SESSION_ID, "")),
+                    patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"),
+                    patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
+                    patch("omo_manager.omo_codex_start.wait_started", return_value="running"),
+                    patch("omo_manager.omo_codex_start.run", side_effect=tmux),
+                    patch("omo_manager.omo_codex_start.verify_same_process"),
+                    patch("omo_manager.omo_codex_start.descendant_pids", return_value=set()),
+                    patch("omo_manager.omo_codex_start.time.sleep"),
+                    fault_patch,
+                    patch("omo_manager.omo_codex_start.send_prompt") as deliver,
+                    self.assertRaisesRegex(StartError, "checkpoint write failed|status rejected|atomic rotation snapshot"),
+                ):
+                    start(self.rotation_args(root, stop_unverified_replacement=True))
+                self.assertEqual("shell", state)
+                deliver.assert_not_called()
+                audit = (root / "rotation.audit").read_text(encoding="utf-8")
+                self.assertIn("replacement-disposition: stopped-to-shell\n", audit)
+                self.assertIn("final-result: failed\n", audit)
 
     def test_source1206_ambiguous_exact_response_is_not_an_identity(self) -> None:
         pane = Pane("cfg:2.0", "%2", "@2", "bun", Path("/tmp"), 5252)

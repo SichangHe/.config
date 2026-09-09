@@ -29,6 +29,9 @@
   - finalizes failure only after stop proof, recording response digest, failure kind, captured UUID when present, and stopped shell identity
   - leaves the checkpoint audit completion-unknown on stop, proof, or finalization fault and never delivers the task prompt
   - never marks a stopped missing-UUID audit reconciliation-eligible
+- Source-1571 one-time worker-replacement path
+  - requires `--stop-unverified-replacement`, `dw1291_generation.md` at `dw5:0`, its fixed audit path, and the byte-exact owner-private Source-1571 email lines `3-9`
+  - otherwise uses the Source-1206 status-and-stop behavior, including stopping an unverified fresh process to an empty shell
 - reconciliation eligibility
   - requires the replacement checkpoint
   - requires the exact UUID-capture failure kind

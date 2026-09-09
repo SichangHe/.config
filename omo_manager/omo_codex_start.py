@@ -92,6 +92,12 @@ SOURCE1206_SCOPE = "> Please reply with either “wait” or “allow the one-ti
 SOURCE1206_TASK_FILE = "dw1113_bedrock.md"
 SOURCE1206_TARGET = "dw5:0.0"
 SOURCE1206_AUDIT_PATH = (Path.home() / ".local/state/omo-manager/rotations/worker-rotation-source1183-1206.audit").resolve(strict=False)
+SOURCE1571_AUTHORITY_FILE = Path("manager_mail/85c5dff58359-1571.txt")
+SOURCE1571_AUTHORITY_LINES = (3, 9)
+SOURCE1571_AUTHORITY_SHA256 = "22e1d871f9c6c43ad5e90eda3a3d0626f9f5b0ac9b73f6248839311797f7f14d"
+SOURCE1571_TASK_FILE = "dw1291_generation.md"
+SOURCE1571_TARGET = "dw5:0.0"
+SOURCE1571_AUDIT_PATH = (Path.home() / ".local/state/omo-manager/rotations/worker-rotation-source1571.audit").resolve(strict=False)
 # Delivery IDs are persisted as filenames.  Keep them opaque but basename-safe
 # so a malformed CLI value can never escape the dedicated event directory.
 DELIVERY_ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
@@ -260,6 +266,7 @@ class Source1206Authority:
     source_size: int
     source_mtime_ns: int
     source_sha256: str
+    source_name: str
     target: str
     pane_id: str
     window_id: str
@@ -802,18 +809,26 @@ def require_source1206_authority(args: Args, pane: Pane) -> Source1206Authority 
 
     if not args.stop_unverified_replacement:
         return None
-    if args.root != SOURCE1206_ROOT:
-        raise StartError("the Source-1206 exception applies only to the approved work-log root.")
-    if (args.task_file, pane.target) != (SOURCE1206_TASK_FILE, SOURCE1206_TARGET):
-        raise StartError("the Source-1206 status-and-stop exception applies only to the approved task and target.")
-    if args.audit_output != SOURCE1206_AUDIT_PATH:
-        raise StartError("the Source-1206 exception requires its exact one-use audit path.")
-    if args.human_email_file is None or args.human_email_lines != SOURCE1206_AUTHORITY_LINES:
-        raise StartError("the Source-1206 exception requires its exact human email and line range.")
+    source_spec = (
+        (SOURCE1206_AUTHORITY_FILE, SOURCE1206_AUTHORITY_LINES, SOURCE1206_AUTHORITY_SHA256, SOURCE1206_TASK_FILE, SOURCE1206_TARGET, SOURCE1206_AUDIT_PATH, "Source-1206")
+        if (args.task_file, pane.target) == (SOURCE1206_TASK_FILE, SOURCE1206_TARGET)
+        else (SOURCE1571_AUTHORITY_FILE, SOURCE1571_AUTHORITY_LINES, SOURCE1571_AUTHORITY_SHA256, SOURCE1571_TASK_FILE, SOURCE1571_TARGET, SOURCE1571_AUDIT_PATH, "Source-1571")
+        if (args.task_file, pane.target) == (SOURCE1571_TASK_FILE, SOURCE1571_TARGET)
+        else None
+    )
+    if args.root != SOURCE1206_ROOT or source_spec is None:
+        raise StartError("status-and-stop authority applies only to one exact approved work-log rotation.")
+    authority_file, authority_lines, authority_sha256, task_file, target, audit_path, source_name = source_spec
+    if (args.task_file, pane.target) != (task_file, target):
+        raise StartError(f"the {source_name} status-and-stop exception applies only to the approved task and target.")
+    if args.audit_output != audit_path:
+        raise StartError(f"the {source_name} exception requires its exact one-use audit path.")
+    if args.human_email_file is None or args.human_email_lines != authority_lines:
+        raise StartError(f"the {source_name} exception requires its exact human email and line range.")
     candidate = args.human_email_file if args.human_email_file.is_absolute() else args.root / args.human_email_file
     try:
         path = candidate.resolve(strict=True)
-        approved = (args.root / SOURCE1206_AUTHORITY_FILE).resolve(strict=True)
+        approved = (args.root / authority_file).resolve(strict=True)
         parent = path.parent.stat()
         with path.open("rb") as source:
             before = os.fstat(source.fileno())
@@ -835,16 +850,24 @@ def require_source1206_authority(args: Args, pane: Pane) -> Source1206Authority 
         or before.st_uid != os.getuid()
         or stat.S_IMODE(before.st_mode) & 0o077
         or len(data) > HUMAN_RESTART_SOURCE_MAX_BYTES
-        or hashlib.sha256(data).hexdigest() != SOURCE1206_AUTHORITY_SHA256
+        or hashlib.sha256(data).hexdigest() != authority_sha256
     ):
-        raise StartError("Source-1206 authority is not the exact bounded owner-private email.")
+        raise StartError(f"{source_name} authority is not the exact bounded owner-private email.")
     try:
         lines = data.decode("utf-8").splitlines()
     except UnicodeDecodeError as error:
-        raise StartError("Source-1206 authority is not valid UTF-8.") from error
-    if len(lines) < SOURCE1206_AUTHORITY_LINES[1] or lines[2] != SOURCE1206_APPROVAL or lines[10] != SOURCE1206_PROCEDURE or lines[12] != SOURCE1206_SCOPE:
+        raise StartError(f"{source_name} authority is not valid UTF-8.") from error
+    if source_name == "Source-1206" and (
+        len(lines) < SOURCE1206_AUTHORITY_LINES[1]
+        or lines[2] != SOURCE1206_APPROVAL
+        or lines[10] != SOURCE1206_PROCEDURE
+        or lines[12] != SOURCE1206_SCOPE
+    ):
         raise StartError("Source-1206 authority excerpt does not match the approved one-time procedure.")
-    return Source1206Authority(path, SOURCE1206_AUTHORITY_LINES, before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, hashlib.sha256(data).hexdigest(), pane.target, pane.pane_id, pane.window_id, pane.pane_pid)
+    # 🧑 Source-1571: "For manager ... Forum manager replaced this stupid agent"
+    if source_name == "Source-1571" and (len(lines) < SOURCE1571_AUTHORITY_LINES[1] or lines[2] != "For manager" or not lines[7].startswith("> Forum manager replaced this stupid agent")):
+        raise StartError("Source-1571 authority excerpt does not match the approved worker replacement.")
+    return Source1206Authority(path, authority_lines, before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, hashlib.sha256(data).hexdigest(), source_name, pane.target, pane.pane_id, pane.window_id, pane.pane_pid)
 
 
 def verify_source1206_authority(args: Args, pane: Pane, expected: Source1206Authority | None) -> None:
@@ -1520,23 +1543,27 @@ def finish_rotation_audit(
             temporary.unlink(missing_ok=True)
 
 
-def checkpoint_rotation_replacement(path: Path, prepared: str, snapshot: RotationSnapshot, args: Args) -> tuple[str, Pane]:
-    """Persist proof that this rotation observed its replacement process."""
-
+def observe_rotation_replacement(snapshot: RotationSnapshot, args: Args) -> Pane:
+    """Return the exact supported replacement before any fallible audit write."""
     deadline_s = time.monotonic() + min(10.0, args.startup_timeout_s)
     while True:
         current = resolve_pane(snapshot.pane.target)
         if current.pane_id != snapshot.pane.pane_id or current.window_id != snapshot.pane.window_id or current.target != snapshot.pane.target:
             raise StartError("rotation replacement checkpoint found a rebound pane or window.")
+        if current.pane_pid != snapshot.pane.pane_pid:
+            if args.stop_unverified_replacement or current.command in SUPPORTED_CODEX_PROCESS_COMMANDS:
+                return current
         current_task = validate_task(args, current, verify_target=False)
         if current_task != snapshot.task or rotation_owner_path(args, current) != snapshot.task_path:
             raise StartError("rotation replacement checkpoint found task, queue, manager, or sole-owner drift.")
-        if current.pane_pid != snapshot.pane.pane_pid and current.command in SUPPORTED_CODEX_PROCESS_COMMANDS:
-            current = verify_rotation_snapshot(args, snapshot, replacement=current)
-            break
         if time.monotonic() >= deadline_s:
             raise StartError("rotation replacement checkpoint did not observe a new supported Codex process before timeout.")
         time.sleep(0.05)
+
+
+def checkpoint_rotation_replacement(path: Path, prepared: str, current: Pane) -> str:
+    """Persist the already-proven exact replacement process."""
+
     checkpointed = prepared + "\n".join(
         (
             "replacement-observed: true",
@@ -1577,7 +1604,7 @@ def checkpoint_rotation_replacement(path: Path, prepared: str, snapshot: Rotatio
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
-    return checkpointed, current
+    return checkpointed
 
 
 FAILED_ROTATION_AUDIT_FIELDS = {
@@ -2919,7 +2946,7 @@ def start(args: Args) -> str:
                             f"authoritative-owner-task-file: {args.task_file}",
                             f"rotation-snapshot-sha256: {rotation_snapshot.sha256}",
                             f"todo-sha256: {rotation_snapshot.todo_sha256}",
-                            *((f"one-status-authority-sha256: {source1206_authority.source_sha256}", "one-status-procedure: Source-1206") if source1206_authority is not None else ()),
+                            *((f"one-status-authority-sha256: {source1206_authority.source_sha256}", f"one-status-procedure: {source1206_authority.source_name}") if source1206_authority is not None else ()),
                             "prompt-delivery: held-until-terminal-sole-owner-proof",
                             "is-manager: false",
                             "tool: codex",
@@ -2935,7 +2962,9 @@ def start(args: Args) -> str:
                         pane = verify_rotation_snapshot(args, rotation_snapshot)
                         verify_source1206_authority(args, pane, source1206_authority)
                         respawn_codex(pane, command)
-                        active_audit, replacement = checkpoint_rotation_replacement(audit_path, prepared_audit, rotation_snapshot, args)
+                        replacement = observe_rotation_replacement(rotation_snapshot, args)
+                        replacement = verify_rotation_snapshot(args, rotation_snapshot, replacement=replacement)
+                        active_audit = checkpoint_rotation_replacement(audit_path, prepared_audit, replacement)
                         result = wait_started(replacement, marker, args.startup_timeout_s, allow_update_input=False) if args.stop_unverified_replacement else wait_started(replacement, marker, args.startup_timeout_s)
                         new_session_id = verify_fresh_rotation(args, rotation_snapshot, replacement, capture_evidence)
                     except RotationSessionCaptureFailed as rotation_error:
@@ -2952,16 +2981,36 @@ def start(args: Args) -> str:
                             rotation_error.add_note(f"private audit finalization also failed; audit remains completion-unknown: {audit_error}")
                         raise
                     except Exception as rotation_error:
+                        stopped_replacement = None
+                        if args.stop_unverified_replacement and replacement is not None:
+                            try:
+                                stopped_replacement = stop_unverified_replacement(replacement, args.startup_timeout_s)
+                            except Exception as stop_error:
+                                rotation_error.add_note(f"unverified replacement stop or proof failed; audit remains completion-unknown: {stop_error}")
+                                raise rotation_error
                         try:
-                            finish_rotation_audit(audit_path, active_audit, "failed")
+                            if stopped_replacement is None:
+                                finish_rotation_audit(audit_path, active_audit, "failed")
+                            else:
+                                finish_rotation_audit(audit_path, active_audit, "failed", stopped_replacement=stopped_replacement)
                         except Exception as audit_error:
                             rotation_error.add_note(f"private audit finalization also failed; audit remains completion-unknown: {audit_error}")
                         raise
                     try:
                         replacement = verify_rotation_snapshot(args, rotation_snapshot, replacement=replacement)
                     except Exception as rotation_error:
+                        stopped_replacement = None
+                        if args.stop_unverified_replacement:
+                            try:
+                                stopped_replacement = stop_unverified_replacement(replacement, args.startup_timeout_s)
+                            except Exception as stop_error:
+                                rotation_error.add_note(f"unverified replacement stop or proof failed; audit remains completion-unknown: {stop_error}")
+                                raise rotation_error
                         try:
-                            finish_rotation_audit(audit_path, active_audit, "failed")
+                            if stopped_replacement is None:
+                                finish_rotation_audit(audit_path, active_audit, "failed")
+                            else:
+                                finish_rotation_audit(audit_path, active_audit, "failed", stopped_replacement=stopped_replacement)
                         except Exception as audit_error:
                             rotation_error.add_note(f"private audit finalization also failed; audit remains completion-unknown: {audit_error}")
                         raise
