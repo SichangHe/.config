@@ -48,6 +48,7 @@ from omo_manager.omo_agent_status import is_main_manager_task_file
 from omo_manager.omo_agent_status import is_human_tmux_target
 from omo_manager.omo_agent_status import is_authoritative_human_blocked_ready_task
 from omo_manager.omo_agent_status import parse_task_lines
+from omo_manager.omo_agent_status import parse_task_text
 from omo_manager.omo_agent_status import read_task_metadata
 from omo_manager.omo_agent_status import resolve_task_path
 from omo_manager.omo_agent_status import scan_task_state
@@ -6160,6 +6161,14 @@ def unchanged_dependency_blocked_idle_line(root: Path, line: str, current: dict[
     """Return true only for a repeated blocked row with a stable task snapshot."""
 
     status = problem_line_status(line)
+    if status == "untracked_agent" and problem_line_value(line, "role") == "tmux_unmanaged":
+        target = problem_line_target(line)
+        matches = [
+            (task_file, task)
+            for task_file, (task, snapshot, _owner_target) in current.items()
+            if snapshot.startswith("done:") and snapshots.get(task_file) == snapshot and same_tmux_target(task.target, target)
+        ]
+        return len(matches) == 1 and matches[0][1].section.startswith("archive:")
     task_status = problem_line_value(line, "task_status")
     if not ((status in SNAPSHOT_SUPPRESSED_BLOCKED_STATUSES and task_status == "blocked") or status in {"ready", "done-stale"} and task_status in {"", "done"}):
         return False
@@ -6502,7 +6511,134 @@ def dependency_snapshot_state(root: Path) -> dict[str, tuple[TaskLine, str, str]
     return snapshots
 
 
-def blocked_report_snapshot_state(root: Path, report_state: Path = DEFAULT_STATE) -> dict[str, tuple[TaskLine, str, str]]:
+def classified_monthly_archive_tasks(root: Path, report_state: Path) -> set[str]:
+    """Return only archive task keys already retained in this root's ledger."""
+
+    ledger = report_state.with_name(f"{report_state.name}.blocked-report-classifications")
+    root_prefix = f"{hashlib.sha256(str(root).encode('utf-8')).hexdigest()[:16]}:"
+    try:
+        rows = ledger.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set()
+    tasks: set[str] = set()
+    for row in rows:
+        key, task_file, snapshot = row.split("\t", 2) if row.count("\t") == 2 else ("", "", "")
+        if key != root_prefix or not snapshot.startswith("done:"):
+            continue
+        if re.fullmatch(r"[0-9]{6}/[^/]+\.md", task_file) is not None:
+            tasks.add(task_file)
+    return tasks
+
+
+def monthly_archived_task_lines(root: Path, requested: set[str]) -> tuple[tuple[TaskLine, Path], ...]:
+    """Read task rows from stable, owner-controlled monthly archive indexes."""
+
+    requested = {task for task in requested if re.fullmatch(r"[0-9]{6}/[^/]+\.md", task) is not None}
+    if not requested:
+        return ()
+    requested_months = {task.partition("/")[0] for task in requested}
+    try:
+        root = root.resolve(strict=True)
+        root_state = root.lstat()
+        entries = tuple(sorted(root.iterdir(), key=lambda path: path.name))
+    except OSError:
+        return ()
+    root_mode = stat.S_IMODE(root_state.st_mode)
+    if (
+        not stat.S_ISDIR(root_state.st_mode)
+        or root_state.st_uid != os.getuid()
+        or root_mode & stat.S_IWOTH
+        or (root_mode & stat.S_IWGRP and not root_mode & stat.S_ISGID)
+    ):
+        return ()
+    archived: list[tuple[TaskLine, Path]] = []
+    for directory in entries:
+        if directory.name not in requested_months:
+            continue
+        index = directory / "old_todos.md"
+        try:
+            directory_before = directory.lstat()
+            index_before = index.lstat()
+            if (
+                not stat.S_ISDIR(directory_before.st_mode)
+                or directory_before.st_uid != os.getuid()
+                or stat.S_IMODE(directory_before.st_mode) & 0o022
+                or directory.resolve(strict=True) != directory
+                or not stat.S_ISREG(index_before.st_mode)
+                or index_before.st_uid != os.getuid()
+                or stat.S_IMODE(index_before.st_mode) & 0o022
+                or index.is_symlink()
+            ):
+                continue
+            index_bytes = index.read_bytes()
+            rows = parse_task_text(index_bytes.decode("utf-8"))
+            index_after = index.lstat()
+            directory_after = directory.lstat()
+        except (OSError, UnicodeDecodeError):
+            continue
+        index_before_identity = (index_before.st_dev, index_before.st_ino, index_before.st_size, index_before.st_mtime_ns, index_before.st_ctime_ns)
+        index_after_identity = (index_after.st_dev, index_after.st_ino, index_after.st_size, index_after.st_mtime_ns, index_after.st_ctime_ns)
+        directory_before_identity = (
+            directory_before.st_dev,
+            directory_before.st_ino,
+            directory_before.st_size,
+            directory_before.st_mtime_ns,
+            directory_before.st_ctime_ns,
+        )
+        directory_after_identity = (
+            directory_after.st_dev,
+            directory_after.st_ino,
+            directory_after.st_size,
+            directory_after.st_mtime_ns,
+            directory_after.st_ctime_ns,
+        )
+        if index_before_identity != index_after_identity or directory_before_identity != directory_after_identity:
+            continue
+        for row in rows:
+            relative = Path(row.task_file)
+            if relative.name != row.task_file or relative.suffix != ".md":
+                continue
+            task_path = directory / relative
+            try:
+                task_state = task_path.lstat()
+            except OSError:
+                continue
+            if (
+                not stat.S_ISREG(task_state.st_mode)
+                or task_state.st_uid != os.getuid()
+                or stat.S_IMODE(task_state.st_mode) & 0o022
+                or task_path.is_symlink()
+            ):
+                continue
+            task_ref = task_path.relative_to(root).as_posix()
+            if task_ref not in requested:
+                continue
+            index_evidence = ":".join(
+                (
+                    hashlib.sha256(index_bytes).hexdigest(),
+                    *(str(value) for value in index_before_identity),
+                    str(stat.S_IMODE(index_before.st_mode)),
+                    str(index_before.st_uid),
+                )
+            )
+            archived.append(
+                (
+                    replace(
+                        row,
+                        task_file=task_ref,
+                        section=f"archive:{index.relative_to(root).as_posix()}:{index_evidence}",
+                    ),
+                    task_path,
+                )
+            )
+    return tuple(archived)
+
+
+def blocked_report_snapshot_state(
+    root: Path,
+    report_state: Path = DEFAULT_STATE,
+    requested_archive_tasks: set[str] | None = None,
+) -> dict[str, tuple[TaskLine, str, str]]:
     """Return stable snapshots for blocked rows and completed ready panes."""
 
     snapshots = dependency_snapshot_state(root)
@@ -6511,7 +6647,17 @@ def blocked_report_snapshot_state(root: Path, report_state: Path = DEFAULT_STATE
     states: dict[str, TaskState] = {}
     metadata_by_task: dict[str, TaskMetadata] = {}
     task_lines = parse_task_lines(root / "TODO.md")
+    archive_requests = classified_monthly_archive_tasks(root, report_state)
+    archive_requests.update(requested_archive_tasks or ())
+    archived_task_lines = monthly_archived_task_lines(root, archive_requests)
     task_occurrences = Counter(task.task_file for task in task_lines if task.task_file != "TODO.md")
+    task_path_occurrences: Counter[Path] = Counter()
+    for indexed_task in task_lines:
+        indexed_path = resolve_task_path(root, indexed_task.task_file)
+        if indexed_path is not None:
+            task_path_occurrences[indexed_path.resolve(strict=False)] += 1
+    for _archived_task, archived_path in archived_task_lines:
+        task_path_occurrences[archived_path.resolve(strict=False)] += 1
     live_targets: list[str] = []
     for candidate in task_lines:
         if candidate.task_file == "TODO.md" or candidate.section not in MANAGER_TASK_STATE_LIVE_SECTIONS:
@@ -6529,6 +6675,7 @@ def blocked_report_snapshot_state(root: Path, report_state: Path = DEFAULT_STATE
         metadata = read_task_metadata(task_path, root)
         if (
             task_path is None
+            or task_path_occurrences[task_path.resolve(strict=False)] != 1
             or state is None
             or metadata is None
             or state.status != "done"
@@ -6555,6 +6702,35 @@ def blocked_report_snapshot_state(root: Path, report_state: Path = DEFAULT_STATE
         )
         if snapshot:
             snapshots[task.task_file] = (task, snapshot, effective_owner_target(root, task, task_path))
+    for task, task_path in archived_task_lines:
+        canonical_path = task_path.resolve(strict=False)
+        if task.task_file in seen_files or task_path_occurrences[canonical_path] != 1:
+            continue
+        seen_files.add(task.task_file)
+        state = scan_task_state(task_path, root)
+        metadata = read_task_metadata(task_path, root)
+        if (
+            state is None
+            or metadata is None
+            or state.status != "done"
+            or not state.target
+            or not state.manager_target
+            or not same_tmux_target(task.target, state.target)
+            or metadata.pending_task_items
+            or task_has_pending_marker(task_path)
+            or any(tmux_targets_overlap(state.target, target) for target in live_targets)
+        ):
+            continue
+        report = inspect_codex(CodexStatusArgs(state.target, 80))
+        if report.status != "ready":
+            continue
+        pane_evidence = blocked_custody_pane_evidence(state.target, report)
+        if not pane_evidence:
+            continue
+        owner_target = effective_owner_target(root, task, task_path)
+        snapshot = recorded_done_ready_snapshot(task_path, task, state, owner_target, pane_evidence)
+        if snapshot:
+            snapshots[task.task_file] = (task, snapshot, owner_target)
     for task in task_lines:
         if task.task_file == "TODO.md" or task.task_file in tasks or task.section not in MANAGER_TASK_STATE_LIVE_SECTIONS:
             continue
@@ -6616,8 +6792,8 @@ def classify_done_ready(args: Args, task_file: str) -> bool:
     lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
     with os.fdopen(lock_fd, "w", encoding="utf-8") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-        first_state = blocked_report_snapshot_state(args.root, args.state)
-        second_state = blocked_report_snapshot_state(args.root, args.state)
+        first_state = blocked_report_snapshot_state(args.root, args.state, {task_file})
+        second_state = blocked_report_snapshot_state(args.root, args.state, {task_file})
         first = first_state.get(task_file)
         second = second_state.get(task_file)
         if first is None or second is None or first != second or not second[1].startswith("done:"):
@@ -7333,7 +7509,10 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     if args.classify_done_ready:
         if not classify_done_ready(args, args.classify_done_ready):
-            print("omo_pending_watch: task is not uniquely done in TODO previous with an empty queue and exact ready Codex pane", file=sys.stderr)
+            print(
+                "omo_pending_watch: task is not uniquely done in TODO previous or one monthly archive with an empty queue and exact ready Codex pane",
+                file=sys.stderr,
+            )
             return 1
         print(f"omo_pending_watch: classified stable done ready pane for {args.classify_done_ready}")
         return 0

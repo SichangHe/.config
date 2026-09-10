@@ -1,5 +1,7 @@
 # tmux send helper
 
+(authored by agents unless marked 🧑)
+
 `omo_tmux_send.py` is the safe tmux paste primitive. Use its file path input for arbitrary prompt text.
 
 Create a private prompt file, write it through an editor, `apply_patch`, or another non-shell text channel, then run:
@@ -36,9 +38,15 @@ For one independently captured Codex composer whose display replaced source spac
 omo_tmux_send.py --target cfg:1.0 --cancel-existing-wrapped-file "$prompt_file" --cancel-existing-source-sha256 "$source_sha256" --cancel-existing-rendered-sha256 "$rendered_sha256" --cancel-existing-rendered-trailing-blank-sha256 "$rendered_blank_sha256" --expected-pane-id "$pane_id" --expected-pane-pid "$pane_pid" --expected-pane-command "$pane_command"
 ```
 
-The deterministic comparison consumes the source and rendering from left to right. Each byte must match exactly except that one source ASCII space or source line feed may appear as one rendered line feed followed by exactly two ASCII spaces; at least one replaced source space is required. Incident-specific hidden bindings may additionally authorize exactly one otherwise-empty source line rendered as one ASCII space, and may bind a raw agent-message body to one exact source target and explicit authority-reminder presence. The ordinary rendering must equal the source without its final spacer line, while the second rendering must differ only by the parser's one literal trailing-space interpretation. Both candidate digests must appear together. Direct launches use one atomic tmux pane/PID/command predicate. Shell-started cancellation is rejected because the foreground process can change identity between authentication and signalling. Every other byte, candidate count, suffix, layout, target, process, error, or race fails closed. This mode never sends Enter and post-cancel verification keeps the same runtime binding.
+The deterministic comparison consumes the source and rendering from left to right. Each source byte must match exactly except that a source ASCII space or source line feed may appear as one rendered line feed followed by exactly two ASCII spaces. Codex may also insert that same display-only prefix before a non-newline source byte, including inside a long token; an insertion is rejected before the first source byte or when repeated without consuming another source byte. At least one authenticated hard wrap is required. Incident-specific hidden bindings may additionally authorize exactly one otherwise-empty source line rendered as one ASCII space, and may bind a raw agent-message body to one exact source target and explicit authority-reminder presence. The ordinary rendering must equal the source without its final spacer line, while the second rendering must differ only by the parser's one literal trailing-space interpretation. Both candidate digests must appear together. Direct launches use one atomic tmux pane/PID/command predicate. Shell-started cancellation is rejected because the foreground process can change identity between authentication and signalling. Every other byte, candidate count, suffix, layout, target, process, error, or race fails closed. This mode never sends Enter and post-cancel verification keeps the same runtime binding.
 
-When the composer opening is above the bounded capture, `--describe-existing-wrapped-file` performs read-only source-bound authentication against the complete tmux history and prints the exact candidate and runtime bindings. This read-only mode can authenticate a shell-started Codex foreground leader. It never cancels or submits input. The same explicit agent-source and one-space-blank hidden bindings apply; missing history is rejected rather than reconstructed from partial rows.
+When the composer opening is above the bounded capture, `--describe-existing-wrapped-file` performs read-only source-bound authentication against the complete tmux history and prints the exact candidate and runtime bindings. Bind the retained file independently with `--describe-existing-source-sha256`:
+
+```sh
+omo_tmux_send.py --target cfg:1.0 --describe-existing-wrapped-file "$prompt_file" --describe-existing-source-sha256 "$source_sha256"
+```
+
+This read-only mode can authenticate a shell-started Codex foreground leader. The digest is part of this one description operation; do not combine it with the mutating `--submit-existing-sha256`. Description never cancels or submits input. The same explicit agent-source and one-space-blank hidden bindings apply; missing history is rejected rather than reconstructed from partial rows.
 
 When a failed Cursor paste leaves only a transport suffix in the composer, first obtain its current raw-rendering proof without mutation, then use that exact digest once:
 

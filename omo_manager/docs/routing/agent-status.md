@@ -1,6 +1,8 @@
 # agent status helper
 
-`omo_agent_status.py` uses `TODO.md` as the linked task-file index, reads each linked task file's frontmatter for authoritative status, then summarizes active tasks. Tmux targets use the existing pane inspector; `omnigent://SESSION_ID` targets use the OmniGent session snapshot. Auto-unstick reports a no-op for OmniGent and sends no recovery input.
+(authored by agents unless marked 🧑)
+
+`omo_agent_status.py` uses `TODO.md` as the linked task-file index, reads each linked task file's frontmatter for authoritative status, then summarizes active tasks. Tmux targets use the existing pane inspector; `omnigent://SESSION_ID` targets use the OmniGent session snapshot. An OmniGent session is reachable only when `runner_online` is exactly true; `host_online` means relaunch may be possible, not that messages can reach the runner. Auto-unstick reports a no-op for OmniGent and sends no recovery input.
 
 It reports `missing`, `not_codex`, `running`, `error`, `ready`, or `stuck_input`; `missing` means the routed tmux target does not exist, while `not_codex` means the target exists but is not showing supported Codex or live Cursor Agent state. Completed registry rows are stale bookkeeping and can be pruned with `--prune-completed`. By default it exits `0` after a successful summary. With `--exit-code-if-active`, it exits `3` when any task is still active, meaning linked from `TODO.md` and not marked `done` or `blocked` in its task file.
 

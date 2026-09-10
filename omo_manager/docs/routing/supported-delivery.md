@@ -1,11 +1,15 @@
 # supported delivery
 
+(authored by agents unless marked 🧑)
+
 `omo_tmux_send.py` is the shared send helper for Codex and live Cursor Agent targets. Tmux `SESSION:WINDOW[.PANE]` targets keep the guarded buffer-and-input path; `omnigent://SESSION_ID` targets use OmniGent's session-event API. Watchers, wake loops, and managers use the same helper and dispatch from the target syntax.
 
 - sendable targets
   - Codex panes in `ready`, `running`, `stuck_input`, `waiting_subagent`, or `error`
   - Cursor Agent panes whose exact process is `agent` and whose TUI shows the `Cursor … · N%` footer plus `→` follow-up composer
   - idle Cursor follow-up `Add a follow-up` is `ready`; `ctrl+c to stop` or a task count is `running`; other follow-up text is `stuck_input`
+- verification
+  - exact pasted source remains authenticated when Codex hard-wraps it at spaces or inside long tokens; only then may Enter be sent
 - rejection
   - Cursor chrome without a live `agent` process stays `not_codex` and is not pasted
   - that definite pre-paste rejection is retryable; the `(pending)` marker stays until a later verified send

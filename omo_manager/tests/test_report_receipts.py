@@ -3800,6 +3800,41 @@ return 75
             )
             self.assertTrue(validate_manager_consumed_report(close_args, case.root / "worker.md"))
 
+    def test_active_accepted_report_exports_without_archive_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, _owner = active_manager_fixture(tmp_path)
+            draft = allocate_report_draft(case, b"active accepted export\n")
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            pending = run_report_from(case, draft, status="done")
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+            accepted = run_report_from(case, draft, status="done")
+            self.assertEqual(0, accepted.returncode, accepted.stderr)
+            self.assertTrue(json.loads(accepted.stdout)["accepted"])
+            task_before = (case.root / "worker.md").read_bytes()
+            manager_before = manager.read_bytes()
+            exported = tmp_path / "active-consumed-export.json"
+
+            verified = run_report_from(
+                case,
+                draft,
+                verify_consumed=True,
+                status="done",
+                consumed_attestation_output=exported,
+            )
+
+            self.assertEqual(0, verified.returncode, verified.stderr)
+            attestation = json.loads(verified.stdout)
+            self.assertTrue(attestation["accepted"])
+            self.assertEqual("manager acknowledged routed report", attestation["reason"])
+            self.assertIn("acceptance", attestation)
+            validated = validate_export_from(case, exported)
+            self.assertEqual(0, validated.returncode, validated.stderr)
+            self.assertEqual(attestation, json.loads(validated.stdout))
+            self.assertEqual(task_before, (case.root / "worker.md").read_bytes())
+            self.assertEqual(manager_before, manager.read_bytes())
+
     def test_archived_consumed_export_covers_current_untracked_done_shapes(self) -> None:
         shapes = (
             ("dw_git_cleanup", "progressing", True),

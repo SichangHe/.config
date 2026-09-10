@@ -117,9 +117,11 @@ def session_snapshot(target: str) -> SessionSnapshot:
 def manager_status(snapshot: SessionSnapshot) -> ManagerStatus:
     if snapshot.status == "failed":
         return "error"
+    if snapshot.runner_online is not True:
+        return "missing"
     if snapshot.status in {"running", "waiting"}:
         return "running"
-    if snapshot.status == "idle" and (snapshot.runner_online is not False or snapshot.host_online is True):
+    if snapshot.status == "idle":
         return "ready"
     return "missing"
 
@@ -164,13 +166,20 @@ def stop_session(target: str, *, dry_run: bool = False) -> None:
 
 def agent_id_for_tool(tool: str) -> str:
     expected_name = f"{tool}-native-ui"
+    expected_harness = f"{tool}-native"
     value = require_mapping(request_json("GET", "/v1/agents?limit=1000"), "agent list")
     agents = value.get("data")
     if not isinstance(agents, list):
         raise RuntimeError("OmniGent agent list lacks `data`")
-    matches = [agent for agent in agents if isinstance(agent, dict) and agent.get("name") == expected_name]
+    matches = [
+        agent
+        for agent in agents
+        if isinstance(agent, dict) and agent.get("name") == expected_name and agent.get("harness") == expected_harness
+    ]
     if len(matches) != 1:
-        raise RuntimeError(f"OmniGent requires exactly one registered `{expected_name}` agent, found {len(matches)}")
+        raise RuntimeError(
+            f"OmniGent requires exactly one registered `{expected_name}` agent with `{expected_harness}` harness, found {len(matches)}"
+        )
     return require_text(matches[0].get("id"), "agent id")
 
 
