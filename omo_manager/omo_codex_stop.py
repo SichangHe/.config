@@ -142,6 +142,10 @@ class Args:
     # Keep new internal fields appended so historical positional callers are
     # not reinterpreted.
     bound_staged_status_check: Callable[[], None] | None = None
+    # Internal, non-CLI-only custody handoff. The caller's pre-input check
+    # must independently prove the expected session when a busy Codex cannot
+    # answer `/status`; all pane and close-capability guards stay mandatory.
+    bound_custody_status_bypass: bool = False
 
 
 @dataclass(frozen=True)
@@ -1703,7 +1707,14 @@ def kill_bound_and_write_close_proof(
         if output:
             raise RuntimeError("bound close produced unexpected output")
     else:
-        _ = tmux(["kill-pane", "-t", expected_pane_id], check=True)
+        output = guarded_tmux_sequence(
+            symbolic_target,
+            expected_pane_id,
+            [["kill-pane", "-t", expected_pane_id]],
+            expected_pane_pid,
+        )
+        if output:
+            raise RuntimeError("bound close produced unexpected output")
     deadline_s = time.monotonic() + 5.0
     while process_start_ticks(expected_pane_pid) is not None and time.monotonic() < deadline_s:
         time.sleep(0.05)
@@ -2317,6 +2328,8 @@ def maybe_request_feedback(args: Args) -> None:
 
 
 def stop(args: Args) -> str:
+    if args.bound_custody_status_bypass and (not args.bound_symbolic_target or not args.bound_pane_id or not args.bound_expected_session_id or args.bound_pre_input_check is None):
+        raise RuntimeError("custody status bypass requires a non-human session-bound guarded close capability and pre-input proof")
     authorized_target = human_authorized_target(args)
     human_authorized = bool(authorized_target)
     if human_authorized:
@@ -2441,6 +2454,26 @@ def stop(args: Args) -> str:
         # Re-read both durable authority bindings after the pane is pinned and
         # immediately before the first human-pane input.
         validate_human_close_authorization(args)
+    if args.bound_custody_status_bypass:
+        # The authenticated caller has proved the busy process-held session
+        # without terminal text.  Do not alter the provider-busy TUI with
+        # `/status`, Ctrl-C, or any other input; atomically kill only this
+        # revalidated pane and write the existing replacement close proof.
+        if human_authorized or not all(proof_fields) or not identity_is_current():
+            raise RuntimeError(f"tmux target disappeared before custody-bound close: {args.target}")
+        assert args.bound_pre_input_check is not None
+        args.bound_pre_input_check()
+        kill_bound_and_write_close_proof(
+            args.bound_symbolic_target,
+            args.bound_pane_id,
+            args.bound_pane_pid,
+            args.bound_pane_start_ticks,
+            Path(args.bound_close_proof_path),
+            Path(args.bound_close_audit_path),
+            args.bound_close_proof_secret,
+            args.bound_close_proof_commitment,
+        )
+        return args.bound_expected_session_id
     if (args.bound_pre_input_check is not None or args.bound_staged_status_check is not None) and (
         tmux_guard is None
         or not all(proof_fields)
@@ -2448,6 +2481,8 @@ def stop(args: Args) -> str:
         or (args.bound_staged_status_check is not None and args.bound_pre_input_check is None)
     ):
         raise RuntimeError("bound pre-input check requires a session-bound guarded close capability")
+    if args.bound_custody_status_bypass and (human_authorized or tmux_guard is None or not all(proof_fields)):
+        raise RuntimeError("custody status bypass requires a non-human session-bound guarded close capability and pre-input proof")
     identity_check = identity_is_current if human_authorized or args.bound_symbolic_target else None
     if task_tool(args) == "cursor":
         before_close = (

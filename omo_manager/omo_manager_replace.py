@@ -18,6 +18,7 @@ import re
 import stat
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
@@ -34,7 +35,7 @@ from omo_manager.omo_codex_start import Pane as StartPane
 from omo_manager.omo_codex_start import pcodx_state
 from omo_manager.omo_task_edit import render_pending_items
 from omo_manager.omo_task_lock import process_start_ticks, task_file_lock, task_target_lock
-from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1, TaskFrontmatterError, TaskMetadata, parse_task_metadata
+from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1, TaskFrontmatterError, TaskMetadata, frontmatter_parts, parse_task_metadata
 from omo_manager.omo_task_status import (
     TODO_ROW_RE,
     active_child_task_refs,
@@ -167,6 +168,7 @@ SOURCE1611_DIRECT_WORKER_PARENT_TARGET = "config:23"
 SOURCE1611_DIRECT_WORKER_OLD_QUEUE = (
     "🧑 Replace the current Pangram manager immediately. Tell the new owner to obey the Human order to try ephemeral AWS proxies for the 20 texts or face termination. Source: manager_mail/85c5dff58359-1597.txt.",
 )
+SOURCE1611_SESSION_ROOT = Path("/home/sichanghe/.codex/sessions")
 SOURCE1612_FILE = "manager_mail/85c5dff58359-1612.txt"
 SOURCE_ONLY_AUTHORITY_MODE = "source-only-old-task-before-image"
 PCODX_REPLACE_EVIDENCE_RE = re.compile(
@@ -176,6 +178,7 @@ PCODX_REPLACE_EVIDENCE_RE = re.compile(
 )
 PCODX_REPLACE_DIRECTIVE_RE = re.compile(r"(?m)^Replace the failed PCODX manager\b.*$")
 MAX_AUDIT_BYTES = 8 * 1024 * 1024
+ROLLOUT_METADATA_MAX_BYTES = 256 * 1024
 POSIX_ACL_XATTRS = {"system.posix_acl_access", "system.posix_acl_default"}
 AT_FDCWD = -100
 AT_SYMLINK_FOLLOW = 0x400
@@ -263,6 +266,24 @@ class Args:
     empty_tree_envelope_sha256: str = ""
     descendant_authority_envelope_sha256: str = ""
     source1611_parent_sha256: str = ""
+    source1611_rollout: Path | None = None
+    source1611_session_root: Path | None = None
+    source1611_rollout_device: int = 0
+    source1611_rollout_inode: int = 0
+    source1611_rollout_holder_pid: int = 0
+    source1611_rollout_holder_start_ticks: int = 0
+    source1611_rollout_fd: int = -1
+    source1611_rollout_session_meta_sha256: str = ""
+    source1611_rollout_holder_exe: Path | None = None
+    source1611_rollout_holder_exe_link: str = ""
+    source1611_rollout_holder_exe_device: int = 0
+    source1611_rollout_holder_exe_inode: int = 0
+    source1611_rollout_holder_exe_mode: int = 0
+    source1611_rollout_holder_exe_uid: int = -1
+    source1611_rollout_holder_exe_nlink: int = -1
+    source1611_rollout_holder_exe_size: int = 0
+    source1611_rollout_holder_exe_sha256: str = ""
+    source1611_rollout_holder_argv_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -278,6 +299,33 @@ class PaneIdentity:
     pane_id: str
     pid: int
     start_ticks: int
+
+
+@dataclass(frozen=True)
+class Source1611RolloutCustody:
+    """One direct worker's live Codex UUID, proven from its held rollout FD."""
+
+    rollout: Path
+    device: int
+    inode: int
+    holder_pid: int
+    holder_start_ticks: int
+    descriptor: int
+    pane_start_ticks: int
+    session_meta_sha256: str
+    session_id: str
+
+
+@dataclass(frozen=True)
+class Source1611Process:
+    pid: int
+    ppid: int
+    state: str
+    process_group: int
+    session: int
+    tty: int
+    start_ticks: int
+    argv_sha256: str
 
 
 @dataclass(frozen=True)
@@ -372,6 +420,24 @@ class ParsedArgs(argparse.Namespace):
     empty_tree_envelope_sha256: str = ""
     descendant_authority_envelope_sha256: str = ""
     source1611_parent_sha256: str = ""
+    source1611_rollout: Path | None = None
+    source1611_session_root: Path | None = None
+    source1611_rollout_device: int = 0
+    source1611_rollout_inode: int = 0
+    source1611_rollout_holder_pid: int = 0
+    source1611_rollout_holder_start_ticks: int = 0
+    source1611_rollout_fd: int | None = None
+    source1611_rollout_session_meta_sha256: str = ""
+    source1611_rollout_holder_exe: Path | None = None
+    source1611_rollout_holder_exe_link: str = ""
+    source1611_rollout_holder_exe_device: int = 0
+    source1611_rollout_holder_exe_inode: int = 0
+    source1611_rollout_holder_exe_mode: int = 0
+    source1611_rollout_holder_exe_uid: int = -1
+    source1611_rollout_holder_exe_nlink: int = -1
+    source1611_rollout_holder_exe_size: int = 0
+    source1611_rollout_holder_exe_sha256: str = ""
+    source1611_rollout_holder_argv_sha256: str = ""
 
 
 def digest(data: bytes) -> str:
@@ -552,6 +618,30 @@ def source1597_direct_worker_required(args: Args) -> bool:
     return is_source1611_direct_worker_semantic_exception(args)
 
 
+def source1611_rollout_custody_requested(args: Args) -> bool:
+    return args.source1611_rollout is not None
+
+
+def source1611_task_session_is_absent(data: bytes) -> bool:
+    """Distinguish a missing legacy field from an explicitly blank one."""
+
+    try:
+        parts = frontmatter_parts(data.decode("utf-8"))
+    except (UnicodeDecodeError, TaskFrontmatterError):
+        return False
+    return parts is not None and not any(line.partition(":")[0].strip() == "session_id" for line in parts[0])
+
+
+def old_session_matches(args: Args, session_id: str, data: bytes | None = None) -> bool:
+    """Keep normal task-session custody mandatory outside the one legacy path."""
+
+    if is_pcodx_replacement(args):
+        return True
+    if source1611_rollout_custody_requested(args):
+        return not session_id and data is not None and source1611_task_session_is_absent(data)
+    return session_id.lower() == args.old_session_id
+
+
 def source_only_expected_old_queue(args: Args) -> tuple[str, ...]:
     if is_source1597_semantic_exception(args):
         return SOURCE1597_OLD_QUEUE
@@ -666,6 +756,24 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--empty-tree-envelope-sha256", default="")
     _ = parser.add_argument("--descendant-authority-envelope-sha256", default="")
     _ = parser.add_argument("--source1611-parent-sha256", default="")
+    _ = parser.add_argument("--source1611-rollout", type=Path)
+    _ = parser.add_argument("--source1611-session-root", type=Path)
+    _ = parser.add_argument("--source1611-rollout-device", type=int, default=0)
+    _ = parser.add_argument("--source1611-rollout-inode", type=int, default=0)
+    _ = parser.add_argument("--source1611-rollout-holder-pid", type=int, default=0)
+    _ = parser.add_argument("--source1611-rollout-holder-start-ticks", type=int, default=0)
+    _ = parser.add_argument("--source1611-rollout-fd", type=int)
+    _ = parser.add_argument("--source1611-rollout-session-meta-sha256", default="")
+    _ = parser.add_argument("--source1611-rollout-holder-exe", type=Path)
+    _ = parser.add_argument("--source1611-rollout-holder-exe-link", default="")
+    _ = parser.add_argument("--source1611-rollout-holder-exe-device", type=int, default=0)
+    _ = parser.add_argument("--source1611-rollout-holder-exe-inode", type=int, default=0)
+    _ = parser.add_argument("--source1611-rollout-holder-exe-mode", type=int, default=0)
+    _ = parser.add_argument("--source1611-rollout-holder-exe-uid", type=int, default=-1)
+    _ = parser.add_argument("--source1611-rollout-holder-exe-nlink", type=int, default=-1)
+    _ = parser.add_argument("--source1611-rollout-holder-exe-size", type=int, default=0)
+    _ = parser.add_argument("--source1611-rollout-holder-exe-sha256", default="")
+    _ = parser.add_argument("--source1611-rollout-holder-argv-sha256", default="")
     _ = parser.add_argument("--old-pane-id", required=True)
     _ = parser.add_argument("--old-pane-pid", required=True, type=int)
     _ = parser.add_argument("--old-pane-start-ticks", required=True, type=int)
@@ -722,6 +830,55 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("closed-owner audit SHA-256 must be 64 lowercase hexadecimal characters")
     if parsed.source1611_parent_sha256 and SHA256_RE.fullmatch(parsed.source1611_parent_sha256) is None:
         parser.error("Source-1611 parent SHA-256 must be 64 lowercase hexadecimal characters")
+    source1611_rollout_values = (
+        parsed.source1611_rollout,
+        parsed.source1611_session_root,
+        parsed.source1611_rollout_device,
+        parsed.source1611_rollout_inode,
+        parsed.source1611_rollout_holder_pid,
+        parsed.source1611_rollout_holder_start_ticks,
+        parsed.source1611_rollout_fd is not None,
+        parsed.source1611_rollout_session_meta_sha256,
+        parsed.source1611_rollout_holder_exe,
+        parsed.source1611_rollout_holder_exe_link,
+        parsed.source1611_rollout_holder_exe_device,
+        parsed.source1611_rollout_holder_exe_inode,
+        parsed.source1611_rollout_holder_exe_mode,
+        parsed.source1611_rollout_holder_exe_uid >= 0,
+        parsed.source1611_rollout_holder_exe_nlink >= 0,
+        parsed.source1611_rollout_holder_exe_size,
+        parsed.source1611_rollout_holder_exe_sha256,
+        parsed.source1611_rollout_holder_argv_sha256,
+    )
+    if any(bool(value) for value in source1611_rollout_values):
+        if (
+            parsed.source1611_rollout is None
+            or parsed.source1611_session_root is None
+            or not parsed.source1611_rollout.is_absolute()
+            or not parsed.source1611_session_root.is_absolute()
+            or parsed.source1611_rollout_holder_exe is None
+            or not parsed.source1611_rollout_holder_exe.is_absolute()
+            or not parsed.source1611_rollout_holder_exe_link.startswith("/")
+            or min(
+                parsed.source1611_rollout_device,
+                parsed.source1611_rollout_inode,
+                parsed.source1611_rollout_holder_pid,
+                parsed.source1611_rollout_holder_start_ticks,
+                parsed.source1611_rollout_holder_exe_device,
+                parsed.source1611_rollout_holder_exe_inode,
+                parsed.source1611_rollout_holder_exe_mode,
+                parsed.source1611_rollout_holder_exe_size,
+            )
+            <= 1
+            or parsed.source1611_rollout_holder_exe_uid < 0
+            or parsed.source1611_rollout_holder_exe_nlink < 0
+            or parsed.source1611_rollout_fd is None
+            or parsed.source1611_rollout_fd < 0
+            or SHA256_RE.fullmatch(parsed.source1611_rollout_session_meta_sha256) is None
+            or SHA256_RE.fullmatch(parsed.source1611_rollout_holder_exe_sha256) is None
+            or SHA256_RE.fullmatch(parsed.source1611_rollout_holder_argv_sha256) is None
+        ):
+            parser.error("Source-1611 rollout custody requires every exact absolute rollout, holder, FD, and metadata binding")
     children = tuple(sorted(parsed.child, key=lambda child: child.task))
     if len({child.task for child in children}) != len(children):
         parser.error("--child task references must be unique")
@@ -771,6 +928,24 @@ def parse_args(argv: list[str]) -> Args:
         empty_tree_envelope_sha256=parsed.empty_tree_envelope_sha256,
         descendant_authority_envelope_sha256=parsed.descendant_authority_envelope_sha256,
         source1611_parent_sha256=parsed.source1611_parent_sha256,
+        source1611_rollout=(parsed.source1611_rollout.resolve(strict=False) if parsed.source1611_rollout is not None else None),
+        source1611_session_root=(parsed.source1611_session_root.resolve(strict=False) if parsed.source1611_session_root is not None else None),
+        source1611_rollout_device=parsed.source1611_rollout_device,
+        source1611_rollout_inode=parsed.source1611_rollout_inode,
+        source1611_rollout_holder_pid=parsed.source1611_rollout_holder_pid,
+        source1611_rollout_holder_start_ticks=parsed.source1611_rollout_holder_start_ticks,
+        source1611_rollout_fd=(parsed.source1611_rollout_fd if parsed.source1611_rollout_fd is not None else -1),
+        source1611_rollout_session_meta_sha256=parsed.source1611_rollout_session_meta_sha256,
+        source1611_rollout_holder_exe=(parsed.source1611_rollout_holder_exe.resolve(strict=False) if parsed.source1611_rollout_holder_exe is not None else None),
+        source1611_rollout_holder_exe_link=parsed.source1611_rollout_holder_exe_link,
+        source1611_rollout_holder_exe_device=parsed.source1611_rollout_holder_exe_device,
+        source1611_rollout_holder_exe_inode=parsed.source1611_rollout_holder_exe_inode,
+        source1611_rollout_holder_exe_mode=parsed.source1611_rollout_holder_exe_mode,
+        source1611_rollout_holder_exe_uid=parsed.source1611_rollout_holder_exe_uid,
+        source1611_rollout_holder_exe_nlink=parsed.source1611_rollout_holder_exe_nlink,
+        source1611_rollout_holder_exe_size=parsed.source1611_rollout_holder_exe_size,
+        source1611_rollout_holder_exe_sha256=parsed.source1611_rollout_holder_exe_sha256,
+        source1611_rollout_holder_argv_sha256=parsed.source1611_rollout_holder_argv_sha256,
     )
     try:
         validate_targets(result)
@@ -1388,6 +1563,10 @@ def validate_live_bindings(args: Args, inventory: dict[str, PaneIdentity], *, re
         if inventory.get(expected_child.target) != expected_child:
             raise ReplaceError(f"active descendant pane identity changed: {item.task}")
     validate_protected_bindings(args, inventory)
+    if source1611_rollout_custody_requested(args):
+        custody = source1611_rollout_custody(args)
+        if custody is None or custody.session_id != args.old_session_id:
+            raise ReplaceError("Source-1611 process-held rollout does not prove the exact old Codex session")
     if is_pcodx_replacement(args):
         _ = pcodx_binding(args, expected)
 
@@ -1569,6 +1748,327 @@ def pane_inventory() -> dict[str, PaneIdentity]:
     return inventory
 
 
+def source1611_process_stat(pid: int, proc_root: Path = Path("/proc")) -> Source1611Process:
+    """Read only the stable kernel identity needed for legacy rollout custody."""
+
+    try:
+        raw = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
+        fields = raw.rsplit(")", 1)[1].split()
+        argv = (proc_root / str(pid) / "cmdline").read_bytes()
+        return Source1611Process(
+            pid,
+            int(fields[1]),
+            fields[0],
+            int(fields[2]),
+            int(fields[3]),
+            int(fields[4]),
+            int(fields[19]),
+            digest(argv),
+        )
+    except (IndexError, OSError, UnicodeDecodeError, ValueError) as exc:
+        raise ReplaceError(f"cannot bind Source-1611 rollout process {pid}: {exc}") from exc
+
+
+def source1611_process_tree(root_pid: int, proc_root: Path = Path("/proc")) -> tuple[Source1611Process, ...]:
+    """Bind the complete descendant tree without inspecting unrelated child FDs."""
+
+    pending = [root_pid]
+    seen: set[int] = set()
+    result: dict[int, Source1611Process] = {}
+    while pending:
+        pid = pending.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        identity = source1611_process_stat(pid, proc_root)
+        if identity.state == "Z":
+            raise ReplaceError(f"Source-1611 rollout process became a zombie: {pid}")
+        task_root = proc_root / str(pid) / "task"
+        try:
+            threads = tuple(task_root.iterdir())
+        except OSError as exc:
+            raise ReplaceError(f"cannot enumerate Source-1611 rollout process threads: {pid}: {exc}") from exc
+        children: set[int] = set()
+        for thread in threads:
+            if not thread.name.isdigit():
+                continue
+            try:
+                children.update(int(value) for value in (thread / "children").read_text(encoding="ascii").split())
+            except (OSError, UnicodeDecodeError, ValueError) as exc:
+                raise ReplaceError(f"cannot enumerate Source-1611 rollout process children: {thread}: {exc}") from exc
+        result[pid] = identity
+        pending.extend(sorted(children - seen, reverse=True))
+    return tuple(result[pid] for pid in sorted(result))
+
+
+def source1611_process_comm(pid: int, proc_root: Path = Path("/proc")) -> str:
+    try:
+        return (proc_root / str(pid) / "comm").read_text(encoding="utf-8").removesuffix("\n")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ReplaceError(f"cannot classify Source-1611 rollout process {pid}: {exc}") from exc
+
+
+def source1611_process_environment(pid: int, proc_root: Path = Path("/proc")) -> dict[str, str]:
+    try:
+        values = (proc_root / str(pid) / "environ").read_bytes().split(b"\0")
+        decoded = [value.decode("utf-8", errors="strict") for value in values if value]
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ReplaceError(f"cannot inspect Source-1611 native Codex environment: {exc}") from exc
+    result: dict[str, str] = {}
+    for value in decoded:
+        key, separator, item = value.partition("=")
+        if not separator:
+            raise ReplaceError("Source-1611 native Codex environment contains a malformed value")
+        if key in result:
+            raise ReplaceError("Source-1611 native Codex environment contains a duplicate key")
+        result[key] = item
+    return result
+
+
+def source1611_native_codex_executable(
+    args: Args,
+    holder: Source1611Process,
+    proc_root: Path,
+) -> None:
+    """Pin the process-held Codex executable and its exact launch argv.
+
+    ``comm`` is useful only as a short kernel label.  The executable is read
+    through the holder's procfs handle and hashed from that opened inode, so a
+    same-named non-Codex child cannot satisfy the legacy custody exception.
+    """
+
+    asserted = args.source1611_rollout_holder_exe
+    if asserted is None:
+        raise ReplaceError("Source-1611 native Codex executable binding is missing")
+    deleted_suffix = " (deleted)"
+    try:
+        proc_link = os.readlink(proc_root / str(holder.pid) / "exe")
+        # npm may unlink a still-running Codex binary during its own cache
+        # rotation. This incident-only fallback therefore accepts only that
+        # exact kernel marker; a live substituted pathname fails closed.
+        if not proc_link.endswith(deleted_suffix):
+            raise ReplaceError("Source-1611 native Codex executable is not the expected deleted process image")
+        proc_executable = Path(proc_link.removesuffix(deleted_suffix))
+        executable = asserted.resolve(strict=False)
+        descriptor = os.open(proc_root / str(holder.pid) / "exe", os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    except OSError as exc:
+        raise ReplaceError(f"cannot inspect Source-1611 native Codex executable: {exc}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        executable_hash = hashlib.sha256()
+        while chunk := os.read(descriptor, 1024 * 1024):
+            executable_hash.update(chunk)
+    except OSError as exc:
+        raise ReplaceError(f"cannot hash Source-1611 native Codex executable: {exc}") from exc
+    finally:
+        os.close(descriptor)
+    if (
+        asserted != executable
+        or executable.name != "codex"
+        or proc_link != args.source1611_rollout_holder_exe_link
+        or proc_executable != executable
+        or not stat.S_ISREG(opened.st_mode)
+        or (opened.st_dev, opened.st_ino) != (args.source1611_rollout_holder_exe_device, args.source1611_rollout_holder_exe_inode)
+        or stat.S_IMODE(opened.st_mode) != args.source1611_rollout_holder_exe_mode
+        or opened.st_uid != args.source1611_rollout_holder_exe_uid
+        or opened.st_nlink != args.source1611_rollout_holder_exe_nlink
+        or opened.st_size != args.source1611_rollout_holder_exe_size
+        or executable_hash.hexdigest() != args.source1611_rollout_holder_exe_sha256
+        or holder.argv_sha256 != args.source1611_rollout_holder_argv_sha256
+    ):
+        raise ReplaceError("Source-1611 native Codex executable or argv provenance changed")
+
+
+def source1611_rollout_metadata(path: Path, identity: tuple[int, int]) -> tuple[bytes, dict[str, object]]:
+    fd = -1
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != identity:
+            raise ReplaceError("Source-1611 rollout path does not retain its asserted regular-file identity")
+        payload = os.read(fd, ROLLOUT_METADATA_MAX_BYTES + 1)
+    except OSError as exc:
+        raise ReplaceError(f"cannot read Source-1611 rollout metadata: {exc}") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if b"\n" not in payload:
+        raise ReplaceError("Source-1611 rollout metadata is missing or exceeds its bounded first record")
+    line = payload.split(b"\n", 1)[0] + b"\n"
+    try:
+        value = json.loads(line, object_pairs_hook=lambda pairs: _no_duplicate_json_object(pairs, "Source-1611 rollout metadata"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ReplaceError) as exc:
+        raise ReplaceError(f"Source-1611 rollout metadata is invalid JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ReplaceError("Source-1611 rollout metadata must be one object")
+    return line, value
+
+
+def _no_duplicate_json_object(pairs: list[tuple[str, object]], label: str) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ReplaceError(f"{label} contains duplicate key {key!r}")
+        result[key] = value
+    return result
+
+
+def source1611_rollout_descriptor(
+    holder: Source1611Process,
+    rollout: Path,
+    identity: tuple[int, int],
+    proc_root: Path,
+) -> int:
+    """Require one writable FD on the exact native Codex process, twice."""
+
+    matching: list[int] = []
+    try:
+        descriptors = tuple((proc_root / str(holder.pid) / "fd").iterdir())
+    except OSError as exc:
+        raise ReplaceError(f"cannot enumerate Source-1611 native Codex descriptors: {exc}") from exc
+    for descriptor_path in descriptors:
+        try:
+            descriptor = int(descriptor_path.name)
+            descriptor_stat = descriptor_path.stat()
+            destination = Path(os.readlink(descriptor_path)).resolve(strict=True)
+        except (OSError, ValueError):
+            continue
+        if (descriptor_stat.st_dev, descriptor_stat.st_ino) != identity or destination != rollout:
+            continue
+        try:
+            fields = (proc_root / str(holder.pid) / "fdinfo" / descriptor_path.name).read_text(encoding="ascii").splitlines()
+            flags = next(line.partition(":")[2].strip() for line in fields if line.startswith("flags:"))
+            writable = int(flags, 8) & os.O_ACCMODE in {os.O_WRONLY, os.O_RDWR}
+        except (OSError, StopIteration, ValueError):
+            raise ReplaceError("cannot prove Source-1611 native Codex rollout descriptor mode") from None
+        if not writable:
+            raise ReplaceError("Source-1611 native Codex rollout descriptor is not writable")
+        matching.append(descriptor)
+    if len(matching) != 1:
+        raise ReplaceError("Source-1611 rollout custody does not have one exact writable native Codex descriptor")
+    return matching[0]
+
+
+def source1611_rollout_custody(args: Args, proc_root: Path = Path("/proc")) -> Source1611RolloutCustody | None:
+    """Prove the sole Source-1611 incumbent UUID from its process-held journal.
+
+    The journal is append-only while Codex runs, so only its immutable first
+    metadata record is digested.  Its live identity is the exact native-Codex
+    FD, inode, descendant chain, pane TTY, and manager target environment.
+    """
+
+    if not source1611_rollout_custody_requested(args):
+        return None
+    asserted_rollout = args.source1611_rollout
+    asserted_root = args.source1611_session_root
+    if asserted_rollout is None or asserted_root is None:
+        raise ReplaceError("Source-1611 rollout custody is incomplete")
+    try:
+        rollout = asserted_rollout.resolve(strict=True)
+        session_root = asserted_root.resolve(strict=True)
+    except OSError as exc:
+        raise ReplaceError(f"cannot resolve Source-1611 rollout custody paths: {exc}") from exc
+    if (
+        asserted_rollout != rollout
+        or asserted_root != session_root
+        or session_root != SOURCE1611_SESSION_ROOT.resolve(strict=True)
+        or not session_root.is_dir()
+        or rollout.parent.parent.parent.parent != session_root
+    ):
+        raise ReplaceError("Source-1611 rollout custody paths are not one canonical dated session record")
+    if not (re.fullmatch(r"[0-9]{4}", rollout.parent.parent.parent.name) and re.fullmatch(r"[0-9]{2}", rollout.parent.parent.name) and re.fullmatch(r"[0-9]{2}", rollout.parent.name)):
+        raise ReplaceError("Source-1611 rollout custody date hierarchy is malformed")
+    identity = (args.source1611_rollout_device, args.source1611_rollout_inode)
+    try:
+        path_stat = rollout.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise ReplaceError(f"cannot stat Source-1611 rollout custody record: {exc}") from exc
+    if not stat.S_ISREG(path_stat.st_mode) or (path_stat.st_dev, path_stat.st_ino) != identity:
+        raise ReplaceError("Source-1611 rollout custody record changed identity")
+    before = source1611_process_tree(args.old_pane_pid, proc_root)
+    root = next((item for item in before if item.pid == args.old_pane_pid), None)
+    if root is None or root.start_ticks != args.old_pane_start_ticks:
+        raise ReplaceError("Source-1611 rollout pane process changed identity")
+    native = tuple(item for item in before if source1611_process_comm(item.pid, proc_root) == "codex")
+    if len(native) != 1:
+        raise ReplaceError("Source-1611 rollout custody requires exactly one native Codex descendant")
+    holder = native[0]
+    if holder.pid != args.source1611_rollout_holder_pid or holder.start_ticks != args.source1611_rollout_holder_start_ticks or root.tty == 0 or holder.tty != root.tty:
+        raise ReplaceError("Source-1611 native Codex holder changed identity or pane TTY")
+    source1611_native_codex_executable(args, holder, proc_root)
+    environment = source1611_process_environment(holder.pid, proc_root)
+    if environment.get("OMO_AGENT_TMUX_TARGET") != args.old_target or environment.get("TMUX_PANE") != args.old_pane_id or environment.get("PWD") != str(args.root.parent / "dw"):
+        raise ReplaceError("Source-1611 native Codex environment does not bind the exact manager pane")
+    try:
+        cwd = (proc_root / str(holder.pid) / "cwd").resolve(strict=True)
+    except OSError as exc:
+        raise ReplaceError(f"cannot resolve Source-1611 native Codex working directory: {exc}") from exc
+    descriptor = source1611_rollout_descriptor(holder, rollout, identity, proc_root)
+    if descriptor != args.source1611_rollout_fd:
+        raise ReplaceError("Source-1611 rollout custody does not have one exact writable native Codex descriptor")
+    metadata_bytes, metadata = source1611_rollout_metadata(rollout, identity)
+    if digest(metadata_bytes) != args.source1611_rollout_session_meta_sha256:
+        raise ReplaceError("Source-1611 rollout session metadata digest changed")
+    payload = metadata.get("payload")
+    if not isinstance(payload, dict):
+        raise ReplaceError("Source-1611 rollout metadata payload is malformed")
+    session_id = payload.get("session_id")
+    started_at = payload.get("timestamp")
+    record_time = metadata.get("timestamp")
+    record_cwd = payload.get("cwd")
+    if (
+        metadata.get("type") != "session_meta"
+        or metadata.get("ordinal") != 0
+        or payload.get("id") != session_id
+        or not isinstance(session_id, str)
+        or UUID_RE.fullmatch(session_id) is None
+        or session_id.lower() != args.old_session_id
+        or not isinstance(record_time, str)
+        or not isinstance(started_at, str)
+        or payload.get("originator") != "codex-tui"
+        or payload.get("source") != "cli"
+        or payload.get("thread_source") != "user"
+        or not isinstance(record_cwd, str)
+        or not rollout.name.endswith(f"-{session_id}.jsonl")
+        or any(key in metadata or key in payload for key in ("parent", "parent_id", "parent_session_id", "parent_thread_id", "fork", "fork_id", "forked_from", "forked_from_id"))
+    ):
+        raise ReplaceError("Source-1611 rollout metadata does not prove one fresh native Codex session")
+    try:
+        parsed_record_time = datetime.fromisoformat(record_time.replace("Z", "+00:00"))
+        parsed_started_at = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        record_cwd_path = Path(record_cwd).resolve(strict=True)
+        boot_seconds = int(next(line.partition(" ")[2] for line in (proc_root / "stat").read_text(encoding="ascii").splitlines() if line.startswith("btime ")))
+        pane_started = datetime.fromtimestamp(boot_seconds + root.start_ticks / os.sysconf("SC_CLK_TCK"), timezone.utc)
+    except (OSError, StopIteration, ValueError) as exc:
+        raise ReplaceError(f"Source-1611 rollout metadata timestamp is invalid: {exc}") from exc
+    if (
+        parsed_record_time.tzinfo is None
+        or parsed_started_at.tzinfo is None
+        or not (parsed_started_at <= parsed_record_time <= parsed_started_at + timedelta(seconds=5))
+        or record_cwd_path != cwd
+        or cwd != (args.root.parent / "dw").resolve(strict=True)
+        or not (pane_started <= parsed_started_at <= pane_started + timedelta(seconds=300))
+    ):
+        raise ReplaceError("Source-1611 rollout metadata time or working-directory identity changed")
+    after = source1611_process_tree(args.old_pane_pid, proc_root)
+    if before != after or source1611_rollout_descriptor(holder, rollout, identity, proc_root) != descriptor:
+        raise ReplaceError("Source-1611 descendant process tree changed during rollout custody binding")
+    source1611_native_codex_executable(args, holder, proc_root)
+    if before != source1611_process_tree(args.old_pane_pid, proc_root):
+        raise ReplaceError("Source-1611 descendant process tree changed after executable provenance binding")
+    return Source1611RolloutCustody(
+        rollout,
+        identity[0],
+        identity[1],
+        holder.pid,
+        holder.start_ticks,
+        descriptor,
+        root.start_ticks,
+        digest(metadata_bytes),
+        session_id.lower(),
+    )
+
+
 def validate_targets(args: Args) -> None:
     child_pairs = tuple((item.task, item.sha256) for item in args.children)
     descendant_pairs = tuple((item.task, item.sha256) for item in args.descendants)
@@ -1621,6 +2121,53 @@ def validate_targets(args: Args) -> None:
             raise ReplaceError("Source-1611 direct-worker replacement requires the exact active parent SHA-256 binding")
     elif args.source1611_parent_sha256:
         raise ReplaceError("Source-1611 parent binding is accepted only for the exact direct-worker replacement")
+    rollout_values = (
+        args.source1611_rollout,
+        args.source1611_session_root,
+        args.source1611_rollout_device,
+        args.source1611_rollout_inode,
+        args.source1611_rollout_holder_pid,
+        args.source1611_rollout_holder_start_ticks,
+        args.source1611_rollout_fd >= 0,
+        args.source1611_rollout_session_meta_sha256,
+        args.source1611_rollout_holder_exe,
+        args.source1611_rollout_holder_exe_link,
+        args.source1611_rollout_holder_exe_device,
+        args.source1611_rollout_holder_exe_inode,
+        args.source1611_rollout_holder_exe_mode,
+        args.source1611_rollout_holder_exe_uid >= 0,
+        args.source1611_rollout_holder_exe_nlink >= 0,
+        args.source1611_rollout_holder_exe_size,
+        args.source1611_rollout_holder_exe_sha256,
+        args.source1611_rollout_holder_argv_sha256,
+    )
+    if source1611_rollout_custody_requested(args):
+        if (
+            not is_source1611_direct_worker_semantic_exception(args)
+            or args.source1611_session_root is None
+            or args.source1611_rollout_holder_exe is None
+            or not args.source1611_rollout_holder_exe_link.startswith("/")
+            or min(
+                args.source1611_rollout_device,
+                args.source1611_rollout_inode,
+                args.source1611_rollout_holder_pid,
+                args.source1611_rollout_holder_start_ticks,
+                args.source1611_rollout_holder_exe_device,
+                args.source1611_rollout_holder_exe_inode,
+                args.source1611_rollout_holder_exe_mode,
+                args.source1611_rollout_holder_exe_size,
+            )
+            <= 1
+            or args.source1611_rollout_holder_exe_uid < 0
+            or args.source1611_rollout_holder_exe_nlink < 0
+            or args.source1611_rollout_fd < 0
+            or SHA256_RE.fullmatch(args.source1611_rollout_session_meta_sha256) is None
+            or SHA256_RE.fullmatch(args.source1611_rollout_holder_exe_sha256) is None
+            or SHA256_RE.fullmatch(args.source1611_rollout_holder_argv_sha256) is None
+        ):
+            raise ReplaceError("process-held rollout custody is accepted only for the exact Source-1611 direct-worker transition")
+    elif any(bool(value) for value in rollout_values):
+        raise ReplaceError("incomplete Source-1611 rollout custody binding")
     if not uses_protected_inventory(args) and args.protected_targets_sha256:
         raise ReplaceError("protected inventory digest is accepted only for PCODX, exact Source-1485, or an exact source-only replacement")
     if not (is_pcodx_replacement(args) or is_source1485_replacement(args)) and args.authority_envelope_file_sha256:
@@ -1895,7 +2442,7 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         or old_metadata.managerat != args.parent_target
         or old_metadata.tool != ("pcodx" if is_pcodx_replacement(args) else "codex")
         or not old_metadata.is_manager
-        or (not is_pcodx_replacement(args) and old_metadata.session_id.lower() != args.old_session_id)
+        or not old_session_matches(args, old_metadata.session_id, old.data)
     ):
         raise ReplaceError("old manager must be the exact live long-running failed-manager record bound by the invocation")
     if uses_ordered_queue_binding(args) and json_digest(list(old_metadata.pending_task_items)) != args.old_queue_sha256:
@@ -2126,6 +2673,8 @@ def audit_record(args: Args, plan: Plan, secret: str, commitment: str) -> dict[s
         record["source1485_topology_sha256"] = json_digest(plan.source1485_topology)
     if is_source_only_semantic_exception(args):
         record.update(source_only_audit_binding(args))
+    if source1611_rollout_custody_requested(args):
+        record.update(source1611_rollout_audit_binding(args))
     if args.closed_owner_audit is not None:
         record.update(
             {
@@ -2292,6 +2841,31 @@ def source_only_audit_binding(args: Args) -> dict[str, object]:
     return binding
 
 
+def source1611_rollout_audit_binding(args: Args) -> dict[str, object]:
+    if not source1611_rollout_custody_requested(args) or args.source1611_rollout is None or args.source1611_session_root is None:
+        return {}
+    return {
+        "source1611_rollout": str(args.source1611_rollout),
+        "source1611_session_root": str(args.source1611_session_root),
+        "source1611_rollout_device": args.source1611_rollout_device,
+        "source1611_rollout_inode": args.source1611_rollout_inode,
+        "source1611_rollout_holder_pid": args.source1611_rollout_holder_pid,
+        "source1611_rollout_holder_start_ticks": args.source1611_rollout_holder_start_ticks,
+        "source1611_rollout_fd": args.source1611_rollout_fd,
+        "source1611_rollout_session_meta_sha256": args.source1611_rollout_session_meta_sha256,
+        "source1611_rollout_holder_exe": str(args.source1611_rollout_holder_exe),
+        "source1611_rollout_holder_exe_link": args.source1611_rollout_holder_exe_link,
+        "source1611_rollout_holder_exe_device": args.source1611_rollout_holder_exe_device,
+        "source1611_rollout_holder_exe_inode": args.source1611_rollout_holder_exe_inode,
+        "source1611_rollout_holder_exe_mode": args.source1611_rollout_holder_exe_mode,
+        "source1611_rollout_holder_exe_uid": args.source1611_rollout_holder_exe_uid,
+        "source1611_rollout_holder_exe_nlink": args.source1611_rollout_holder_exe_nlink,
+        "source1611_rollout_holder_exe_size": args.source1611_rollout_holder_exe_size,
+        "source1611_rollout_holder_exe_sha256": args.source1611_rollout_holder_exe_sha256,
+        "source1611_rollout_holder_argv_sha256": args.source1611_rollout_holder_argv_sha256,
+    }
+
+
 def descendant_binding(args: Args) -> list[dict[str, object]]:
     return [
         {
@@ -2351,6 +2925,8 @@ def audit_binding(args: Args) -> dict[str, object]:
         )
     if is_source_only_semantic_exception(args):
         binding.update(source_only_audit_binding(args))
+    if source1611_rollout_custody_requested(args):
+        binding.update(source1611_rollout_audit_binding(args))
     if args.closed_owner_audit is not None:
         binding.update(
             {
@@ -2643,7 +3219,7 @@ def recovery_plan(
         or old_metadata.managerat != args.parent_target
         or old_metadata.tool != ("pcodx" if is_pcodx_replacement(args) else "codex")
         or not old_metadata.is_manager
-        or (not is_pcodx_replacement(args) and old_metadata.session_id.lower() != args.old_session_id)
+        or not old_session_matches(args, old_metadata.session_id, old_entry.before)
     ):
         raise ReplaceError("private replacement audit does not describe the exact failed manager")
     if uses_ordered_queue_binding(args) and json_digest(list(old_metadata.pending_task_items)) != args.old_queue_sha256:
@@ -2798,6 +3374,8 @@ def recover_existing(
     all_before = all(value == "before" for value in states)
     completed_value = record.get("completed_writes")
     completed = tuple(completed_value) if isinstance(completed_value, list) else ()
+    if source1611_rollout_custody_requested(args) and old == expected_old and not proof:
+        _ = source1611_rollout_custody(args)
     if state == "committed":
         if not all_after or old is not None or not (proof or authorized_absence):
             raise ReplaceError("committed replacement audit no longer has its exact committed state and close outcome evidence")
@@ -3075,6 +3653,10 @@ def require_preclose_eligibility(args: Args, plan: Plan) -> None:
         raise ReplaceError("Markdown membership changed before guarded manager close")
     if plan.successor_path.exists() or plan.successor_path.is_symlink():
         raise ReplaceError("successor appeared before guarded manager close")
+    if source1611_rollout_custody_requested(args):
+        custody = source1611_rollout_custody(args)
+        if custody is None or custody.session_id != args.old_session_id:
+            raise ReplaceError("Source-1611 process-held rollout changed before guarded manager close")
     require_snapshot(plan.old, "pre-close old manager")
     require_snapshot(plan.todo, "pre-close TODO")
     require_snapshot(plan.authority, "pre-close replacement authority")
@@ -3159,6 +3741,7 @@ def stop_old_manager(
             human_close_authorization_sha256=args.authority_sha256 if is_pcodx_replacement(args) else "",
             human_close_authorized_target=args.old_target if is_pcodx_replacement(args) else "",
             bound_pre_input_check=(pre_input_check if uses_protected_inventory(args) or is_source1289_whole_tree(args) else None),
+            bound_custody_status_bypass=source1611_rollout_custody_requested(args),
         )
     )
     if session_id.lower() != args.old_session_id:
@@ -3240,6 +3823,8 @@ def prove_committed(args: Args, plan: Plan, old_after: Snapshot, child_after: tu
         raise ReplaceError("a replaced-tree descendant remains live at the singular ownership proof boundary")
     audit = read_snapshot(args.audit_output, "committed replacement audit")
     record = json.loads(audit.data)
+    if source1611_rollout_custody_requested(args) and (not isinstance(record, dict) or any(record.get(key) != value for key, value in source1611_rollout_audit_binding(args).items())):
+        raise ReplaceError("committed audit lost the exact Source-1611 process-held rollout custody binding")
     secret = record.get("close_proof_secret") if isinstance(record, dict) else None
     if not isinstance(secret, str) or any(not has_bound_close_proof(descendant_evidence_paths(args.audit_output, child)[1], descendant_commitment(secret, child)) for child in args.descendants):
         raise ReplaceError("a replaced-tree descendant lacks its durable guarded-close proof")

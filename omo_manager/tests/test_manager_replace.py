@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import contextlib
+import os
 import tempfile
 import unittest
 import subprocess
+from datetime import datetime, timezone
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -259,11 +261,12 @@ class ManagerReplaceTests(unittest.TestCase):
             return result
 
         def stopped(_args: object) -> str:
+            state["stop_args"] = _args
             state["old_live"] = False
             hook = state.get("stop_hook")
             if callable(hook):
                 hook()
-            return SESSION_ID
+            return str(state.get("stop_session", SESSION_ID))
 
         return (
             patch.object(manager_replace, "pane_inventory", side_effect=inventory),
@@ -626,11 +629,12 @@ class ManagerReplaceTests(unittest.TestCase):
             return result
 
         def stopped(_args: object) -> str:
+            state["stop_args"] = _args
             state["old_live"] = False
             hook = state.get("stop_hook")
             if callable(hook):
                 hook()
-            return SESSION_ID
+            return str(state.get("stop_session", SESSION_ID))
 
         return (
             patch.object(manager_replace, "pane_inventory", side_effect=inventory),
@@ -770,6 +774,116 @@ class ManagerReplaceTests(unittest.TestCase):
             protected_targets_sha256=manager_replace.json_digest([{"target": item.target, "pane_id": item.pane_id, "pid": item.pid, "start_ticks": item.start_ticks} for item in direct_protected]),
         )
         return root, exact, direct_protected
+
+    def source1611_rollout_custody_fixture(self, base: Path) -> tuple[Args, Path]:
+        root, args, _protected = self.source1611_direct_worker_fixture(base)
+        old = root / args.old_task
+        old_text = old.read_text(encoding="utf-8").replace(f"session_id: {SESSION_ID}\n", "")
+        old.write_text(old_text, encoding="utf-8")
+        workdir = root.parent / "dw"
+        workdir.mkdir()
+        session = "33333333-2222-4333-8444-555555555555"
+        session_root = base / "sessions"
+        rollout = session_root / "2026" / "09" / "08" / f"rollout-2026-09-08T13-09-22-{session}.jsonl"
+        rollout.parent.mkdir(parents=True)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        metadata = {
+            "timestamp": now.isoformat().replace("+00:00", "Z"),
+            "ordinal": 0,
+            "type": "session_meta",
+            "payload": {
+                "session_id": session,
+                "id": session,
+                "timestamp": now.isoformat().replace("+00:00", "Z"),
+                "cwd": str(workdir),
+                "originator": "codex-tui",
+                "source": "cli",
+                "thread_source": "user",
+            },
+        }
+        header = (json.dumps(metadata, separators=(",", ":")) + "\n").encode()
+        rollout.write_bytes(header)
+        proc_root = base / "proc"
+        proc_root.mkdir()
+        clock = os.sysconf("SC_CLK_TCK")
+        root_start = 1_000
+        boot = int(now.timestamp()) - root_start // clock
+        (proc_root / "stat").write_text(f"btime {boot}\n", encoding="ascii")
+
+        def add_process(pid: int, ppid: int, comm: str, start: int, children: tuple[int, ...] = ()) -> Path:
+            process = proc_root / str(pid)
+            (process / "task" / str(pid)).mkdir(parents=True)
+            fields = ["S", str(ppid), "1", "1", "34835", *("0" for _ in range(14)), str(start)]
+            (process / "stat").write_text(f"{pid} ({comm}) " + " ".join(fields), encoding="utf-8")
+            (process / "comm").write_text(comm + "\n", encoding="utf-8")
+            (process / "cmdline").write_bytes(f"/{comm}\0".encode())
+            (process / "task" / str(pid) / "children").write_text(" ".join(str(value) for value in children), encoding="ascii")
+            return process
+
+        _ = add_process(args.old_pane_pid, 1, "zsh", root_start, (4243,))
+        native = add_process(4243, args.old_pane_pid, "codex", root_start + 1)
+        executable = base / "native" / "codex"
+        executable.parent.mkdir()
+        executable.write_bytes(b"native-codex-binary\n")
+        executable.chmod(0o755)
+        (native / "exe").symlink_to(executable)
+        (native / "cwd").symlink_to(workdir, target_is_directory=True)
+        (native / "environ").write_bytes(f"OMO_AGENT_TMUX_TARGET={args.old_target}\0TMUX_PANE={args.old_pane_id}\0PWD={workdir}\0".encode())
+        (native / "fd").mkdir()
+        (native / "fdinfo").mkdir()
+        (native / "fd" / "61").symlink_to(rollout)
+        (native / "fdinfo" / "61").write_text("flags:\t0102001\n", encoding="ascii")
+        changed = replace(
+            args,
+            old_sha256=sha(old_text),
+            authority_envelope_sha256=sha(old_text),
+            old_pane_start_ticks=root_start,
+            old_session_id=session,
+            source1611_rollout=rollout,
+            source1611_session_root=session_root,
+            source1611_rollout_device=rollout.stat().st_dev,
+            source1611_rollout_inode=rollout.stat().st_ino,
+            source1611_rollout_holder_pid=4243,
+            source1611_rollout_holder_start_ticks=root_start + 1,
+            source1611_rollout_fd=61,
+            source1611_rollout_session_meta_sha256=hashlib.sha256(header).hexdigest(),
+            source1611_rollout_holder_exe=executable,
+            source1611_rollout_holder_exe_link=f"{executable} (deleted)",
+            source1611_rollout_holder_exe_device=executable.stat().st_dev,
+            source1611_rollout_holder_exe_inode=executable.stat().st_ino,
+            source1611_rollout_holder_exe_mode=0o755,
+            source1611_rollout_holder_exe_uid=executable.stat().st_uid,
+            source1611_rollout_holder_exe_nlink=0,
+            source1611_rollout_holder_exe_size=executable.stat().st_size,
+            source1611_rollout_holder_exe_sha256=hashlib.sha256(executable.read_bytes()).hexdigest(),
+            source1611_rollout_holder_argv_sha256=hashlib.sha256(b"/codex\0").hexdigest(),
+        )
+        return changed, proc_root
+
+    @contextlib.contextmanager
+    def source1611_deleted_executable_fixture(self, args: Args, proc_root: Path):
+        """Model procfs' `(deleted)` image while retaining a readable fake FD."""
+
+        executable = args.source1611_rollout_holder_exe
+        assert executable is not None
+        native_exe = proc_root / str(args.source1611_rollout_holder_pid) / "exe"
+        real_readlink = os.readlink
+        real_fstat = os.fstat
+        executable_identity = (executable.stat().st_dev, executable.stat().st_ino)
+
+        def deleted_readlink(path: str | os.PathLike[str], *values: object, **keywords: object) -> str:
+            if Path(path) == native_exe:
+                return args.source1611_rollout_holder_exe_link
+            return real_readlink(path, *values, **keywords)
+
+        def deleted_fstat(descriptor: int) -> os.stat_result:
+            value = real_fstat(descriptor)
+            if (value.st_dev, value.st_ino) == executable_identity:
+                return os.stat_result((value.st_mode, value.st_ino, value.st_dev, 0, value.st_uid, value.st_gid, value.st_size, value.st_atime, value.st_mtime, value.st_ctime))
+            return value
+
+        with patch.object(manager_replace.os, "readlink", side_effect=deleted_readlink), patch.object(manager_replace.os, "fstat", side_effect=deleted_fstat):
+            yield
 
     def whole_tree_fixture(self, base: Path) -> tuple[Path, Args, dict[str, str]]:
         root, args, files = self.fixture(base)
@@ -2447,6 +2561,149 @@ class ManagerReplaceTests(unittest.TestCase):
                     self.assertFalse(manager_replace.is_source1611_direct_worker_semantic_exception(replace(exact, **changes)))
             with self.assertRaisesRegex(ReplaceError, "exact active parent SHA-256"):
                 manager_replace.validate_targets(replace(exact, source1611_parent_sha256=""))
+
+    def test_source1611_rollout_custody_binds_only_the_missing_session_direct_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args, proc_root = self.source1611_rollout_custody_fixture(Path(tmp))
+            with self.source1611_deleted_executable_fixture(args, proc_root), patch.object(manager_replace, "SOURCE1611_SESSION_ROOT", args.source1611_session_root):
+                manager_replace.validate_targets(args)
+                manager_replace.validate_targets(replace(args, source1611_rollout_holder_exe_nlink=2))
+                custody = manager_replace.source1611_rollout_custody(args, proc_root)
+            self.assertIsNotNone(custody)
+            self.assertEqual(args.old_session_id, custody.session_id if custody else "")
+            old_bytes = (args.root / args.old_task).read_bytes()
+            self.assertTrue(manager_replace.old_session_matches(args, "", old_bytes))
+            self.assertFalse(manager_replace.old_session_matches(args, SESSION_ID, old_bytes))
+            self.assertFalse(manager_replace.old_session_matches(args, "", old_bytes.replace(b"---\n", b"---\nsession_id: \n", 1)))
+            self.assertEqual(args.source1611_rollout_session_meta_sha256, manager_replace.source1611_rollout_audit_binding(args)["source1611_rollout_session_meta_sha256"])
+
+    def test_source1611_rollout_custody_rejects_other_modes_and_process_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args, proc_root = self.source1611_rollout_custody_fixture(Path(tmp))
+            with self.assertRaisesRegex(ReplaceError, "only for the exact Source-1611"):
+                manager_replace.validate_targets(
+                    replace(
+                        args,
+                        old_target="dw:14",
+                        source1611_parent_sha256="",
+                        old_queue_sha256="",
+                        protected_targets=(),
+                        protected_targets_sha256="",
+                    )
+                )
+            native_comm = proc_root / "4243" / "comm"
+            native_comm.write_text("codex \n", encoding="utf-8")
+            with (
+                self.source1611_deleted_executable_fixture(args, proc_root),
+                patch.object(manager_replace, "SOURCE1611_SESSION_ROOT", args.source1611_session_root),
+                self.assertRaisesRegex(ReplaceError, "exactly one native Codex"),
+            ):
+                manager_replace.source1611_rollout_custody(args, proc_root)
+
+    def test_source1611_rollout_custody_rejects_spoofed_comm_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args, proc_root = self.source1611_rollout_custody_fixture(Path(tmp))
+            fake = Path(tmp) / "spoof" / "codex"
+            fake.parent.mkdir()
+            fake.write_bytes(b"not-native-codex\n")
+            fake.chmod(0o755)
+            executable_link = proc_root / "4243" / "exe"
+            executable_link.unlink()
+            executable_link.symlink_to(fake)
+            with (
+                self.source1611_deleted_executable_fixture(args, proc_root),
+                patch.object(manager_replace, "SOURCE1611_SESSION_ROOT", args.source1611_session_root),
+                self.assertRaisesRegex(ReplaceError, "executable or argv provenance changed"),
+            ):
+                manager_replace.source1611_rollout_custody(args, proc_root)
+
+    def test_source1611_rollout_custody_rejects_nondeleted_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args, proc_root = self.source1611_rollout_custody_fixture(Path(tmp))
+            with patch.object(manager_replace, "SOURCE1611_SESSION_ROOT", args.source1611_session_root), self.assertRaisesRegex(ReplaceError, "expected deleted process image"):
+                manager_replace.source1611_rollout_custody(args, proc_root)
+
+    def test_source1611_rollout_custody_is_rechecked_before_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected = self.source1611_direct_worker_fixture(Path(tmp))
+            args = replace(
+                args,
+                old_session_id="33333333-2222-4333-8444-555555555555",
+                source1611_rollout=Path("/tmp/rollout"),
+                source1611_session_root=Path("/tmp"),
+                source1611_rollout_device=2,
+                source1611_rollout_inode=2,
+                source1611_rollout_holder_pid=3,
+                source1611_rollout_holder_start_ticks=4,
+                source1611_rollout_fd=5,
+                source1611_rollout_session_meta_sha256="0" * 64,
+                source1611_rollout_holder_exe=Path("/tmp/codex"),
+                source1611_rollout_holder_exe_link="/tmp/codex (deleted)",
+                source1611_rollout_holder_exe_device=6,
+                source1611_rollout_holder_exe_inode=7,
+                source1611_rollout_holder_exe_mode=0o755,
+                source1611_rollout_holder_exe_uid=1000,
+                source1611_rollout_holder_exe_nlink=0,
+                source1611_rollout_holder_exe_size=8,
+                source1611_rollout_holder_exe_sha256="1" * 64,
+                source1611_rollout_holder_argv_sha256="2" * 64,
+            )
+            old_path = root / args.old_task
+            old_text = old_path.read_text(encoding="utf-8").replace(f"session_id: {SESSION_ID}\n", "")
+            old_path.write_text(old_text, encoding="utf-8")
+            args = replace(args, old_sha256=sha(old_text), authority_envelope_sha256=sha(old_text))
+            state = {"old_live": True}
+            runtime = self.source1597_runtime(state, args, protected)
+            custody = manager_replace.Source1611RolloutCustody(Path("/tmp/rollout"), 2, 2, 3, 4, 5, args.old_pane_start_ticks, "0" * 64, args.old_session_id)
+            with (
+                runtime[0],
+                runtime[1] as stop_mock,
+                runtime[2],
+                patch.object(manager_replace, "source1611_rollout_custody", side_effect=(custody, custody, ReplaceError("rollout drift"))),
+                self.assertRaisesRegex(ReplaceError, "rollout drift"),
+            ):
+                replace_manager(args)
+            stop_mock.assert_not_called()
+
+    def test_source1611_rollout_custody_uses_exact_no_status_stop_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected = self.source1611_direct_worker_fixture(Path(tmp))
+            session = "33333333-2222-4333-8444-555555555555"
+            old_path = root / args.old_task
+            old_text = old_path.read_text(encoding="utf-8").replace(f"session_id: {SESSION_ID}\n", "")
+            old_path.write_text(old_text, encoding="utf-8")
+            args = replace(
+                args,
+                old_sha256=sha(old_text),
+                authority_envelope_sha256=sha(old_text),
+                old_session_id=session,
+                source1611_rollout=Path("/tmp/rollout"),
+                source1611_session_root=Path("/tmp"),
+                source1611_rollout_device=2,
+                source1611_rollout_inode=2,
+                source1611_rollout_holder_pid=3,
+                source1611_rollout_holder_start_ticks=4,
+                source1611_rollout_fd=5,
+                source1611_rollout_session_meta_sha256="0" * 64,
+                source1611_rollout_holder_exe=Path("/tmp/codex"),
+                source1611_rollout_holder_exe_link="/tmp/codex (deleted)",
+                source1611_rollout_holder_exe_device=6,
+                source1611_rollout_holder_exe_inode=7,
+                source1611_rollout_holder_exe_mode=0o755,
+                source1611_rollout_holder_exe_uid=1000,
+                source1611_rollout_holder_exe_nlink=0,
+                source1611_rollout_holder_exe_size=8,
+                source1611_rollout_holder_exe_sha256="1" * 64,
+                source1611_rollout_holder_argv_sha256="2" * 64,
+            )
+            custody = manager_replace.Source1611RolloutCustody(Path("/tmp/rollout"), 2, 2, 3, 4, 5, args.old_pane_start_ticks, "0" * 64, session)
+            state: dict[str, object] = {"old_live": True, "stop_session": session}
+            runtime = self.source1597_runtime(state, args, protected)
+            with runtime[0], runtime[1], runtime[2], patch.object(manager_replace, "source1611_rollout_custody", return_value=custody):
+                replace_manager(args)
+            stopped = state["stop_args"]
+            self.assertIsInstance(stopped, manager_replace.StopArgs)
+            self.assertTrue(getattr(stopped, "bound_custody_status_bypass"))
 
     def test_source1611_direct_worker_preserves_human_queue_and_migrates_children(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

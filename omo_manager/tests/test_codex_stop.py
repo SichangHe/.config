@@ -1480,6 +1480,77 @@ class CodexStopTests(unittest.TestCase):
                 )
         self.assertEqual(session_id, result)
 
+    def test_bound_custody_bypass_never_sends_status_to_busy_exact_pane(self) -> None:
+        session_id = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"
+        checked: list[bool] = []
+
+        def guarded(_target: str, _pane: str, command: list[str], _pid: int) -> str:
+            field = command[-1]
+            if field == "#{pane_id}":
+                return "%42\n"
+            if field == "#{session_name}":
+                return "work\n"
+            if field == "#{session_name}:#{window_index}.#{pane_index}":
+                return "work:1.0\n"
+            if field == "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}":
+                return "%42\twork:1.0\n"
+            raise AssertionError(command)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with (
+                patch("omo_manager.omo_codex_stop.bound_guarded_read", side_effect=guarded),
+                patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=999),
+                patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%caller"),
+                patch("omo_manager.omo_codex_stop.guarded_capture", return_value="› working\n"),
+                patch("omo_manager.omo_codex_stop.report_from_lines", return_value=Report("running", [])),
+                patch("omo_manager.omo_codex_stop.query_status_session_id") as status,
+                patch("omo_manager.omo_codex_stop.send_exit_keys") as interrupt,
+                patch("omo_manager.omo_codex_stop.kill_bound_and_write_close_proof") as close,
+                patch("omo_manager.omo_codex_stop.tmux") as raw_tmux,
+            ):
+                result = stop(
+                    Args(
+                        target="work:1",
+                        wait_s=0.0,
+                        lines=10,
+                        dry_run=False,
+                        allow_self=False,
+                        root=root,
+                        no_feedback=True,
+                        bound_symbolic_target="work:1",
+                        bound_pane_id="%42",
+                        bound_close_proof_path=str(root / "proof"),
+                        bound_close_audit_path=str(root / "audit"),
+                        bound_close_proof_secret="b" * 64,
+                        bound_close_proof_commitment="c" * 64,
+                        bound_pane_pid=4242,
+                        bound_pane_start_ticks=999,
+                        bound_expected_session_id=session_id,
+                        bound_pre_input_check=lambda: checked.append(True),
+                        bound_custody_status_bypass=True,
+                    )
+                )
+        self.assertEqual(session_id, result)
+        self.assertTrue(checked)
+        status.assert_not_called()
+        interrupt.assert_not_called()
+        close.assert_called_once()
+        raw_tmux.assert_not_called()
+
+    def test_bound_custody_bypass_requires_exact_guarded_preinput_proof(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "custody status bypass requires"):
+            stop(
+                Args(
+                    target="work:1",
+                    wait_s=0.0,
+                    lines=10,
+                    dry_run=False,
+                    allow_self=False,
+                    bound_custody_status_bypass=True,
+                )
+            )
+
     def test_nonhuman_lifecycle_guard_rechecks_after_status_paste_before_enter(self) -> None:
         session_id = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"
         checks = 0
@@ -2718,11 +2789,13 @@ class CodexStopTests(unittest.TestCase):
             with (
                 patch("omo_manager.omo_codex_stop.pane_id", side_effect=["%42", "%42", "", ""]),
                 patch("omo_manager.omo_codex_stop.process_start_ticks", side_effect=[999, None, None]),
+                patch("omo_manager.omo_codex_stop.guarded_tmux_sequence", return_value="") as guarded,
                 patch("omo_manager.omo_codex_stop.tmux") as tmux,
                 patch("omo_manager.omo_codex_stop.write_bound_close_proof") as writer,
             ):
                 codex_stop.kill_bound_and_write_close_proof("vl:2", "%42", 4242, 999, proof, audit, secret, commitment)
-        tmux.assert_called_once_with(["kill-pane", "-t", "%42"], check=True)
+        guarded.assert_called_once_with("vl:2", "%42", [["kill-pane", "-t", "%42"]], 4242)
+        tmux.assert_not_called()
         writer.assert_called_once_with(proof, audit, secret, commitment)
 
     def test_close_proof_internal_mode_rejects_uncommitted_or_incomplete_capability(self) -> None:
