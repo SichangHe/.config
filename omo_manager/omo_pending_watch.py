@@ -6127,7 +6127,13 @@ def line_matches_blocked_report_snapshot(root: Path, line: str, task: TaskLine, 
     if not snapshot.startswith(("human:", "custody:", "cascade:")):
         return status == "blocked_idle"
     stable_ready = status == "blocked_idle" and problem_line_value(line, "idle_status") == "ready"
-    stable_human_input = snapshot.startswith("human:") and status == "stuck_input" and problem_line_value(line, "idle_status") == "stuck_input"
+    stable_human_input = (
+        snapshot.startswith("human:")
+        and status == "stuck_input"
+        and problem_line_value(line, "role") == "blocked_idle"
+        and problem_line_value(line, "idle_status") == "stuck_input"
+        and problem_line_value(line, "unstick") == "disabled:blocked_idle_blocked"
+    )
     if not (stable_ready or stable_human_input):
         return False
     task_path = resolve_task_path(root, task.task_file)

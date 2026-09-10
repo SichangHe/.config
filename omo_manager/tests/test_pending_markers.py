@@ -8511,6 +8511,20 @@ with exclusive_watcher_root(root):
                 self.assertTrue(snapshot.startswith("human:"))
                 self.assertIsNone(watcher.filter_unchanged_dependency_blocked_idle_output(args, problem, {"worker.md": snapshot}))
 
+                for name, changed_problem in {
+                    "role": problem.replace("role=blocked_idle", "role=worker"),
+                    "unstick": problem.replace("unstick=disabled:blocked_idle_blocked", "unstick=sent_enter"),
+                }.items():
+                    with self.subTest(name=name):
+                        self.assertEqual(
+                            changed_problem,
+                            watcher.filter_unchanged_dependency_blocked_idle_output(
+                                args,
+                                changed_problem,
+                                {"worker.md": snapshot},
+                            ),
+                        )
+
                 changes = {
                     "blocker": lambda: (root / "worker.md").write_text(task.replace("blocked_on: human", "blocked_on: human decision"), encoding="utf-8"),
                     "queue": lambda: (root / "worker.md").write_text(task.replace("Wait for the Human decision.", "Wait for a revised Human decision."), encoding="utf-8"),
