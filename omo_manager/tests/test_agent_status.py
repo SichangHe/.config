@@ -15,9 +15,6 @@ from omo_manager.omo_agent_status import target_resolution_state
 from omo_manager.omo_agent_status import SessionRecord, StatusRow, TaskLine
 from omo_manager.omo_codex_status import Args as CodexStatusArgs, PlanPromptRecovery, Report, report_from_lines
 
-EXPECTED_DATA_GEN_QUEUE = (
-    "Own manager routing for helper_scripts_mgr.md at config:8 and todo_archive_0910.md at wl:40 after their managerat migration from wl:1; preserve singleton ownership, direct Human email by workers, and at most four direct reports. Ensure config:8 routes mailbox-compression threshold 20ff56453d75c4a7e80154cb570ce9aa to the existing singular mail_cleanup_now.md owner without duplication.",
-)
 EXPECTED_MAIL_REPLACE_QUEUE = (
     "🧑 Get a different agent to do the mail compression",
     "🧑 Mail compression worker should be in wl, not dw, and should report to me immediately upon accepting the task. Did you not read MANAGER.md?? What’s the must important is you should list out all the current agents and what they are doing in a nestest list and I’ll decide which ones to keep",
@@ -2550,28 +2547,23 @@ resolved_task_items: []
                         self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
                     self.assertEqual("", out.getvalue())
 
-    def test_problems_only_classifies_expected_stopped_records_as_blocked_idle(self) -> None:
+    def test_problems_only_ignores_expected_stopped_records_but_reports_blocked_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text(
-                "current:\nmail_replace_exec.md wl:2\n\nhuman pending:\nlifecycle_reports.md wl:35\ndw_reports_submgr.md wl:33\ndata_gen_mgr.md dw:29\n",
+                "current:\nmail_replace_exec.md wl:2\nblocked_ready.md cfg:1\n\nhuman pending:\nlifecycle_reports.md wl:35\ndw_reports_submgr.md wl:33\n",
                 encoding="utf-8",
             )
-            for task_file, target, items in (
-                ("lifecycle_reports.md", "wl:35", ()),
-                ("dw_reports_submgr.md", "wl:33", ()),
-                ("data_gen_mgr.md", "dw:29", EXPECTED_DATA_GEN_QUEUE),
-            ):
+            for task_file, target in (("lifecycle_reports.md", "wl:35"), ("dw_reports_submgr.md", "wl:33")):
                 _ = (root / task_file).write_text(
                     task_frontmatter(
                         "blocked",
                         runat=target,
-                        managerat="dw:44" if task_file == "data_gen_mgr.md" else "dw:34",
+                        managerat="dw:34",
                         is_manager=True,
                         blocked_on="human hold after explicit pane termination",
-                        pending_items=items,
                     ),
                     encoding="utf-8",
                 )
@@ -2585,29 +2577,37 @@ resolved_task_items: []
                 ),
                 encoding="utf-8",
             )
+            _ = (root / "blocked_ready.md").write_text(
+                task_frontmatter("blocked", blocked_on="dependency unavailable"),
+                encoding="utf-8",
+            )
 
             def fake_inspect(args: object, **_: object) -> Report:
-                return Report("not_codex", ["codex resume 01a08c5a-19be-7863-ac2a-7e4f6d984e71", "Or run codex resume and select Apply manager worker defaults.", "❯ shell"]) if getattr(args, "target") == "wl:2" else Report("missing", [])
+                if getattr(args, "target") == "wl:2":
+                    return Report("not_codex", ["codex resume 01a08c5a-19be-7863-ac2a-7e4f6d984e71", "Or run codex resume and select Apply manager worker defaults.", "❯ shell"])
+                if getattr(args, "target") == "cfg:1":
+                    return Report("ready", ["ready"])
+                return Report("missing", [])
 
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             text = out.getvalue()
-            self.assertIn("agent-problems: blocked_idle=4", text)
-            self.assertIn("blocked_idle: task=lifecycle_reports.md", text)
-            self.assertIn("blocked_idle: task=dw_reports_submgr.md", text)
-            self.assertIn("blocked_idle: task=mail_replace_exec.md", text)
-            self.assertIn("blocked_idle: task=data_gen_mgr.md", text)
+            self.assertIn("agent-problems: blocked_idle=1", text)
+            self.assertIn("blocked_idle: task=blocked_ready.md", text)
+            self.assertNotIn("task=lifecycle_reports.md", text)
+            self.assertNotIn("task=dw_reports_submgr.md", text)
+            self.assertNotIn("task=mail_replace_exec.md", text)
             self.assertNotIn("missing: task=", text)
             self.assertNotIn("not_codex: task=", text)
 
     def test_problems_only_keeps_changed_stopped_records_actionable(self) -> None:
         cases = (
-            ("manager queue", "data_gen_mgr.md", "human pending", "dw:29", "dw:44", True, "human hold after explicit pane termination", ("changed queue",), Report("missing", []), "missing"),
-            ("manager owner", "data_gen_mgr.md", "human pending", "dw:29", "dw:45", True, "human hold after explicit pane termination", EXPECTED_DATA_GEN_QUEUE, Report("missing", []), "missing"),
-            ("manager target", "data_gen_mgr.md", "human pending", "dw:30", "dw:44", True, "human hold after explicit pane termination", EXPECTED_DATA_GEN_QUEUE, Report("missing", []), "missing"),
-            ("manager custody", "data_gen_mgr.md", "current", "dw:29", "dw:44", True, "human hold after explicit pane termination", EXPECTED_DATA_GEN_QUEUE, Report("missing", []), "missing"),
-            ("manager reason", "data_gen_mgr.md", "human pending", "dw:29", "dw:44", True, "human hold after failed launch", EXPECTED_DATA_GEN_QUEUE, Report("missing", []), "missing"),
+            ("manager queue", "dw_reports_submgr.md", "human pending", "wl:33", "dw:34", True, "human hold after explicit pane termination", ("changed queue",), Report("missing", []), "missing"),
+            ("manager owner", "dw_reports_submgr.md", "human pending", "wl:33", "dw:35", True, "human hold after explicit pane termination", (), Report("missing", []), "missing"),
+            ("manager target", "dw_reports_submgr.md", "human pending", "wl:34", "dw:34", True, "human hold after explicit pane termination", (), Report("missing", []), "missing"),
+            ("manager custody", "dw_reports_submgr.md", "current", "wl:33", "dw:34", True, "human hold after explicit pane termination", (), Report("missing", []), "missing"),
+            ("manager reason", "dw_reports_submgr.md", "human pending", "wl:33", "dw:34", True, "human hold after failed launch", (), Report("missing", []), "missing"),
             ("helper queue", "mail_replace_exec.md", "current", "wl:2", "dw:34", False, "no approved live ordinary-worker cross-target replacement helper", ("changed queue",), Report("not_codex", ["codex resume 01a08c5a-19be-7863-ac2a-7e4f6d984e71", "Or run codex resume", "❯ shell"]), "not_codex"),
             ("helper owner", "mail_replace_exec.md", "current", "wl:2", "dw:35", False, "no approved live ordinary-worker cross-target replacement helper", EXPECTED_MAIL_REPLACE_QUEUE, Report("not_codex", ["codex resume 01a08c5a-19be-7863-ac2a-7e4f6d984e71", "Or run codex resume", "❯ shell"]), "not_codex"),
             ("helper target", "mail_replace_exec.md", "current", "wl:3", "dw:34", False, "no approved live ordinary-worker cross-target replacement helper", EXPECTED_MAIL_REPLACE_QUEUE, Report("not_codex", ["codex resume 01a08c5a-19be-7863-ac2a-7e4f6d984e71", "Or run codex resume", "❯ shell"]), "not_codex"),
@@ -2634,22 +2634,36 @@ resolved_task_items: []
             root = Path(tmp)
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
-            _ = (root / "TODO.md").write_text("human pending:\ndata_gen_mgr.md dw:29.0\n", encoding="utf-8")
-            _ = (root / "data_gen_mgr.md").write_text(
+            _ = (root / "TODO.md").write_text("human pending:\ndw_reports_submgr.md wl:33.0\n", encoding="utf-8")
+            _ = (root / "dw_reports_submgr.md").write_text(
                 task_frontmatter(
                     "blocked",
-                    runat="dw:29",
-                    managerat="dw:44",
+                    runat="wl:33",
+                    managerat="dw:34",
                     is_manager=True,
                     blocked_on="human hold after explicit pane termination",
-                    pending_items=EXPECTED_DATA_GEN_QUEUE,
                 ),
                 encoding="utf-8",
             )
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("missing", [])), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            self.assertIn("missing: task=data_gen_mgr.md", out.getvalue())
+            self.assertIn("missing: task=dw_reports_submgr.md", out.getvalue())
+
+    def test_problems_only_keeps_expected_stopped_pending_delivery_actionable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("human pending:\ndw_reports_submgr.md wl:33\n", encoding="utf-8")
+            _ = (root / "dw_reports_submgr.md").write_text(
+                f"{task_frontmatter('blocked', runat='wl:33', managerat='dw:34', is_manager=True, blocked_on='human hold after explicit pane termination')}(pending)\n",
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("missing", [])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("missing: task=dw_reports_submgr.md", out.getvalue())
 
     def test_problems_only_skips_exact_direct_human_shutdown_pauses(self) -> None:
         paused = (
