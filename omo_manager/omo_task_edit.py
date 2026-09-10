@@ -157,9 +157,7 @@ def parse_args(argv: list[str]) -> Args:
     list_parser.set_defaults(command="pending-list")
     _ = list_parser.add_argument("task_file", type=Path)
 
-    add_parser = subparsers.add_parser(
-        "pending-add", aliases=["add"], help="Append one or more pending_task_items.", description=PENDING_ITEM_PROVENANCE_HELP
-    )
+    add_parser = subparsers.add_parser("pending-add", aliases=["add"], help="Append one or more pending_task_items.", description=PENDING_ITEM_PROVENANCE_HELP)
     add_parser.set_defaults(command="pending-add")
     _ = add_parser.add_argument("task_file", type=Path)
     _ = add_parser.add_argument("--item", action="append", required=True, help="Pending task item to add. Pass once per item.")
@@ -178,9 +176,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = remove_parser.add_argument("task_file", type=Path)
     _ = remove_parser.add_argument("--item", action="append", required=True, help="Pending task item to remove. Pass once per item.")
     _ = remove_parser.add_argument("--evidence", required=True, help="One-line evidence that the removed item is complete or cancelled.")
-    _ = remove_parser.add_argument(
-        "--completion-key", required=True, help="Exact shared lowercase SHA-256 identity required before completion email."
-    )
+    _ = remove_parser.add_argument("--completion-key", required=True, help="Exact shared lowercase SHA-256 identity required before completion email.")
 
     move_parser = subparsers.add_parser(
         "pending-move",
@@ -346,7 +342,16 @@ def parse_args(argv: list[str]) -> Args:
                 )
             if parsed.owner_task_file is not None or parsed.owner_item:
                 parser.error("--owner-task-file and --owner-item are only valid with --clear-kind existing-owner-item.")
-            return Args(root, parsed.task_file, command, comment=normalized_comment_message(parsed.comment), line=parsed.line, ack_human=parsed.ack_human, email_file=parsed.email_file, clear_kind=parsed.clear_kind)
+            return Args(
+                root,
+                parsed.task_file,
+                command,
+                comment=normalized_comment_message(parsed.comment),
+                line=parsed.line,
+                ack_human=parsed.ack_human,
+                email_file=parsed.email_file,
+                clear_kind=parsed.clear_kind,
+            )
         if command == "source-pointer-dedupe":
             return Args(
                 root,
@@ -1146,10 +1151,7 @@ def run(args: Args) -> int:
             target_text = target_path.read_text(encoding="utf-8")
             source_metadata = parse_task_metadata(source_text, args.root)
             target_metadata = parse_task_metadata(target_text, args.root)
-            if v2_enabled(args.root) and any(
-                metadata is not None and metadata.version == TASK_FRONTMATTER_V1
-                for metadata in (source_metadata, target_metadata)
-            ):
+            if v2_enabled(args.root) and any(metadata is not None and metadata.version == TASK_FRONTMATTER_V1 for metadata in (source_metadata, target_metadata)):
                 raise TaskFrontmatterError("v1 task writes are disabled after v2 enablement")
             if len(args.items) != 1:
                 raise TaskFrontmatterError("pending-move requires exactly one pending item.")

@@ -179,9 +179,7 @@ class TaskStatusTests(unittest.TestCase):
         "instead put the pending item under the to do file without a linked agent.\n"
     )
     RECONCILE_AUTHORITY_TEXT = (
-        "Subject: correct missing task records\n\n"
-        "I don't see any task I am aware of that is not tracked, so just correct "
-        "the task records as opposed to reinstating the agents.\n"
+        "Subject: correct missing task records\n\nI don't see any task I am aware of that is not tracked, so just correct the task records as opposed to reinstating the agents.\n"
     )
     CLOSE_MISSING_AUTHORITY_TEXT = (
         "Subject: close missing records\n\n"
@@ -206,18 +204,18 @@ class TaskStatusTests(unittest.TestCase):
         authority.chmod(0o600)
         excerpt = "".join(self.CLOSE_MISSING_AUTHORITY_TEXT.splitlines(keepends=True)[2:6])
         envelope = root / "request_task.md"
-        envelope_text = (
-            '<human_instruction authoritative="true" source="manager_mail/close.txt:3-6">\n'
-            f"{excerpt}</human_instruction>\n"
-        )
+        envelope_text = f'<human_instruction authoritative="true" source="manager_mail/close.txt:3-6">\n{excerpt}</human_instruction>\n'
         envelope.write_text(envelope_text, encoding="utf-8")
-        text = task_frontmatter(
-            status="blocked",
-            blocked_on=blocker,
-            pending_items=("preserve first", "preserve second"),
-            runat="vl:8",
-            is_manager=is_manager,
-        ) + "existing evidence\n"
+        text = (
+            task_frontmatter(
+                status="blocked",
+                blocked_on=blocker,
+                pending_items=("preserve first", "preserve second"),
+                runat="vl:8",
+                is_manager=is_manager,
+            )
+            + "existing evidence\n"
+        )
         task = root / "missing.md"
         task.write_text(text, encoding="utf-8")
         row = "missing.md vl:8" if targetful else "missing.md"
@@ -301,8 +299,16 @@ class TaskStatusTests(unittest.TestCase):
 
     def test_close_missing_target_rejects_drift_malformed_authority_and_ambiguous_todo(self) -> None:
         for case in (
-            "task_digest", "todo_digest", "authority", "negated_authority", "unrelated_closure",
-            "question_authority", "conditional_authority", "temporal_authority", "envelope", "duplicate",
+            "task_digest",
+            "todo_digest",
+            "authority",
+            "negated_authority",
+            "unrelated_closure",
+            "question_authority",
+            "conditional_authority",
+            "temporal_authority",
+            "envelope",
+            "duplicate",
         ):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
@@ -343,10 +349,7 @@ class TaskStatusTests(unittest.TestCase):
                     authority.chmod(0o600)
                     excerpt = unrelated.splitlines(keepends=True)[2]
                     envelope = root / "request_task.md"
-                    envelope_text = (
-                        '<human_instruction authoritative="true" source="manager_mail/close.txt:3-3">\n'
-                        f"{excerpt}</human_instruction>\n"
-                    )
+                    envelope_text = f'<human_instruction authoritative="true" source="manager_mail/close.txt:3-3">\n{excerpt}</human_instruction>\n'
                     envelope.write_text(envelope_text)
                     args = replace(
                         args,
@@ -367,10 +370,7 @@ class TaskStatusTests(unittest.TestCase):
                     authority.chmod(0o600)
                     excerpt = uncertain.splitlines(keepends=True)[2]
                     envelope = root / "request_task.md"
-                    envelope_text = (
-                        '<human_instruction authoritative="true" source="manager_mail/close.txt:3-3">\n'
-                        f"{excerpt}</human_instruction>\n"
-                    )
+                    envelope_text = f'<human_instruction authoritative="true" source="manager_mail/close.txt:3-3">\n{excerpt}</human_instruction>\n'
                     envelope.write_text(envelope_text)
                     args = replace(
                         args,
@@ -567,10 +567,7 @@ class TaskStatusTests(unittest.TestCase):
             authority.chmod(0o600)
             excerpt = semantic.splitlines(keepends=True)[2]
             envelope = root / "request_task.md"
-            envelope_text = (
-                '<human_instruction authoritative="true" source="manager_mail/close.txt:3-3">\n'
-                f"{excerpt}</human_instruction>\n"
-            )
+            envelope_text = f'<human_instruction authoritative="true" source="manager_mail/close.txt:3-3">\n{excerpt}</human_instruction>\n'
             envelope.write_text(envelope_text)
             args = replace(
                 args,
@@ -601,10 +598,7 @@ class TaskStatusTests(unittest.TestCase):
             authority.chmod(0o600)
             excerpt = "".join(source1398.splitlines(keepends=True)[2:9])
             envelope = root / "request_task.md"
-            envelope_text = (
-                '<human_instruction authoritative="true" source="manager_mail/close.txt:3-9">\n'
-                f"{excerpt}</human_instruction>\n"
-            )
+            envelope_text = f'<human_instruction authoritative="true" source="manager_mail/close.txt:3-9">\n{excerpt}</human_instruction>\n'
             envelope.write_text(envelope_text)
             args = replace(
                 args,
@@ -857,10 +851,7 @@ class TaskStatusTests(unittest.TestCase):
                 authority.chmod(0o600)
                 excerpt = unsafe.splitlines(keepends=True)[2]
                 envelope = root / "request_task.md"
-                envelope_text = (
-                    '<human_instruction authoritative="true" source="manager_mail/close.txt:3-3">\n'
-                    f"{excerpt}</human_instruction>\n"
-                )
+                envelope_text = f'<human_instruction authoritative="true" source="manager_mail/close.txt:3-3">\n{excerpt}</human_instruction>\n'
                 envelope.write_text(envelope_text)
                 args = replace(
                     args,
@@ -923,12 +914,29 @@ class TaskStatusTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             parse_args(
                 [
-                    "--root", "/tmp/root", "--close-missing-target", "--missing-target", "vl:8",
-                    "--expected-task-sha256", "1" * 64, "--expected-todo-sha256", "2" * 64,
-                    "--expected-receipt-sha256", "5" * 64,
-                    "--authority-file", "manager_mail/request.txt", "--authority-lines", "3-4",
-                    "--authority-sha256", "3" * 64, "--authority-envelope", "task.md",
-                    "--authority-envelope-sha256", "4" * 64, "--audit-output", "/tmp/audit.yaml",
+                    "--root",
+                    "/tmp/root",
+                    "--close-missing-target",
+                    "--missing-target",
+                    "vl:8",
+                    "--expected-task-sha256",
+                    "1" * 64,
+                    "--expected-todo-sha256",
+                    "2" * 64,
+                    "--expected-receipt-sha256",
+                    "5" * 64,
+                    "--authority-file",
+                    "manager_mail/request.txt",
+                    "--authority-lines",
+                    "3-4",
+                    "--authority-sha256",
+                    "3" * 64,
+                    "--authority-envelope",
+                    "task.md",
+                    "--authority-envelope-sha256",
+                    "4" * 64,
+                    "--audit-output",
+                    "/tmp/audit.yaml",
                     "missing.md",
                 ]
             )
@@ -962,18 +970,18 @@ class TaskStatusTests(unittest.TestCase):
         authority.chmod(0o600)
         excerpt = self.RECONCILE_AUTHORITY_TEXT.splitlines(keepends=True)[2]
         envelope = root / "request_task.md"
-        envelope_text = (
-            '<human_instruction authoritative="true" source="manager_mail/request.txt:3-3">\n'
-            f"{excerpt}</human_instruction>\n"
-        )
+        envelope_text = f'<human_instruction authoritative="true" source="manager_mail/request.txt:3-3">\n{excerpt}</human_instruction>\n'
         envelope.write_text(envelope_text, encoding="utf-8")
-        text = task_frontmatter(
-            status="blocked",
-            blocked_on="direct human shutdown",
-            pending_items=("preserve work",),
-            runat=runat,
-            is_manager=is_manager,
-        ) + "existing evidence\n"
+        text = (
+            task_frontmatter(
+                status="blocked",
+                blocked_on="direct human shutdown",
+                pending_items=("preserve work",),
+                runat=runat,
+                is_manager=is_manager,
+            )
+            + "existing evidence\n"
+        )
         task = root / "missing.md"
         task.write_text(text, encoding="utf-8")
         todo_text = f"current:\n\nlow priority:\nslow.md vl:7\n\nhuman pending:\nmissing.md {runat}\n\nprevious:\n"
@@ -1055,26 +1063,21 @@ class TaskStatusTests(unittest.TestCase):
         authority.write_text(self.AUTHORITY_TEXT, encoding="utf-8")
         authority.chmod(0o600)
         excerpt = "".join(self.AUTHORITY_TEXT.splitlines(keepends=True)[2:6])
-        envelope_text = (
-            '<human_instruction authoritative="true" source="manager_mail/halt.txt:3-6">\n'
-            f"{excerpt}</human_instruction>\n"
-        )
+        envelope_text = f'<human_instruction authoritative="true" source="manager_mail/halt.txt:3-6">\n{excerpt}</human_instruction>\n'
         envelope = root / "vl_pause.md"
         envelope.write_text(envelope_text, encoding="utf-8")
-        text = task_frontmatter(
-            status="blocked",
-            blocked_on="reviewed lifecycle helper cannot create targetless TODO custody while preserving historical runat",
-            pending_items=("preserve first item", "preserve second item"),
-            runat=runat,
-        ) + "existing evidence\n"
+        text = (
+            task_frontmatter(
+                status="blocked",
+                blocked_on="reviewed lifecycle helper cannot create targetless TODO custody while preserving historical runat",
+                pending_items=("preserve first item", "preserve second item"),
+                runat=runat,
+            )
+            + "existing evidence\n"
+        )
         task = root / "vl_task.md"
         task.write_text(text, encoding="utf-8")
-        original_todo = todo_text or (
-            f"current:\nother.md vl:9\n\n"
-            "low priority:\nslow.md vl:7\n\n"
-            f"human pending:\nvl_task.md {runat}\nwaiting.md vl:6\n\n"
-            "previous:\nold.md vl:8\n"
-        )
+        original_todo = todo_text or (f"current:\nother.md vl:9\n\nlow priority:\nslow.md vl:7\n\nhuman pending:\nvl_task.md {runat}\nwaiting.md vl:6\n\nprevious:\nold.md vl:8\n")
         todo = root / "TODO.md"
         todo.write_text(original_todo, encoding="utf-8")
         audit_dir = root / "audit"
@@ -1297,9 +1300,7 @@ class TaskStatusTests(unittest.TestCase):
                 patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("%42", "")),
                 patch(
                     "omo_manager.omo_task_status.stop",
-                    side_effect=lambda stop_args: self.complete_guarded_park_stop(
-                        stop_args, "01a03702-dd9a-79c2-a1c4-3508f4918350"
-                    ),
+                    side_effect=lambda stop_args: self.complete_guarded_park_stop(stop_args, "01a03702-dd9a-79c2-a1c4-3508f4918350"),
                 ) as stop_owner,
                 redirect_stdout(io.StringIO()),
             ):
@@ -1317,10 +1318,7 @@ class TaskStatusTests(unittest.TestCase):
     def test_park_unlinked_moves_proven_prior_stop_from_previous_without_pane_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            todo_text = (
-                "current:\nother.md vl:9\n\nlow priority:\nslow.md vl:7\n\n"
-                "human pending:\nwaiting.md vl:6\n\nprevious:\nvl_task.md vl:2\nold.md vl:8\n"
-            )
+            todo_text = "current:\nother.md vl:9\n\nlow priority:\nslow.md vl:7\n\nhuman pending:\nwaiting.md vl:6\n\nprevious:\nvl_task.md vl:2\nold.md vl:8\n"
             task, text, todo, _original_todo, args = self.write_park_case(root, todo_text=todo_text)
             session_id = "01a03a33-5aa7-7752-ba19-95d74a2910e3"
             text = text.rstrip("\n") + close_note("vl:2", session_id)
@@ -1684,8 +1682,7 @@ class TaskStatusTests(unittest.TestCase):
                     text = text.replace("is_manager: false", "is_manager: true")
                     task.write_text(text, encoding="utf-8")
                     (root / "child.md").write_text(
-                        task_frontmatter(status="running", runat="vl-child:3", managerat="vl:2")
-                        + "child evidence\n",
+                        task_frontmatter(status="running", runat="vl-child:3", managerat="vl:2") + "child evidence\n",
                         encoding="utf-8",
                     )
                     args = replace(args, expected_task_sha256=hashlib.sha256(text.encode()).hexdigest())
@@ -1748,9 +1745,12 @@ class TaskStatusTests(unittest.TestCase):
                 root = Path(tmp)
                 task, text, todo, todo_text, args = self.write_park_case(root)
                 args = replace(self.archive_park_authority(root, args), authority_file=authority_file)
-                with patch("omo_manager.omo_task_status.stop") as stop_owner, self.assertRaisesRegex(
-                    TaskFrontmatterError,
-                    "under the task root",
+                with (
+                    patch("omo_manager.omo_task_status.stop") as stop_owner,
+                    self.assertRaisesRegex(
+                        TaskFrontmatterError,
+                        "under the task root",
+                    ),
                 ):
                     park_unlinked(args, task, text, task.stat())
                 stop_owner.assert_not_called()
@@ -1778,9 +1778,12 @@ class TaskStatusTests(unittest.TestCase):
                     real = mail / "archive-authority.txt"
                     authority.rename(real)
                     authority.symlink_to(real.name)
-                with patch("omo_manager.omo_task_status.stop") as stop_owner, self.assertRaisesRegex(
-                    TaskFrontmatterError,
-                    "without symlinks",
+                with (
+                    patch("omo_manager.omo_task_status.stop") as stop_owner,
+                    self.assertRaisesRegex(
+                        TaskFrontmatterError,
+                        "without symlinks",
+                    ),
                 ):
                     park_unlinked(args, task, text, task.stat())
                 stop_owner.assert_not_called()
@@ -1805,9 +1808,12 @@ class TaskStatusTests(unittest.TestCase):
                     envelope.write_text(changed, encoding="utf-8")
                     args = replace(args, authority_envelope_sha256=hashlib.sha256(changed.encode()).hexdigest())
                     expected = "authority envelope"
-                with patch("omo_manager.omo_task_status.stop") as stop_owner, self.assertRaisesRegex(
-                    TaskFrontmatterError,
-                    expected,
+                with (
+                    patch("omo_manager.omo_task_status.stop") as stop_owner,
+                    self.assertRaisesRegex(
+                        TaskFrontmatterError,
+                        expected,
+                    ),
                 ):
                     park_unlinked(args, task, text, task.stat())
                 stop_owner.assert_not_called()
@@ -2050,16 +2056,30 @@ class TaskStatusTests(unittest.TestCase):
 
     def test_park_unlinked_reattestation_parser_requires_prior_receipt_and_session(self) -> None:
         complete = [
-            "--root", "/tmp/work", "--reattest-park-unlinked",
-            "--expected-task-sha256", "a" * 64,
-            "--expected-todo-sha256", "b" * 64,
-            "--expected-receipt-sha256", "c" * 64,
-            "--session-id", "01a03a33-5aa7-7752-ba19-95d74a2910e3",
-            "--authority-file", "202607/manager_mail/halt.txt",
-            "--authority-lines", "3-6", "--authority-sha256", "d" * 64,
-            "--authority-envelope", "202607/vl_pause.md",
-            "--authority-envelope-sha256", "e" * 64,
-            "--audit-output", "/tmp/park-audit.yaml", "task.md",
+            "--root",
+            "/tmp/work",
+            "--reattest-park-unlinked",
+            "--expected-task-sha256",
+            "a" * 64,
+            "--expected-todo-sha256",
+            "b" * 64,
+            "--expected-receipt-sha256",
+            "c" * 64,
+            "--session-id",
+            "01a03a33-5aa7-7752-ba19-95d74a2910e3",
+            "--authority-file",
+            "202607/manager_mail/halt.txt",
+            "--authority-lines",
+            "3-6",
+            "--authority-sha256",
+            "d" * 64,
+            "--authority-envelope",
+            "202607/vl_pause.md",
+            "--authority-envelope-sha256",
+            "e" * 64,
+            "--audit-output",
+            "/tmp/park-audit.yaml",
+            "task.md",
         ]
         args = parse_args(complete)
         self.assertTrue(args.reattest_park_unlinked)
@@ -2174,15 +2194,11 @@ class TaskStatusTests(unittest.TestCase):
             "schema": "omo-report-transaction-commitment/v2",
             "transfer": transfer,
         }
-        record["commitment_id"] = hashlib.sha256(
-            json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        record["commitment_id"] = hashlib.sha256(json.dumps(record, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         commitment.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
         os.chmod(commitment, 0o600)
         attached = {**transfer, "commitment_id": record["commitment_id"]}
-        attached["transfer_id"] = hashlib.sha256(
-            json.dumps(attached, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        attached["transfer_id"] = hashlib.sha256(json.dumps(attached, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         envelope.write_bytes(
             (
                 f"(sent from agent via omo_report.sh tmux={target} time=00:00 task-file={task.name})\n"
@@ -2207,8 +2223,11 @@ class TaskStatusTests(unittest.TestCase):
         private = args.audit_output.parent
         terminal_receipt_sha256 = "d" * 64
         worker = self.write_report_transaction(
-            private, task, args.active_target,
-            f"terminal receipt {terminal_receipt_sha256}\n".encode(), "worker-report",
+            private,
+            task,
+            args.active_target,
+            f"terminal receipt {terminal_receipt_sha256}\n".encode(),
+            "worker-report",
         )
         args = replace(args, terminal_evidence=worker["report_sha256"])
         manager_task = root / "manager.md"
@@ -2229,9 +2248,7 @@ class TaskStatusTests(unittest.TestCase):
         receipt: dict[str, object] = {
             "accepted": True,
             "audit": str(args.audit_output),
-            "audit_sha256": hashlib.sha256(
-                render_done_live_close_audit(args, task, DoneLiveCloseAudit("reserved")).encode()
-            ).hexdigest(),
+            "audit_sha256": hashlib.sha256(render_done_live_close_audit(args, task, DoneLiveCloseAudit("reserved")).encode()).hexdigest(),
             "manager_acceptance": {
                 "task": str(manager_task),
                 "task_sha256": hashlib.sha256(manager_task.read_bytes()).hexdigest(),
@@ -2252,9 +2269,7 @@ class TaskStatusTests(unittest.TestCase):
             "todo_sha256": args.expected_todo_sha256,
             "worker_report": worker,
         }
-        receipt["receipt_id"] = hashlib.sha256(
-            json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        receipt["receipt_id"] = hashlib.sha256(json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         receipt_path = private / "manager-consumed.json"
         receipt_path.write_text(json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
         os.chmod(receipt_path, 0o600)
@@ -2287,9 +2302,7 @@ class TaskStatusTests(unittest.TestCase):
         )
         commitment = json.loads(Path(worker["commitment"]).read_text(encoding="utf-8"))
         transfer = {**commitment["transfer"], "commitment_id": commitment["commitment_id"]}
-        transfer["transfer_id"] = hashlib.sha256(
-            json.dumps(transfer, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        transfer["transfer_id"] = hashlib.sha256(json.dumps(transfer, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         state = private.parent / "pending-watch-consumed-reports.tsv"
         envelope = Path(worker["envelope"])
         report_sha256 = worker["report_sha256"]
@@ -2318,13 +2331,25 @@ class TaskStatusTests(unittest.TestCase):
             "protocol": "locked-owner-restore-v1",
         }
         fields = [
-            "42.0", key, str(transition["protocol"]), str(transition["manager_path_sha256"]),
-            str(transition["pointer_sha256"]), str(transition["before_sha256"]),
-            str(transition["before_size_bytes"]), str(transition["after_sha256"]),
-            str(transition["after_size_bytes"]), str(authority["protocol"]), str(authority["role"]),
-            str(authority["pid"]), str(authority["process_start_ticks"]), str(authority["lock_path_sha256"]),
-            str(authority["lock_dev"]), str(authority["lock_inode"]), str(authority["source_path"]),
-            str(authority["source_sha256"]), str(authority["token_sha256"]),
+            "42.0",
+            key,
+            str(transition["protocol"]),
+            str(transition["manager_path_sha256"]),
+            str(transition["pointer_sha256"]),
+            str(transition["before_sha256"]),
+            str(transition["before_size_bytes"]),
+            str(transition["after_sha256"]),
+            str(transition["after_size_bytes"]),
+            str(authority["protocol"]),
+            str(authority["role"]),
+            str(authority["pid"]),
+            str(authority["process_start_ticks"]),
+            str(authority["lock_path_sha256"]),
+            str(authority["lock_dev"]),
+            str(authority["lock_inode"]),
+            str(authority["source_path"]),
+            str(authority["source_sha256"]),
+            str(authority["token_sha256"]),
         ]
         entry = "\t".join(fields)
         state.write_text(entry + "\n", encoding="utf-8")
@@ -2349,17 +2374,13 @@ class TaskStatusTests(unittest.TestCase):
             "terminal": True,
             "transfer_receipt": transfer,
         }
-        attestation["attestation_id"] = hashlib.sha256(
-            json.dumps(attestation, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        attestation["attestation_id"] = hashlib.sha256(json.dumps(attestation, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         bundle: dict[str, object] = {
             "attestation": attestation,
             "schema": "omo-report-consumed-export/v1",
             "verification": {},
         }
-        bundle["export_id"] = hashlib.sha256(
-            json.dumps(bundle, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
+        bundle["export_id"] = hashlib.sha256(json.dumps(bundle, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         evidence = private / "consumed-attestation.json"
         evidence.write_text(json.dumps(bundle, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
         os.chmod(evidence, 0o600)
@@ -2685,24 +2706,45 @@ class TaskStatusTests(unittest.TestCase):
 
     def test_done_live_no_mail_parser_requires_bound_close_evidence(self) -> None:
         complete = [
-            "--root", "/tmp/work_logs", "--close-done-live-no-mail",
-            "--active-target", "wl:2", "--manager-target", "wl:1",
-            "--expected-task-sha256", "a" * 64,
-            "--expected-todo-sha256", "b" * 64,
-            "--expected-pane-id", "%42", "--expected-pane-pid", "4242",
-            "--expected-pane-start-ticks", "73",
-            "--expected-session-id", "019e9ed9-6262-71c0-b4b3-72ffd4182e98",
-            "--terminal-evidence", "accepted-report-receipt-token",
-            "--audit-output", "/tmp/done-live-close.json", "task.md",
+            "--root",
+            "/tmp/work_logs",
+            "--close-done-live-no-mail",
+            "--active-target",
+            "wl:2",
+            "--manager-target",
+            "wl:1",
+            "--expected-task-sha256",
+            "a" * 64,
+            "--expected-todo-sha256",
+            "b" * 64,
+            "--expected-pane-id",
+            "%42",
+            "--expected-pane-pid",
+            "4242",
+            "--expected-pane-start-ticks",
+            "73",
+            "--expected-session-id",
+            "019e9ed9-6262-71c0-b4b3-72ffd4182e98",
+            "--terminal-evidence",
+            "accepted-report-receipt-token",
+            "--audit-output",
+            "/tmp/done-live-close.json",
+            "task.md",
         ]
         args = parse_args(complete)
         self.assertTrue(args.close_done_live_no_mail)
         self.assertEqual("done", args.status)
         for option in (
-            "--active-target", "--manager-target", "--expected-task-sha256",
-            "--expected-todo-sha256", "--expected-pane-id", "--expected-pane-pid",
-            "--expected-pane-start-ticks", "--expected-session-id",
-            "--terminal-evidence", "--audit-output",
+            "--active-target",
+            "--manager-target",
+            "--expected-task-sha256",
+            "--expected-todo-sha256",
+            "--expected-pane-id",
+            "--expected-pane-pid",
+            "--expected-pane-start-ticks",
+            "--expected-session-id",
+            "--terminal-evidence",
+            "--audit-output",
         ):
             candidate = complete.copy()
             index = candidate.index(option)
@@ -2714,8 +2756,10 @@ class TaskStatusTests(unittest.TestCase):
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
             parse_args(human_target)
         consumed = complete[:-1] + [
-            "--manager-consumed-report-receipt", "/tmp/consumed.json",
-            "--manager-consumed-report-receipt-sha256", "c" * 64,
+            "--manager-consumed-report-receipt",
+            "/tmp/consumed.json",
+            "--manager-consumed-report-receipt-sha256",
+            "c" * 64,
             "task.md",
         ]
         parsed = parse_args(consumed)
@@ -2728,10 +2772,17 @@ class TaskStatusTests(unittest.TestCase):
 
     def test_done_live_evidence_parser_requires_export_and_no_close_assertions(self) -> None:
         complete = [
-            "--root", "/tmp/work_logs", "--describe-done-live-no-mail",
-            "--active-target", "wl:2", "--manager-target", "wl:1",
-            "--manager-consumed-report-receipt", "/tmp/consumed.json",
-            "--manager-consumed-report-receipt-sha256", "c" * 64,
+            "--root",
+            "/tmp/work_logs",
+            "--describe-done-live-no-mail",
+            "--active-target",
+            "wl:2",
+            "--manager-target",
+            "wl:1",
+            "--manager-consumed-report-receipt",
+            "/tmp/consumed.json",
+            "--manager-consumed-report-receipt-sha256",
+            "c" * 64,
             "task.md",
         ]
         args = parse_args(complete)
@@ -2798,9 +2849,7 @@ class TaskStatusTests(unittest.TestCase):
                 }
             )
             unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
-            attestation["attestation_id"] = hashlib.sha256(
-                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest()
+            attestation["attestation_id"] = hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             bundle["attestation"] = attestation
             evidence.write_text(json.dumps(bundle, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
             args = replace(
@@ -2828,9 +2877,7 @@ class TaskStatusTests(unittest.TestCase):
                 attestation["accepted"] = False
                 attestation["reason"] = "manager watcher consumed report; acceptance receipt unavailable"
                 unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
-                attestation["attestation_id"] = hashlib.sha256(
-                    json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
-                ).hexdigest()
+                attestation["attestation_id"] = hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
                 args = replace(args, terminal_evidence=attestation["attestation_id"])
                 validate_consumed_closure_attestation(args, archived, attestation)
             validate_done_live_todo(root, archived, todo_text, args.active_target, archived=True)
@@ -2874,9 +2921,7 @@ class TaskStatusTests(unittest.TestCase):
                 "todo_sha256": hashlib.sha256(todo_text.encode()).hexdigest(),
             }
             unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
-            attestation["attestation_id"] = hashlib.sha256(
-                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest()
+            attestation["attestation_id"] = hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             bundle["attestation"] = attestation
             evidence.write_text(json.dumps(bundle, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
             args = replace(
@@ -2973,18 +3018,14 @@ class TaskStatusTests(unittest.TestCase):
 
             proof_text = proof.read_text(encoding="utf-8")
             proof.unlink()
-            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""), self.assertRaisesRegex(
-                TaskFrontmatterError, "post-note custody evidence"
-            ):
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""), self.assertRaisesRegex(TaskFrontmatterError, "post-note custody evidence"):
                 close_done_live_no_mail(args, archived, closed_text, archived.stat())
             proof.write_text(proof_text, encoding="utf-8")
             proof.chmod(0o600)
             started = done_live_close_started_path(args.audit_output)
             started.write_text(proof_text, encoding="utf-8")
             started.chmod(0o600)
-            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""), self.assertRaisesRegex(
-                TaskFrontmatterError, "post-note custody evidence"
-            ):
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""), self.assertRaisesRegex(TaskFrontmatterError, "post-note custody evidence"):
                 close_done_live_no_mail(args, archived, closed_text, archived.stat())
             started.unlink()
             todo.write_text(todo_text + "unrelated.md wl:9\n", encoding="utf-8")
@@ -3032,9 +3073,7 @@ class TaskStatusTests(unittest.TestCase):
                 "todo_sha256": hashlib.sha256(todo_text.encode()).hexdigest(),
             }
             unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
-            attestation["attestation_id"] = hashlib.sha256(
-                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest()
+            attestation["attestation_id"] = hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             args = replace(args, terminal_evidence=attestation["attestation_id"])
             validate_consumed_closure_attestation(args, task, attestation, text.encode())
             provenance = attestation["archive_custody"]["git_provenance"]
@@ -3153,12 +3192,19 @@ class TaskStatusTests(unittest.TestCase):
 
     def test_live_no_mail_parser_requires_exact_cas_evidence(self) -> None:
         complete = [
-            "--root", "/tmp/work_logs", "--complete-live-no-mail",
-            "--active-target", "wl:2",
-            "--manager-target", "wl:1",
-            "--expected-task-sha256", "a" * 64,
-            "--expected-todo-sha256", "b" * 64,
-            "--expected-pane-id", "%42",
+            "--root",
+            "/tmp/work_logs",
+            "--complete-live-no-mail",
+            "--active-target",
+            "wl:2",
+            "--manager-target",
+            "wl:1",
+            "--expected-task-sha256",
+            "a" * 64,
+            "--expected-todo-sha256",
+            "b" * 64,
+            "--expected-pane-id",
+            "%42",
             "task.md",
         ]
         args = parse_args(complete)
@@ -3297,6 +3343,7 @@ class TaskStatusTests(unittest.TestCase):
                 original_todo = todo.read_text(encoding="utf-8")
                 pane_values = ["%41"] if case == "pane" else ["%42", "%42"]
                 if case == "todo race":
+
                     def pane_with_todo_race(_target: str) -> str:
                         value = pane_values.pop(0)
                         if not pane_values:
@@ -3308,6 +3355,7 @@ class TaskStatusTests(unittest.TestCase):
                     pane_patch = patch("omo_manager.omo_task_status.exact_pane_id", side_effect=pane_values)
                 ownership_patch = nullcontext()
                 if case == "task race":
+
                     def owner_with_task_race(_root: Path, _target: str) -> tuple[Path, ...]:
                         task.write_text(f"{text}concurrent\n", encoding="utf-8")
                         return (task,)
@@ -3315,6 +3363,7 @@ class TaskStatusTests(unittest.TestCase):
                     ownership_patch = patch("omo_manager.omo_task_status.authoritative_active_target_task_paths", side_effect=owner_with_task_race)
                 replace_patch = nullcontext()
                 if case == "task write":
+
                     def fail_task_write(path: Path, payload: str, before: os.stat_result) -> None:
                         if path == task:
                             raise OSError("task write failed")
@@ -3388,17 +3437,29 @@ class TaskStatusTests(unittest.TestCase):
 
     def test_active_task_tree_no_mail_parser_requires_exact_bindings(self) -> None:
         complete = [
-            "--root", "/tmp/work_logs", "--close-active-task-tree-no-mail",
-            "--shared-target", "agent_managers:5",
-            "--protected-shared-task", "202608/mail_report_policy.md",
-            "--protected-shared-sha256", "a" * 64,
-            "--expected-task-sha256", "b" * 64,
-            "--expected-todo-sha256", "c" * 64,
-            "--expected-pane-id", "%3387",
-            "--authority-file", "manager_mail/85c5dff58359-1298.txt",
-            "--authority-lines", "3-4",
-            "--authority-sha256", "d" * 64,
-            "--no-mail-intent", ACTIVE_TASK_TREE_NO_MAIL_INTENT,
+            "--root",
+            "/tmp/work_logs",
+            "--close-active-task-tree-no-mail",
+            "--shared-target",
+            "agent_managers:5",
+            "--protected-shared-task",
+            "202608/mail_report_policy.md",
+            "--protected-shared-sha256",
+            "a" * 64,
+            "--expected-task-sha256",
+            "b" * 64,
+            "--expected-todo-sha256",
+            "c" * 64,
+            "--expected-pane-id",
+            "%3387",
+            "--authority-file",
+            "manager_mail/85c5dff58359-1298.txt",
+            "--authority-lines",
+            "3-4",
+            "--authority-sha256",
+            "d" * 64,
+            "--no-mail-intent",
+            ACTIVE_TASK_TREE_NO_MAIL_INTENT,
             "active_task_tree.md",
         ]
         args = parse_args(complete)
@@ -3572,8 +3633,15 @@ class TaskStatusTests(unittest.TestCase):
                 proof = Path(str(values[4]))
                 audit = Path(str(values[5]))
                 write_done_live_close_started(
-                    proof, audit, str(values[6]), str(values[7]), str(values[12]),
-                    args.active_target, args.expected_pane_id, args.expected_pane_pid, args.expected_pane_start_ticks,
+                    proof,
+                    audit,
+                    str(values[6]),
+                    str(values[7]),
+                    str(values[12]),
+                    args.active_target,
+                    args.expected_pane_id,
+                    args.expected_pane_pid,
+                    args.expected_pane_start_ticks,
                 )
                 state["live"] = False
                 with (
@@ -3581,8 +3649,14 @@ class TaskStatusTests(unittest.TestCase):
                     patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=None),
                 ):
                     promote_done_live_close_started(
-                        proof, audit, str(values[7]), str(values[12]),
-                        args.active_target, args.expected_pane_id, args.expected_pane_pid, args.expected_pane_start_ticks,
+                        proof,
+                        audit,
+                        str(values[7]),
+                        str(values[12]),
+                        args.active_target,
+                        args.expected_pane_id,
+                        args.expected_pane_pid,
+                        args.expected_pane_start_ticks,
                     )
 
             output = io.StringIO()
@@ -3843,9 +3917,7 @@ class TaskStatusTests(unittest.TestCase):
                 else:
                     attestation["transfer_receipt"]["authority"]["source_task"] = str(root / "other.md")
                 unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
-                attestation["attestation_id"] = hashlib.sha256(
-                    json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
-                ).hexdigest()
+                attestation["attestation_id"] = hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
                 args = replace(
                     args,
                     terminal_evidence=str(attestation["attestation_id"]),
@@ -3946,9 +4018,7 @@ class TaskStatusTests(unittest.TestCase):
                     )
                     prior = receipt["manager_acceptance"]["transaction"]
                     body = Path(prior["report"]).read_bytes()
-                    transaction = self.write_report_transaction(
-                        root / "private", manager_task, "wl:8", body, "other-manager-report"
-                    )
+                    transaction = self.write_report_transaction(root / "private", manager_task, "wl:8", body, "other-manager-report")
                     receipt["manager_acceptance"] = {
                         "task": str(manager_task),
                         "task_sha256": hashlib.sha256(manager_task.read_bytes()).hexdigest(),
@@ -3963,9 +4033,7 @@ class TaskStatusTests(unittest.TestCase):
                         args = replace(args, audit_output=(root / "private" / "replayed-audit.json").resolve())
                 if defect in {"wrong task", "wrong manager"}:
                     receipt.pop("receipt_id")
-                    receipt["receipt_id"] = hashlib.sha256(
-                        json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()
-                    ).hexdigest()
+                    receipt["receipt_id"] = hashlib.sha256(json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
                 if defect not in {"drift", "replay"}:
                     receipt_path.write_text(json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
                     os.chmod(receipt_path, 0o600)
@@ -4146,8 +4214,15 @@ class TaskStatusTests(unittest.TestCase):
                 proof = Path(str(values[4]))
                 audit = Path(str(values[5]))
                 write_done_live_close_started(
-                    proof, audit, str(values[6]), str(values[7]), str(values[12]),
-                    args.active_target, args.expected_pane_id, args.expected_pane_pid, args.expected_pane_start_ticks,
+                    proof,
+                    audit,
+                    str(values[6]),
+                    str(values[7]),
+                    str(values[12]),
+                    args.active_target,
+                    args.expected_pane_id,
+                    args.expected_pane_pid,
+                    args.expected_pane_start_ticks,
                 )
                 state["live"] = False
                 with (
@@ -4155,8 +4230,14 @@ class TaskStatusTests(unittest.TestCase):
                     patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=None),
                 ):
                     promote_done_live_close_started(
-                        proof, audit, str(values[7]), str(values[12]),
-                        args.active_target, args.expected_pane_id, args.expected_pane_pid, args.expected_pane_start_ticks,
+                        proof,
+                        audit,
+                        str(values[7]),
+                        str(values[12]),
+                        args.active_target,
+                        args.expected_pane_id,
+                        args.expected_pane_pid,
+                        args.expected_pane_start_ticks,
                     )
 
             def interrupt_final_audit(path: Path, expected: str, updated: str) -> None:
@@ -4235,7 +4316,9 @@ class TaskStatusTests(unittest.TestCase):
             path.write_text(text, encoding="utf-8")
             todo = root / "TODO.md"
             todo.write_text("current:\nother.md vl:9\n\nlow priority:\nmanager.md vl:2\n\nhuman pending:\n\nprevious:\n", encoding="utf-8")
-            args = StatusArgs(root, Path("manager.md"), "", "", normalize_low_priority_current=True, active_target="vl:2", manager_target="vl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest())
+            args = StatusArgs(
+                root, Path("manager.md"), "", "", normalize_low_priority_current=True, active_target="vl:2", manager_target="vl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest()
+            )
 
             self.assertEqual(0, run(args))
             self.assertEqual(text, path.read_text(encoding="utf-8"))
@@ -4279,7 +4362,9 @@ class TaskStatusTests(unittest.TestCase):
                 text = task_frontmatter(status="long_running", runat="vl:2", managerat="vl:1", is_manager=True)
                 path.write_text(text, encoding="utf-8")
                 (root / "TODO.md").write_text(todo_text, encoding="utf-8")
-                args = StatusArgs(root, Path("manager.md"), "", "", normalize_low_priority_current=True, active_target="vl:2", manager_target="vl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest())
+                args = StatusArgs(
+                    root, Path("manager.md"), "", "", normalize_low_priority_current=True, active_target="vl:2", manager_target="vl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest()
+                )
                 with self.assertRaisesRegex(TaskFrontmatterError, expected):
                     normalize_low_priority_current(args, path, text, path.stat())
 
@@ -4291,17 +4376,23 @@ class TaskStatusTests(unittest.TestCase):
             path.write_text(text, encoding="utf-8")
             (root / "other.md").write_text(task_frontmatter(status="running", runat="vl:2", managerat="vl:1") + "body\n", encoding="utf-8")
             (root / "TODO.md").write_text("current:\n\nlow priority:\nmanager.md vl:2\n\nhuman pending:\n\nprevious:\n", encoding="utf-8")
-            args = StatusArgs(root, Path("manager.md"), "", "", normalize_low_priority_current=True, active_target="vl:2", manager_target="vl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest())
+            args = StatusArgs(
+                root, Path("manager.md"), "", "", normalize_low_priority_current=True, active_target="vl:2", manager_target="vl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest()
+            )
             with self.assertRaisesRegex(TaskFrontmatterError, "sole active owner"):
                 normalize_low_priority_current(args, path, text, path.stat())
 
-            human_args = StatusArgs(root, Path("manager.md"), "", "", normalize_low_priority_current=True, active_target="h:2", manager_target="vl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest())
+            human_args = StatusArgs(
+                root, Path("manager.md"), "", "", normalize_low_priority_current=True, active_target="h:2", manager_target="vl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest()
+            )
             with self.assertRaisesRegex(TaskFrontmatterError, "non-human exact"):
                 normalize_low_priority_current(human_args, path, text, path.stat())
             v2 = root / "v2.md"
             v2_text = v2_task().replace("runat: wl:2", "runat: vl:2").replace("managerat: wl:1", "managerat: vl:1").replace("is_manager: false", "is_manager: true")
             v2.write_text(v2_text, encoding="utf-8")
-            v2_args = StatusArgs(root, Path("v2.md"), "", "", normalize_low_priority_current=True, active_target="vl:2", manager_target="vl:1", source_sha256=hashlib.sha256(v2_text.encode()).hexdigest())
+            v2_args = StatusArgs(
+                root, Path("v2.md"), "", "", normalize_low_priority_current=True, active_target="vl:2", manager_target="vl:1", source_sha256=hashlib.sha256(v2_text.encode()).hexdigest()
+            )
             with self.assertRaisesRegex(TaskFrontmatterError, "unchanged active v1 manager"):
                 normalize_low_priority_current(v2_args, v2, v2_text, v2.stat())
 
@@ -4323,16 +4414,20 @@ class TaskStatusTests(unittest.TestCase):
             todo = root / "TODO.md"
             todo_text = "current:\n\nlow priority:\nmanager.md vl:2\n\nhuman pending:\n\nprevious:\n"
             todo.write_text(todo_text, encoding="utf-8")
-            args = StatusArgs(root, Path("manager.md"), "", "", normalize_low_priority_current=True, active_target="vl:2", manager_target="vl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest())
+            args = StatusArgs(
+                root, Path("manager.md"), "", "", normalize_low_priority_current=True, active_target="vl:2", manager_target="vl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest()
+            )
             before = path.stat()
             path.write_text(text + "drift\n", encoding="utf-8")
             with self.assertRaisesRegex(TaskFrontmatterError, "source bytes do not match"):
                 normalize_low_priority_current(args, path, text, before)
 
             path.write_text(text, encoding="utf-8")
+
             def mutate_todo(*_args: object) -> str:
                 todo.write_text(todo_text.replace("vl:2", "vl:3"), encoding="utf-8")
                 return "current:\nmanager.md vl:2\n\nlow priority:\n\nhuman pending:\n\nprevious:\n"
+
             with patch("omo_manager.omo_task_status.reconcile_todo_text", side_effect=mutate_todo):
                 with self.assertRaisesRegex(TaskFrontmatterError, "TODO changed while low-priority normalization"):
                     normalize_low_priority_current(args, path, text, path.stat())
@@ -4340,12 +4435,19 @@ class TaskStatusTests(unittest.TestCase):
 
             todo.write_text(todo_text, encoding="utf-8")
             locks: list[str] = []
+
             def record_lock(candidate: Path):
                 locks.append(candidate.name)
                 return nullcontext()
-            with patch("omo_manager.omo_task_status.root_membership_lock", side_effect=lambda _root: nullcontext()), patch("omo_manager.omo_task_status.task_target_lock", side_effect=lambda _root, _target: nullcontext()), patch("omo_manager.omo_task_status.task_file_lock", side_effect=record_lock):
+
+            with (
+                patch("omo_manager.omo_task_status.root_membership_lock", side_effect=lambda _root: nullcontext()),
+                patch("omo_manager.omo_task_status.task_target_lock", side_effect=lambda _root, _target: nullcontext()),
+                patch("omo_manager.omo_task_status.task_file_lock", side_effect=record_lock),
+            ):
                 normalize_low_priority_current(args, path, text, path.stat())
             self.assertEqual(sorted(locks), locks)
+
     def test_retired_todo_normalization_is_index_only_and_unblocks_proven_closure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -4387,8 +4489,20 @@ class TaskStatusTests(unittest.TestCase):
             ("pending marker", task_frontmatter(status="blocked", blocked_on="human", runat="retired") + "(pending)\n", "human pending:\nlegacy.md\n", "", "no live pending marker"),
             ("row", task_frontmatter(status="blocked", blocked_on="human", runat="retired") + "body\n", "human pending:\nlegacy.md stale\n", "", "exact targetless task row"),
             ("target suffix", task_frontmatter(status="blocked", blocked_on="human", runat="retired") + "body\n", "human pending:\nlegacy.md wl:2\n", "", "exact targetless task row"),
-            ("duplicate", task_frontmatter(status="blocked", blocked_on="human", runat="retired") + "body\n", "current:\nlegacy.md\n\nhuman pending:\nlegacy.md\n", "", "exactly one human-pending TODO row"),
-            ("outside human pending", task_frontmatter(status="blocked", blocked_on="human", runat="retired") + "body\n", "current:\nlegacy.md\n\nhuman pending:\n", "", "exactly one human-pending TODO row"),
+            (
+                "duplicate",
+                task_frontmatter(status="blocked", blocked_on="human", runat="retired") + "body\n",
+                "current:\nlegacy.md\n\nhuman pending:\nlegacy.md\n",
+                "",
+                "exactly one human-pending TODO row",
+            ),
+            (
+                "outside human pending",
+                task_frontmatter(status="blocked", blocked_on="human", runat="retired") + "body\n",
+                "current:\nlegacy.md\n\nhuman pending:\n",
+                "",
+                "exactly one human-pending TODO row",
+            ),
         ):
             with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
@@ -4404,17 +4518,24 @@ class TaskStatusTests(unittest.TestCase):
 
     def test_retired_todo_normalization_parser_rejects_unrelated_lifecycle_inputs(self) -> None:
         with self.assertRaises(SystemExit):
-            parse_args([
+            parse_args(
+                [
+                    "--normalize-retired-todo",
+                    "--source-sha256",
+                    "a" * 64,
+                    "--historical-target",
+                    "wl:2",
+                    "legacy.md",
+                ]
+            )
+        args = parse_args(
+            [
                 "--normalize-retired-todo",
-                "--source-sha256", "a" * 64,
-                "--historical-target", "wl:2",
+                "--source-sha256",
+                "a" * 64,
                 "legacy.md",
-            ])
-        args = parse_args([
-            "--normalize-retired-todo",
-            "--source-sha256", "a" * 64,
-            "legacy.md",
-        ])
+            ]
+        )
         self.assertTrue(args.normalize_retired_todo)
         self.assertEqual("", args.status)
         self.assertEqual("a" * 64, args.source_sha256)
@@ -4433,7 +4554,9 @@ class TaskStatusTests(unittest.TestCase):
             task.write_text(current, encoding="utf-8")
             todo = root / "TODO.md"
             todo.write_text("current:\n\nhuman pending:\nretired_legacy.md retired\n\nprevious:\n", encoding="utf-8")
-            args = StatusArgs(root, Path("retired_legacy.md"), "done", "", close_retired_done=True, historical_target="wl:2", historical_commit=commit, source_sha256=hashlib.sha256(current.encode()).hexdigest())
+            args = StatusArgs(
+                root, Path("retired_legacy.md"), "done", "", close_retired_done=True, historical_target="wl:2", historical_commit=commit, source_sha256=hashlib.sha256(current.encode()).hexdigest()
+            )
             tmux_names = ("stop", "capture", "exact_pane_id", "pane_id", "close_note", "record_close", "close_exited_codex_shell", "blocking_request")
             output = io.StringIO()
             with patch.multiple("omo_manager.omo_task_status", **{name: DEFAULT for name in tmux_names}) as mocked, redirect_stdout(output):
@@ -4465,7 +4588,16 @@ class TaskStatusTests(unittest.TestCase):
                 current = task_frontmatter(status="blocked", blocked_on="human", runat="retired") + "body\n" + note
                 task.write_text(current, encoding="utf-8")
                 (root / "TODO.md").write_text("current:\n\nhuman pending:\nlegacy.md retired\n\nprevious:\n", encoding="utf-8")
-                args = StatusArgs(root, Path("legacy.md"), "done", "", close_retired_done=True, historical_target=target, historical_commit=commit, source_sha256=digest or hashlib.sha256(current.encode()).hexdigest())
+                args = StatusArgs(
+                    root,
+                    Path("legacy.md"),
+                    "done",
+                    "",
+                    close_retired_done=True,
+                    historical_target=target,
+                    historical_commit=commit,
+                    source_sha256=digest or hashlib.sha256(current.encode()).hexdigest(),
+                )
                 with self.assertRaisesRegex(TaskFrontmatterError, expected):
                     close_retired_done(args, task, current, task.stat())
                 self.assertEqual(current, task.read_text(encoding="utf-8"))
@@ -4484,7 +4616,9 @@ class TaskStatusTests(unittest.TestCase):
             task.write_text(current, encoding="utf-8")
             todo = root / "TODO.md"
             todo.write_text("current:\n\nhuman pending:\nlegacy.md carried-forward-retired\n\nprevious:\n", encoding="utf-8")
-            args = StatusArgs(root, Path("legacy.md"), "done", "", close_retired_done=True, historical_target="wl:2", historical_commit=commit, source_sha256=hashlib.sha256(current.encode()).hexdigest())
+            args = StatusArgs(
+                root, Path("legacy.md"), "done", "", close_retired_done=True, historical_target="wl:2", historical_commit=commit, source_sha256=hashlib.sha256(current.encode()).hexdigest()
+            )
             with self.assertRaisesRegex(TaskFrontmatterError, "targetless retired TODO row"):
                 close_retired_done(args, task, current, task.stat())
             todo.write_text("current:\n\nhuman pending:\nlegacy.md retired\n\nprevious:\n", encoding="utf-8")
@@ -4506,7 +4640,9 @@ class TaskStatusTests(unittest.TestCase):
             task.write_text(intermediate, encoding="utf-8")
             todo = root / "TODO.md"
             todo.write_text("current:\n\nhuman pending:\nlegacy.md retired\n\nprevious:\n", encoding="utf-8")
-            args = StatusArgs(root, Path("legacy.md"), "done", "", close_retired_done=True, historical_target="wl:2", historical_commit=commit, source_sha256=hashlib.sha256(intermediate.encode()).hexdigest())
+            args = StatusArgs(
+                root, Path("legacy.md"), "done", "", close_retired_done=True, historical_target="wl:2", historical_commit=commit, source_sha256=hashlib.sha256(intermediate.encode()).hexdigest()
+            )
 
             self.assertEqual("wl:2", close_retired_done(args, task, intermediate, task.stat()))
 
@@ -4515,15 +4651,22 @@ class TaskStatusTests(unittest.TestCase):
 
     def test_retired_closure_parser_rejects_unused_task_digest(self) -> None:
         with self.assertRaises(SystemExit):
-            parse_args([
-                "--root", "/tmp",
-                "--close-retired-done",
-                "--historical-target", "wl:2",
-                "--historical-commit", "a" * 40,
-                "--source-sha256", "b" * 64,
-                "--task-sha256", "c" * 64,
-                "legacy.md",
-            ])
+            parse_args(
+                [
+                    "--root",
+                    "/tmp",
+                    "--close-retired-done",
+                    "--historical-target",
+                    "wl:2",
+                    "--historical-commit",
+                    "a" * 40,
+                    "--source-sha256",
+                    "b" * 64,
+                    "--task-sha256",
+                    "c" * 64,
+                    "legacy.md",
+                ]
+            )
 
     def test_shared_target_closure_is_metadata_only_and_moves_current_to_previous(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4535,8 +4678,14 @@ class TaskStatusTests(unittest.TestCase):
             todo.write_text("current:\nmanager.md wl:1\n\nprevious:\n", encoding="utf-8")
             args = StatusArgs(root, Path("manager.md"), "done", "", close_shared_target=True, shared_target="wl:1", source_sha256=hashlib.sha256(original.encode()).hexdigest())
             tmux_names = (
-                "stop", "capture", "exact_pane_id", "pane_id", "close_note", "record_close",
-                "close_exited_codex_shell", "blocking_request",
+                "stop",
+                "capture",
+                "exact_pane_id",
+                "pane_id",
+                "close_note",
+                "record_close",
+                "close_exited_codex_shell",
+                "blocking_request",
             )
             with patch.multiple("omo_manager.omo_task_status", **{name: DEFAULT for name in tmux_names}) as mocked:
                 self.assertEqual(0, run(args))
@@ -4549,14 +4698,26 @@ class TaskStatusTests(unittest.TestCase):
     def test_shared_target_closure_fails_closed_for_digest_queue_ownership_and_todo_drift(self) -> None:
         cases = (
             ("digest", lambda text, todo: StatusArgs(Path("."), Path("manager.md"), "done", "", close_shared_target=True, shared_target="wl:1", source_sha256="0" * 64), "source bytes"),
-            ("queue", lambda text, todo: StatusArgs(Path("."), Path("manager.md"), "done", "", close_shared_target=True, shared_target="wl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest()), "empty queue"),
-            ("todo", lambda text, todo: StatusArgs(Path("."), Path("manager.md"), "done", "", close_shared_target=True, shared_target="wl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest()), "TODO"),
+            (
+                "queue",
+                lambda text, todo: StatusArgs(Path("."), Path("manager.md"), "done", "", close_shared_target=True, shared_target="wl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest()),
+                "empty queue",
+            ),
+            (
+                "todo",
+                lambda text, todo: StatusArgs(Path("."), Path("manager.md"), "done", "", close_shared_target=True, shared_target="wl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest()),
+                "TODO",
+            ),
         )
         for label, make_args, expected in cases:
             with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 task = root / "manager.md"
-                text = task_frontmatter(status="long_running", runat="wl:1", managerat="vl:1", is_manager=True, pending_items=("open",)) if label == "queue" else task_frontmatter(status="long_running", runat="wl:1", managerat="vl:1", is_manager=True)
+                text = (
+                    task_frontmatter(status="long_running", runat="wl:1", managerat="vl:1", is_manager=True, pending_items=("open",))
+                    if label == "queue"
+                    else task_frontmatter(status="long_running", runat="wl:1", managerat="vl:1", is_manager=True)
+                )
                 task.write_text(text, encoding="utf-8")
                 todo_text = "current:\nother.md wl:1\n\nprevious:\n" if label == "todo" else "current:\nmanager.md wl:1\n\nprevious:\n"
                 (root / "TODO.md").write_text(todo_text, encoding="utf-8")
@@ -4694,16 +4855,29 @@ class TaskStatusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             memory = root / "memory_research_mgr.md"
-            original = task_frontmatter(
-                status="blocked", blocked_on="paused", pending_items=("one", "two"),
-                runat="wl:32", managerat="wl:30", is_manager=True,
-            ) + "history\n"
+            original = (
+                task_frontmatter(
+                    status="blocked",
+                    blocked_on="paused",
+                    pending_items=("one", "two"),
+                    runat="wl:32",
+                    managerat="wl:30",
+                    is_manager=True,
+                )
+                + "history\n"
+            )
             memory.write_text(original, encoding="utf-8")
             protected = root / "transcription_sw.md"
-            protected_text = task_frontmatter(
-                status="blocked", blocked_on="human", pending_items=("keep",),
-                runat="wl:32", managerat="wl:1",
-            ) + "transcription evidence\n"
+            protected_text = (
+                task_frontmatter(
+                    status="blocked",
+                    blocked_on="human",
+                    pending_items=("keep",),
+                    runat="wl:32",
+                    managerat="wl:1",
+                )
+                + "transcription evidence\n"
+            )
             protected.write_text(protected_text, encoding="utf-8")
             todo = root / "TODO.md"
             todo_text = "current:\ntranscription_sw.md wl:32\n\nhuman pending:\nmemory_research_mgr.md wl:32\n\nprevious:\n"
@@ -4716,15 +4890,15 @@ class TaskStatusTests(unittest.TestCase):
             authority.chmod(0o600)
             envelope = root / "authority.md"
             excerpt = "Close the “memory” thing. It is so old.\nWhich email report was for the transcription thing\n"
-            envelope_text = (
-                '<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1290.txt:3-4">\n'
-                f"{excerpt}</human_instruction>\n"
-            )
+            envelope_text = f'<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1290.txt:3-4">\n{excerpt}</human_instruction>\n'
             envelope.write_text(envelope_text, encoding="utf-8")
             private = root / "private"
             private.mkdir(mode=0o700)
             args = StatusArgs(
-                root, Path("memory_research_mgr.md"), "done", "",
+                root,
+                Path("memory_research_mgr.md"),
+                "done",
+                "",
                 cancel_shared_target=True,
                 shared_target="wl:32",
                 protected_shared_task=Path("transcription_sw.md"),
@@ -4739,8 +4913,15 @@ class TaskStatusTests(unittest.TestCase):
                 audit_output=private / "cancel.yaml",
             )
             tmux_names = (
-                "stop", "capture", "exact_pane_id", "pane_id", "close_note", "record_close",
-                "close_exited_codex_shell", "blocking_request", "tmux",
+                "stop",
+                "capture",
+                "exact_pane_id",
+                "pane_id",
+                "close_note",
+                "record_close",
+                "close_exited_codex_shell",
+                "blocking_request",
+                "tmux",
             )
             with patch.multiple("omo_manager.omo_task_status", **{name: DEFAULT for name in tmux_names}) as mocked:
                 self.assertEqual("wl:32", cancel_shared_target_done(args, memory, original, memory.stat()))
@@ -4781,7 +4962,11 @@ class TaskStatusTests(unittest.TestCase):
                 todo.write_text(todo_text, encoding="utf-8")
                 mail = root / "manager_mail"
                 mail.mkdir(mode=0o700)
-                authority_text = "Subject: Re: Authorize memory_research_mgr.md relocation\n\nClose the wrong thing.\nOther question\n" if label == "authority" else "Subject: Re: Authorize memory_research_mgr.md relocation\n\nClose the “memory” thing. It is so old.\nWhich email report was for the transcription thing\n"
+                authority_text = (
+                    "Subject: Re: Authorize memory_research_mgr.md relocation\n\nClose the wrong thing.\nOther question\n"
+                    if label == "authority"
+                    else "Subject: Re: Authorize memory_research_mgr.md relocation\n\nClose the “memory” thing. It is so old.\nWhich email report was for the transcription thing\n"
+                )
                 authority_name = "alternate.txt" if label == "alternate-source" else "85c5dff58359-1290.txt"
                 authority = mail / authority_name
                 authority.write_text(authority_text, encoding="utf-8")
@@ -4794,14 +4979,21 @@ class TaskStatusTests(unittest.TestCase):
                 private = root / "private"
                 private.mkdir(mode=0o700)
                 args = StatusArgs(
-                    root, memory.relative_to(root), "done", "", cancel_shared_target=True,
-                    shared_target="wl:32", protected_shared_task=protected.relative_to(root),
+                    root,
+                    memory.relative_to(root),
+                    "done",
+                    "",
+                    cancel_shared_target=True,
+                    shared_target="wl:32",
+                    protected_shared_task=protected.relative_to(root),
                     protected_shared_sha256=("0" * 64 if label == "protected" else hashlib.sha256(protected_text.encode()).hexdigest()),
                     source_sha256=hashlib.sha256(original.encode()).hexdigest(),
                     expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
-                    authority_file=Path("manager_mail") / authority_name, authority_lines=(3, 4),
+                    authority_file=Path("manager_mail") / authority_name,
+                    authority_lines=(3, 4),
                     authority_sha256=hashlib.sha256(authority_text.encode()).hexdigest(),
-                    authority_envelope=Path("authority.md"), authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+                    authority_envelope=Path("authority.md"),
+                    authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
                     audit_output=private / "cancel.yaml",
                 )
                 with self.assertRaises(TaskFrontmatterError):
@@ -4835,13 +5027,22 @@ class TaskStatusTests(unittest.TestCase):
             private = root / "private"
             private.mkdir(mode=0o700)
             args = StatusArgs(
-                root, Path("memory_research_mgr.md"), "done", "", cancel_shared_target=True,
-                shared_target="wl:32", protected_shared_task=Path("transcription_sw.md"),
+                root,
+                Path("memory_research_mgr.md"),
+                "done",
+                "",
+                cancel_shared_target=True,
+                shared_target="wl:32",
+                protected_shared_task=Path("transcription_sw.md"),
                 protected_shared_sha256=hashlib.sha256(protected_text.encode()).hexdigest(),
-                source_sha256=hashlib.sha256(original.encode()).hexdigest(), expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
-                authority_file=Path("manager_mail/85c5dff58359-1290.txt"), authority_lines=(3, 4),
-                authority_sha256=hashlib.sha256(authority_text.encode()).hexdigest(), authority_envelope=Path("authority.md"),
-                authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(), audit_output=private / "cancel.yaml",
+                source_sha256=hashlib.sha256(original.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                authority_file=Path("manager_mail/85c5dff58359-1290.txt"),
+                authority_lines=(3, 4),
+                authority_sha256=hashlib.sha256(authority_text.encode()).hexdigest(),
+                authority_envelope=Path("authority.md"),
+                authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+                audit_output=private / "cancel.yaml",
             )
             original_reader = read_park_authority_envelope
             calls = 0
@@ -4886,11 +5087,22 @@ class TaskStatusTests(unittest.TestCase):
             private = root / "private"
             private.mkdir(mode=0o700)
             args = StatusArgs(
-                root, Path("memory_research_mgr.md"), "done", "", cancel_shared_target=True,
-                shared_target="wl:32", protected_shared_task=Path("transcription_sw.md"), protected_shared_sha256=hashlib.sha256(protected_text.encode()).hexdigest(),
-                source_sha256=hashlib.sha256(original.encode()).hexdigest(), expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
-                authority_file=Path("manager_mail/85c5dff58359-1290.txt"), authority_lines=(3, 4), authority_sha256=hashlib.sha256(authority_text.encode()).hexdigest(),
-                authority_envelope=Path("authority.md"), authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(), audit_output=private / "cancel.yaml",
+                root,
+                Path("memory_research_mgr.md"),
+                "done",
+                "",
+                cancel_shared_target=True,
+                shared_target="wl:32",
+                protected_shared_task=Path("transcription_sw.md"),
+                protected_shared_sha256=hashlib.sha256(protected_text.encode()).hexdigest(),
+                source_sha256=hashlib.sha256(original.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                authority_file=Path("manager_mail/85c5dff58359-1290.txt"),
+                authority_lines=(3, 4),
+                authority_sha256=hashlib.sha256(authority_text.encode()).hexdigest(),
+                authority_envelope=Path("authority.md"),
+                authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+                audit_output=private / "cancel.yaml",
             )
             original_finish = finish_private_audit
             with patch("omo_manager.omo_task_status.finish_private_audit", side_effect=OSError("injected finalization failure")):
@@ -4931,11 +5143,22 @@ class TaskStatusTests(unittest.TestCase):
             private = root / "private"
             private.mkdir(mode=0o700)
             args = StatusArgs(
-                root, Path("memory_research_mgr.md"), "done", "", cancel_shared_target=True,
-                shared_target="wl:32", protected_shared_task=Path("transcription_sw.md"), protected_shared_sha256=hashlib.sha256(protected_text.encode()).hexdigest(),
-                source_sha256=hashlib.sha256(original.encode()).hexdigest(), expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
-                authority_file=Path("manager_mail/85c5dff58359-1290.txt"), authority_lines=(3, 4), authority_sha256=hashlib.sha256(authority_text.encode()).hexdigest(),
-                authority_envelope=Path("authority.md"), authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(), audit_output=private / "cancel.yaml",
+                root,
+                Path("memory_research_mgr.md"),
+                "done",
+                "",
+                cancel_shared_target=True,
+                shared_target="wl:32",
+                protected_shared_task=Path("transcription_sw.md"),
+                protected_shared_sha256=hashlib.sha256(protected_text.encode()).hexdigest(),
+                source_sha256=hashlib.sha256(original.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                authority_file=Path("manager_mail/85c5dff58359-1290.txt"),
+                authority_lines=(3, 4),
+                authority_sha256=hashlib.sha256(authority_text.encode()).hexdigest(),
+                authority_envelope=Path("authority.md"),
+                authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+                audit_output=private / "cancel.yaml",
             )
             (private / "cancel.yaml").write_text("final-result: success\n", encoding="utf-8")
             (private / "cancel.yaml").chmod(0o600)
@@ -5007,7 +5230,9 @@ class TaskStatusTests(unittest.TestCase):
             path.write_text(original)
             todo = root / "TODO.md"
             todo.write_text("previous:\nother.md wl:3\n")
-            args = StatusArgs(root, Path("terminal.md"), "", "", restore_terminal_target=True, historical_target="wl:7", task_sha256=hashlib.sha256(original.encode()).hexdigest(), historical_commit=commit)
+            args = StatusArgs(
+                root, Path("terminal.md"), "", "", restore_terminal_target=True, historical_target="wl:7", task_sha256=hashlib.sha256(original.encode()).hexdigest(), historical_commit=commit
+            )
             with patch("omo_manager.omo_task_status.stop") as stop:
                 self.assertEqual(0, run(args))
             stop.assert_not_called()
@@ -5025,7 +5250,9 @@ class TaskStatusTests(unittest.TestCase):
                 root = Path(tmp)
                 path = root / "terminal.md"
                 path.write_text(original)
-                args = StatusArgs(root, path, "", "", restore_terminal_target=True, historical_target="wl:7", task_sha256=digest or hashlib.sha256(original.encode()).hexdigest(), historical_commit="a" * 40)
+                args = StatusArgs(
+                    root, path, "", "", restore_terminal_target=True, historical_target="wl:7", task_sha256=digest or hashlib.sha256(original.encode()).hexdigest(), historical_commit="a" * 40
+                )
                 with self.assertRaisesRegex(TaskFrontmatterError, error):
                     restore_terminal_target(args, path, original, path.stat())
                 self.assertEqual(original, path.read_text())
@@ -5072,7 +5299,9 @@ class TaskStatusTests(unittest.TestCase):
         parsed = parse_args(["--root", "/tmp/work", "--restore-terminal-target", "--historical-target", "wl:2", "--historical-commit", "b" * 40, "--task-sha256", "a" * 64, "task.md"])
         self.assertTrue(parsed.restore_terminal_target)
         with self.assertRaises(SystemExit):
-            parse_args(["--root", "/tmp/work", "--restore-terminal-target", "--historical-target", "wl:2", "--historical-commit", "b" * 40, "--task-sha256", "a" * 64, "--blocked-on", "human", "task.md"])
+            parse_args(
+                ["--root", "/tmp/work", "--restore-terminal-target", "--historical-target", "wl:2", "--historical-commit", "b" * 40, "--task-sha256", "a" * 64, "--blocked-on", "human", "task.md"]
+            )
 
     def test_repository_closure_custody_accepts_clean_or_exact_dirty_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5227,6 +5456,7 @@ resolved_task_items: []
             actor.assert_not_called()
             self.assertEqual(text, path.read_text())
             self.assertEqual("current:\ntask.md wl:2\n\nhuman pending:\n", (root / "TODO.md").read_text())
+
     def test_stop_done_agent_treats_verified_missing_exact_pane_as_stopped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -5359,10 +5589,10 @@ resolved_task_items: []
             metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
             assert metadata is not None
 
-            with patch("omo_manager.omo_task_status.exact_pane_id", return_value="%3"), patch(
-                "omo_manager.omo_task_status.current_target_task_paths", side_effect=((path,), (other, path))
-            ), patch(
-                "omo_manager.omo_task_status.stop", return_value="session-1"
+            with (
+                patch("omo_manager.omo_task_status.exact_pane_id", return_value="%3"),
+                patch("omo_manager.omo_task_status.current_target_task_paths", side_effect=((path,), (other, path))),
+                patch("omo_manager.omo_task_status.stop", return_value="session-1"),
             ):
                 stop_args, _session_id = stop_done_agent(root, path, metadata)
 
@@ -5544,7 +5774,10 @@ resolved_task_items: []
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "rednote-recovery.md"
-            original_task = task_frontmatter(status="blocked", blocked_on="human", runat="social:4", managerat="social-manager:1", pending_items=("human RedNote sign-in and read-only verification",)) + "all task content stays\n"
+            original_task = (
+                task_frontmatter(status="blocked", blocked_on="human", runat="social:4", managerat="social-manager:1", pending_items=("human RedNote sign-in and read-only verification",))
+                + "all task content stays\n"
+            )
             path.write_text(original_task, encoding="utf-8")
             todo = root / "TODO.md"
             todo.write_text("current:\nrednote-recovery.md\nother.md wl:9\n\nhuman pending:\nwaiting.md wl:4\n\nprevious:\nold.md wl:2\n", encoding="utf-8")
@@ -5965,13 +6198,16 @@ resolved_task_items: []
             root = Path(tmp)
             path = root / "vl_target_select27.md"
             blocker = "final STOP report has only replay commitment; accepted delivery and exact consumed-closure attestation are absent"
-            task_text = task_frontmatter(
-                status="blocked",
-                blocked_on=blocker,
-                runat="vl_build_mgr:4",
-                managerat="vl_build_mgr:3",
-                pending_items=("completed item 1", "completed item 2", "completed item 3", "completed item 4", "completed item 5", "completed item 6"),
-            ) + "body\n"
+            task_text = (
+                task_frontmatter(
+                    status="blocked",
+                    blocked_on=blocker,
+                    runat="vl_build_mgr:4",
+                    managerat="vl_build_mgr:3",
+                    pending_items=("completed item 1", "completed item 2", "completed item 3", "completed item 4", "completed item 5", "completed item 6"),
+                )
+                + "body\n"
+            )
             path.write_text(task_text, encoding="utf-8")
             todo = root / "TODO.md"
             todo.write_text("current:\nother.md wl:3\n\nhuman pending:\nwaiting.md wl:4\n\nlow priority:\nvl_target_select27.md vl_build_mgr:4\n\nprevious:\n", encoding="utf-8")
@@ -6072,11 +6308,14 @@ resolved_task_items: []
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "stale.md"
-            original_task = task_frontmatter(
-                status="blocked",
-                blocked_on="human",
-                pending_items=("first question", "second question"),
-            ) + "closure evidence\nbody\n"
+            original_task = (
+                task_frontmatter(
+                    status="blocked",
+                    blocked_on="human",
+                    pending_items=("first question", "second question"),
+                )
+                + "closure evidence\nbody\n"
+            )
             path.write_text(original_task, encoding="utf-8")
             owner = root / "owner.md"
             owner_text = task_frontmatter(status="long_running", blocked_on="persistent manager role", is_manager=True) + "owner body\n"
@@ -6298,10 +6537,14 @@ resolved_task_items: []
             def fake_record(args: StopArgs, session_id: str) -> None:
                 close_calls.append((args, session_id))
 
-            with patch("omo_manager.omo_task_status.stop_done_agent", return_value=(StopArgs("wl:2", 10.0, 2000, False, False, Path(tmp), "task.md", True, 0.0), "session-1")), patch(
-                "omo_manager.omo_task_status.record_close",
-                side_effect=fake_record,
-            ), redirect_stdout(stdout):
+            with (
+                patch("omo_manager.omo_task_status.stop_done_agent", return_value=(StopArgs("wl:2", 10.0, 2000, False, False, Path(tmp), "task.md", True, 0.0), "session-1")),
+                patch(
+                    "omo_manager.omo_task_status.record_close",
+                    side_effect=fake_record,
+                ),
+                redirect_stdout(stdout),
+            ):
                 exit_code = run(StatusArgs(Path(tmp), Path("task.md"), "done", ""))
 
             self.assertEqual(0, exit_code)
@@ -6365,21 +6608,21 @@ resolved_task_items: []
             manager.write_text(task_frontmatter(runat="wl:1", managerat="main:0", is_manager=True), encoding="utf-8")
             close_args = StopArgs("wl:2", 10.0, 2000, False, False, root, "task.md", True, 0.0)
             status_args = StatusArgs(root, Path("task.md"), "done", "", completion_key="f" * 64)
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
-                "omo_manager.omo_task_status.require_owner_completion", side_effect=actual_require
-            ), patch("omo_manager.omo_completion_email.current_active_task", return_value=manager), patch(
-                "omo_manager.omo_tmux_send.send_system_to_codex"
-            ) as queue, patch("omo_manager.omo_task_status.stop_done_agent", return_value=(close_args, "session-1")) as stop, patch(
-                "omo_manager.omo_task_status.record_close"
-            ), redirect_stderr(io.StringIO()):
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_task_status.require_owner_completion", side_effect=actual_require),
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=manager),
+                patch("omo_manager.omo_tmux_send.send_system_to_codex") as queue,
+                patch("omo_manager.omo_task_status.stop_done_agent", return_value=(close_args, "session-1")) as stop,
+                patch("omo_manager.omo_task_status.record_close"),
+                redirect_stderr(io.StringIO()),
+            ):
                 self.assertEqual(2, run(status_args))
                 self.assertEqual(original, task.read_text(encoding="utf-8"))
                 stop.assert_not_called()
                 owner_command = queue.call_args.args[1].splitlines()[-1]
                 self.assertIn("omo_completion_email.py", owner_command)
-                with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch(
-                    "omo_manager.omo_completion_email.subprocess.run"
-                ) as email:
+                with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch("omo_manager.omo_completion_email.subprocess.run") as email:
                     plan = build_completion_email(root, task, original, "task done", semantic_key="f" * 64)
                     assert plan is not None
                     self.assertEqual(
@@ -6438,11 +6681,13 @@ resolved_task_items: []
                     semantic_key="f" * 64,
                 )
                 close_args = StopArgs("wl:2", 10.0, 2000, False, False, root, "task.md", True, 0.0)
-                with patch("omo_manager.omo_task_status.require_owner_completion", side_effect=actual_require), patch(
-                    "omo_manager.omo_completion_email.current_active_task", return_value=manager
-                ), patch("omo_manager.omo_tmux_send.send_system_to_codex") as queue, patch(
-                    "omo_manager.omo_task_status.stop_done_agent", return_value=(close_args, "session-1")
-                ), patch("omo_manager.omo_task_status.record_close"):
+                with (
+                    patch("omo_manager.omo_task_status.require_owner_completion", side_effect=actual_require),
+                    patch("omo_manager.omo_completion_email.current_active_task", return_value=manager),
+                    patch("omo_manager.omo_tmux_send.send_system_to_codex") as queue,
+                    patch("omo_manager.omo_task_status.stop_done_agent", return_value=(close_args, "session-1")),
+                    patch("omo_manager.omo_task_status.record_close"),
+                ):
                     self.assertEqual(0, run(StatusArgs(root, Path("task.md"), "done", "", completion_key="f" * 64)))
             queue.assert_not_called()
             self.assertIn("status: done\n", task.read_text(encoding="utf-8"))
@@ -6478,9 +6723,11 @@ resolved_task_items: []
             notes.write_text("---\nversion: article\nstatus: draft\n---\nnotes\n", encoding="utf-8")
             stdout = io.StringIO()
 
-            with patch("omo_manager.omo_task_status.stop_done_agent", return_value=(StopArgs("wl:2", 10.0, 2000, False, False, root, "manager.md", True, 0.0), "session-1")), patch(
-                "omo_manager.omo_task_status.record_close"
-            ), redirect_stdout(stdout):
+            with (
+                patch("omo_manager.omo_task_status.stop_done_agent", return_value=(StopArgs("wl:2", 10.0, 2000, False, False, root, "manager.md", True, 0.0), "session-1")),
+                patch("omo_manager.omo_task_status.record_close"),
+                redirect_stdout(stdout),
+            ):
                 exit_code = run(StatusArgs(root, Path("manager.md"), "done", ""))
 
             self.assertEqual(0, exit_code)
@@ -6571,7 +6818,9 @@ resolved_task_items: []
         replacement_is_manager: bool = True,
     ) -> tuple[Path, Path, str, str]:
         evidence = "verified stopped legacy target"
-        stale_text = task_frontmatter(status="blocked", blocked_on="replaced", pending_items=stale_pending, runat="old:2", managerat="owner:1", is_manager=True) + f"(verified empty stale task: {evidence})\n"
+        stale_text = (
+            task_frontmatter(status="blocked", blocked_on="replaced", pending_items=stale_pending, runat="old:2", managerat="owner:1", is_manager=True) + f"(verified empty stale task: {evidence})\n"
+        )
         replacement_text = task_frontmatter(status="long_running", pending_items=("finish authoritative work",), runat="new:3", managerat=replacement_managerat, is_manager=replacement_is_manager)
         stale = root / "stale.md"
         replacement = root / "replacement.md"
@@ -6613,7 +6862,13 @@ resolved_task_items: []
             with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 stale, _replacement, stale_text, _replacement_text = self.write_replacement_tasks(root, stale_pending=("still open",) if case == "queue" else ())
-                args = self.replacement_args(root, stale_target="wrong:2") if case == "stale target" else self.replacement_args(root, replacement_target="wrong:3") if case == "successor target" else self.replacement_args(root)
+                args = (
+                    self.replacement_args(root, stale_target="wrong:2")
+                    if case == "stale target"
+                    else self.replacement_args(root, replacement_target="wrong:3")
+                    if case == "successor target"
+                    else self.replacement_args(root)
+                )
                 with patch("omo_manager.omo_task_status.capture") as capture_call, redirect_stderr(io.StringIO()):
                     self.assertEqual(2, run(args))
                 self.assertEqual(stale_text, stale.read_text(encoding="utf-8"))
@@ -6633,7 +6888,11 @@ resolved_task_items: []
 
                 pane = (lambda target: "" if target == "old:2" else "") if case == "pane" else (lambda target: "" if target == "old:2" else "%3")
                 capture_side_effect = capture if case == "bytes" else None
-                with patch("omo_manager.omo_task_status.exact_pane_id", side_effect=pane), patch("omo_manager.omo_task_status.capture", side_effect=capture_side_effect) as capture_call, redirect_stderr(io.StringIO()):
+                with (
+                    patch("omo_manager.omo_task_status.exact_pane_id", side_effect=pane),
+                    patch("omo_manager.omo_task_status.capture", side_effect=capture_side_effect) as capture_call,
+                    redirect_stderr(io.StringIO()),
+                ):
                     self.assertEqual(2, run(args))
                 self.assertEqual(stale_text, stale.read_text(encoding="utf-8"))
                 self.assertFalse((root / "replacement.audit").exists())
@@ -6681,7 +6940,11 @@ resolved_task_items: []
                     replacement_is_manager=case != "role",
                 )
                 args = self.replacement_args(root)
-                with patch("omo_manager.omo_task_status.exact_pane_id", side_effect=lambda target: "" if target == "old:2" else "%3"), patch("omo_manager.omo_task_status.capture") as capture_call, redirect_stderr(io.StringIO()):
+                with (
+                    patch("omo_manager.omo_task_status.exact_pane_id", side_effect=lambda target: "" if target == "old:2" else "%3"),
+                    patch("omo_manager.omo_task_status.capture") as capture_call,
+                    redirect_stderr(io.StringIO()),
+                ):
                     self.assertEqual(2, run(args))
                 self.assertEqual(stale_text, stale.read_text(encoding="utf-8"))
                 capture_call.assert_not_called()
@@ -6695,7 +6958,9 @@ resolved_task_items: []
                 competitor.write_text(
                     task_frontmatter(status="running", pending_items=("competing work",), runat="new:3", managerat="owner:1", is_manager=True)
                     if case == "duplicate"
-                    else task_frontmatter(status="running", pending_items=("competing work",), runat="new:3", managerat="owner:1", is_manager=True).replace("runat: new:3\n", "runat: new:3\nrunat: new:3\n"),
+                    else task_frontmatter(status="running", pending_items=("competing work",), runat="new:3", managerat="owner:1", is_manager=True).replace(
+                        "runat: new:3\n", "runat: new:3\nrunat: new:3\n"
+                    ),
                     encoding="utf-8",
                 )
                 with (
@@ -6790,10 +7055,14 @@ resolved_task_items: []
             path.write_text(task_frontmatter() + "body\n", encoding="utf-8")
             stderr = io.StringIO()
 
-            with patch("omo_manager.omo_task_status.stop_done_agent", return_value=(StopArgs("wl:2", 10.0, 2000, False, False, Path(tmp), "task.md", True, 0.0), "session-1")), patch(
-                "omo_manager.omo_task_status.record_close",
-                side_effect=RuntimeError("TODO locked"),
-            ), redirect_stderr(stderr):
+            with (
+                patch("omo_manager.omo_task_status.stop_done_agent", return_value=(StopArgs("wl:2", 10.0, 2000, False, False, Path(tmp), "task.md", True, 0.0), "session-1")),
+                patch(
+                    "omo_manager.omo_task_status.record_close",
+                    side_effect=RuntimeError("TODO locked"),
+                ),
+                redirect_stderr(stderr),
+            ):
                 exit_code = run(StatusArgs(Path(tmp), Path("task.md"), "done", ""))
 
             self.assertEqual(2, exit_code)
@@ -6806,10 +7075,14 @@ resolved_task_items: []
             path = Path(tmp) / "task.md"
             path.write_text(task_frontmatter() + "body\n", encoding="utf-8")
 
-            with patch("omo_manager.omo_task_status.stop_done_agent", return_value=(StopArgs("wl:2", 10.0, 2000, False, False, Path(tmp), "task.md", True, 0.0), "session-1")), patch(
-                "omo_manager.omo_task_status.record_close",
-                side_effect=RuntimeError("line one\nline two"),
-            ), redirect_stderr(io.StringIO()):
+            with (
+                patch("omo_manager.omo_task_status.stop_done_agent", return_value=(StopArgs("wl:2", 10.0, 2000, False, False, Path(tmp), "task.md", True, 0.0), "session-1")),
+                patch(
+                    "omo_manager.omo_task_status.record_close",
+                    side_effect=RuntimeError("line one\nline two"),
+                ),
+                redirect_stderr(io.StringIO()),
+            ):
                 exit_code = run(StatusArgs(Path(tmp), Path("task.md"), "done", ""))
 
             self.assertEqual(2, exit_code)
@@ -6826,10 +7099,14 @@ resolved_task_items: []
                     raise RuntimeError("write raced")
                 target.write_text(text, encoding="utf-8")
 
-            with patch("omo_manager.omo_task_status.stop_done_agent", return_value=(StopArgs("wl:2", 10.0, 2000, False, False, Path(tmp), "task.md", True, 0.0), "session-1")), patch(
-                "omo_manager.omo_task_status.replace_if_unchanged",
-                side_effect=flaky_replace,
-            ), redirect_stderr(io.StringIO()):
+            with (
+                patch("omo_manager.omo_task_status.stop_done_agent", return_value=(StopArgs("wl:2", 10.0, 2000, False, False, Path(tmp), "task.md", True, 0.0), "session-1")),
+                patch(
+                    "omo_manager.omo_task_status.replace_if_unchanged",
+                    side_effect=flaky_replace,
+                ),
+                redirect_stderr(io.StringIO()),
+            ):
                 exit_code = run(StatusArgs(Path(tmp), Path("task.md"), "done", ""))
 
             self.assertEqual(2, exit_code)
@@ -7052,9 +7329,11 @@ resolved_task_items: []
             )
             (root / "TODO.md").write_text("current:\n\nprevious:\ntask.md wl:2\n", encoding="utf-8")
 
-            with patch("omo_manager.omo_task_status.exact_pane_id", return_value=""), patch(
-                "omo_manager.omo_task_status.stop_done_agent", side_effect=AssertionError("already closed")
-            ), redirect_stdout(io.StringIO()):
+            with (
+                patch("omo_manager.omo_task_status.exact_pane_id", return_value=""),
+                patch("omo_manager.omo_task_status.stop_done_agent", side_effect=AssertionError("already closed")),
+                redirect_stdout(io.StringIO()),
+            ):
                 exit_code = run(StatusArgs(root, Path("task.md"), "done", "", True, "unverified-session"))
 
             self.assertEqual(0, exit_code)
@@ -7235,20 +7514,26 @@ resolved_task_items: []
         source = root / "blocked_manager.md"
         dependency = root / "repair.md"
         todo = root / "TODO.md"
-        source_text = task_frontmatter(
-            status="blocked",
-            blocked_on="repair.md",
-            pending_items=("preserve open work",),
-            runat="owner:2",
-            managerat="upper:1",
-            is_manager=True,
-        ) + "source body\n"
-        dependency_text = task_frontmatter(
-            status="running",
-            pending_items=("implement repair",),
-            runat="repair:3",
-            managerat="upper:1",
-        ) + "dependency body\n"
+        source_text = (
+            task_frontmatter(
+                status="blocked",
+                blocked_on="repair.md",
+                pending_items=("preserve open work",),
+                runat="owner:2",
+                managerat="upper:1",
+                is_manager=True,
+            )
+            + "source body\n"
+        )
+        dependency_text = (
+            task_frontmatter(
+                status="running",
+                pending_items=("implement repair",),
+                runat="repair:3",
+                managerat="upper:1",
+            )
+            + "dependency body\n"
+        )
         source.write_text(source_text, encoding="utf-8")
         dependency.write_text(dependency_text, encoding="utf-8")
         source_row = "blocked_manager.md owner:2"
@@ -7256,11 +7541,7 @@ resolved_task_items: []
         human_rows = ["waiting.md wait:4"]
         (current_rows if source_section == "current" else human_rows).append(source_row)
         todo.write_text(
-            "current:\n"
-            + "\n".join(current_rows)
-            + "\n\nlow priority:\n\nhuman pending:\n"
-            + "\n".join(human_rows)
-            + "\n\nprevious:\nold.md retired\n",
+            "current:\n" + "\n".join(current_rows) + "\n\nlow priority:\n\nhuman pending:\n" + "\n".join(human_rows) + "\n\nprevious:\nold.md retired\n",
             encoding="utf-8",
         )
         return source, dependency, todo, source_text, dependency_text
@@ -7310,15 +7591,19 @@ resolved_task_items: []
                 events.append(name)
                 yield
 
-            with patch(
-                "omo_manager.omo_task_status.root_membership_lock",
-                side_effect=lambda _root: recorded("membership"),
-            ), patch(
-                "omo_manager.omo_task_status.task_target_lock",
-                side_effect=lambda _root, target: recorded(f"target:{target}"),
-            ), patch(
-                "omo_manager.omo_task_status.task_file_lock",
-                side_effect=lambda path: recorded(f"file:{path.name}"),
+            with (
+                patch(
+                    "omo_manager.omo_task_status.root_membership_lock",
+                    side_effect=lambda _root: recorded("membership"),
+                ),
+                patch(
+                    "omo_manager.omo_task_status.task_target_lock",
+                    side_effect=lambda _root, target: recorded(f"target:{target}"),
+                ),
+                patch(
+                    "omo_manager.omo_task_status.task_file_lock",
+                    side_effect=lambda path: recorded(f"file:{path.name}"),
+                ),
             ):
                 self.assertEqual(0, run(args))
 

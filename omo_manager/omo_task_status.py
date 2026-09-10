@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Safely update task-file frontmatter status."""
+
 from __future__ import annotations
 
 import argparse
@@ -61,6 +62,7 @@ from omo_manager.omo_codex_stop import terminalize_bound_codex_to_shell_with_con
 from omo_manager.omo_codex_stop import tmux
 from omo_manager.omo_codex_stop import validate_exited_codex_shell
 from omo_manager.omo_codex_stop import validate_exited_codex_shell_with_consumed_report
+
 try:
     from omo_manager.omo_codex_stop import validate_human_close_authorization as _validate_human_close_authorization
 except ImportError:
@@ -96,20 +98,46 @@ DONE_LIVE_CLOSE_OPERATION = "done-live-no-mail-close"
 DONE_LIVE_CLOSE_STATES = frozenset({"reserved", "prepared", "terminalized", "owner-stopped", "note-prepared", "complete"})
 DONE_LIVE_CLOSE_AUDIT_KEYS = frozenset(
     {
-        "version", "operation", "state", "task", "target", "manager_target",
-        "task_sha256", "todo_sha256", "pane_id", "pane_pid",
-        "pane_start_ticks", "session_id", "terminal_evidence_sha256",
-        "terminal_capture_sha256", "close_proof_commitment", "close_note",
+        "version",
+        "operation",
+        "state",
+        "task",
+        "target",
+        "manager_target",
+        "task_sha256",
+        "todo_sha256",
+        "pane_id",
+        "pane_pid",
+        "pane_start_ticks",
+        "session_id",
+        "terminal_evidence_sha256",
+        "terminal_capture_sha256",
+        "close_proof_commitment",
+        "close_note",
         "completed_task_sha256",
     }
 )
 DONE_LIVE_CONSUMED_AUDIT_KEYS = DONE_LIVE_CLOSE_AUDIT_KEYS | {"manager_consumed_receipt_sha256"}
 DONE_LIVE_CONSUMED_RECEIPT_KEYS = frozenset(
     {
-        "accepted", "audit", "audit_sha256", "manager_acceptance", "no_mail", "pane_id",
-        "pane_pid", "pane_start_ticks", "receipt_id", "schema", "session_id", "target",
-        "task", "task_sha256", "terminal_evidence_sha256", "terminal_receipt_sha256",
-        "todo_sha256", "worker_report",
+        "accepted",
+        "audit",
+        "audit_sha256",
+        "manager_acceptance",
+        "no_mail",
+        "pane_id",
+        "pane_pid",
+        "pane_start_ticks",
+        "receipt_id",
+        "schema",
+        "session_id",
+        "target",
+        "task",
+        "task_sha256",
+        "terminal_evidence_sha256",
+        "terminal_receipt_sha256",
+        "todo_sha256",
+        "worker_report",
     }
 )
 MAX_AUTHORITY_BYTES = 1_000_000
@@ -329,17 +357,39 @@ shutdown.""",
         action="store_true",
         help="Migrate one exact v1 or v2 park receipt to current authenticated targetless custody without accessing tmux for mutation.",
     )
-    _ = parser.add_argument("--retire-blocked-target", action="store_true", help="Atomically retire one blocked human-pending worker target that conflicts with one live lifecycle owner; performs no tmux action.")
-    _ = parser.add_argument("--reconcile-missing-target", action="store_true", help="Atomically mark one authority-approved absent blocked target historical and remove it from its sole human-pending TODO row; never starts or stops tmux.")
-    _ = parser.add_argument("--close-missing-target", action="store_true", help="Atomically close one authority-approved absent blocked record from its sole canonical TODO row; never starts or stops tmux.")
+    _ = parser.add_argument(
+        "--retire-blocked-target", action="store_true", help="Atomically retire one blocked human-pending worker target that conflicts with one live lifecycle owner; performs no tmux action."
+    )
+    _ = parser.add_argument(
+        "--reconcile-missing-target",
+        action="store_true",
+        help="Atomically mark one authority-approved absent blocked target historical and remove it from its sole human-pending TODO row; never starts or stops tmux.",
+    )
+    _ = parser.add_argument(
+        "--close-missing-target", action="store_true", help="Atomically close one authority-approved absent blocked record from its sole canonical TODO row; never starts or stops tmux."
+    )
     _ = parser.add_argument("--complete-live-no-mail", action="store_true", help="Mark one exact queue-empty live non-manager done without email or pane mutation.")
     _ = parser.add_argument("--close-active-task-tree-no-mail", action="store_true", help="Close active_task_tree.md metadata/TODO on its shared target without email or pane mutation.")
     _ = parser.add_argument("--close-done-live-no-mail", action="store_true", help="Close one exact live Codex pane left by --complete-live-no-mail without email or task reopening.")
-    _ = parser.add_argument("--describe-done-live-no-mail", action="store_true", help="Authenticate and print current evidence for one exact close-done-live-no-mail invocation without closing the pane.")
+    _ = parser.add_argument(
+        "--describe-done-live-no-mail", action="store_true", help="Authenticate and print current evidence for one exact close-done-live-no-mail invocation without closing the pane."
+    )
     _ = parser.add_argument("--missing-target", default="", help="Exact absent target required with --reconcile-missing-target or --close-missing-target.")
-    _ = parser.add_argument("--reconcile-long-running-human-index", action="store_true", help="Move one unchanged long_running task with exact human blocker from TODO current to human pending without changing task or pane state.")
-    _ = parser.add_argument("--reconcile-blocked-index", action="store_true", help="Move one digest-bound v1 blocked worker with an open queue from TODO previous or low priority to human pending without changing task or pane state.")
-    _ = parser.add_argument("--reconcile-dependency-blocked-current", action="store_true", help="Move one digest-bound v1 task blocked on one active task from TODO human pending to current without changing task or pane state.")
+    _ = parser.add_argument(
+        "--reconcile-long-running-human-index",
+        action="store_true",
+        help="Move one unchanged long_running task with exact human blocker from TODO current to human pending without changing task or pane state.",
+    )
+    _ = parser.add_argument(
+        "--reconcile-blocked-index",
+        action="store_true",
+        help="Move one digest-bound v1 blocked worker with an open queue from TODO previous or low priority to human pending without changing task or pane state.",
+    )
+    _ = parser.add_argument(
+        "--reconcile-dependency-blocked-current",
+        action="store_true",
+        help="Move one digest-bound v1 task blocked on one active task from TODO human pending to current without changing task or pane state.",
+    )
     _ = parser.add_argument("--session-id", default="", help="Session id captured by the prior close, if available.")
     _ = parser.add_argument("--replacement-task", type=Path, help="Active replacement task file; required with --finish-replaced-done.")
     _ = parser.add_argument("--stale-target", help="Exact stopped target recorded by the stale task; required with --finish-replaced-done.")
@@ -360,9 +410,15 @@ shutdown.""",
     _ = parser.add_argument("--task-sha256", default="", help="Exact current task digest required with --restore-terminal-target.")
     _ = parser.add_argument("--historical-commit", default="", help="Full Git commit containing the proven prior target; required with --restore-terminal-target.")
     _ = parser.add_argument("--close-shared-target", action="store_true", help="Close one explicitly proven manager record on a shared target using metadata and TODO files only; never accesses tmux.")
-    _ = parser.add_argument("--cancel-shared-target", action="store_true", help="Cancel one Human-identified blocked manager on a shared target while preserving the other exact shared record; never accesses tmux.")
-    _ = parser.add_argument("--close-retired-done", action="store_true", help="Close one already-stopped blocked/retired worker using Git-proven historical target and recorded close evidence; never accesses tmux.")
-    _ = parser.add_argument("--normalize-retired-todo", action="store_true", help="Normalize the sole targetless human-pending row for one already-retired blocked worker; never accesses tmux or task bytes.")
+    _ = parser.add_argument(
+        "--cancel-shared-target", action="store_true", help="Cancel one Human-identified blocked manager on a shared target while preserving the other exact shared record; never accesses tmux."
+    )
+    _ = parser.add_argument(
+        "--close-retired-done", action="store_true", help="Close one already-stopped blocked/retired worker using Git-proven historical target and recorded close evidence; never accesses tmux."
+    )
+    _ = parser.add_argument(
+        "--normalize-retired-todo", action="store_true", help="Normalize the sole targetless human-pending row for one already-retired blocked worker; never accesses tmux or task bytes."
+    )
     _ = parser.add_argument("--normalize-low-priority-current", action="store_true", help="Move the sole low-priority TODO row for one exact active v1 manager record to current; never accesses tmux.")
     _ = parser.add_argument("--shared-target", default="", help="Exact shared manager target required with --close-shared-target.")
     _ = parser.add_argument("--protected-shared-task", type=Path, help="Other exact shared-target task that must remain byte-identical with --cancel-shared-target.")
@@ -371,7 +427,9 @@ shutdown.""",
     _ = parser.add_argument("--manager-target", default="", help="Exact manager owner target required with --normalize-low-priority-current.")
     _ = parser.add_argument("--source-sha256", default="", help="Exact SHA-256 of the source task bytes required with --close-shared-target, --close-retired-done, or --normalize-retired-todo.")
     _ = parser.add_argument("--dependency-sha256", default="", help="Exact SHA-256 of the active blocker task required with --reconcile-dependency-blocked-current.")
-    _ = parser.add_argument("--human-close-authorization-source", default="", help="Exact manager_mail/<id>.txt record that directly authorizes closing this human-owned task target during normal done closure.")
+    _ = parser.add_argument(
+        "--human-close-authorization-source", default="", help="Exact manager_mail/<id>.txt record that directly authorizes closing this human-owned task target during normal done closure."
+    )
     _ = parser.add_argument("--human-close-authorization-sha256", default="", help="Lowercase SHA-256 of that exact human-close authorization record.")
     _ = parser.add_argument("--expected-task-sha256", default="", help="Exact SHA-256 of unchanged task bytes required with --park-unlinked or --reattest-park-unlinked.")
     _ = parser.add_argument("--expected-todo-sha256", default="", help="Exact SHA-256 of unchanged TODO bytes required with --park-unlinked or --reattest-park-unlinked.")
@@ -408,13 +466,43 @@ shutdown.""",
     )
     if any(human_close_authority) and not all(human_close_authority):
         parser.error("human-close authorization requires both source and digest.")
-    if parsed.closure_repository is not None and (parsed.status != "done" or any((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index))):
+    if parsed.closure_repository is not None and (
+        parsed.status != "done"
+        or any((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index))
+    ):
         parser.error("--closure-repository is only valid with a normal done transition.")
     if parsed.closure_repository is not None and not parsed.closure_repository.is_absolute():
         parser.error("--closure-repository must be an explicit absolute Git worktree root.")
     if parsed.dirty_path_handoff is not None and parsed.closure_repository is None:
         parser.error("--dirty-path-handoff requires --closure-repository.")
-    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.reattest_park_unlinked, parsed.retire_blocked_target, parsed.reconcile_missing_target, parsed.close_missing_target, parsed.complete_live_no_mail, parsed.close_active_task_tree_no_mail, parsed.close_done_live_no_mail, parsed.describe_done_live_no_mail, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.reconcile_dependency_blocked_current, parsed.restore_terminal_target, parsed.close_shared_target, parsed.cancel_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current)) > 1:
+    if (
+        sum(
+            (
+                parsed.finish_closed_done,
+                parsed.finish_replaced_done,
+                parsed.recover_exited_shell_done,
+                parsed.park_unlinked,
+                parsed.reattest_park_unlinked,
+                parsed.retire_blocked_target,
+                parsed.reconcile_missing_target,
+                parsed.close_missing_target,
+                parsed.complete_live_no_mail,
+                parsed.close_active_task_tree_no_mail,
+                parsed.close_done_live_no_mail,
+                parsed.describe_done_live_no_mail,
+                parsed.reconcile_long_running_human_index,
+                parsed.reconcile_blocked_index,
+                parsed.reconcile_dependency_blocked_current,
+                parsed.restore_terminal_target,
+                parsed.close_shared_target,
+                parsed.cancel_shared_target,
+                parsed.close_retired_done,
+                parsed.normalize_retired_todo,
+                parsed.normalize_low_priority_current,
+            )
+        )
+        > 1
+    ):
         parser.error("finish and recovery modes are mutually exclusive.")
     if parsed.dependency_sha256 and not parsed.reconcile_dependency_blocked_current:
         parser.error("--dependency-sha256 requires --reconcile-dependency-blocked-current.")
@@ -430,7 +518,24 @@ shutdown.""",
         parser.error("pane process and expected session assertions require --close-done-live-no-mail.")
     if any(human_close_authority) and (
         parsed.status != "done"
-        or any((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.reconcile_dependency_blocked_current, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current, parsed.close_active_task_tree_no_mail))
+        or any(
+            (
+                parsed.finish_closed_done,
+                parsed.finish_replaced_done,
+                parsed.recover_exited_shell_done,
+                parsed.park_unlinked,
+                parsed.retire_blocked_target,
+                parsed.reconcile_long_running_human_index,
+                parsed.reconcile_blocked_index,
+                parsed.reconcile_dependency_blocked_current,
+                parsed.restore_terminal_target,
+                parsed.close_shared_target,
+                parsed.close_retired_done,
+                parsed.normalize_retired_todo,
+                parsed.normalize_low_priority_current,
+                parsed.close_active_task_tree_no_mail,
+            )
+        )
     ):
         parser.error("human-close authorization is valid only for a normal done transition.")
     if parsed.park_unlinked:
@@ -464,14 +569,8 @@ shutdown.""",
             any(unrelated)
             or SHA256_RE.fullmatch(parsed.expected_task_sha256.strip()) is None
             or SHA256_RE.fullmatch(parsed.expected_todo_sha256.strip()) is None
-            or (
-                not parsed.session_id.strip()
-                and re.fullmatch(r"%[0-9]+", parsed.expected_pane_id.strip()) is None
-            )
-            or (
-                parsed.session_id.strip()
-                and (CODEX_SESSION_RE.fullmatch(parsed.session_id.strip()) is None or parsed.expected_pane_id.strip())
-            )
+            or (not parsed.session_id.strip() and re.fullmatch(r"%[0-9]+", parsed.expected_pane_id.strip()) is None)
+            or (parsed.session_id.strip() and (CODEX_SESSION_RE.fullmatch(parsed.session_id.strip()) is None or parsed.expected_pane_id.strip()))
             or parsed.authority_file is None
             or parsed.authority_lines is None
             or SHA256_RE.fullmatch(parsed.authority_sha256.strip()) is None
@@ -680,52 +779,201 @@ shutdown.""",
         )
     if parsed.missing_target:
         parser.error("--missing-target requires --reconcile-missing-target or --close-missing-target.")
-    if any((parsed.expected_task_sha256, parsed.expected_todo_sha256, parsed.expected_receipt_sha256, parsed.expected_pane_id, parsed.authority_file, parsed.authority_lines, parsed.authority_sha256, parsed.authority_envelope, parsed.authority_envelope_sha256)) and not (parsed.cancel_shared_target or parsed.complete_live_no_mail or parsed.close_active_task_tree_no_mail or parsed.close_done_live_no_mail):
+    if any(
+        (
+            parsed.expected_task_sha256,
+            parsed.expected_todo_sha256,
+            parsed.expected_receipt_sha256,
+            parsed.expected_pane_id,
+            parsed.authority_file,
+            parsed.authority_lines,
+            parsed.authority_sha256,
+            parsed.authority_envelope,
+            parsed.authority_envelope_sha256,
+        )
+    ) and not (parsed.cancel_shared_target or parsed.complete_live_no_mail or parsed.close_active_task_tree_no_mail or parsed.close_done_live_no_mail):
         parser.error("park-unlinked task, TODO, receipt, pane, and authority assertions require a park operation.")
     if parsed.retire_blocked_target:
         parser.error("--retire-blocked-target is disabled: preserve the historical target and resolve ownership without writing retired semantics.")
     if parsed.restore_terminal_target:
-        if parsed.status not in {None, ""} or TARGET_RE.fullmatch(parsed.historical_target.strip()) is None or SHA256_RE.fullmatch(parsed.task_sha256.strip()) is None or GIT_COMMIT_RE.fullmatch(parsed.historical_commit.strip()) is None:
+        if (
+            parsed.status not in {None, ""}
+            or TARGET_RE.fullmatch(parsed.historical_target.strip()) is None
+            or SHA256_RE.fullmatch(parsed.task_sha256.strip()) is None
+            or GIT_COMMIT_RE.fullmatch(parsed.historical_commit.strip()) is None
+        ):
             parser.error("--restore-terminal-target requires --historical-target TARGET, full --historical-commit, and lowercase --task-sha256, without status.")
-        if any((parsed.blocked_on, parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository, parsed.dirty_path_handoff)):
+        if any(
+            (
+                parsed.blocked_on,
+                parsed.session_id,
+                parsed.replacement_task,
+                parsed.stale_target,
+                parsed.replacement_target,
+                parsed.stale_sha256,
+                parsed.replacement_sha256,
+                parsed.replacement_status,
+                parsed.protected_target,
+                parsed.stopped_evidence,
+                parsed.replacement_pane_evidence,
+                parsed.audit_output,
+                parsed.pane_id,
+                parsed.terminal_evidence,
+                parsed.closure_repository,
+                parsed.dirty_path_handoff,
+            )
+        ):
             parser.error("unrelated lifecycle, replacement, pane, and repository evidence is not valid with --restore-terminal-target.")
-        return Args(parsed.root.resolve(), parsed.task_file, "", "", restore_terminal_target=True, historical_target=parsed.historical_target.strip(), task_sha256=parsed.task_sha256.strip(), historical_commit=parsed.historical_commit.strip())
+        return Args(
+            parsed.root.resolve(),
+            parsed.task_file,
+            "",
+            "",
+            restore_terminal_target=True,
+            historical_target=parsed.historical_target.strip(),
+            task_sha256=parsed.task_sha256.strip(),
+            historical_commit=parsed.historical_commit.strip(),
+        )
     if parsed.close_retired_done:
-        unrelated = (parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository, parsed.dirty_path_handoff, parsed.shared_target, parsed.task_sha256)
-        if any(unrelated) or TARGET_RE.fullmatch(parsed.historical_target.strip()) is None or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None or GIT_COMMIT_RE.fullmatch(parsed.historical_commit.strip()) is None:
+        unrelated = (
+            parsed.status,
+            parsed.blocked_on,
+            parsed.session_id,
+            parsed.replacement_task,
+            parsed.stale_target,
+            parsed.replacement_target,
+            parsed.stale_sha256,
+            parsed.replacement_sha256,
+            parsed.replacement_status,
+            parsed.protected_target,
+            parsed.stopped_evidence,
+            parsed.replacement_pane_evidence,
+            parsed.audit_output,
+            parsed.pane_id,
+            parsed.terminal_evidence,
+            parsed.closure_repository,
+            parsed.dirty_path_handoff,
+            parsed.shared_target,
+            parsed.task_sha256,
+        )
+        if (
+            any(unrelated)
+            or TARGET_RE.fullmatch(parsed.historical_target.strip()) is None
+            or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None
+            or GIT_COMMIT_RE.fullmatch(parsed.historical_commit.strip()) is None
+        ):
             parser.error("--close-retired-done requires --historical-target TARGET, full --historical-commit, and lowercase --source-sha256, without lifecycle or pane evidence.")
-        return Args(parsed.root.resolve(), parsed.task_file, "done", "", close_retired_done=True, historical_target=parsed.historical_target.strip(), historical_commit=parsed.historical_commit.strip(), source_sha256=parsed.source_sha256.strip())
+        return Args(
+            parsed.root.resolve(),
+            parsed.task_file,
+            "done",
+            "",
+            close_retired_done=True,
+            historical_target=parsed.historical_target.strip(),
+            historical_commit=parsed.historical_commit.strip(),
+            source_sha256=parsed.source_sha256.strip(),
+        )
     if parsed.normalize_retired_todo:
-        unrelated = (parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository, parsed.dirty_path_handoff, parsed.historical_target, parsed.task_sha256, parsed.historical_commit, parsed.shared_target)
+        unrelated = (
+            parsed.status,
+            parsed.blocked_on,
+            parsed.session_id,
+            parsed.replacement_task,
+            parsed.stale_target,
+            parsed.replacement_target,
+            parsed.stale_sha256,
+            parsed.replacement_sha256,
+            parsed.replacement_status,
+            parsed.protected_target,
+            parsed.stopped_evidence,
+            parsed.replacement_pane_evidence,
+            parsed.audit_output,
+            parsed.pane_id,
+            parsed.terminal_evidence,
+            parsed.closure_repository,
+            parsed.dirty_path_handoff,
+            parsed.historical_target,
+            parsed.task_sha256,
+            parsed.historical_commit,
+            parsed.shared_target,
+        )
         if any(unrelated) or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None:
             parser.error("--normalize-retired-todo requires only lowercase --source-sha256 for one exact blocked/retired source task.")
         return Args(parsed.root.resolve(), parsed.task_file, "", "", normalize_retired_todo=True, source_sha256=parsed.source_sha256.strip())
     if parsed.normalize_low_priority_current:
-        unrelated = (parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository, parsed.dirty_path_handoff, parsed.historical_target, parsed.task_sha256, parsed.historical_commit, parsed.shared_target)
+        unrelated = (
+            parsed.status,
+            parsed.blocked_on,
+            parsed.session_id,
+            parsed.replacement_task,
+            parsed.stale_target,
+            parsed.replacement_target,
+            parsed.stale_sha256,
+            parsed.replacement_sha256,
+            parsed.replacement_status,
+            parsed.protected_target,
+            parsed.stopped_evidence,
+            parsed.replacement_pane_evidence,
+            parsed.audit_output,
+            parsed.pane_id,
+            parsed.terminal_evidence,
+            parsed.closure_repository,
+            parsed.dirty_path_handoff,
+            parsed.historical_target,
+            parsed.task_sha256,
+            parsed.historical_commit,
+            parsed.shared_target,
+        )
         active_target = parsed.active_target.strip()
         manager_target = parsed.manager_target.strip()
         if any(unrelated) or TARGET_RE.fullmatch(active_target) is None or TARGET_RE.fullmatch(manager_target) is None or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None:
             parser.error("--normalize-low-priority-current requires exact --active-target, --manager-target, and lowercase --source-sha256, without lifecycle or repository evidence.")
         if active_target.partition(":")[0].startswith("h") or manager_target.partition(":")[0].startswith("h"):
             parser.error("--normalize-low-priority-current cannot modify a human-owned `h*` target.")
-        return Args(parsed.root.resolve(), parsed.task_file, "", "", normalize_low_priority_current=True, active_target=active_target, manager_target=manager_target, source_sha256=parsed.source_sha256.strip())
+        return Args(
+            parsed.root.resolve(), parsed.task_file, "", "", normalize_low_priority_current=True, active_target=active_target, manager_target=manager_target, source_sha256=parsed.source_sha256.strip()
+        )
     if parsed.describe_done_live_no_mail:
         unrelated = (
-            parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task,
-            parsed.stale_target, parsed.replacement_target, parsed.stale_sha256,
-            parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target,
-            parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output,
-            parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository,
-            parsed.dirty_path_handoff, parsed.historical_target, parsed.task_sha256,
-            parsed.historical_commit, parsed.shared_target, parsed.protected_shared_task,
-            parsed.protected_shared_sha256, parsed.source_sha256,
-            parsed.human_close_authorization_source, parsed.human_close_authorization_sha256,
-            parsed.expected_task_sha256, parsed.expected_todo_sha256,
-            parsed.expected_receipt_sha256, parsed.expected_pane_id,
-            parsed.expected_pane_pid, parsed.expected_pane_start_ticks,
-            parsed.expected_session_id, parsed.authority_file, parsed.authority_lines,
-            parsed.authority_sha256, parsed.authority_envelope,
-            parsed.authority_envelope_sha256, parsed.missing_target,
+            parsed.status,
+            parsed.blocked_on,
+            parsed.session_id,
+            parsed.replacement_task,
+            parsed.stale_target,
+            parsed.replacement_target,
+            parsed.stale_sha256,
+            parsed.replacement_sha256,
+            parsed.replacement_status,
+            parsed.protected_target,
+            parsed.stopped_evidence,
+            parsed.replacement_pane_evidence,
+            parsed.audit_output,
+            parsed.pane_id,
+            parsed.terminal_evidence,
+            parsed.closure_repository,
+            parsed.dirty_path_handoff,
+            parsed.historical_target,
+            parsed.task_sha256,
+            parsed.historical_commit,
+            parsed.shared_target,
+            parsed.protected_shared_task,
+            parsed.protected_shared_sha256,
+            parsed.source_sha256,
+            parsed.human_close_authorization_source,
+            parsed.human_close_authorization_sha256,
+            parsed.expected_task_sha256,
+            parsed.expected_todo_sha256,
+            parsed.expected_receipt_sha256,
+            parsed.expected_pane_id,
+            parsed.expected_pane_pid,
+            parsed.expected_pane_start_ticks,
+            parsed.expected_session_id,
+            parsed.authority_file,
+            parsed.authority_lines,
+            parsed.authority_sha256,
+            parsed.authority_envelope,
+            parsed.authority_envelope_sha256,
+            parsed.missing_target,
         )
         active_target = parsed.active_target.strip()
         manager_target = parsed.manager_target.strip()
@@ -744,7 +992,10 @@ shutdown.""",
         ):
             parser.error("--describe-done-live-no-mail requires exact non-human owner/manager and an exported manager-consumed report with its lowercase SHA-256.")
         return Args(
-            parsed.root.resolve(), parsed.task_file, "", "",
+            parsed.root.resolve(),
+            parsed.task_file,
+            "",
+            "",
             describe_done_live_no_mail=True,
             active_target=active_target,
             manager_target=manager_target,
@@ -753,17 +1004,36 @@ shutdown.""",
         )
     if parsed.close_done_live_no_mail:
         unrelated = (
-            parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task,
-            parsed.stale_target, parsed.replacement_target, parsed.stale_sha256,
-            parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target,
-            parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.pane_id,
-            parsed.closure_repository, parsed.dirty_path_handoff, parsed.historical_target,
-            parsed.task_sha256, parsed.historical_commit, parsed.shared_target,
-            parsed.protected_shared_task, parsed.protected_shared_sha256,
-            parsed.source_sha256, parsed.human_close_authorization_source,
-            parsed.human_close_authorization_sha256, parsed.expected_receipt_sha256,
-            parsed.authority_file, parsed.authority_lines, parsed.authority_sha256,
-            parsed.authority_envelope, parsed.authority_envelope_sha256,
+            parsed.status,
+            parsed.blocked_on,
+            parsed.session_id,
+            parsed.replacement_task,
+            parsed.stale_target,
+            parsed.replacement_target,
+            parsed.stale_sha256,
+            parsed.replacement_sha256,
+            parsed.replacement_status,
+            parsed.protected_target,
+            parsed.stopped_evidence,
+            parsed.replacement_pane_evidence,
+            parsed.pane_id,
+            parsed.closure_repository,
+            parsed.dirty_path_handoff,
+            parsed.historical_target,
+            parsed.task_sha256,
+            parsed.historical_commit,
+            parsed.shared_target,
+            parsed.protected_shared_task,
+            parsed.protected_shared_sha256,
+            parsed.source_sha256,
+            parsed.human_close_authorization_source,
+            parsed.human_close_authorization_sha256,
+            parsed.expected_receipt_sha256,
+            parsed.authority_file,
+            parsed.authority_lines,
+            parsed.authority_sha256,
+            parsed.authority_envelope,
+            parsed.authority_envelope_sha256,
             parsed.missing_target,
         )
         active_target = parsed.active_target.strip()
@@ -788,15 +1058,15 @@ shutdown.""",
             or not parsed.audit_output.is_absolute()
             or (
                 parsed.manager_consumed_report_receipt is not None
-                and (
-                    not parsed.manager_consumed_report_receipt.is_absolute()
-                    or SHA256_RE.fullmatch(parsed.manager_consumed_report_receipt_sha256.strip()) is None
-                )
+                and (not parsed.manager_consumed_report_receipt.is_absolute() or SHA256_RE.fullmatch(parsed.manager_consumed_report_receipt_sha256.strip()) is None)
             )
         ):
             parser.error("--close-done-live-no-mail requires exact done task/TODO, non-human owner/manager, pane process/session/report evidence, and an absolute audit output.")
         return Args(
-            parsed.root.resolve(), parsed.task_file, "done", "",
+            parsed.root.resolve(),
+            parsed.task_file,
+            "done",
+            "",
             close_done_live_no_mail=True,
             active_target=active_target,
             manager_target=manager_target,
@@ -808,26 +1078,41 @@ shutdown.""",
             expected_session_id=parsed.expected_session_id.strip().lower(),
             terminal_evidence=terminal_evidence,
             audit_output=parsed.audit_output.resolve(),
-            manager_consumed_report_receipt=(
-                parsed.manager_consumed_report_receipt.resolve()
-                if parsed.manager_consumed_report_receipt is not None
-                else None
-            ),
+            manager_consumed_report_receipt=(parsed.manager_consumed_report_receipt.resolve() if parsed.manager_consumed_report_receipt is not None else None),
             manager_consumed_report_receipt_sha256=parsed.manager_consumed_report_receipt_sha256.strip(),
         )
     if parsed.complete_live_no_mail:
         unrelated = (
-            parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task,
-            parsed.stale_target, parsed.replacement_target, parsed.stale_sha256,
-            parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target,
-            parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output,
-            parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository,
-            parsed.dirty_path_handoff, parsed.historical_target, parsed.task_sha256,
-            parsed.historical_commit, parsed.shared_target,
-            parsed.source_sha256, parsed.human_close_authorization_source,
-            parsed.human_close_authorization_sha256, parsed.expected_receipt_sha256,
-            parsed.authority_file, parsed.authority_lines, parsed.authority_sha256,
-            parsed.authority_envelope, parsed.authority_envelope_sha256,
+            parsed.status,
+            parsed.blocked_on,
+            parsed.session_id,
+            parsed.replacement_task,
+            parsed.stale_target,
+            parsed.replacement_target,
+            parsed.stale_sha256,
+            parsed.replacement_sha256,
+            parsed.replacement_status,
+            parsed.protected_target,
+            parsed.stopped_evidence,
+            parsed.replacement_pane_evidence,
+            parsed.audit_output,
+            parsed.pane_id,
+            parsed.terminal_evidence,
+            parsed.closure_repository,
+            parsed.dirty_path_handoff,
+            parsed.historical_target,
+            parsed.task_sha256,
+            parsed.historical_commit,
+            parsed.shared_target,
+            parsed.source_sha256,
+            parsed.human_close_authorization_source,
+            parsed.human_close_authorization_sha256,
+            parsed.expected_receipt_sha256,
+            parsed.authority_file,
+            parsed.authority_lines,
+            parsed.authority_sha256,
+            parsed.authority_envelope,
+            parsed.authority_envelope_sha256,
             parsed.missing_target,
         )
         active_target = parsed.active_target.strip()
@@ -844,7 +1129,10 @@ shutdown.""",
         ):
             parser.error("--complete-live-no-mail requires exact non-human owner/manager targets, task/TODO digests, and --expected-pane-id, without unrelated lifecycle evidence.")
         return Args(
-            parsed.root.resolve(), parsed.task_file, "done", "",
+            parsed.root.resolve(),
+            parsed.task_file,
+            "done",
+            "",
             complete_live_no_mail=True,
             active_target=active_target,
             manager_target=manager_target,
@@ -854,16 +1142,34 @@ shutdown.""",
         )
     if parsed.close_active_task_tree_no_mail:
         unrelated = (
-            parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task,
-            parsed.stale_target, parsed.replacement_target, parsed.stale_sha256,
-            parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target,
-            parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output,
-            parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository,
-            parsed.dirty_path_handoff, parsed.historical_target, parsed.task_sha256,
-            parsed.historical_commit, parsed.active_target, parsed.manager_target,
-            parsed.source_sha256, parsed.human_close_authorization_source,
-            parsed.human_close_authorization_sha256, parsed.expected_receipt_sha256,
-            parsed.authority_envelope, parsed.authority_envelope_sha256,
+            parsed.status,
+            parsed.blocked_on,
+            parsed.session_id,
+            parsed.replacement_task,
+            parsed.stale_target,
+            parsed.replacement_target,
+            parsed.stale_sha256,
+            parsed.replacement_sha256,
+            parsed.replacement_status,
+            parsed.protected_target,
+            parsed.stopped_evidence,
+            parsed.replacement_pane_evidence,
+            parsed.audit_output,
+            parsed.pane_id,
+            parsed.terminal_evidence,
+            parsed.closure_repository,
+            parsed.dirty_path_handoff,
+            parsed.historical_target,
+            parsed.task_sha256,
+            parsed.historical_commit,
+            parsed.active_target,
+            parsed.manager_target,
+            parsed.source_sha256,
+            parsed.human_close_authorization_source,
+            parsed.human_close_authorization_sha256,
+            parsed.expected_receipt_sha256,
+            parsed.authority_envelope,
+            parsed.authority_envelope_sha256,
             parsed.missing_target,
         )
         if (
@@ -884,7 +1190,10 @@ shutdown.""",
         ):
             parser.error("--close-active-task-tree-no-mail requires exact task/protected/TODO/pane/authority/no-mail bindings.")
         return Args(
-            parsed.root.resolve(), parsed.task_file, "done", "",
+            parsed.root.resolve(),
+            parsed.task_file,
+            "done",
+            "",
             close_active_task_tree_no_mail=True,
             shared_target=parsed.shared_target.strip(),
             protected_shared_task=parsed.protected_shared_task,
@@ -898,21 +1207,59 @@ shutdown.""",
             no_mail_intent=parsed.no_mail_intent,
         )
     if parsed.close_shared_target:
-        unrelated = (parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository, parsed.dirty_path_handoff, parsed.historical_target, parsed.task_sha256, parsed.historical_commit)
+        unrelated = (
+            parsed.status,
+            parsed.blocked_on,
+            parsed.session_id,
+            parsed.replacement_task,
+            parsed.stale_target,
+            parsed.replacement_target,
+            parsed.stale_sha256,
+            parsed.replacement_sha256,
+            parsed.replacement_status,
+            parsed.protected_target,
+            parsed.stopped_evidence,
+            parsed.replacement_pane_evidence,
+            parsed.audit_output,
+            parsed.pane_id,
+            parsed.terminal_evidence,
+            parsed.closure_repository,
+            parsed.dirty_path_handoff,
+            parsed.historical_target,
+            parsed.task_sha256,
+            parsed.historical_commit,
+        )
         if any(unrelated) or TARGET_RE.fullmatch(parsed.shared_target.strip()) is None or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None:
             parser.error("--close-shared-target requires exact --shared-target and lowercase --source-sha256, without lifecycle or repository evidence.")
         return Args(parsed.root.resolve(), parsed.task_file, "done", "", close_shared_target=True, shared_target=parsed.shared_target.strip(), source_sha256=parsed.source_sha256.strip())
     if parsed.cancel_shared_target:
         unrelated = (
-            parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task,
-            parsed.stale_target, parsed.replacement_target, parsed.stale_sha256,
-            parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target,
-            parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.pane_id,
-            parsed.terminal_evidence, parsed.closure_repository, parsed.dirty_path_handoff,
-            parsed.historical_target, parsed.task_sha256, parsed.historical_commit,
-            parsed.active_target, parsed.manager_target, parsed.human_close_authorization_source,
-            parsed.human_close_authorization_sha256, parsed.expected_receipt_sha256,
-            parsed.expected_pane_id, parsed.missing_target,
+            parsed.status,
+            parsed.blocked_on,
+            parsed.session_id,
+            parsed.replacement_task,
+            parsed.stale_target,
+            parsed.replacement_target,
+            parsed.stale_sha256,
+            parsed.replacement_sha256,
+            parsed.replacement_status,
+            parsed.protected_target,
+            parsed.stopped_evidence,
+            parsed.replacement_pane_evidence,
+            parsed.pane_id,
+            parsed.terminal_evidence,
+            parsed.closure_repository,
+            parsed.dirty_path_handoff,
+            parsed.historical_target,
+            parsed.task_sha256,
+            parsed.historical_commit,
+            parsed.active_target,
+            parsed.manager_target,
+            parsed.human_close_authorization_source,
+            parsed.human_close_authorization_sha256,
+            parsed.expected_receipt_sha256,
+            parsed.expected_pane_id,
+            parsed.missing_target,
             parsed.expected_task_sha256,
         )
         if (
@@ -932,7 +1279,10 @@ shutdown.""",
         ):
             parser.error("--cancel-shared-target requires exact task/protected/TODO digests, shared target, authority source and envelope, and an absolute audit output.")
         return Args(
-            parsed.root.resolve(), parsed.task_file, "done", "",
+            parsed.root.resolve(),
+            parsed.task_file,
+            "done",
+            "",
             cancel_shared_target=True,
             shared_target=parsed.shared_target.strip(),
             protected_shared_task=parsed.protected_shared_task,
@@ -949,38 +1299,72 @@ shutdown.""",
     if parsed.reconcile_long_running_human_index:
         if parsed.status not in {None, ""} or parsed.blocked_on:
             parser.error("--reconcile-long-running-human-index does not accept status or --blocked-on.")
-        if any((parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence)):
+        if any(
+            (
+                parsed.session_id,
+                parsed.replacement_task,
+                parsed.stale_target,
+                parsed.replacement_target,
+                parsed.stale_sha256,
+                parsed.replacement_sha256,
+                parsed.replacement_status,
+                parsed.protected_target,
+                parsed.stopped_evidence,
+                parsed.replacement_pane_evidence,
+                parsed.audit_output,
+                parsed.pane_id,
+                parsed.terminal_evidence,
+            )
+        ):
             parser.error("unrelated lifecycle evidence is not valid with --reconcile-long-running-human-index.")
         return Args(parsed.root.resolve(), parsed.task_file, "", "", reconcile_long_running_human_index=True)
     if parsed.reconcile_dependency_blocked_current:
         unrelated = (
-            parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task,
-            parsed.stale_target, parsed.replacement_target, parsed.stale_sha256,
-            parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target,
-            parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output,
-            parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository,
-            parsed.dirty_path_handoff, parsed.historical_target, parsed.task_sha256,
-            parsed.historical_commit, parsed.shared_target, parsed.active_target,
-            parsed.manager_target, parsed.human_close_authorization_source,
-            parsed.human_close_authorization_sha256, parsed.expected_task_sha256,
-            parsed.expected_todo_sha256, parsed.expected_receipt_sha256,
-            parsed.expected_pane_id, parsed.expected_pane_pid,
-            parsed.expected_pane_start_ticks, parsed.expected_session_id,
-            parsed.authority_file, parsed.authority_lines, parsed.authority_sha256,
-            parsed.no_mail_intent, parsed.authority_envelope,
-            parsed.authority_envelope_sha256, parsed.missing_target,
+            parsed.status,
+            parsed.blocked_on,
+            parsed.session_id,
+            parsed.replacement_task,
+            parsed.stale_target,
+            parsed.replacement_target,
+            parsed.stale_sha256,
+            parsed.replacement_sha256,
+            parsed.replacement_status,
+            parsed.protected_target,
+            parsed.stopped_evidence,
+            parsed.replacement_pane_evidence,
+            parsed.audit_output,
+            parsed.pane_id,
+            parsed.terminal_evidence,
+            parsed.closure_repository,
+            parsed.dirty_path_handoff,
+            parsed.historical_target,
+            parsed.task_sha256,
+            parsed.historical_commit,
+            parsed.shared_target,
+            parsed.active_target,
+            parsed.manager_target,
+            parsed.human_close_authorization_source,
+            parsed.human_close_authorization_sha256,
+            parsed.expected_task_sha256,
+            parsed.expected_todo_sha256,
+            parsed.expected_receipt_sha256,
+            parsed.expected_pane_id,
+            parsed.expected_pane_pid,
+            parsed.expected_pane_start_ticks,
+            parsed.expected_session_id,
+            parsed.authority_file,
+            parsed.authority_lines,
+            parsed.authority_sha256,
+            parsed.no_mail_intent,
+            parsed.authority_envelope,
+            parsed.authority_envelope_sha256,
+            parsed.missing_target,
             parsed.manager_consumed_report_receipt,
-            parsed.manager_consumed_report_receipt_sha256, parsed.completion_key,
+            parsed.manager_consumed_report_receipt_sha256,
+            parsed.completion_key,
         )
-        if (
-            any(unrelated)
-            or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None
-            or SHA256_RE.fullmatch(parsed.dependency_sha256.strip()) is None
-        ):
-            parser.error(
-                "--reconcile-dependency-blocked-current requires only lowercase "
-                "--source-sha256 and --dependency-sha256 assertions."
-            )
+        if any(unrelated) or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None or SHA256_RE.fullmatch(parsed.dependency_sha256.strip()) is None:
+            parser.error("--reconcile-dependency-blocked-current requires only lowercase --source-sha256 and --dependency-sha256 assertions.")
         return Args(
             parsed.root.resolve(),
             parsed.task_file,
@@ -991,7 +1375,31 @@ shutdown.""",
             dependency_sha256=parsed.dependency_sha256.strip(),
         )
     if parsed.reconcile_blocked_index:
-        unrelated = (parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository, parsed.dirty_path_handoff, parsed.historical_target, parsed.task_sha256, parsed.historical_commit, parsed.shared_target, parsed.active_target, parsed.manager_target)
+        unrelated = (
+            parsed.status,
+            parsed.blocked_on,
+            parsed.session_id,
+            parsed.replacement_task,
+            parsed.stale_target,
+            parsed.replacement_target,
+            parsed.stale_sha256,
+            parsed.replacement_sha256,
+            parsed.replacement_status,
+            parsed.protected_target,
+            parsed.stopped_evidence,
+            parsed.replacement_pane_evidence,
+            parsed.audit_output,
+            parsed.pane_id,
+            parsed.terminal_evidence,
+            parsed.closure_repository,
+            parsed.dirty_path_handoff,
+            parsed.historical_target,
+            parsed.task_sha256,
+            parsed.historical_commit,
+            parsed.shared_target,
+            parsed.active_target,
+            parsed.manager_target,
+        )
         if any(unrelated) or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None:
             parser.error("--reconcile-blocked-index requires only lowercase --source-sha256 for one exact blocked source task.")
         return Args(parsed.root.resolve(), parsed.task_file, "", "", reconcile_blocked_index=True, source_sha256=parsed.source_sha256.strip())
@@ -1000,7 +1408,20 @@ shutdown.""",
             parser.error("--recover-exited-shell-done only supports status `done`.")
         if not parsed.session_id.strip() or not parsed.pane_id.strip() or not parsed.terminal_evidence.strip():
             parser.error("--recover-exited-shell-done requires --session-id, --pane-id, and --terminal-evidence.")
-        if any((parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output)):
+        if any(
+            (
+                parsed.replacement_task,
+                parsed.stale_target,
+                parsed.replacement_target,
+                parsed.stale_sha256,
+                parsed.replacement_sha256,
+                parsed.replacement_status,
+                parsed.protected_target,
+                parsed.stopped_evidence,
+                parsed.replacement_pane_evidence,
+                parsed.audit_output,
+            )
+        ):
             parser.error("replacement evidence is only valid with --finish-replaced-done.")
         return Args(
             parsed.root.resolve(),
@@ -1059,7 +1480,20 @@ shutdown.""",
             parser.error("--finish-closed-done only supports status `done`.")
         if parsed.pane_id or parsed.terminal_evidence:
             parser.error("pane and terminal evidence are only valid with --recover-exited-shell-done.")
-        if any((parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output)):
+        if any(
+            (
+                parsed.replacement_task,
+                parsed.stale_target,
+                parsed.replacement_target,
+                parsed.stale_sha256,
+                parsed.replacement_sha256,
+                parsed.replacement_status,
+                parsed.protected_target,
+                parsed.stopped_evidence,
+                parsed.replacement_pane_evidence,
+                parsed.audit_output,
+            )
+        ):
             parser.error("replacement evidence is only valid with --finish-replaced-done.")
         return Args(parsed.root.resolve(), parsed.task_file, "done", parsed.blocked_on.strip(), True, parsed.session_id.strip())
     if not parsed.status:
@@ -1070,7 +1504,20 @@ shutdown.""",
         parser.error("--completion-key must be a lowercase SHA-256 digest.")
     if parsed.session_id:
         parser.error("--session-id is only valid with --finish-closed-done.")
-    if any((parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output)):
+    if any(
+        (
+            parsed.replacement_task,
+            parsed.stale_target,
+            parsed.replacement_target,
+            parsed.stale_sha256,
+            parsed.replacement_sha256,
+            parsed.replacement_status,
+            parsed.protected_target,
+            parsed.stopped_evidence,
+            parsed.replacement_pane_evidence,
+            parsed.audit_output,
+        )
+    ):
         parser.error("replacement evidence is only valid with --finish-replaced-done.")
     if parsed.pane_id or parsed.terminal_evidence:
         parser.error("pane and terminal evidence are only valid with --recover-exited-shell-done.")
@@ -1287,9 +1734,7 @@ def update_frontmatter_status(text: str, status: str, blocked_on: str, work_log_
     if has_pending_marker(text) and not (metadata.version == V2_VERSION and only_wake_pending_markers(text)):
         raise TaskFrontmatterError("task file still contains `(pending)`; handle pending markers before changing status.")
     if status == "done" and metadata.pending_task_items:
-        raise TaskFrontmatterError(
-            "task file still has `pending_task_items`; verify each pending item is actually complete or cancelled, then remove it before marking done."
-        )
+        raise TaskFrontmatterError("task file still has `pending_task_items`; verify each pending item is actually complete or cancelled, then remove it before marking done.")
     if status == "blocked" and not blocked_on:
         raise TaskFrontmatterError("`--blocked-on` is required when setting status to `blocked`.")
     if "\n" in blocked_on or "\r" in blocked_on:
@@ -1484,17 +1929,12 @@ def authoritative_active_target_task_paths(root: Path, target: str) -> tuple[Pat
             text = candidate.read_text(encoding="utf-8")
         except OSError as exc:
             raise TaskFrontmatterError(f"cannot verify target ownership because `{relative_task_ref(root, candidate)}` could not be read: {exc}") from exc
-        raw_claim = any(
-            key.strip() == "runat" and sep and same_tmux_target(value.strip(), target)
-            for key, sep, value in (line.partition(":") for line in text.splitlines())
-        )
+        raw_claim = any(key.strip() == "runat" and sep and same_tmux_target(value.strip(), target) for key, sep, value in (line.partition(":") for line in text.splitlines()))
         try:
             metadata = parse_task_metadata(text, root)
         except TaskFrontmatterError as exc:
             if raw_claim:
-                raise TaskFrontmatterError(
-                    f"cannot verify target ownership because `{relative_task_ref(root, candidate)}` has invalid task frontmatter: {exc}"
-                ) from exc
+                raise TaskFrontmatterError(f"cannot verify target ownership because `{relative_task_ref(root, candidate)}` has invalid task frontmatter: {exc}") from exc
             continue
         if metadata is not None and metadata.status != "done" and same_tmux_target(metadata.runat, target):
             matches.append(candidate.resolve())
@@ -1691,7 +2131,6 @@ def retire_blocked_target(args: Args, path: Path, text: str, before: os.stat_res
     """Atomically retire a blocked worker's conflicting target without tmux access."""
     raise TaskFrontmatterError("target retirement is disabled: retired is not a run target")
 
-
     if TARGET_RE.fullmatch(args.stale_target) is None:
         raise TaskFrontmatterError("--stale-target must be an exact SESSION:WINDOW[.PANE] target.")
     if args.stale_target.partition(":")[0].startswith("h"):
@@ -1885,13 +2324,7 @@ def closed_missing_task_text(
     """Render one terminal task while preserving its prior queue in the audit binding."""
 
     metadata = parse_task_metadata(text, args.root)
-    if (
-        metadata is None
-        or metadata.version == V2_VERSION
-        or metadata.status != "blocked"
-        or metadata.runat != args.missing_target
-        or has_pending_marker(text)
-    ):
+    if metadata is None or metadata.version == V2_VERSION or metadata.status != "blocked" or metadata.runat != args.missing_target or has_pending_marker(text):
         raise TaskFrontmatterError("missing-target closure requires one blocked v1 task at the exact target with no pending marker.")
     queue_text = yaml.safe_dump(list(metadata.pending_task_items), sort_keys=False)
     queue_sha256 = hashlib.sha256(queue_text.encode()).hexdigest()
@@ -1945,15 +2378,11 @@ def closed_missing_todo_text(root: Path, path: Path, text: str, target: str) -> 
     row_index, row_section = rows[0]
     validate_reconciled_todo_row(root, path, lines[row_index], target)
     if row_section not in headers:
-        raise TaskFrontmatterError(
-            "missing-target closure requires the TODO row in a canonical lifecycle section."
-        )
+        raise TaskFrontmatterError("missing-target closure requires the TODO row in a canonical lifecycle section.")
     ref = relative_task_ref(root, path)
     row = lines[row_index].rstrip("\r\n")
     if row not in {ref, f"{ref} {target}"}:
-        raise TaskFrontmatterError(
-            "missing-target closure requires one canonical targetless or exact-target TODO row."
-        )
+        raise TaskFrontmatterError("missing-target closure requires one canonical targetless or exact-target TODO row.")
     newline = "\r\n" if lines[row_index].endswith("\r\n") else "\n"
     lines.pop(row_index)
     previous_index = next(index for index, line in enumerate(lines) if line.rstrip("\r\n") == "previous:")
@@ -2266,9 +2695,7 @@ def close_missing_target(args: Args, path: Path, text: str, before: os.stat_resu
                 metadata = parse_task_metadata(current_task, args.root)
                 if metadata is None:
                     raise TaskFrontmatterError("missing-target closure requires a task record.")
-                updated_task, queue_sha256 = closed_missing_task_text(
-                    args, path, current_task, authority_locator, authority_envelope
-                )
+                updated_task, queue_sha256 = closed_missing_task_text(args, path, current_task, authority_locator, authority_envelope)
                 updated_todo = closed_missing_todo_text(args.root, path, current_todo, args.missing_target)
                 committed_task_sha256 = hashlib.sha256(updated_task.encode()).hexdigest()
                 committed_todo_sha256 = hashlib.sha256(updated_todo.encode()).hexdigest()
@@ -2300,9 +2727,7 @@ def close_missing_target(args: Args, path: Path, text: str, before: os.stat_resu
                 )
                 reserve_private_audit(args.audit_output, prepared_audit)
             else:
-                record = validate_missing_close_recovery_audit(
-                    args, path, audit_text, authority_locator, authority_envelope
-                )
+                record = validate_missing_close_recovery_audit(args, path, audit_text, authority_locator, authority_envelope)
                 committed_task_sha256 = str(record["committed_task_sha256"])
                 committed_todo_sha256 = str(record["committed_todo_sha256"])
                 queue_sha256 = str(record["pending_task_items_sha256"])
@@ -2338,9 +2763,7 @@ def close_missing_target(args: Args, path: Path, text: str, before: os.stat_resu
                 updated_task = ""
                 updated_todo = ""
                 if current_task_sha256 == args.expected_task_sha256:
-                    updated_task, recovered_queue_sha256 = closed_missing_task_text(
-                        args, path, current_task, authority_locator, authority_envelope
-                    )
+                    updated_task, recovered_queue_sha256 = closed_missing_task_text(args, path, current_task, authority_locator, authority_envelope)
                     if hashlib.sha256(updated_task.encode()).hexdigest() != committed_task_sha256 or recovered_queue_sha256 != queue_sha256:
                         raise TaskFrontmatterError("missing-target closure task recovery bytes do not match the prepared audit.")
                 elif current_task_sha256 != committed_task_sha256:
@@ -2369,17 +2792,14 @@ def close_missing_target(args: Args, path: Path, text: str, before: os.stat_resu
                     try:
                         replace_if_unchanged_locked(todo, current_todo, moved_todo_before)
                     except Exception as rollback_error:
-                        raise TaskFrontmatterError(
-                            f"missing-target closure failed and TODO rollback also failed: {rollback_error}"
-                        ) from mutation_error
+                        raise TaskFrontmatterError(f"missing-target closure failed and TODO rollback also failed: {rollback_error}") from mutation_error
                 raise
             try:
                 if prepared_audit != complete_audit:
                     replace_private_audit(args.audit_output, prepared_audit, complete_audit)
             except Exception as audit_error:
                 print(
-                    "omo_task_status.py: closure committed; audit remains prepared-or-committed "
-                    f"because finalization failed: {audit_error}",
+                    f"omo_task_status.py: closure committed; audit remains prepared-or-committed because finalization failed: {audit_error}",
                     file=sys.stderr,
                 )
 
@@ -2396,24 +2816,13 @@ def read_park_authority(args: Args) -> tuple[str, str]:
         raise TaskFrontmatterError(f"park-unlinked authority source is outside the task root or unavailable: {exc}") from exc
     parts = relative.parts
     direct = len(parts) == 2 and parts[0] == "manager_mail"
-    archived = (
-        len(parts) == 3
-        and re.fullmatch(r"[0-9]{4}(?:0[1-9]|1[0-2])", parts[0]) is not None
-        and parts[1] == "manager_mail"
-    )
+    archived = len(parts) == 3 and re.fullmatch(r"[0-9]{4}(?:0[1-9]|1[0-2])", parts[0]) is not None and parts[1] == "manager_mail"
     if not (direct or archived) or any(part in {"", ".", ".."} for part in parts):
-        raise TaskFrontmatterError(
-            "park-unlinked authority must be one direct manager_mail file or one YYYYMM/manager_mail file under the task root."
-        )
+        raise TaskFrontmatterError("park-unlinked authority must be one direct manager_mail file or one YYYYMM/manager_mail file under the task root.")
     directory_states: list[tuple[Path, os.stat_result]] = []
     try:
         with ExitStack() as descriptors:
-            directory_flags = (
-                os.O_RDONLY
-                | getattr(os, "O_CLOEXEC", 0)
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_NOFOLLOW", 0)
-            )
+            directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
             directory_fd = os.open(root, directory_flags)
             descriptors.callback(os.close, directory_fd)
             current_path = root
@@ -2423,11 +2832,7 @@ def read_park_authority(args: Args) -> tuple[str, str]:
                 descriptors.callback(os.close, directory_fd)
                 state = os.fstat(directory_fd)
                 directory_states.append((current_path, state))
-                if (
-                    not stat.S_ISDIR(state.st_mode)
-                    or state.st_uid != os.getuid()
-                    or stat.S_IMODE(state.st_mode) & (0o077 if direct else 0o022)
-                ):
+                if not stat.S_ISDIR(state.st_mode) or state.st_uid != os.getuid() or stat.S_IMODE(state.st_mode) & (0o077 if direct else 0o022):
                     raise TaskFrontmatterError("park-unlinked authority directory is not owner-controlled.")
             source = root.joinpath(*parts)
             flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -2447,9 +2852,7 @@ def read_park_authority(args: Args) -> tuple[str, str]:
             current = source.lstat()
             current_directories = [(path, path.lstat()) for path, _state in directory_states]
     except OSError as exc:
-        raise TaskFrontmatterError(
-            f"park-unlinked authority must be a direct file in an allowed manager_mail layout without symlinks: {exc}"
-        ) from exc
+        raise TaskFrontmatterError(f"park-unlinked authority must be a direct file in an allowed manager_mail layout without symlinks: {exc}") from exc
     if (
         not stat.S_ISREG(before.st_mode)
         or before.st_uid != os.getuid()
@@ -2457,10 +2860,7 @@ def read_park_authority(args: Args) -> tuple[str, str]:
         or len(payload) > MAX_AUTHORITY_BYTES
         or not same_file_state(before, after)
         or not same_file_state(after, current)
-        or any(
-            stat.S_ISLNK(state.st_mode) or not same_file_state(state, latest)
-            for (_path, state), (_latest_path, latest) in zip(directory_states, current_directories)
-        )
+        or any(stat.S_ISLNK(state.st_mode) or not same_file_state(state, latest) for (_path, state), (_latest_path, latest) in zip(directory_states, current_directories))
         or hashlib.sha256(payload).hexdigest() != args.authority_sha256
     ):
         raise TaskFrontmatterError("park-unlinked authority source is unsafe, changed, oversized, or does not match --authority-sha256.")
@@ -2531,10 +2931,7 @@ def read_park_authority_envelope(args: Args, excerpt: str, locator: str) -> str:
     ):
         raise TaskFrontmatterError("park-unlinked authority envelope changed, is oversized, or does not match its digest.")
     matches = AUTHORITATIVE_HUMAN_ENVELOPE_RE.findall(envelope)
-    normalized_matches = [
-        (match_locator, match_excerpt.replace("\r\n", "\n"))
-        for match_locator, match_excerpt in matches
-    ]
+    normalized_matches = [(match_locator, match_excerpt.replace("\r\n", "\n")) for match_locator, match_excerpt in matches]
     expected_match = (locator, excerpt.replace("\r\n", "\n"))
     source1503_matches = (
         relative == Path("dw_rotate_exec.md")
@@ -2551,9 +2948,7 @@ def read_park_authority_envelope(args: Args, excerpt: str, locator: str) -> str:
         and normalized_matches[2] == expected_match
     )
     if normalized_matches != [expected_match] and not source1503_matches and not source1506_matches:
-        raise TaskFrontmatterError(
-            "park-unlinked authority envelope must contain exactly the selected authoritative human text."
-        )
+        raise TaskFrontmatterError("park-unlinked authority envelope must contain exactly the selected authoritative human text.")
     return relative.as_posix()
 
 
@@ -2591,12 +2986,7 @@ def park_target_pane_id(target: str) -> str | None:
         ):
             return None
         row_session, row_window, row_pane, row_active, row_id = fields
-        if (
-            row_session == session
-            and row_window == window
-            and ((pane is not None and row_pane == pane) or (pane is None and row_active == "1"))
-            and re.fullmatch(r"%[0-9]+", row_id) is not None
-        ):
+        if row_session == session and row_window == window and ((pane is not None and row_pane == pane) or (pane is None and row_active == "1")) and re.fullmatch(r"%[0-9]+", row_id) is not None:
             matches.append(row_id)
     if len(matches) > 1:
         return None
@@ -2635,18 +3025,14 @@ def parked_todo_text(
         if path in todo_row_task_paths(root, line):
             rows.append((index, section))
     if headers[source_section] != 1 or headers["low priority"] != 1 or len(rows) != 1:
-        raise TaskFrontmatterError(
-            f"park-unlinked requires sole canonical {source_section} and low-priority TODO sections and exactly one task row."
-        )
+        raise TaskFrontmatterError(f"park-unlinked requires sole canonical {source_section} and low-priority TODO sections and exactly one task row.")
     row_index, row_section = rows[0]
     row = lines[row_index]
     row_text = row.rstrip("\r\n")
     if allow_already_parked and row_section == "low priority" and row_text == relative:
         return text
     if row_section != source_section or row_text != expected:
-        raise TaskFrontmatterError(
-            f"park-unlinked requires one canonical TODO row in {source_section} naming only the task and exact historical target."
-        )
+        raise TaskFrontmatterError(f"park-unlinked requires one canonical TODO row in {source_section} naming only the task and exact historical target.")
     moved = lines.pop(row_index)
     newline = moved[len(moved.rstrip("\r\n")) :]
     low_priority_index = next(index for index, line in enumerate(lines) if line.rstrip("\r\n") == "low priority:")
@@ -2797,9 +3183,19 @@ def parse_complete_park_reattestation(text: str) -> dict[str, object]:
     except (yaml.YAMLError, TaskFrontmatterError) as exc:
         raise TaskFrontmatterError("park-unlinked v2 receipt is not unambiguous YAML.") from exc
     expected_keys = {
-        "version", "operation", "state", "task", "target", "task_sha256", "todo_sha256",
-        "authority_source", "authority_sha256", "authority_envelope", "authority_envelope_sha256",
-        "prior_complete_receipt_sha256", "prior_complete_receipt",
+        "version",
+        "operation",
+        "state",
+        "task",
+        "target",
+        "task_sha256",
+        "todo_sha256",
+        "authority_source",
+        "authority_sha256",
+        "authority_envelope",
+        "authority_envelope_sha256",
+        "prior_complete_receipt_sha256",
+        "prior_complete_receipt",
     }
     if not isinstance(record, dict) or set(record) != expected_keys:
         raise TaskFrontmatterError("park-unlinked v2 receipt has an unknown or incomplete schema.")
@@ -2911,13 +3307,7 @@ def reattest_park_unlinked(args: Args, path: Path, text: str, before: os.stat_re
     """Rebind one complete prior-stop receipt without changing task, TODO, or tmux state."""
 
     todo = args.root / "TODO.md"
-    if (
-        path == todo
-        or args.audit_output is None
-        or not args.audit_output.is_absolute()
-        or args.audit_output in {path, todo}
-        or not todo.is_file()
-    ):
+    if path == todo or args.audit_output is None or not args.audit_output.is_absolute() or args.audit_output in {path, todo} or not todo.is_file():
         raise TaskFrontmatterError("park-unlinked re-attestation requires a task, TODO.md, and existing private receipt.")
     validate_private_audit_parent(args.audit_output)
     metadata = parse_task_metadata(text, args.root)
@@ -3055,8 +3445,7 @@ def reattest_park_unlinked(args: Args, path: Path, text: str, before: os.stat_re
                 or len(current_envelope.parts) != 2
                 or current_envelope.parts[0] != current_parts[0]
                 or prior_envelope.name != current_envelope.name
-                or digest_after_locator_rollback(envelope_text, authority_locator, old_locator)
-                != prior["authority_envelope_sha256"]
+                or digest_after_locator_rollback(envelope_text, authority_locator, old_locator) != prior["authority_envelope_sha256"]
             ):
                 raise TaskFrontmatterError("park-unlinked archived envelope does not preserve the prior authoritative envelope.")
             if authoritative_active_target_task_paths(args.root, metadata.runat) != (path,):
@@ -3098,14 +3487,7 @@ def park_unlinked(args: Args, path: Path, text: str, before: os.stat_result) -> 
     if path == todo or not todo.is_file():
         raise TaskFrontmatterError("park-unlinked requires a task file distinct from a regular TODO.md.")
     metadata = parse_task_metadata(text, args.root)
-    if (
-        metadata is None
-        or metadata.status != "blocked"
-        or not metadata.blocked_on
-        or not metadata.pending_task_items
-        or has_pending_marker(text)
-        or metadata.is_manager
-    ):
+    if metadata is None or metadata.status != "blocked" or not metadata.blocked_on or not metadata.pending_task_items or has_pending_marker(text) or metadata.is_manager:
         raise TaskFrontmatterError("park-unlinked requires one blocked non-manager task with a recorded blocker, nonempty queue, and no live pending marker.")
     if TARGET_RE.fullmatch(metadata.runat) is None or metadata.runat.partition(":")[0].startswith("h"):
         raise TaskFrontmatterError("park-unlinked requires one exact non-human historical run target.")
@@ -3123,12 +3505,7 @@ def park_unlinked(args: Args, path: Path, text: str, before: os.stat_result) -> 
             current_before = path.stat()
             current_text = path.read_text(encoding="utf-8")
             current_metadata = parse_task_metadata(current_text, args.root)
-            if (
-                not same_file_state(before, current_before)
-                or current_text != text
-                or current_metadata != metadata
-                or hashlib.sha256(current_text.encode()).hexdigest() != args.expected_task_sha256
-            ):
+            if not same_file_state(before, current_before) or current_text != text or current_metadata != metadata or hashlib.sha256(current_text.encode()).hexdigest() != args.expected_task_sha256:
                 raise TaskFrontmatterError("park-unlinked task changed while the operation was being prepared; retry.")
             excerpt, authority_locator = read_park_authority(args)
             envelope_ref = read_park_authority_envelope(args, excerpt, authority_locator)
@@ -3169,9 +3546,7 @@ def park_unlinked(args: Args, path: Path, text: str, before: os.stat_result) -> 
                     source_section="previous" if prior_stop else "human pending",
                 )
             else:
-                audit_state, initial_todo_digest, proof_commitment = validate_park_audit(
-                    args, path, metadata.runat, authority_locator, envelope_ref, audit_text
-                )
+                audit_state, initial_todo_digest, proof_commitment = validate_park_audit(args, path, metadata.runat, authority_locator, envelope_ref, audit_text)
                 updated_todo = parked_todo_text(
                     args.root,
                     path,
@@ -3207,9 +3582,7 @@ def park_unlinked(args: Args, path: Path, text: str, before: os.stat_result) -> 
                     if symbolic_pane != args.expected_pane_id:
                         raise TaskFrontmatterError("park-unlinked symbolic target rebound to a stale pane id.")
                     if path_artifact_exists(proof_path):
-                        raise TaskFrontmatterError(
-                            "park-unlinked prepared audit has conflicting live-owner and close-proof artifact state."
-                        )
+                        raise TaskFrontmatterError("park-unlinked prepared audit has conflicting live-owner and close-proof artifact state.")
                     proof_secret = secrets.token_hex(32)
                     proof_commitment = hashlib.sha256(proof_secret.encode()).hexdigest()
                     refreshed_audit = park_audit_record(
@@ -3225,26 +3598,19 @@ def park_unlinked(args: Args, path: Path, text: str, before: os.stat_result) -> 
                     replace_private_audit(args.audit_output, audit_text, refreshed_audit)
                     audit_text = refreshed_audit
                 elif not close_proven:
-                    raise TaskFrontmatterError(
-                        "park-unlinked prepared audit requires the exact symbolic owner to remain live; absence or rebind is not proof of a successful stop."
-                    )
+                    raise TaskFrontmatterError("park-unlinked prepared audit requires the exact symbolic owner to remain live; absence or rebind is not proof of a successful stop.")
             elif audit_state == "owner-stopped":
                 if symbolic_pane:
                     raise TaskFrontmatterError("park-unlinked stopped audit found the owner target or pane live again.")
                 if not close_proven:
                     detail = "mismatched" if path_artifact_exists(proof_path) else "missing"
-                    raise TaskFrontmatterError(
-                        f"park-unlinked stopped audit has a {detail} durable guarded-close proof; TODO custody was not changed."
-                    )
+                    raise TaskFrontmatterError(f"park-unlinked stopped audit has a {detail} durable guarded-close proof; TODO custody was not changed.")
 
             session_id = ""
             if audit_state == "prepared" and symbolic_pane:
                 if read_park_authority(args) != (excerpt, authority_locator):
                     raise TaskFrontmatterError("park-unlinked authority changed before pane closure.")
-                if (
-                    read_park_authority_envelope(args, excerpt, authority_locator)
-                    != envelope_ref
-                ):
+                if read_park_authority_envelope(args, excerpt, authority_locator) != envelope_ref:
                     raise TaskFrontmatterError("park-unlinked authority envelope changed before pane closure.")
                 stop_args = StopArgs(
                     metadata.runat,
@@ -3380,12 +3746,7 @@ def close_retired_done(args: Args, path: Path, text: str, before: os.stat_result
         raise TaskFrontmatterError("retired closure source bytes do not match --source-sha256")
     metadata = parse_manager_child_metadata(text, args.root)
     blocked_source = (
-        metadata is not None
-        and metadata.version != V2_VERSION
-        and metadata.status == "blocked"
-        and metadata.runat == "retired"
-        and not metadata.is_manager
-        and not metadata.pending_task_items
+        metadata is not None and metadata.version != V2_VERSION and metadata.status == "blocked" and metadata.runat == "retired" and not metadata.is_manager and not metadata.pending_task_items
     )
     recoverable_intermediate = (
         metadata is not None
@@ -3758,12 +4119,7 @@ def complete_live_no_mail(args: Args, path: Path, text: str, before: os.stat_res
             current_before = path.stat()
             current_text = path.read_text(encoding="utf-8")
             current_metadata = parse_task_metadata(current_text, args.root)
-            if (
-                not same_file_state(before, current_before)
-                or current_text != text
-                or current_metadata != metadata
-                or hashlib.sha256(current_text.encode()).hexdigest() != args.expected_task_sha256
-            ):
+            if not same_file_state(before, current_before) or current_text != text or current_metadata != metadata or hashlib.sha256(current_text.encode()).hexdigest() != args.expected_task_sha256:
                 raise TaskFrontmatterError("live no-mail completion task changed while the operation was being prepared; retry.")
             owners = authoritative_active_target_task_paths(args.root, metadata.runat)
             if owners != (path,):
@@ -3945,12 +4301,7 @@ def close_active_task_tree_no_mail(args: Args, path: Path, text: str, before: os
             protected_metadata = parse_task_metadata(protected_text, args.root)
             todo_before = todo.stat()
             todo_text = todo.read_text(encoding="utf-8")
-            if (
-                not same_file_state(before, current_before)
-                or current_text != text
-                or current_metadata != metadata
-                or hashlib.sha256(current_text.encode()).hexdigest() != args.expected_task_sha256
-            ):
+            if not same_file_state(before, current_before) or current_text != text or current_metadata != metadata or hashlib.sha256(current_text.encode()).hexdigest() != args.expected_task_sha256:
                 raise TaskFrontmatterError("active_task_tree source changed while closure was being prepared; retry.")
             if (
                 protected_metadata is None
@@ -4136,20 +4487,14 @@ def cancel_shared_target_done(args: Args, path: Path, text: str, before: os.stat
     if (
         args.shared_target != "wl:32"
         or authority_locator != "manager_mail/85c5dff58359-1290.txt:3-4"
-        or normalized_authority
-        != "Close the “memory” thing. It is so old.\nWhich email report was for the transcription thing"
+        or normalized_authority != "Close the “memory” thing. It is so old.\nWhich email report was for the transcription thing"
     ):
         raise TaskFrontmatterError("Human cancellation authority does not bind exact Source-1290 and the shared target.")
     protected_text = protected.read_text(encoding="utf-8")
     if hashlib.sha256(protected_text.encode()).hexdigest() != args.protected_shared_sha256:
         raise TaskFrontmatterError("protected shared-target task bytes changed.")
     protected_metadata = parse_task_metadata(protected_text, args.root)
-    if (
-        protected_metadata is None
-        or protected_metadata.version == V2_VERSION
-        or protected_metadata.status == "done"
-        or protected_metadata.runat != args.shared_target
-    ):
+    if protected_metadata is None or protected_metadata.version == V2_VERSION or protected_metadata.status == "done" or protected_metadata.runat != args.shared_target:
         raise TaskFrontmatterError("protected shared-target task is not the exact distinct active owner.")
     prior_audit = read_private_audit(args.audit_output)
     already_complete = False
@@ -4178,9 +4523,7 @@ def cancel_shared_target_done(args: Args, path: Path, text: str, before: os.stat
                 protected_rows.append((section, line))
         if protected_rows != [("current", "transcription_sw.md wl:32")]:
             raise TaskFrontmatterError("protected shared-target TODO row is missing, duplicated, malformed, or misplaced.")
-        updated_todo = reconcile_todo_text(
-            args.root, path, todo_text, args.shared_target, "previous", ("current", "human pending")
-        )
+        updated_todo = reconcile_todo_text(args.root, path, todo_text, args.shared_target, "previous", ("current", "human pending"))
         queue = list(metadata.pending_task_items)
         queue_text = yaml.safe_dump(queue, sort_keys=False)
         queue_sha256 = hashlib.sha256(queue_text.encode()).hexdigest()
@@ -4232,12 +4575,28 @@ def cancel_shared_target_done(args: Args, path: Path, text: str, before: os.stat
         if not isinstance(prepared_record, dict):
             raise TaskFrontmatterError("shared-target cancellation audit is not one mapping.")
         expected_keys = {
-            "version", "operation", "state", "task", "task_sha256", "source_task_text",
-            "cancelled_pending_items", "cancelled_pending_items_sha256", "prior_blocker",
-            "shared_target", "protected_task", "protected_task_sha256", "todo_sha256",
-            "source_todo_text", "authority", "authority_sha256", "authority_envelope",
-            "authority_envelope_sha256", "committed_task_sha256", "committed_task_text",
-            "committed_todo_sha256", "committed_todo_text",
+            "version",
+            "operation",
+            "state",
+            "task",
+            "task_sha256",
+            "source_task_text",
+            "cancelled_pending_items",
+            "cancelled_pending_items_sha256",
+            "prior_blocker",
+            "shared_target",
+            "protected_task",
+            "protected_task_sha256",
+            "todo_sha256",
+            "source_todo_text",
+            "authority",
+            "authority_sha256",
+            "authority_envelope",
+            "authority_envelope_sha256",
+            "committed_task_sha256",
+            "committed_task_text",
+            "committed_todo_sha256",
+            "committed_todo_text",
         }
         if already_complete:
             expected_keys.add("final-result")
@@ -4268,8 +4627,7 @@ def cancel_shared_target_done(args: Args, path: Path, text: str, before: os.stat
             or not all(isinstance(item, str) and item for item in queue)
             or not isinstance(prior_blocker, str)
             or not prior_blocker
-            or hashlib.sha256(yaml.safe_dump(queue, sort_keys=False).encode()).hexdigest()
-            != prepared_record.get("cancelled_pending_items_sha256")
+            or hashlib.sha256(yaml.safe_dump(queue, sort_keys=False).encode()).hexdigest() != prepared_record.get("cancelled_pending_items_sha256")
         ):
             raise TaskFrontmatterError("shared-target cancellation audit lost its queue or blocker evidence.")
         text_fields = ("source_task_text", "source_todo_text", "committed_task_text", "committed_todo_text")
@@ -4308,13 +4666,9 @@ def cancel_shared_target_done(args: Args, path: Path, text: str, before: os.stat
                 protected_rows.append((section, line))
         if protected_rows != [("current", "transcription_sw.md wl:32")]:
             raise TaskFrontmatterError("shared-target cancellation audit source TODO does not preserve the exact protected row.")
-        canonical_todo = reconcile_todo_text(
-            args.root, path, todo_text, args.shared_target, "previous", ("current", "human pending")
-        )
+        canonical_todo = reconcile_todo_text(args.root, path, todo_text, args.shared_target, "previous", ("current", "human pending"))
         queue_sha256 = hashlib.sha256(yaml.safe_dump(queue, sort_keys=False).encode()).hexdigest()
-        canonical_task = update_frontmatter_status(
-            cleared_pending_task_text(text, args.root), "done", "", args.root
-        ).rstrip("\n")
+        canonical_task = update_frontmatter_status(cleared_pending_task_text(text, args.root), "done", "", args.root).rstrip("\n")
         canonical_note = (
             f"(verified cancelled pending items under Human authority {authority_locator}; "
             f"prior queue preserved in owner-private audit {args.audit_output}; "
@@ -4368,9 +4722,7 @@ def cancel_shared_target_done(args: Args, path: Path, text: str, before: os.stat
                             try:
                                 replace_if_unchanged_locked(todo, todo_text, todo.stat())
                             except Exception as rollback_error:
-                                raise TaskFrontmatterError(
-                                    f"shared-target cancellation task write failed and TODO rollback also failed: {rollback_error}"
-                                ) from task_error
+                                raise TaskFrontmatterError(f"shared-target cancellation task write failed and TODO rollback also failed: {rollback_error}") from task_error
                         raise
     except Exception:
         raise
@@ -4378,8 +4730,7 @@ def cancel_shared_target_done(args: Args, path: Path, text: str, before: os.stat
         finish_private_audit(args.audit_output, prepared_audit, "success")
     except Exception as audit_error:
         print(
-            "omo_task_status.py: shared-target cancellation committed; audit remains prepared "
-            f"because finalization failed: {audit_error}",
+            f"omo_task_status.py: shared-target cancellation committed; audit remains prepared because finalization failed: {audit_error}",
             file=sys.stderr,
         )
     return args.shared_target
@@ -4531,7 +4882,9 @@ def reconcile_previous_blocked_index(args: Args, path: Path, text: str, before: 
         base_headers_valid = headers["current"] == headers["human pending"] == headers["previous"] == 1
         low_priority_headers_valid = headers["low priority"] <= 1 and (task_sections != ["low priority"] or headers["low priority"] == 1)
         if not base_headers_valid or not low_priority_headers_valid or invalid_headers:
-            raise TaskFrontmatterError("blocked index reconciliation requires one canonical current, human pending, and previous TODO section, plus one canonical low priority section when it contains the source row.")
+            raise TaskFrontmatterError(
+                "blocked index reconciliation requires one canonical current, human pending, and previous TODO section, plus one canonical low priority section when it contains the source row."
+            )
         updated_todo = reconcile_todo_text(args.root, path, todo_text, metadata.runat, "human pending", ("previous", "low priority"))
         if updated_todo == todo_text:
             raise TaskFrontmatterError("blocked index reconciliation requires the sole TODO row to move from previous or low priority to human pending.")
@@ -4582,7 +4935,7 @@ def exact_dependency_todo_rows(
     dependency_row = f"{relative_task_ref(root, dependency)} {dependency_target}"
     if headers != {"current": 1, "human pending": 1}:
         raise TaskFrontmatterError("dependency-blocked current reconciliation requires one canonical current and human pending TODO section.")
-    if source_rows not in ([('human pending', source_row)], [('current', source_row)]):
+    if source_rows not in ([("human pending", source_row)], [("current", source_row)]):
         raise TaskFrontmatterError("dependency-blocked current reconciliation requires one exact source row in human pending or current.")
     if dependency_rows != [("current", dependency_row)]:
         raise TaskFrontmatterError("dependency-blocked current reconciliation requires one exact active dependency row in current.")
@@ -4743,9 +5096,12 @@ def mark_done_bookkeeping_failed(root: Path, path: Path, exc: Exception) -> None
     replace_if_unchanged(path, rollback, rollback_before)
 
 
-def finish_done_transaction(root: Path, path: Path, text: str, before: os.stat_result, *, locked: bool = False, todo_text: str | None = None, prepared_todo: str | None = None, todo_before: os.stat_result | None = None) -> tuple[os.stat_result, os.stat_result | None]:
+def finish_done_transaction(
+    root: Path, path: Path, text: str, before: os.stat_result, *, locked: bool = False, todo_text: str | None = None, prepared_todo: str | None = None, todo_before: os.stat_result | None = None
+) -> tuple[os.stat_result, os.stat_result | None]:
     """Atomically replace each bookkeeping file and roll back `TODO.md` if the task replacement fails."""
     replace_file = replace_if_unchanged_locked if locked else replace_if_unchanged
+
     def replaced_state(replaced_path: Path, replacement_text: str, expected: os.stat_result) -> os.stat_result:
         state = replace_file(replaced_path, replacement_text, expected)
         return state if state is not None else replaced_path.stat()
@@ -4779,7 +5135,9 @@ def finish_done_transaction(root: Path, path: Path, text: str, before: os.stat_r
     return moved_task_state, moved_todo_state
 
 
-def finish_done_transaction_published(root: Path, path: Path, text: str, before: os.stat_result, *, todo_text: str, prepared_todo: str, todo_before: os.stat_result) -> tuple[PublishedFile, PublishedFile]:
+def finish_done_transaction_published(
+    root: Path, path: Path, text: str, before: os.stat_result, *, todo_text: str, prepared_todo: str, todo_before: os.stat_result
+) -> tuple[PublishedFile, PublishedFile]:
     """Publish task and TODO replacements while holding open descriptors to both new files."""
     todo = root / "TODO.md"
     if not todo.exists():
@@ -5135,15 +5493,10 @@ def private_evidence_bytes(path: Path, expected_sha256: str, field: str) -> byte
 def validate_report_transaction_evidence(record: object, *, expected_task: Path, expected_target: str) -> bytes:
     """Authenticate one immutable report allocation, commitment, and routed envelope."""
 
-    if not isinstance(record, dict) or set(record) != {
-        "commitment", "commitment_sha256", "envelope", "envelope_sha256", "report", "report_sha256"
-    }:
+    if not isinstance(record, dict) or set(record) != {"commitment", "commitment_sha256", "envelope", "envelope_sha256", "report", "report_sha256"}:
         raise TaskFrontmatterError("manager-consumed report transaction schema is invalid.")
     paths = {name: Path(str(record[name])) for name in ("commitment", "envelope", "report")}
-    payloads = {
-        name: private_evidence_bytes(paths[name], str(record[f"{name}_sha256"]), name)
-        for name in ("commitment", "envelope", "report")
-    }
+    payloads = {name: private_evidence_bytes(paths[name], str(record[f"{name}_sha256"]), name) for name in ("commitment", "envelope", "report")}
     try:
         commitment = json.loads(payloads["commitment"])
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -5271,18 +5624,14 @@ def validate_manager_consumed_report(
     }
     if any(receipt.get(key) != value for key, value in exact.items()):
         raise TaskFrontmatterError("manager-consumed report receipt does not bind this exact close.")
-    worker_message = validate_report_transaction_evidence(
-        receipt["worker_report"], expected_task=path, expected_target=args.active_target
-    )
+    worker_message = validate_report_transaction_evidence(receipt["worker_report"], expected_task=path, expected_target=args.active_target)
     manager_record = receipt["manager_acceptance"]
     if not isinstance(manager_record, dict) or set(manager_record) != {"task", "task_sha256", "target", "transaction"}:
         raise TaskFrontmatterError("manager-consumed report manager acceptance is invalid.")
     manager_task = Path(str(manager_record.get("task")))
     manager_target = str(manager_record.get("target"))
     manager_transaction = manager_record.get("transaction")
-    manager_message = validate_report_transaction_evidence(
-        manager_transaction, expected_task=manager_task, expected_target=manager_target
-    )
+    manager_message = validate_report_transaction_evidence(manager_transaction, expected_task=manager_task, expected_target=manager_target)
     try:
         manager_before = manager_task.lstat()
         manager_text = manager_task.read_text(encoding="utf-8")
@@ -5341,11 +5690,7 @@ def validate_consumed_closure_attestation(
     _ = bound_json_id(attestation, "attestation_id")
     transfer = attestation.get("transfer_receipt")
     input_info = attestation.get("input")
-    if (
-        not isinstance(transfer, dict)
-        or not isinstance(input_info, dict)
-        or set(input_info) != {"sha256", "size_bytes"}
-    ):
+    if not isinstance(transfer, dict) or not isinstance(input_info, dict) or set(input_info) != {"sha256", "size_bytes"}:
         raise TaskFrontmatterError("manager-consumed report attestation is malformed.")
     authority = transfer.get("authority")
     queue_item = transfer.get("queue_item")
@@ -5454,16 +5799,11 @@ def validate_consumed_closure_attestation(
     elif "acceptance" in attestation:
         raise TaskFrontmatterError("manager-consumed report acceptance binding is invalid.")
     if archived:
-        if not isinstance(archive, dict) or set(archive) != {
-            "git_provenance", "original_task", "schema", "task", "task_ref", "task_sha256", "todo",
-            "todo_reference_count", "todo_sha256"
-        }:
+        if not isinstance(archive, dict) or set(archive) != {"git_provenance", "original_task", "schema", "task", "task_ref", "task_sha256", "todo", "todo_reference_count", "todo_sha256"}:
             raise TaskFrontmatterError("manager-consumed report archive custody is invalid.")
         git_provenance = archive.get("git_provenance")
         terminal_transition = (
-            archive.get("schema") == "omo-report-terminal-task-custody/v1"
-            and isinstance(git_provenance, dict)
-            and git_provenance.get("schema") == "omo-report-terminal-task-transition/v1"
+            archive.get("schema") == "omo-report-terminal-task-custody/v1" and isinstance(git_provenance, dict) and git_provenance.get("schema") == "omo-report-terminal-task-transition/v1"
         )
         commitment_binding = git_provenance.get("commitment_binding") if isinstance(git_provenance, dict) else None
         session_binding = (
@@ -5476,9 +5816,7 @@ def validate_consumed_closure_attestation(
             else None
         )
         monthly_archive = (
-            archive.get("schema") == "omo-report-archived-task-custody/v1"
-            and isinstance(git_provenance, dict)
-            and git_provenance.get("schema") == "omo-report-archived-task-git-provenance/v1"
+            archive.get("schema") == "omo-report-archived-task-custody/v1" and isinstance(git_provenance, dict) and git_provenance.get("schema") == "omo-report-archived-task-git-provenance/v1"
         )
         todo_path = args.root / "TODO.md"
         try:
@@ -5623,10 +5961,7 @@ def owned_regular_text_beneath(root: Path, path: Path, field: str) -> str:
         result = os.read(fd, MAX_AUTHORITY_BYTES + 1)
         after = os.fstat(fd)
         current = os.stat(path, follow_symlinks=False)
-        current_directories = [
-            (opened, os.stat(lexical, follow_symlinks=False))
-            for lexical, opened in directory_identities
-        ]
+        current_directories = [(opened, os.stat(lexical, follow_symlinks=False)) for lexical, opened in directory_identities]
     except OSError as exc:
         raise TaskFrontmatterError(f"manager-consumed report {field} is unavailable: {exc}") from exc
     finally:
@@ -5641,12 +5976,7 @@ def owned_regular_text_beneath(root: Path, path: Path, field: str) -> str:
         or not stat.S_ISREG(current.st_mode)
         or current.st_uid != os.getuid()
         or current.st_nlink != 1
-        or any(
-            (opened.st_dev, opened.st_ino) != (observed.st_dev, observed.st_ino)
-            or not stat.S_ISDIR(observed.st_mode)
-            or observed.st_uid != os.getuid()
-            for opened, observed in current_directories
-        )
+        or any((opened.st_dev, opened.st_ino) != (observed.st_dev, observed.st_ino) or not stat.S_ISDIR(observed.st_mode) or observed.st_uid != os.getuid() for opened, observed in current_directories)
         or len(result) != before.st_size
         or len(result) > MAX_AUTHORITY_BYTES
     ):
@@ -5697,10 +6027,7 @@ def describe_done_live_no_mail(args: Args, path: Path, text: str, before: os.sta
     if prevalidated_attestation is None or manager_path is None:
         raise TaskFrontmatterError("done-live evidence requires one exported consumed-closure attestation.")
     custody = prevalidated_attestation.get("archive_custody")
-    monthly_archive = (
-        isinstance(custody, dict)
-        and custody.get("schema") == "omo-report-archived-task-custody/v1"
-    )
+    monthly_archive = isinstance(custody, dict) and custody.get("schema") == "omo-report-archived-task-custody/v1"
     terminal_evidence = bound_json_id(prevalidated_attestation, "attestation_id")
     with root_membership_lock(args.root), task_target_lock(args.root, args.active_target):
         with ExitStack() as locks:
@@ -5810,15 +6137,25 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
     """Close one already-done live worker without mail or lifecycle reopening."""
 
     other_modes = (
-        args.finish_closed_done, args.finish_replaced_done, args.recover_exited_shell_done,
-        args.park_unlinked, args.reattest_park_unlinked, args.retire_blocked_target,
-        args.reconcile_missing_target, args.close_missing_target,
-        args.complete_live_no_mail, args.close_active_task_tree_no_mail,
+        args.finish_closed_done,
+        args.finish_replaced_done,
+        args.recover_exited_shell_done,
+        args.park_unlinked,
+        args.reattest_park_unlinked,
+        args.retire_blocked_target,
+        args.reconcile_missing_target,
+        args.close_missing_target,
+        args.complete_live_no_mail,
+        args.close_active_task_tree_no_mail,
         args.reconcile_long_running_human_index,
-        args.reconcile_blocked_index, args.reconcile_dependency_blocked_current,
+        args.reconcile_blocked_index,
+        args.reconcile_dependency_blocked_current,
         args.restore_terminal_target,
-        args.close_shared_target, args.cancel_shared_target, args.close_retired_done,
-        args.normalize_retired_todo, args.normalize_low_priority_current,
+        args.close_shared_target,
+        args.cancel_shared_target,
+        args.close_retired_done,
+        args.normalize_retired_todo,
+        args.normalize_low_priority_current,
         args.describe_done_live_no_mail,
     )
     if (
@@ -5840,10 +6177,7 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
         or args.audit_output is None
         or not args.audit_output.is_absolute()
         or bool(args.manager_consumed_report_receipt) != bool(args.manager_consumed_report_receipt_sha256)
-        or (
-            args.manager_consumed_report_receipt is not None
-            and SHA256_RE.fullmatch(args.manager_consumed_report_receipt_sha256) is None
-        )
+        or (args.manager_consumed_report_receipt is not None and SHA256_RE.fullmatch(args.manager_consumed_report_receipt_sha256) is None)
     ):
         raise TaskFrontmatterError("done-live close arguments do not satisfy the exact no-mail recovery contract.")
     todo = args.root / "TODO.md"
@@ -5894,15 +6228,9 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
             archived_task_payload = original_text.encode()
     if prevalidated_attestation is None:
         prevalidated_attestation, manager_path = prevalidate_manager_consumed_export(args, path)
-    archived = (
-        prevalidated_attestation is not None
-        and prevalidated_attestation.get("archive_custody") is not None
-    )
+    archived = prevalidated_attestation is not None and prevalidated_attestation.get("archive_custody") is not None
     custody = prevalidated_attestation.get("archive_custody") if prevalidated_attestation is not None else None
-    monthly_archive = (
-        isinstance(custody, dict)
-        and custody.get("schema") == "omo-report-archived-task-custody/v1"
-    )
+    monthly_archive = isinstance(custody, dict) and custody.get("schema") == "omo-report-archived-task-custody/v1"
     locked_paths = {path, todo}
     if manager_path is not None:
         locked_paths.add(manager_path)
@@ -5916,10 +6244,7 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
             todo_text = todo.read_text(encoding="utf-8")
             if not same_file_state(before, current_before) or current_text != text:
                 raise TaskFrontmatterError("done-live close task changed while the operation was being prepared; retry.")
-            if (
-                (archived_task_payload is None or not monthly_archive)
-                and hashlib.sha256(todo_text.encode()).hexdigest() != args.expected_todo_sha256
-            ):
+            if (archived_task_payload is None or not monthly_archive) and hashlib.sha256(todo_text.encode()).hexdigest() != args.expected_todo_sha256:
                 raise TaskFrontmatterError("done-live close TODO bytes do not match --expected-todo-sha256.")
             manager_consumed = validate_manager_consumed_report(args, path, prevalidated_attestation, archived_task_payload)
             audit_text = read_private_audit(audit_path)
@@ -5943,21 +6268,10 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                 reserve_private_audit(audit_path, audit_text)
             assert audit is not None and audit_text is not None
             close_audit = audit
-            if close_audit.manager_consumed_receipt_sha256 and (
-                not manager_consumed
-                or close_audit.manager_consumed_receipt_sha256 != args.manager_consumed_report_receipt_sha256
-            ):
+            if close_audit.manager_consumed_receipt_sha256 and (not manager_consumed or close_audit.manager_consumed_receipt_sha256 != args.manager_consumed_report_receipt_sha256):
                 raise TaskFrontmatterError("done-live close manager-consumed receipt changed after authentication.")
-            validate_terminal_shell = (
-                validate_exited_codex_shell_with_consumed_report
-                if manager_consumed
-                else validate_exited_codex_shell
-            )
-            terminalize_to_shell = (
-                terminalize_bound_codex_to_shell_with_consumed_report
-                if manager_consumed
-                else terminalize_bound_codex_to_shell
-            )
+            validate_terminal_shell = validate_exited_codex_shell_with_consumed_report if manager_consumed else validate_exited_codex_shell
+            terminalize_to_shell = terminalize_bound_codex_to_shell_with_consumed_report if manager_consumed else terminalize_bound_codex_to_shell
 
             def advance_audit(updated: DoneLiveCloseAudit) -> None:
                 nonlocal close_audit, audit_text
@@ -5989,12 +6303,7 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                 validate_done_live_ownership(args.root, path, args.active_target)
                 if manager_consumed:
                     validation_task_payload = archived_task_payload
-                    if (
-                        validation_task_payload is None
-                        and archived
-                        and close_audit.state in {"note-prepared", "complete"}
-                        and current_text == text + close_audit.close_note
-                    ):
+                    if validation_task_payload is None and archived and close_audit.state in {"note-prepared", "complete"} and current_text == text + close_audit.close_note:
                         validation_task_payload = text.encode()
                     _ = validate_manager_consumed_report(
                         args,
@@ -6019,9 +6328,7 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                         replace(
                             close_audit,
                             state="prepared",
-                            manager_consumed_receipt_sha256=(
-                                args.manager_consumed_report_receipt_sha256 if manager_consumed else ""
-                            ),
+                            manager_consumed_receipt_sha256=(args.manager_consumed_report_receipt_sha256 if manager_consumed else ""),
                         )
                     )
                 elif close_audit.state != "prepared":
@@ -6151,11 +6458,7 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
 
             if close_audit.state == "owner-stopped":
                 terminalized_sha256 = terminalized_done_live_audit_sha256(args, path, close_audit)
-                if (
-                    not has_bound_close_proof(proof_path, close_audit.close_proof_commitment, terminalized_sha256)
-                    or path_artifact_exists(started_path)
-                    or done_live_pane_state(args) != "absent"
-                ):
+                if not has_bound_close_proof(proof_path, close_audit.close_proof_commitment, terminalized_sha256) or path_artifact_exists(started_path) or done_live_pane_state(args) != "absent":
                     raise TaskFrontmatterError("done-live close stopped state lacks exact durable absence evidence.")
                 unchanged_evidence()
                 note = close_note(args.active_target, args.expected_session_id)
@@ -6164,11 +6467,7 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
 
             if close_audit.state == "note-prepared":
                 terminalized_sha256 = terminalized_done_live_audit_sha256(args, path, close_audit)
-                if (
-                    not has_bound_close_proof(proof_path, close_audit.close_proof_commitment, terminalized_sha256)
-                    or path_artifact_exists(started_path)
-                    or done_live_pane_state(args) != "absent"
-                ):
+                if not has_bound_close_proof(proof_path, close_audit.close_proof_commitment, terminalized_sha256) or path_artifact_exists(started_path) or done_live_pane_state(args) != "absent":
                     raise TaskFrontmatterError("done-live close note state lacks exact durable absence evidence.")
                 validate_done_live_task(args, current_text, close_audit)
                 current_sha256 = hashlib.sha256(current_text.encode()).hexdigest()
@@ -6184,11 +6483,7 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
             if close_audit.state != "complete":
                 raise TaskFrontmatterError("done-live close audit did not reach its complete state.")
             terminalized_sha256 = terminalized_done_live_audit_sha256(args, path, close_audit)
-            if (
-                not has_bound_close_proof(proof_path, close_audit.close_proof_commitment, terminalized_sha256)
-                or path_artifact_exists(started_path)
-                or done_live_pane_state(args) != "absent"
-            ):
+            if not has_bound_close_proof(proof_path, close_audit.close_proof_commitment, terminalized_sha256) or path_artifact_exists(started_path) or done_live_pane_state(args) != "absent":
                 raise TaskFrontmatterError("done-live close completion lost its durable close proof or absence.")
             unchanged_evidence()
             validate_done_live_task(args, current_text, close_audit)
@@ -6274,16 +6569,13 @@ def finish_closed_done(args: Args, path: Path, text: str, before: os.stat_result
         raise TaskFrontmatterError("task file has no frontmatter.")
     ensure_manager_has_no_active_children(args.root, path, metadata)
     matching_close_note = has_close_note(text, metadata.runat, args.session_id)
-    verified_already_closed = (
-        not metadata.is_manager
-        and is_close_failed_reason(metadata.blocked_on)
-        and not exact_pane_id(metadata.runat)
-        and task_is_in_todo_section(args.root, path, "previous")
-    )
+    verified_already_closed = not metadata.is_manager and is_close_failed_reason(metadata.blocked_on) and not exact_pane_id(metadata.runat) and task_is_in_todo_section(args.root, path, "previous")
     close_session_id = "" if verified_already_closed else args.session_id
-    retryable_blocker = is_bookkeeping_failed_reason(metadata.blocked_on) or (
-        matching_close_note and (metadata.blocked_on == DONE_CLOSE_IN_PROGRESS or is_close_failed_reason(metadata.blocked_on))
-    ) or verified_already_closed
+    retryable_blocker = (
+        is_bookkeeping_failed_reason(metadata.blocked_on)
+        or (matching_close_note and (metadata.blocked_on == DONE_CLOSE_IN_PROGRESS or is_close_failed_reason(metadata.blocked_on)))
+        or verified_already_closed
+    )
     if metadata.status != "blocked" or not retryable_blocker:
         raise TaskFrontmatterError("--finish-closed-done requires failed close bookkeeping or a matching prior-close note on a failed close.")
     bookkept = text if matching_close_note else text.rstrip("\n") + close_note(metadata.runat, close_session_id)
@@ -6316,9 +6608,7 @@ def recover_exited_shell_done(args: Args, path: Path, text: str, before: os.stat
                 raise TaskFrontmatterError("task changed while exited-shell recovery was being prepared; retry after rereading it.")
             if metadata.is_manager:
                 raise TaskFrontmatterError("--recover-exited-shell-done supports non-manager tasks only.")
-            if metadata.status != "blocked" or metadata.blocked_on != (
-                f"{CLOSE_FAILED_PREFIX}: target is not a supported live Codex pane: {args.pane_id} status=not_codex"
-            ):
+            if metadata.status != "blocked" or metadata.blocked_on != (f"{CLOSE_FAILED_PREFIX}: target is not a supported live Codex pane: {args.pane_id} status=not_codex"):
                 raise TaskFrontmatterError("task does not have the exact exited-shell done-close failure for the supplied pane id.")
             _ = update_frontmatter_status(current_text, "done", "", args.root)
             owners = authoritative_active_target_task_paths(args.root, metadata.runat)

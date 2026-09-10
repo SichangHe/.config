@@ -2351,6 +2351,12 @@ def execute(args: argparse.Namespace) -> None:
             prior_controls=prior_close_control_paths(prior_complete, prior_prepared),
         )
 
+        if {
+            Path(str(todo_recovery["source1485_root_audit"])).resolve(strict=True),
+            Path(str(todo_recovery["current_manager_task"])).resolve(strict=True),
+        } & ({prepared_path, complete_path, recovery_path, recovery_review_path} | reserved):
+            raise TaskFrontmatterError("TODO recovery paths overlap immutable evidence or disposition outputs.")
+
     with (
         tmux_input_lock(predecessor.target),
         task_target_lock(root, predecessor.target),

@@ -27,6 +27,7 @@ from omo_manager.omo_codex_start import (
     HCFG_RESTART_AUTHORITY_SHA256,
     HCFG_RESTART_TASK_FILE,
     LEGACY_FAILED_ROTATION_AUDIT_FIELDS,
+    LEGACY_SESSION_META_TIMESTAMPS,
     Pane,
     RECOVERY_EVENT_DIRNAME,
     RECOVERY_RECEIPT_DIRNAME,
@@ -1940,6 +1941,17 @@ class CodexStartTests(unittest.TestCase):
             self.assertIn(f"rollout-device: {rollout_info.st_dev}\nrollout-inode: {rollout_info.st_ino}\n", receipt)
             self.assertIn("rollout-holder-pid: 5253\nrollout-holder-start-ticks: 7002\nrollout-fd: 56\n", receipt)
             self.assertIn(f"current-session-id: {session_id}\nfinal-result: success\n", receipt)
+
+    def test_source1578_legacy_session_timestamp_binding_is_exact(self) -> None:
+        key = (
+            "f102332fa802984aa88118cc9071b360363d7b2403788d982cd621d698d29efc",
+            "fbb39548b0ee18f1b26485dc61ab373bbba2c33e6ef351cbfca57f2fa15f0555",
+        )
+        self.assertEqual(
+            ("2026-09-09T19:59:52.640Z", "2026-09-09T19:56:52.620Z"),
+            LEGACY_SESSION_META_TIMESTAMPS[key],
+        )
+        self.assertNotIn((key[0], "0" * 64), LEGACY_SESSION_META_TIMESTAMPS)
 
     def test_process_held_rollout_reconciliation_fails_closed_on_ambiguous_or_unbound_sources(self) -> None:
         cases = (

@@ -1,0 +1,34 @@
+# transferred manager close
+
+- scope
+  - exact `dw_tree_replace.md` manager at `config:2`
+  - exact stale `dw_rotate_repair.md` record at the same target
+  - exact replacement `cleanup_dw_tree.md` at `config:1`
+- prepare
+  - authenticate Source-1492 line 5 naming `config:2`
+  - prove the historical ordered queue occurs once, contiguously, and unchanged in the replacement queue
+  - prove every historical direct child now reports to the replacement target
+  - resolve the live Codex UUID through a guarded fresh `/status` response and reject a caller-supplied session mismatch
+  - bind task, TODO, Git, pane, process, session, and protected-target identities
+  - write an owner-private immutable packet without mutation
+- independent review
+  - run `verify-live-session` against the exact immutable packet so review authenticates the current live UUID, not only UUID syntax
+  - include that exact UUID as `session_id` in the authenticated PASS body alongside `schema`, `verdict`, and `packet_sha256`
+  - hold every packet input stable until execution consumes the authenticated PASS
+- execute
+  - require an authenticated PASS from neither source nor replacement
+  - revalidate every packet input under task and target locks
+  - resolve and compare the live session again before publishing the prepared audit, so stale-session failure leaves no transaction artifact
+  - publish a durable prepared audit before the guarded session-bound stop
+  - use that audit as the exact capability for a durable close proof, including held-input and protected-target checks before every pane input
+  - close only the bound source pane
+  - mark both same-target records done and move their TODO rows to targetless `previous`
+  - require the close proof for recovery after pane absence, preserve recoverability after a partial metadata write, and retire the proof after the committed audit
+- pre-interrupt abandonment
+  - use `abandon-prepared` only when execution published the exact prepared audit but no close-start marker, owner-stopped proof, committed audit, or closure-specific task/TODO mutation exists
+  - tolerate unrelated later TODO bookkeeping only when the exact source/stale custody rows and sole source/replacement ownership still match; record both packet and observed TODO digests
+  - preserve the prepared audit and publish a bound `.abandoned` disposition recording the stale packet UUID and freshly resolved live UUID
+  - permanently reject execution of a packet with a matching abandonment record
+- exclusions
+  - Human-owned targets, PCODX, domain collectors, providers, or project repositories
+  - inferred authority, reordered or duplicated queue transfer, child-report drift, or protected-target drift

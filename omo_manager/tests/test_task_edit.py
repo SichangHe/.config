@@ -471,9 +471,7 @@ class TaskEditTests(unittest.TestCase):
                 self.assertEqual(0, run(Args(root, Path("task.md"), "summary")))
             self.assertIn("  - fresh residual review: exact bookkeeping candidate\n", summary.getvalue())
 
-            with patch("omo_manager.omo_task_edit.require_owner_completion", return_value=True), patch(
-                "omo_manager.omo_task_edit.plan_completion_email", return_value=None
-            ):
+            with patch("omo_manager.omo_task_edit.require_owner_completion", return_value=True), patch("omo_manager.omo_task_edit.plan_completion_email", return_value=None):
                 self.assertEqual(
                     0,
                     run(
@@ -581,11 +579,12 @@ class TaskEditTests(unittest.TestCase):
             stdout = io.StringIO()
 
             email = object()
-            with patch("omo_manager.omo_task_edit.require_owner_completion", return_value=True), patch(
-                "omo_manager.omo_task_edit.plan_completion_email", return_value=email
-            ) as plan, patch(
-                "omo_manager.omo_task_edit.send_completion_email", return_value=True
-            ) as send, redirect_stdout(stdout):
+            with (
+                patch("omo_manager.omo_task_edit.require_owner_completion", return_value=True),
+                patch("omo_manager.omo_task_edit.plan_completion_email", return_value=email) as plan,
+                patch("omo_manager.omo_task_edit.send_completion_email", return_value=True) as send,
+                redirect_stdout(stdout),
+            ):
                 exit_code = run(Args(root, Path("task.md"), "pending-remove", items=("finish review",), evidence="review passed"))
 
             self.assertEqual(0, exit_code)
@@ -614,14 +613,15 @@ class TaskEditTests(unittest.TestCase):
                 evidence="review passed",
                 completion_key="e" * 64,
             )
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
-                "omo_manager.omo_completion_email.current_active_task", return_value=manager
-            ), patch("omo_manager.omo_tmux_send.send_system_to_codex") as queue, redirect_stderr(io.StringIO()):
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=manager),
+                patch("omo_manager.omo_tmux_send.send_system_to_codex") as queue,
+                redirect_stderr(io.StringIO()),
+            ):
                 self.assertEqual(2, run(args))
                 self.assertEqual(original, task.read_text(encoding="utf-8"))
-                with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch(
-                    "omo_manager.omo_completion_email.subprocess.run"
-                ) as email:
+                with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch("omo_manager.omo_completion_email.subprocess.run") as email:
                     plan = build_completion_email(
                         root,
                         task,
@@ -753,7 +753,10 @@ class TaskEditTests(unittest.TestCase):
                 )
 
             self.assertEqual(0, exit_code)
-            expected_text = task_frontmatter() + "body\nrequest that needs no new item\n(pending marker cleared line=11: report-only: handled in existing item)\n(human ack sent for pending marker clear line=11: report-only: handled in existing item)\n"
+            expected_text = (
+                task_frontmatter()
+                + "body\nrequest that needs no new item\n(pending marker cleared line=11: report-only: handled in existing item)\n(human ack sent for pending marker clear line=11: report-only: handled in existing item)\n"
+            )
             self.assertEqual(expected_text, task.read_text(encoding="utf-8"))
             self.assertEqual([("Re: Existing thread\n", "No pending item was added.\nClassification: report-only\nReason: handled in existing item\n")], calls)
 
@@ -800,7 +803,10 @@ class TaskEditTests(unittest.TestCase):
                 self.assertEqual(0, run(args))
 
             self.assertEqual(1, len(commands))
-            self.assertEqual(task_frontmatter() + "FYI only\n(pending marker cleared line=10: report-only: FYI only)\n(human ack sent for pending marker clear line=10: report-only: FYI only)\n", task.read_text(encoding="utf-8"))
+            self.assertEqual(
+                task_frontmatter() + "FYI only\n(pending marker cleared line=10: report-only: FYI only)\n(human ack sent for pending marker clear line=10: report-only: FYI only)\n",
+                task.read_text(encoding="utf-8"),
+            )
 
     def test_pending_marker_clear_human_ack_requires_clear_kind(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -838,7 +844,10 @@ class TaskEditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task = root / "task.md"
-            text = task_frontmatter() + "body\n(pending)\nnew request\n(pending marker cleared line=11: report-only: old request)\n(human ack sent for pending marker clear line=11: report-only: old request)\n"
+            text = (
+                task_frontmatter()
+                + "body\n(pending)\nnew request\n(pending marker cleared line=11: report-only: old request)\n(human ack sent for pending marker clear line=11: report-only: old request)\n"
+            )
             task.write_text(text, encoding="utf-8")
             pending_line = text.splitlines().index("(pending)") + 1
             calls: list[list[str]] = []
@@ -954,10 +963,7 @@ class TaskEditTests(unittest.TestCase):
             ref = "manager_mail/691.txt"
             pointer = f"(record and delegate {ref})"
             task.write_text(
-                task_frontmatter()
-                + f"{pointer}\n\n{pointer}\n"
-                + "(verified removed pending item: original reply sent)\n"
-                + f"\n{pointer}\n",
+                task_frontmatter() + f"{pointer}\n\n{pointer}\n" + "(verified removed pending item: original reply sent)\n" + f"\n{pointer}\n",
                 encoding="utf-8",
             )
 
@@ -1361,9 +1367,7 @@ class TaskEditTests(unittest.TestCase):
         self.assertEqual(("new",), parse_args(["add", "task.md", "--agent", "--item", "new"]).items)
         self.assertEqual(
             "pending-remove",
-            parse_args(
-                ["remove", "task.md", "--item", "old", "--evidence", "done", "--completion-key", "a" * 64]
-            ).command,
+            parse_args(["remove", "task.md", "--item", "old", "--evidence", "done", "--completion-key", "a" * 64]).command,
         )
         args = parse_args(["update", "task.md", "--old-item", "old", "--new-item", "new"])
 

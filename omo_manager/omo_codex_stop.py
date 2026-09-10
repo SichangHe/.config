@@ -75,11 +75,25 @@ STATUS_MENU_ROWS = (
 DONE_LIVE_CLOSE_OPERATION = "done-live-no-mail-close"
 STALE_PREDECESSOR_CLOSE_OPERATION = "stale-predecessor-no-mail-close"
 WEBCONF_EXITED_CLOSE_OPERATION = "webconf-exited-shell-no-mail-close"
+TRANSFERRED_MANAGER_CLOSE_OPERATION = "transferred-manager-close"
 BOUND_CLOSE_OPERATIONS = frozenset(
     {
         DONE_LIVE_CLOSE_OPERATION,
         STALE_PREDECESSOR_CLOSE_OPERATION,
+        TRANSFERRED_MANAGER_CLOSE_OPERATION,
         WEBCONF_EXITED_CLOSE_OPERATION,
+    }
+)
+TRANSFERRED_MANAGER_AUDIT_KEYS = frozenset(
+    {
+        "schema", "root", "source_task", "replacement_task", "stale_task",
+        "source_target", "replacement_target", "executor_target", "source_sha256",
+        "replacement_sha256", "stale_sha256", "todo_sha256", "historical_commit",
+        "historical_source_sha256", "historical_queue_sha256", "authority",
+        "authority_sha256", "authority_lines", "source_pane", "session_id",
+        "protected_targets", "child_transfers", "source_after_sha256",
+        "stale_after_sha256", "todo_after_sha256", "audit", "binding_id",
+        "packet_sha256", "close_proof_commitment", "operation", "state",
     }
 )
 DONE_LIVE_CLOSE_AUDIT_KEYS = frozenset(
@@ -1161,6 +1175,93 @@ def done_live_close_audit_authorizes(
     return True
 
 
+def transferred_manager_close_audit_authorizes(
+    audit_text: str,
+    audit: object,
+    commitment: str,
+    target: str,
+    pane_id_value: str,
+    pane_pid: int,
+    pane_start_ticks: int,
+    audit_path: Path,
+) -> bool:
+    if not isinstance(audit, dict) or set(audit) != TRANSFERRED_MANAGER_AUDIT_KEYS:
+        return False
+    record = {str(key): value for key, value in audit.items()}
+    pane = record.get("source_pane")
+    protected = record.get("protected_targets")
+    child_transfers = record.get("child_transfers")
+    sha_fields = {
+        "source_sha256",
+        "replacement_sha256",
+        "stale_sha256",
+        "todo_sha256",
+        "historical_source_sha256",
+        "historical_queue_sha256",
+        "authority_sha256",
+        "source_after_sha256",
+        "stale_after_sha256",
+        "todo_after_sha256",
+        "binding_id",
+        "packet_sha256",
+        "close_proof_commitment",
+    }
+    exact_root = "/ssd1/sichangheagent/work_logs"
+    exact_authority = f"{exact_root}/manager_mail/85c5dff58359-1492.txt"
+    return (
+        audit_text == json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+        and record.get("schema") == "omo-transferred-manager-close/v1"
+        and record.get("operation") == TRANSFERRED_MANAGER_CLOSE_OPERATION
+        and record.get("state") == "prepared"
+        and record.get("root") == exact_root
+        and record.get("source_task") == "dw_tree_replace.md"
+        and record.get("replacement_task") == "cleanup_dw_tree.md"
+        and record.get("stale_task") == "dw_rotate_repair.md"
+        and record.get("source_target") == "config:2"
+        and record.get("replacement_target") == "config:1"
+        and record.get("executor_target") == "config:4"
+        and record.get("authority") == exact_authority
+        and record.get("authority_sha256") == "399b09775312d638e3b57b35bdce85b9e8e1b6487528d35e3c0f2f5b80dbf4ec"
+        and record.get("authority_lines") == [5, 5]
+        and record.get("audit") == str(audit_path).removesuffix(".prepared")
+        and record.get("close_proof_commitment") == commitment
+        and all(SHA256_RE.fullmatch(str(record.get(field))) is not None for field in sha_fields)
+        and re.fullmatch(r"[0-9a-f]{40}", str(record.get("historical_commit"))) is not None
+        and re.fullmatch(UUID_RE, str(record.get("session_id"))) is not None
+        and pane
+        == {
+            "target": target,
+            "pane_id": pane_id_value,
+            "pane_pid": pane_pid,
+            "pane_start_ticks": pane_start_ticks,
+        }
+        and isinstance(protected, list)
+        and {item.get("target") for item in protected if isinstance(item, dict)} == {"config:1", "config:4"}
+        and len(protected) == 2
+        and all(
+            isinstance(item, dict)
+            and set(item) == {"target", "pane_id", "pane_pid", "pane_start_ticks"}
+            and re.fullmatch(r"%[0-9]+", str(item.get("pane_id"))) is not None
+            and type(item.get("pane_pid")) is int
+            and int(item["pane_pid"]) > 1
+            and type(item.get("pane_start_ticks")) is int
+            and int(item["pane_start_ticks"]) > 0
+            for item in protected
+        )
+        and isinstance(child_transfers, list)
+        and len(child_transfers) == 2
+        and {item.get("task") for item in child_transfers if isinstance(item, dict)} == {"dw_lpair.md", "dw_rotate_exec.md"}
+        and all(
+            isinstance(item, dict)
+            and set(item) == {"task", "sha256", "current_sha256"}
+            and item.get("task") in {"dw_lpair.md", "dw_rotate_exec.md"}
+            and SHA256_RE.fullmatch(str(item.get("sha256"))) is not None
+            and SHA256_RE.fullmatch(str(item.get("current_sha256"))) is not None
+            for item in child_transfers
+        )
+    )
+
+
 def validate_done_live_close_audit_file(
     audit_path: Path,
     commitment: str,
@@ -1252,6 +1353,38 @@ def validate_bound_close_audit_file(
             expected_audit_sha256,
             closed_identity=closed_identity,
         )
+        return
+    if operation == TRANSFERRED_MANAGER_CLOSE_OPERATION:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd: int | None = None
+        try:
+            fd = os.open(audit_path, flags)
+            before = os.fstat(fd)
+            with os.fdopen(os.dup(fd), "r", encoding="utf-8") as source:
+                audit_text = source.read(65537)
+            after = os.fstat(fd)
+            current = audit_path.lstat()
+            audit: object = json.loads(audit_text)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("transferred-manager close audit is unavailable or invalid") from exc
+        finally:
+            if fd is not None:
+                os.close(fd)
+        identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or stat.S_IMODE(before.st_mode) != 0o600
+            or len(audit_text.encode()) > 65536
+            or hashlib.sha256(audit_text.encode()).hexdigest() != expected_audit_sha256
+            or identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            or identity != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns)
+            or not transferred_manager_close_audit_authorizes(
+                audit_text, audit, commitment, target, pane_id_value, pane_pid,
+                pane_start_ticks, audit_path,
+            )
+        ):
+            raise RuntimeError("transferred-manager close audit drifted before exact pane kill")
         return
     if operation != STALE_PREDECESSOR_CLOSE_OPERATION:
         raise RuntimeError("bound close operation is unsupported")

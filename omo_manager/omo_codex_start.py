@@ -133,6 +133,14 @@ LEGACY_SESSION_META_TIMESTAMPS = {
         "2026-09-09T00:51:24.425Z",
         "2026-09-09T00:42:35.656Z",
     ),
+    # 🧑 "Start a new agent and transfer them the task of generating B12 sites"
+    (
+        "f102332fa802984aa88118cc9071b360363d7b2403788d982cd621d698d29efc",
+        "fbb39548b0ee18f1b26485dc61ab373bbba2c33e6ef351cbfca57f2fa15f0555",
+    ): (
+        "2026-09-09T19:59:52.640Z",
+        "2026-09-09T19:56:52.620Z",
+    ),
 }
 ROTATION_ELIGIBILITY_XATTR = "user.omo_rotation_reconciliation_eligible_sha256"
 PCODX_LAUNCH_COMMAND = str(HELPER_DIR / "pcodx")

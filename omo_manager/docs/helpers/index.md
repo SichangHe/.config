@@ -14,6 +14,7 @@ This directory is non-authoritative helper documentation. Manager operating inst
 - `done-live-no-mail-close.md` documents canonical no-mail completion closure and the exact source-bound WebConf exited-shell recovery
 - `exited-shell-idle-prompt.md` distinguishes the exact two-line Codex exit prompt from later shell activity
 - `transcription-shared-closure.md` exact no-resend Sent adoption, incident recovery evidence, shared-`wl:32` closure, and approved post-cancellation closure
+- `transferred-manager-close.md` reviewed, authenticated closure of the exact transferred DeepWiki manager and stale same-target record
 - `source1290-lifecycle-prerequisite.md` accepted-report-gated terminalization and current-row custody receipt for the canonical Source-1290 carrier
 - `tmux-send.md` safe tmux paste and async delivery through `omo_tmux_send.py`
 - `../routing/supported-delivery.md` shared Codex and live Cursor Agent delivery
