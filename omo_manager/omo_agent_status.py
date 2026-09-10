@@ -171,6 +171,16 @@ BLOCKED_DELIVERY_ITEMS = (
     "Read-only fresh closure audit of /ssd1/sichangheagent/vl_artifacts/fresh_target_selection_2026-08-15_g: verify exact inventory/hashes, authorization byte identity, nine actual query results, no candidates/candidate inventory/frozen verdict, planning-only scope, and modes; return PASS or substantive defects.",
     "Rerun read-only review of corrected /ssd1/sichangheagent/vl_artifacts/fresh_target_selection_2026-08-15_g pre-freeze STOP packet and GATE_STOP_INVENTORY.sha256",
 )
+# 🧑 "Make the smallest watcher/helper change that classifies these intentional blocked-idle records without hiding genuine failed launches or actionable missing targets."
+HUMAN_TERMINATED_BLOCKED_REASON = "human hold after explicit pane termination"
+REPLACEMENT_HELPER_BLOCKED_REASON = "no approved live ordinary-worker cross-target replacement helper"
+CODEX_EXIT_RESUME_EVIDENCE_RE = re.compile(r"\bcodex resume [0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b.*\bOr run codex resume\b", re.IGNORECASE)
+EXPECTED_STOPPED_BLOCKED_IDLE: dict[str, tuple[str, str, str, bool, str, str, str]] = {
+    "dw_reports_submgr.md": ("todo:human pending", "wl:33", "dw:34", True, HUMAN_TERMINATED_BLOCKED_REASON, "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "missing"),
+    "lifecycle_reports.md": ("todo:human pending", "wl:35", "dw:34", True, HUMAN_TERMINATED_BLOCKED_REASON, "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "missing"),
+    "mail_replace_exec.md": ("todo:current", "wl:2", "dw:34", False, REPLACEMENT_HELPER_BLOCKED_REASON, "99e0727906bf7d1469090c6a0c6182c89cc48fb302e48246f726d0fd05e30fa3", "not_codex"),
+    "data_gen_mgr.md": ("todo:human pending", "dw:29", "dw:44", True, HUMAN_TERMINATED_BLOCKED_REASON, "4d895af6d8f7dfa439d8f2597dd86c0efab7d796769f482842cf2b32db4c4081", "missing"),
+}
 VAGUE_STOPPED_HUMAN_WAIT_RE = re.compile(
     r"\A(?:human|human\s+(?:approval|authorization|decision|discussion)|human[- ]pending|direct\s+human\s+discussion|waiting\s+(?:on|for)\s+(?:(?:a|the)\s+)?(?:human|person)(?:'s)?(?:\s+(?:action|answers?|approval|authorization|choice|confirmation|decision|discussion|feedback|follow-?up|guidance|input|repl(?:y|ies)|responses?|reviews?)|\s+to)?)\Z",
     re.IGNORECASE,
@@ -1032,6 +1042,37 @@ def is_direct_human_shutdown_pause(root: Path, task: TaskLine, state: TaskState)
     return task_path is not None and has_closed_codex_evidence(task_path, state.target)
 
 
+def is_expected_intentionally_stopped_blocked_idle(root: Path, task: TaskLine, state: TaskState, classified: StatusRow) -> bool:
+    """Return whether exact stopped-record evidence makes an absent runtime expected."""
+
+    task_path = resolve_task_path(root, task.task_file)
+    indexed = [linked for linked in parse_task_lines(root / "TODO.md") if resolve_task_path(root, linked.task_file) == task_path]
+    expected = EXPECTED_STOPPED_BLOCKED_IDLE.get(task.task_file)
+    if (
+        task_path is None
+        or expected is None
+        or state.status != "blocked"
+        or target_session(state.target).startswith("h")
+        or task.target != state.target
+        or len(indexed) != 1
+        or task_has_pending_marker(task_path)
+    ):
+        return False
+    queue_digest = hashlib.sha256(
+        json.dumps(tuple(pending_task_items(task_path, root)), ensure_ascii=False, separators=(",", ":")).encode()
+    ).hexdigest()
+    actual = (
+        task.section,
+        state.target,
+        state.manager_target,
+        state.is_manager,
+        state.reason,
+        queue_digest,
+        classified.status,
+    )
+    return actual == expected and (classified.status != "not_codex" or CODEX_EXIT_RESUME_EVIDENCE_RE.search(classified.evidence) is not None)
+
+
 def is_human_token_quota_pause(root: Path, task: TaskLine, state: TaskState) -> bool:
     """Return whether a source-bound VL quota pause preserves a parked manager."""
 
@@ -1605,8 +1646,10 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
         return
     classified: StatusRow | None = None
     idle_status = "blocked_idle"
+    expected_intentionally_stopped = False
     quiet_dependency = False
     quiet_resumable = False
+    quiet_closed_manager = False
     if target:
         classified = classify_target(task.task_file, target, state.persistent_role, state.status, auto_unstick, role, unstick_by_target, auto_unstick_disabled_reason)
         idle_status = classified.status
@@ -1624,6 +1667,7 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
             return
         if is_human_token_quota_pause(root, task, state) and idle_status in {"missing", "not_codex"}:
             return
+        expected_intentionally_stopped = is_expected_intentionally_stopped_blocked_idle(root, task, state, classified)
         quiet_dependency = blocked_dependencies_are_active(root, task, state) and idle_status == "ready"
         quiet_resumable = blocked_resumable_dependencies_are_active(root, task, state) and idle_status in {"missing", "not_codex"} and " output=" not in classified.evidence and not target_resolves_exactly(target)
         quiet_closed_manager = (
@@ -1634,7 +1678,7 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
     reason = state.reason or "blocked with no reason in latest status line"
     evidence = classified.evidence if classified is not None else f"target={target} role={role} task_status=blocked"
     evidence += f" idle_status={idle_status} reason={reason}"
-    status = "ready" if quiet_dependency or quiet_resumable or quiet_closed_manager else idle_status if idle_status in {"error", "missing", "not_codex", "stuck_input"} else "blocked_idle"
+    status = "blocked_idle" if expected_intentionally_stopped else "ready" if quiet_dependency or quiet_resumable or quiet_closed_manager else idle_status if idle_status in {"error", "missing", "not_codex", "stuck_input"} else "blocked_idle"
     rows.append(StatusRow(task.task_file, status, evidence, state.persistent_role, state.status, target, classified.unstick if classified is not None else ""))
     seen.add(seen_key)
 
