@@ -95,6 +95,41 @@ SOURCE1485_AUTHORITY = (
     "> What else is going on for dw work?\r\n"
     "> You are the main dw manager, right?\r\n\r\n"
 )
+SOURCE1597_AUTHORITY = (
+    b"Subject: Re: Try Pangram for hard data\n\n"
+    b"For manager: replace this agent immediately. Tell to new agent to obey my order to try ephemeral AWS proxies "
+    b"for the 20 texts or face termination\r\n\r\n"
+    b"> On Sep 9, 2026, at 18:12, sichangheagent@gmail.com wrote:\r\n> \r\n"
+    b"> I accepted the safe parts of this request.\r\n> \r\n"
+    b"> I will give you the complete record for sample 2's missing label and will change the result summary so it "
+    b"lists only texts for which Pangram actually returned an AI, Human, or Mixed result.\r\n> \r\n"
+    b"> I will not create and repeatedly destroy AWS proxies or disposable browser sessions to bypass Pangram's "
+    b"free-use limit. That would be evading the service's access controls rather than evaluating the detector normally. "
+    b"The existing signed-in account and reviewed automation remain available when legitimate credits return.\r\n> \r\n"
+    b"> What we know immediately about sample 2: the signed-out attempt reached Pangram but redirected to signup "
+    b"before displaying any AI, Human, or Mixed result. It therefore is not a detector result and should not have "
+    b"appeared in the result list. I am having the owner reconcile every saved event, timestamp, and screenshot for "
+    b"that attempt and will send the exact account separately.\r\n> \r\n\r\n"
+)
+SOURCE1611_AUTHORITY = (
+    b"Subject: Re: [cleanup_dw_tree.md] Config/DW replacement needs supported recursive lifecycle path\n\n"
+    b"Replace the manager and let the new manager immediately replace their worker\r\n"
+)
+SOURCE1601_AUTHORITY = (
+    b"Subject: Re: Try Pangram for hard data\n\n"
+    b"For a manager, replace this manager and DW for team, only tell them their\r\n"
+    b"original goals from the human, not any of the ones they set themselves.\r\n\r\n"
+    b"On Wed, Sep 9, 2026 at 18:19 <sichangheagent@gmail.com> wrote:\r\n\r\n"
+    b"> I received your request to replace the current Pangram manager. I am\r\n"
+    b"> starting an atomic ownership transfer now so exactly one Pangram manager\r\n"
+    b"> remains active and all existing results and pending work are preserved.\r\n>\r\n"
+    b"> The replacement will receive your instruction to test the 20 texts. It\r\n"
+    b"> will still need to use Pangram in a way that complies with the service's\r\n"
+    b"> access controls; replacing the manager does not authorize bypassing usage\r\n"
+    b"> limits.\r\n>\r\n"
+)
+HUMAN_QUEUE = manager_replace.SOURCE1611_OLD_QUEUE
+SOURCE1597_QUEUE = manager_replace.SOURCE1597_OLD_QUEUE
 
 
 def sha(data: str) -> str:
@@ -505,6 +540,185 @@ class ManagerReplaceTests(unittest.TestCase):
         )
         protected_sha = manager_replace.protected_inventory_digest(provisional, identities)
         return root, replace(provisional, protected_targets_sha256=protected_sha), identities
+
+    def source1597_fixture(self, base: Path) -> tuple[Path, Args, tuple[PaneIdentity, ...]]:
+        root, args, files = self.fixture(base)
+        old_text = task_text(
+            status="long_running",
+            runat=manager_replace.SOURCE1597_OLD_TARGET,
+            managerat=manager_replace.SOURCE1597_PARENT_TARGET,
+            is_manager=True,
+            pending=SOURCE1597_QUEUE,
+            session_id=SESSION_ID,
+        )
+        (root / args.old_task).unlink()
+        old_path = root / manager_replace.SOURCE1597_TASK
+        old_path.write_text(old_text, encoding="utf-8")
+        children: list[ChildPin] = []
+        identities = [
+            PaneIdentity("dw:15.0", "%50", 5000, 900),
+            PaneIdentity("other:1.0", "%51", 5001, 901),
+        ]
+        for index, (task, status, runat, pending) in enumerate(
+            (
+                ("child_a.md", "running", "worker:1", ("Translate one module.",)),
+                ("child_b.md", "blocked", "worker:2", ("Run the verifier.",)),
+            ),
+            start=2,
+        ):
+            data = task_text(status=status, runat=runat, managerat=manager_replace.SOURCE1597_OLD_TARGET, is_manager=False, pending=pending)
+            (root / task).write_text(data, encoding="utf-8")
+            children.append(ChildPin(task, sha(data)))
+            identities.append(PaneIdentity(f"{runat}.0", f"%{50 + index}", 5000 + index, 900 + index))
+        todo = files["TODO.md"].replace(
+            f"{args.old_task} {OLD_TARGET}",
+            f"{manager_replace.SOURCE1597_TASK} {manager_replace.SOURCE1597_OLD_TARGET}",
+        )
+        (root / "TODO.md").write_text(todo, encoding="utf-8")
+        authority_path = root / manager_replace.SOURCE1597_FILE
+        authority_path.write_bytes(SOURCE1597_AUTHORITY)
+        authority_path.chmod(0o600)
+        source1601_path = root / manager_replace.SOURCE1601_FILE
+        source1601_path.write_bytes(SOURCE1601_AUTHORITY)
+        source1601_path.chmod(0o600)
+        self.assertEqual(manager_replace.SOURCE1597_SHA256, hashlib.sha256(SOURCE1597_AUTHORITY).hexdigest())
+        self.assertEqual(manager_replace.SOURCE1601_SHA256, hashlib.sha256(SOURCE1601_AUTHORITY).hexdigest())
+        protected = tuple(sorted(identities, key=lambda identity: identity.target))
+        exact = replace(
+            args,
+            old_task=manager_replace.SOURCE1597_TASK,
+            successor_task=manager_replace.SOURCE1597_SUCCESSOR_TASK,
+            old_target=manager_replace.SOURCE1597_OLD_TARGET,
+            new_target=manager_replace.SOURCE1597_SUCCESSOR_TARGET,
+            parent_target=manager_replace.SOURCE1597_PARENT_TARGET,
+            old_sha256=sha(old_text),
+            todo_sha256=sha(todo),
+            children=tuple(children),
+            authority_file=manager_replace.SOURCE1597_FILE,
+            authority_lines=LineRange(*manager_replace.SOURCE1597_LINES),
+            authority_sha256=manager_replace.SOURCE1597_SHA256,
+            authority_envelope_task=manager_replace.SOURCE1597_TASK,
+            authority_envelope_sha256=sha(old_text),
+            successor_item_lines=(LineRange(*manager_replace.SOURCE1597_LINES),),
+            protected_targets=tuple(identity.target for identity in protected),
+            old_queue_sha256=manager_replace.json_digest(list(SOURCE1597_QUEUE)),
+            protected_targets_sha256=manager_replace.json_digest(
+                [
+                    {"target": identity.target, "pane_id": identity.pane_id, "pid": identity.pid, "start_ticks": identity.start_ticks}
+                    for identity in protected
+                ]
+            ),
+        )
+        return root, exact, protected
+
+    def source1597_runtime(
+        self,
+        state: dict[str, object],
+        args: Args,
+        protected: tuple[PaneIdentity, ...],
+    ) -> tuple[object, object, object]:
+        def inventory() -> dict[str, PaneIdentity]:
+            result = {identity.target: identity for identity in protected}
+            extra = state.get("extra_identity")
+            if isinstance(extra, PaneIdentity):
+                result[extra.target] = extra
+            if state.get("protected_drift"):
+                first = protected[0]
+                result[first.target] = replace(first, pid=first.pid + 100)
+            if state.get("old_live", True):
+                result[manager_replace.canonical_target(args.old_target)] = PaneIdentity(
+                    manager_replace.canonical_target(args.old_target), "%42", 4242, 999
+                )
+            return result
+
+        def stopped(_args: object) -> str:
+            state["old_live"] = False
+            hook = state.get("stop_hook")
+            if callable(hook):
+                hook()
+            return SESSION_ID
+
+        return (
+            patch.object(manager_replace, "pane_inventory", side_effect=inventory),
+            patch.object(manager_replace, "stop", side_effect=stopped),
+            patch.object(manager_replace, "has_bound_close_proof", side_effect=lambda *_args: not state.get("old_live", True)),
+        )
+
+    def source1611_fixture(self, base: Path) -> tuple[Path, Args, tuple[PaneIdentity, ...]]:
+        root, args, files = self.fixture(base)
+        source_file = manager_replace.SOURCE1611_FILE
+        source_bytes = SOURCE1611_AUTHORITY
+        source_lines = manager_replace.SOURCE1611_LINES
+        source_sha256 = manager_replace.SOURCE1611_SHA256
+        old_task = manager_replace.SOURCE1611_TASK
+        old_target = manager_replace.SOURCE1611_OLD_TARGET
+        successor_task = manager_replace.SOURCE1611_SUCCESSOR_TASK
+        successor_target = manager_replace.SOURCE1611_SUCCESSOR_TARGET
+        parent_target = manager_replace.SOURCE1611_PARENT_TARGET
+        human_queue = HUMAN_QUEUE
+        old_text = task_text(
+            status="long_running",
+            runat=old_target,
+            managerat=parent_target,
+            is_manager=True,
+            pending=human_queue,
+            session_id=SESSION_ID,
+        )
+        (root / args.old_task).unlink()
+        (root / old_task).write_text(old_text, encoding="utf-8")
+        children: list[ChildPin] = []
+        identities = [
+            PaneIdentity(manager_replace.canonical_target(parent_target), "%60", 6000, 1000),
+            PaneIdentity("other:1.0", "%61", 6001, 1001),
+        ]
+        for index, (task, status, runat, pending) in enumerate(
+            (
+                ("child_a.md", "running", "worker:1", ("🧑 Translate one Human-requested module.",)),
+                ("child_b.md", "blocked", "worker:2", ("🧑 Run the Human-requested verifier.",)),
+            ),
+            start=2,
+        ):
+            data = task_text(status=status, runat=runat, managerat=old_target, is_manager=False, pending=pending)
+            (root / task).write_text(data, encoding="utf-8")
+            children.append(ChildPin(task, sha(data)))
+            identities.append(PaneIdentity(f"{runat}.0", f"%{60 + index}", 6000 + index, 1000 + index))
+        todo = files["TODO.md"].replace(f"{args.old_task} {OLD_TARGET}", f"{old_task} {old_target}")
+        (root / "TODO.md").write_text(todo, encoding="utf-8")
+        authority_path = root / source_file
+        authority_path.write_bytes(source_bytes)
+        authority_path.chmod(0o600)
+        source1601_path = root / manager_replace.SOURCE1601_FILE
+        source1601_path.write_bytes(SOURCE1601_AUTHORITY)
+        source1601_path.chmod(0o600)
+        self.assertEqual(source_sha256, hashlib.sha256(source_bytes).hexdigest())
+        self.assertEqual(manager_replace.SOURCE1601_SHA256, hashlib.sha256(SOURCE1601_AUTHORITY).hexdigest())
+        protected = tuple(sorted(identities, key=lambda identity: identity.target))
+        exact = replace(
+            args,
+            old_task=old_task,
+            successor_task=successor_task,
+            old_target=old_target,
+            new_target=successor_target,
+            parent_target=parent_target,
+            old_sha256=sha(old_text),
+            todo_sha256=sha(todo),
+            children=tuple(children),
+            authority_file=source_file,
+            authority_lines=LineRange(*source_lines),
+            authority_sha256=source_sha256,
+            authority_envelope_task=old_task,
+            authority_envelope_sha256=sha(old_text),
+            successor_item_lines=(LineRange(*source_lines),),
+            protected_targets=tuple(identity.target for identity in protected),
+            old_queue_sha256=manager_replace.json_digest(list(human_queue)),
+            protected_targets_sha256=manager_replace.json_digest(
+                [
+                    {"target": identity.target, "pane_id": identity.pane_id, "pid": identity.pid, "start_ticks": identity.start_ticks}
+                    for identity in protected
+                ]
+            ),
+        )
+        return root, exact, protected
 
     def whole_tree_fixture(self, base: Path) -> tuple[Path, Args, dict[str, str]]:
         root, args, files = self.fixture(base)
@@ -1980,6 +2194,198 @@ class ManagerReplaceTests(unittest.TestCase):
             ):
                 replace_manager(changed)
             stop_mock.assert_not_called()
+
+    def test_source1597_exception_is_exact_source_only_and_non_reusable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, exact, _protected = self.source1597_fixture(Path(tmp))
+            self.assertTrue(manager_replace.is_source1597_semantic_exception(exact))
+            variants = (
+                {"old_task": "other.md"},
+                {"successor_task": "dw_fpr_wrong.md"},
+                {"old_target": "dw:13"},
+                {"new_target": "dw:17"},
+                {"parent_target": "dw:18"},
+                {"authority_file": "manager_mail/other.txt"},
+                {"authority_sha256": "0" * 64},
+                {"authority_lines": LineRange(2, 3)},
+                {"successor_item_lines": (LineRange(2, 3),)},
+                {"authority_envelope_task": "authority_envelope.md"},
+                {"authority_envelope_sha256": "0" * 64},
+            )
+            for changes in variants:
+                with self.subTest(changes=changes):
+                    self.assertFalse(manager_replace.is_source1597_semantic_exception(replace(exact, **changes)))
+
+    def test_source1597_replacement_preserves_queue_and_protected_panes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected = self.source1597_fixture(Path(tmp))
+            state: dict[str, object] = {"old_live": True}
+            runtime = self.source1597_runtime(state, args, protected)
+            with runtime[0], runtime[1], runtime[2]:
+                result = replace_manager(args)
+            self.assertIn("sole ownership", result)
+            self.assertEqual((), parsed(root / args.old_task, root).pending_task_items)
+            self.assertEqual(
+                (
+                    *SOURCE1597_QUEUE,
+                    f"🧑 Source {args.authority_file}: {manager_replace.SOURCE1597_DIRECTIVE}",
+                    f"🧑 Source {manager_replace.SOURCE1601_FILE}: {manager_replace.SOURCE1601_QUEUE_GOAL}",
+                ),
+                parsed(root / args.successor_task, root).pending_task_items,
+            )
+            self.assertEqual(args.new_target, parsed(root / args.successor_task, root).runat)
+            record = json.loads(args.audit_output.read_text(encoding="utf-8"))
+            self.assertEqual(manager_replace.SOURCE_ONLY_AUTHORITY_MODE, record["authority_mode"])
+            self.assertEqual(args.old_queue_sha256, record["old_queue_sha256"])
+            self.assertEqual(args.protected_targets_sha256, record["protected_targets_sha256"])
+
+    def test_source1597_rejects_queue_source_and_protected_drift_before_mutation(self) -> None:
+        cases = (
+            ("queue", lambda args: replace(args, old_queue_sha256="0" * 64), "ordered queue changed"),
+            ("source", lambda args: replace(args, authority_sha256="0" * 64), "source-only replacement"),
+            ("protected", lambda args: replace(args, protected_targets_sha256="0" * 64), "protected pane/process inventory changed"),
+        )
+        for label, mutate, error in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root, args, protected = self.source1597_fixture(Path(tmp))
+                changed = mutate(args)
+                runtime = self.source1597_runtime({"old_live": True}, changed, protected)
+                before = (root / args.old_task).read_bytes()
+                with runtime[0], runtime[1] as stop_mock, runtime[2], self.assertRaisesRegex(ReplaceError, error):
+                    replace_manager(changed)
+                stop_mock.assert_not_called()
+                self.assertEqual(before, (root / args.old_task).read_bytes())
+                self.assertFalse((root / args.successor_task).exists())
+
+    def test_source1597_rejects_omitted_or_new_live_protected_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected = self.source1597_fixture(Path(tmp))
+            reduced = protected[:-1]
+            changed = replace(
+                args,
+                protected_targets=tuple(identity.target for identity in reduced),
+                protected_targets_sha256=manager_replace.json_digest(
+                    [
+                        {"target": identity.target, "pane_id": identity.pane_id, "pid": identity.pid, "start_ticks": identity.start_ticks}
+                        for identity in reduced
+                    ]
+                ),
+            )
+            runtime = self.source1597_runtime({"old_live": True}, changed, protected)
+            with runtime[0], runtime[1] as stop_mock, runtime[2], self.assertRaisesRegex(ReplaceError, "not the complete canonical live inventory"):
+                replace_manager(changed)
+            stop_mock.assert_not_called()
+            self.assertFalse((root / args.successor_task).exists())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected = self.source1597_fixture(Path(tmp))
+            state: dict[str, object] = {"old_live": True, "extra_identity": PaneIdentity("late:1.0", "%70", 5070, 970)}
+            runtime = self.source1597_runtime(state, args, protected)
+            with runtime[0], runtime[1] as stop_mock, runtime[2], self.assertRaisesRegex(ReplaceError, "not the complete canonical live inventory"):
+                replace_manager(args)
+            stop_mock.assert_not_called()
+            self.assertFalse((root / args.successor_task).exists())
+
+    def test_source1597_revalidates_protected_inventory_after_stop_and_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected = self.source1597_fixture(Path(tmp))
+            state: dict[str, object] = {"old_live": True}
+            state["stop_hook"] = lambda: state.__setitem__("protected_drift", True)
+            runtime = self.source1597_runtime(state, args, protected)
+            before = (root / args.old_task).read_bytes()
+            with runtime[0], runtime[1], runtime[2], self.assertRaisesRegex(ReplaceError, "protected pane/process inventory changed"):
+                replace_manager(args)
+            self.assertEqual(before, (root / args.old_task).read_bytes())
+            self.assertFalse((root / args.successor_task).exists())
+
+    def test_source1611_exception_is_exact_and_requires_source1601(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, exact, _protected = self.source1611_fixture(Path(tmp))
+            self.assertTrue(manager_replace.is_source1611_semantic_exception(exact))
+            variants = (
+                {"old_task": "other.md"},
+                {"successor_task": "cleanup_dw_tree_bad.md"},
+                {"old_target": "config:2"},
+                {"new_target": "config:24"},
+                {"parent_target": "wl:2"},
+                {"authority_file": manager_replace.SOURCE1601_FILE},
+                {"authority_sha256": "0" * 64},
+                {"authority_lines": LineRange(2, 3)},
+                {"successor_item_lines": (LineRange(2, 3),)},
+                {"authority_envelope_task": "other.md"},
+            )
+            for changes in variants:
+                with self.subTest(changes=changes):
+                    self.assertFalse(manager_replace.is_source1611_semantic_exception(replace(exact, **changes)))
+            source1601 = root / manager_replace.SOURCE1601_FILE
+            source1601.write_bytes(source1601.read_bytes() + b"drift\n")
+            runtime = self.source1597_runtime({"old_live": True}, exact, _protected)
+            with runtime[0], runtime[1] as stop_mock, runtime[2], self.assertRaisesRegex(ReplaceError, "Source-1601 authority source or digest changed"):
+                replace_manager(exact)
+            stop_mock.assert_not_called()
+
+    def test_source1611_replacement_preserves_only_human_queue_and_complete_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected = self.source1611_fixture(Path(tmp))
+            runtime = self.source1597_runtime({"old_live": True}, args, protected)
+            with runtime[0], runtime[1], runtime[2]:
+                result = replace_manager(args)
+            self.assertIn("sole ownership", result)
+            successor = parsed(root / args.successor_task, root)
+            self.assertTrue(successor.is_manager)
+            self.assertEqual(HUMAN_QUEUE, successor.pending_task_items)
+            self.assertNotIn("Preserve this delegated body.", (root / args.successor_task).read_text(encoding="utf-8"))
+            record = json.loads(args.audit_output.read_text(encoding="utf-8"))
+            self.assertEqual(manager_replace.SOURCE1601_SHA256, record["source1601_sha256"])
+            self.assertEqual(list(manager_replace.SOURCE1601_LINES), record["source1601_lines"])
+
+    def test_source1611_rejects_agent_authored_queue_and_source_race(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected = self.source1611_fixture(Path(tmp))
+            old_path = root / args.old_task
+            changed_text = old_path.read_text(encoding="utf-8").replace(HUMAN_QUEUE[1], "Agent-authored replacement strategy.")
+            old_path.write_text(changed_text, encoding="utf-8")
+            changed_queue = parsed(old_path, root).pending_task_items
+            changed = replace(
+                args,
+                old_sha256=sha(changed_text),
+                authority_envelope_sha256=sha(changed_text),
+                old_queue_sha256=manager_replace.json_digest(list(changed_queue)),
+            )
+            runtime = self.source1597_runtime({"old_live": True}, changed, protected)
+            with runtime[0], runtime[1] as stop_mock, runtime[2], self.assertRaisesRegex(ReplaceError, "Human-provenance queue changed"):
+                replace_manager(changed)
+            stop_mock.assert_not_called()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected = self.source1611_fixture(Path(tmp))
+            state: dict[str, object] = {"old_live": True}
+            source1601 = root / manager_replace.SOURCE1601_FILE
+            state["stop_hook"] = lambda: source1601.write_bytes(source1601.read_bytes() + b"late drift\n")
+            runtime = self.source1597_runtime(state, args, protected)
+            before = (root / args.old_task).read_bytes()
+            with runtime[0], runtime[1], runtime[2], self.assertRaisesRegex(ReplaceError, "Source-1601 replacement authority"):
+                replace_manager(args)
+            self.assertEqual(before, (root / args.old_task).read_bytes())
+            self.assertFalse((root / args.successor_task).exists())
+
+    def test_source1611_rejects_noncompliant_successor_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _protected = self.source1611_fixture(Path(tmp))
+            changed = replace(args, successor_task="cleanup_dw_tree_successor.md")
+            with self.assertRaisesRegex(ReplaceError, "ordered queue binding|exact replacement program|shorter than 25"):
+                manager_replace.validate_targets(changed)
+
+    def test_source1612_requires_separate_handoff_complete_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _protected = self.source1611_fixture(Path(tmp))
+            changed = replace(
+                args,
+                authority_file=manager_replace.SOURCE1612_FILE,
+                authority_sha256="0" * 64,
+            )
+            with self.assertRaisesRegex(ReplaceError, "separate authenticated handoff-complete proof"):
+                manager_replace.validate_targets(changed)
 
     def test_other_authority_cannot_request_descendant_closure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

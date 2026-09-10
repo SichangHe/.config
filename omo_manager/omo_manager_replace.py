@@ -122,6 +122,41 @@ SOURCE1485_UMBRELLA_TASK = "resume_dw_work.md"
 SOURCE1485_UMBRELLA_TARGET = "wl:7.0"
 SOURCE1485_ROOT_REQUIRED_CHILDREN = frozenset({"dw_cc_sampling.md", "dw_fpr_mgr_replacement2.md", SOURCE1485_UMBRELLA_TASK})
 SOURCE1485_ROOT_OPTIONAL_CHILDREN = frozenset({"dw_bodyswap_pr.md"})
+SOURCE1597_FILE = "manager_mail/85c5dff58359-1597.txt"
+SOURCE1597_SHA256 = "aa4034035121e5fa75c8c2e412bccb1731b626982934403e00fce33506380b43"
+SOURCE1597_LINES = (3, 3)
+SOURCE1597_TASK = "dw_fpr_new.md"
+SOURCE1597_OLD_TARGET = "dw:14"
+SOURCE1597_SUCCESSOR_TASK = "dw_fpr_new_source1597.md"
+SOURCE1597_SUCCESSOR_TARGET = "dw:16"
+SOURCE1597_PARENT_TARGET = "dw:15"
+SOURCE1597_DIRECTIVE = "For manager: replace this agent immediately. Tell to new agent to obey my order to try ephemeral AWS proxies for the 20 texts or face termination"
+SOURCE1597_OLD_QUEUE = (
+    "🧑 Use the Human-signed-up :6082 browser, which gives 20 free checks a day, for the Pangram evaluation. Source: manager_mail/85c5dff58359-1584.txt.",
+    "🧑 Automate Pangram checks and run all hard samples; if automation is too complicated, delegate direct checks to cheaper agents. Source: manager_mail/85c5dff58359-1592.txt.",
+)
+SOURCE1601_FILE = "manager_mail/85c5dff58359-1601.txt"
+SOURCE1601_SHA256 = "dc78cd34a4fd6becb0a20a1ea3143d43cf8f45ae1e6a58c6e7b3c6fa9f830e01"
+SOURCE1601_LINES = (3, 4)
+SOURCE1601_DIRECTIVE = "For a manager, replace this manager and DW for team, only tell them their\noriginal goals from the human, not any of the ones they set themselves."
+SOURCE1601_QUEUE_GOAL = "For a manager, replace this manager and DW for team, only tell them their original goals from the human, not any of the ones they set themselves."
+SOURCE1611_FILE = "manager_mail/85c5dff58359-1611.txt"
+SOURCE1611_SHA256 = "b136968572ef02cd85811fbc89f171b332cd9d24768ca6c5718dfb175b4ff648"
+SOURCE1611_LINES = (3, 3)
+SOURCE1611_TASK = "cleanup_dw_tree.md"
+SOURCE1611_OLD_TARGET = "config:1"
+SOURCE1611_SUCCESSOR_TASK = "cleanup_dw_tree_new.md"
+SOURCE1611_SUCCESSOR_TARGET = "config:23"
+SOURCE1611_PARENT_TARGET = "wl:1"
+SOURCE1611_DIRECTIVE = "Replace the manager and let the new manager immediately replace their worker"
+SOURCE1611_OLD_QUEUE = (
+    "🧑 Human Source manager_mail/85c5dff58359-1601.txt: replace this manager and the entire DW team through supported atomic lifecycle transfers, preserving exactly one successor per responsibility.",
+    "🧑 Human Source manager_mail/85c5dff58359-1601.txt: give every successor only the original goals stated by the Human; exclude goals or constraints invented by prior agents.",
+    "🧑 Replace the manager, then have the new manager immediately replace their worker. Source: manager_mail/85c5dff58359-1611.txt.",
+    "🧑 Replace the manager that took tasks outside its ownership, and require the successor manager to hand off all tasks completely to workers. Source: manager_mail/85c5dff58359-1612.txt.",
+)
+SOURCE1612_FILE = "manager_mail/85c5dff58359-1612.txt"
+SOURCE_ONLY_AUTHORITY_MODE = "source-only-old-task-before-image"
 PCODX_REPLACE_EVIDENCE_RE = re.compile(
     r"(?m)^Replace the failed PCODX manager (?P<task>[A-Za-z0-9_./-]+\.md) at "
     r"(?P<target>[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) with one fresh plain-Codex manager "
@@ -264,6 +299,7 @@ class Plan:
     descendant_identities: tuple[PaneIdentity, ...] = ()
     empty_tree_authority: Snapshot | None = None
     source1485_topology: dict[str, object] | None = None
+    source1601_authority: Snapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -409,6 +445,80 @@ def is_source1485_semantic_exception(args: Args) -> bool:
         and args.authority_envelope_task in SOURCE1485_ENVELOPE_TASKS
         and args.authority_envelope_sha256 == SOURCE1485_ENVELOPE_SHA256
     )
+
+
+# 🧑 Source `manager_mail/85c5dff58359-1597.txt:3`: exact replacement of the Pangram manager.
+def is_source1597_semantic_exception(args: Args) -> bool:
+    return (
+        args.old_task == SOURCE1597_TASK
+        and args.successor_task == SOURCE1597_SUCCESSOR_TASK
+        and canonical_target(args.old_target) == canonical_target(SOURCE1597_OLD_TARGET)
+        and canonical_target(args.new_target) == canonical_target(SOURCE1597_SUCCESSOR_TARGET)
+        and canonical_target(args.parent_target) == canonical_target(SOURCE1597_PARENT_TARGET)
+        and args.authority_file == SOURCE1597_FILE
+        and args.authority_sha256 == SOURCE1597_SHA256
+        and args.authority_lines == LineRange(*SOURCE1597_LINES)
+        and args.successor_item_lines == (LineRange(*SOURCE1597_LINES),)
+        and args.authority_envelope_task == args.old_task
+        and args.authority_envelope_sha256 == args.old_sha256
+    )
+
+
+def is_source1611_semantic_exception(args: Args) -> bool:
+    return (
+        args.old_task == SOURCE1611_TASK
+        and args.successor_task == SOURCE1611_SUCCESSOR_TASK
+        and canonical_target(args.old_target) == canonical_target(SOURCE1611_OLD_TARGET)
+        and canonical_target(args.new_target) == canonical_target(SOURCE1611_SUCCESSOR_TARGET)
+        and canonical_target(args.parent_target) == canonical_target(SOURCE1611_PARENT_TARGET)
+        and args.authority_file == SOURCE1611_FILE
+        and args.authority_sha256 == SOURCE1611_SHA256
+        and args.authority_lines == LineRange(*SOURCE1611_LINES)
+        and args.successor_item_lines == (LineRange(*SOURCE1611_LINES),)
+        and args.authority_envelope_task == args.old_task
+        and args.authority_envelope_sha256 == args.old_sha256
+    )
+
+
+def is_source_only_semantic_exception(args: Args) -> bool:
+    return is_source1597_semantic_exception(args) or is_source1611_semantic_exception(args)
+
+
+def source_only_directive(args: Args) -> str:
+    if is_source1597_semantic_exception(args):
+        return SOURCE1597_DIRECTIVE
+    if is_source1611_semantic_exception(args):
+        return SOURCE1611_DIRECTIVE
+    raise ReplaceError("source-only authority is unavailable outside an exact replacement program")
+
+
+def source1601_required(args: Args) -> bool:
+    return is_source1597_semantic_exception(args) or is_source1611_semantic_exception(args)
+
+
+def source_only_expected_old_queue(args: Args) -> tuple[str, ...]:
+    if is_source1597_semantic_exception(args):
+        return SOURCE1597_OLD_QUEUE
+    if is_source1611_semantic_exception(args):
+        return SOURCE1611_OLD_QUEUE
+    raise ReplaceError("source-only queue is unavailable outside an exact replacement program")
+
+
+def source_only_added_goals(args: Args, queue: tuple[str, ...]) -> tuple[str, ...]:
+    added: list[str] = []
+    if not any(args.authority_file in item for item in queue):
+        added.append(f"🧑 Source {args.authority_file}: {source_only_directive(args)}")
+    if source1601_required(args) and not any(SOURCE1601_FILE in item for item in queue):
+        added.append(f"🧑 Source {SOURCE1601_FILE}: {SOURCE1601_QUEUE_GOAL}")
+    return tuple(added)
+
+
+def uses_ordered_queue_binding(args: Args) -> bool:
+    return is_pcodx_replacement(args) or is_guest1269_replacement(args) or is_source1485_replacement(args) or is_source_only_semantic_exception(args)
+
+
+def uses_protected_inventory(args: Args) -> bool:
+    return is_pcodx_replacement(args) or is_source1485_replacement(args) or is_source_only_semantic_exception(args)
 
 
 def is_source1292_empty_tree(args: Args) -> bool:
@@ -910,6 +1020,20 @@ def replace_v1_fields(
     return "".join(lines)
 
 
+def frontmatter_only(text: str) -> str:
+    """Retain task metadata while excluding inherited agent-authored body text."""
+
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        raise ReplaceError("manager task has no frontmatter")
+    try:
+        closing = next(index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+    except StopIteration as exc:
+        raise ReplaceError("manager task frontmatter is unterminated") from exc
+    ending = "\r\n" if lines[0].endswith("\r\n") else "\n"
+    return "".join(lines[: closing + 1]) + ending
+
+
 def authority_material(args: Args, snapshot: Snapshot, envelope: Snapshot) -> tuple[str, ...]:
     """Authenticate failed-manager evidence without copying private mail into task records."""
 
@@ -940,6 +1064,14 @@ def authority_material(args: Args, snapshot: Snapshot, envelope: Snapshot) -> tu
     canonical_excerpt = "\n".join(excerpt.splitlines())
     if not excerpt.strip():
         raise ReplaceError("authority excerpt must not be empty")
+    if is_source_only_semantic_exception(args):
+        if (
+            envelope.path != task_path(args.root, args.old_task)
+            or digest(envelope.data) != args.old_sha256
+            or canonical_excerpt != source_only_directive(args)
+        ):
+            raise ReplaceError("source-only authority or old-task before image changed")
+        return ()
     locator = f"{args.authority_file}:{args.authority_lines.start}-{args.authority_lines.end}"
     matches = list(HUMAN_ENVELOPE_RE.finditer(envelope_text))
     expected_matches = 2 if is_source1292_empty_tree(args) or is_source1292_descendant_tree(args) else 1
@@ -988,6 +1120,7 @@ def authority_material(args: Args, snapshot: Snapshot, envelope: Snapshot) -> tu
         and not is_source1443_semantic_exception(args)
         and not is_source1477_semantic_exception(args)
         and not is_source1485_semantic_exception(args)
+        and not is_source_only_semantic_exception(args)
     ):
         raise ReplaceError("authenticated authority does not explicitly prove failure, non-execution, and replacement")
     if is_pcodx_replacement(args) and not all(value in selected_evidence for value in (args.old_task, args.old_target)):
@@ -1001,6 +1134,33 @@ def authority_material(args: Args, snapshot: Snapshot, envelope: Snapshot) -> tu
         if (len(subject_token.findall(source_text)) != 1 and not exact_pcodx_replacement) or (len(close_directive.findall(selected_evidence)) != 1 and not exact_pcodx_replacement):
             raise ReplaceError("authenticated PCODX authority must directly close the exact named task and protected target")
     return tuple(items)
+
+
+def source1601_material(args: Args) -> Snapshot | None:
+    if not source1601_required(args):
+        return None
+    path = task_path(args.root, SOURCE1601_FILE)
+    snapshot = read_snapshot(path, "Source-1601 replacement authority")
+    try:
+        parent = path.parent.stat()
+    except OSError as exc:
+        raise ReplaceError(f"Source-1601 authority directory is unavailable: {exc}") from exc
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != os.getuid()
+        or stat.S_IMODE(parent.st_mode) & 0o077
+        or stat.S_IMODE(snapshot.state.st_mode) & 0o077
+        or digest(snapshot.data) != SOURCE1601_SHA256
+    ):
+        raise ReplaceError("Source-1601 authority source or digest changed")
+    try:
+        lines = snapshot.data.decode().splitlines()
+    except UnicodeDecodeError as exc:
+        raise ReplaceError(f"Source-1601 authority is not UTF-8: {exc}") from exc
+    excerpt = "\n".join(lines[SOURCE1601_LINES[0] - 1 : SOURCE1601_LINES[1]])
+    if excerpt != SOURCE1601_DIRECTIVE:
+        raise ReplaceError("Source-1601 original-Human-goals directive changed")
+    return snapshot
 
 
 def empty_tree_authority_material(args: Args, envelope: Snapshot) -> tuple[Snapshot, str]:
@@ -1061,6 +1221,18 @@ def protected_inventory_digest(args: Args, inventory: dict[str, PaneIdentity]) -
     )
 
 
+def validate_protected_bindings(args: Args, inventory: dict[str, PaneIdentity]) -> None:
+    if not uses_protected_inventory(args):
+        return
+    protected = tuple(canonical_target(target) for target in args.protected_targets)
+    if is_source_only_semantic_exception(args):
+        expected = tuple(sorted(target for target in inventory if target != canonical_target(args.old_target)))
+        if protected != expected:
+            raise ReplaceError("source-only replacement protected targets are not the complete canonical live inventory")
+    if protected_inventory_digest(args, inventory) != args.protected_targets_sha256:
+        raise ReplaceError("protected pane/process inventory changed")
+
+
 def pcodx_binding(args: Args, pane: PaneIdentity) -> dict[str, str]:
     if START_PCODX_ENV_KEYS != PCODX_ENV_KEYS:
         raise ReplaceError("installed PCODX custody schema changed")
@@ -1087,9 +1259,7 @@ def validate_live_bindings(args: Args, inventory: dict[str, PaneIdentity], *, re
         expected_child = PaneIdentity(canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks)
         if inventory.get(expected_child.target) != expected_child:
             raise ReplaceError(f"active descendant pane identity changed: {item.task}")
-    if is_pcodx_replacement(args) or is_source1485_replacement(args):
-        if protected_inventory_digest(args, inventory) != args.protected_targets_sha256:
-            raise ReplaceError("protected pane/process inventory changed")
+    validate_protected_bindings(args, inventory)
     if is_pcodx_replacement(args):
         _ = pcodx_binding(args, expected)
 
@@ -1120,6 +1290,8 @@ def old_and_successor_text(
     old_target: str,
     new_target: str,
     authority_items: tuple[str, ...],
+    *,
+    human_goals_only: bool = False,
 ) -> tuple[bytes, bytes, tuple[str, ...]]:
     old_text = old_data.decode()
     old_metadata = metadata(old_data, root, "old manager task")
@@ -1136,6 +1308,8 @@ def old_and_successor_text(
         remove_session=True,
         tool="codex",
     )
+    if human_goals_only:
+        successor = frontmatter_only(successor)
     successor = render_pending_items(successor, queue)
     successor_metadata = parse_task_metadata(successor, root)
     if successor_metadata is None or successor_metadata.pending_task_items != queue:
@@ -1270,6 +1444,8 @@ def pane_inventory() -> dict[str, PaneIdentity]:
 def validate_targets(args: Args) -> None:
     child_pairs = tuple((item.task, item.sha256) for item in args.children)
     descendant_pairs = tuple((item.task, item.sha256) for item in args.descendants)
+    if args.authority_file == SOURCE1612_FILE:
+        raise ReplaceError("Source-1612 replacement requires a separate authenticated handoff-complete proof")
     if len({item.task for item in args.children}) != len(args.children):
         raise ReplaceError("child task references must be unique")
     if len({item.task for item in args.descendants}) != len(args.descendants):
@@ -1305,12 +1481,15 @@ def validate_targets(args: Args) -> None:
             raise ReplaceError("Source-1485 replacement requires a nonempty digest-bound protected target inventory")
         if SHA256_RE.fullmatch(args.authority_envelope_file_sha256) is None:
             raise ReplaceError("Source-1485 replacement requires the complete authority-envelope file SHA-256 binding")
+    elif is_source_only_semantic_exception(args):
+        if SHA256_RE.fullmatch(args.old_queue_sha256) is None or not args.protected_targets or SHA256_RE.fullmatch(args.protected_targets_sha256) is None:
+            raise ReplaceError("source-only replacement requires ordered-queue and protected-inventory SHA-256 bindings")
     elif not is_pcodx_replacement(args) and args.old_queue_sha256:
-        raise ReplaceError("ordered queue binding is accepted only for an exact PCODX, Source-1269, or Source-1485 replacement")
+        raise ReplaceError("ordered queue binding is accepted only for an exact PCODX, Source-1269, Source-1485, or source-only replacement")
     if not is_source1485_replacement(args) and any(child.queue_sha256 for child in args.children):
         raise ReplaceError("explicit child queue bindings are accepted only for an exact Source-1485 replacement")
-    if not (is_pcodx_replacement(args) or is_source1485_replacement(args)) and args.protected_targets_sha256:
-        raise ReplaceError("protected inventory digest is accepted only for PCODX or exact Source-1485 replacement")
+    if not uses_protected_inventory(args) and args.protected_targets_sha256:
+        raise ReplaceError("protected inventory digest is accepted only for PCODX, exact Source-1485, or an exact source-only replacement")
     if not (is_pcodx_replacement(args) or is_source1485_replacement(args)) and args.authority_envelope_file_sha256:
         raise ReplaceError("authority-envelope file digest is accepted only for PCODX or exact Source-1485 replacement")
     if args.closed_owner_audit is not None:
@@ -1333,12 +1512,20 @@ def validate_targets(args: Args) -> None:
         raise ReplaceError("Source-1292 descendant mode requires exact Source-1289 with nonempty descendant pins")
     if any(child.task == args.authority_envelope_task for child in args.children) and not is_source1292_descendant_tree(args):
         raise ReplaceError("authority-envelope child alias is restricted to exact Source-1292 descendant mode")
+    if args.authority_envelope_task == args.old_task and not is_source_only_semantic_exception(args):
+        raise ReplaceError("authority-envelope old-task alias is restricted to an exact source-only mode")
+    if is_source_only_semantic_exception(args) and len(Path(args.successor_task).name) >= 25:
+        raise ReplaceError("source-only successor task filename must be shorter than 25 characters")
     if is_source1289_whole_tree(args) and (
         args.authority_sha256 != SOURCE1289_SHA256 or args.authority_lines != LineRange(*SOURCE1289_CARRIER_LINES) or args.successor_item_lines != (LineRange(*SOURCE1289_TREE_LINES),)
     ):
         raise ReplaceError("Source-1289 whole-tree mode requires its exact authenticated tree-replacement directive")
     if args.authority_file == SOURCE1485_FILE and not is_source1485_semantic_exception(args):
         raise ReplaceError("Source-1485 authority is restricted to its three exact manager transitions")
+    if args.authority_file == SOURCE1597_FILE and not is_source1597_semantic_exception(args):
+        raise ReplaceError("Source-1597 authority is restricted to its exact manager transition")
+    if args.authority_file == SOURCE1611_FILE and not is_source1611_semantic_exception(args):
+        raise ReplaceError("Source-1611 authority is restricted to its exact manager transition")
     old = canonical_target(args.old_target)
     new = canonical_target(args.new_target)
     if old == new:
@@ -1560,6 +1747,7 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
     todo = read_snapshot(todo_path, "TODO")
     authority = read_snapshot(authority_path, "replacement authority")
     authority_envelope = read_snapshot(authority_envelope_path, "replacement authority envelope")
+    source1601_authority = source1601_material(args)
     if digest(old.data) != args.old_sha256 or digest(todo.data) != args.todo_sha256:
         raise ReplaceError("old manager or TODO digest changed")
     if is_source1485_replacement(args) and args.old_task == SOURCE1485_ROOT_TASK:
@@ -1575,8 +1763,10 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         or (not is_pcodx_replacement(args) and old_metadata.session_id.lower() != args.old_session_id)
     ):
         raise ReplaceError("old manager must be the exact live long-running failed-manager record bound by the invocation")
-    if (is_pcodx_replacement(args) or is_guest1269_replacement(args) or is_source1485_replacement(args)) and json_digest(list(old_metadata.pending_task_items)) != args.old_queue_sha256:
+    if uses_ordered_queue_binding(args) and json_digest(list(old_metadata.pending_task_items)) != args.old_queue_sha256:
         raise ReplaceError("old manager full ordered queue changed")
+    if is_source_only_semantic_exception(args) and old_metadata.pending_task_items != source_only_expected_old_queue(args):
+        raise ReplaceError("source-only replacement exact Human-provenance queue changed")
     old_owners = authoritative_active_target_task_paths(args.root, args.old_target)
     if old_owners != (old_path.resolve(),):
         raise ReplaceError("old target does not have exactly one authoritative active owner")
@@ -1623,6 +1813,8 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         child_queues.append(child_metadata.pending_task_items)
         child_metadata_values.append(child_metadata)
     authority_items = authority_material(args, authority, authority_envelope)
+    if is_source_only_semantic_exception(args):
+        authority_items = (*authority_items, *source_only_added_goals(args, old_metadata.pending_task_items))
     empty_tree_authority: Snapshot | None = None
     if is_source1292_empty_tree(args) or is_source1292_descendant_tree(args):
         empty_tree_authority, empty_tree_item = empty_tree_authority_material(args, authority_envelope)
@@ -1633,10 +1825,11 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         args.old_target,
         args.new_target,
         authority_items,
+        human_goals_only=is_source_only_semantic_exception(args),
     )
     todo_after = todo_replacement(todo.data, args.root, old_path, successor_path, args.old_target, args.new_target)
     protected_identities: tuple[PaneIdentity, ...] = ()
-    if is_pcodx_replacement(args) or is_source1485_replacement(args):
+    if uses_protected_inventory(args):
         inventory = pane_inventory()
         validate_live_bindings(args, inventory)
         validate_source1485_protected_set(args, inventory, tuple(child_metadata_values))
@@ -1660,6 +1853,8 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         descendant_identities,
         empty_tree_authority,
     )
+    if source1601_authority is not None:
+        plan = replace(plan, source1601_authority=source1601_authority)
     if is_source1485_replacement(args):
         topology = source1485_topology_binding(args, plan)
         plan = replace(plan, source1485_topology=topology)
@@ -1681,6 +1876,10 @@ def authenticate_committed_authority_envelope(
     child_after: tuple[Snapshot, ...],
 ) -> None:
     """Authenticate unchanged authority blocks in a migrated child carrier."""
+
+    if is_source_only_semantic_exception(args):
+        _ = authority_material(args, plan.authority, plan.old)
+        return
 
     index = authority_envelope_child_index(args)
     if index is None:
@@ -1786,6 +1985,8 @@ def audit_record(args: Args, plan: Plan, secret: str, commitment: str) -> dict[s
         record["authority_envelope_file_sha256"] = args.authority_envelope_file_sha256
         record["source1485_topology"] = plan.source1485_topology
         record["source1485_topology_sha256"] = json_digest(plan.source1485_topology)
+    if is_source_only_semantic_exception(args):
+        record.update(source_only_audit_binding(args))
     if args.closed_owner_audit is not None:
         record.update(
             {
@@ -1795,7 +1996,7 @@ def audit_record(args: Args, plan: Plan, secret: str, commitment: str) -> dict[s
         )
     if is_pcodx_replacement(args):
         record.update(pcodx_audit_binding(args))
-    if is_pcodx_replacement(args) or is_source1485_replacement(args):
+    if uses_protected_inventory(args):
         record["protected_inventory"] = [
             {
                 "target": identity.target,
@@ -1921,6 +2122,23 @@ def pcodx_audit_binding(args: Args) -> dict[str, object]:
     }
 
 
+def source_only_audit_binding(args: Args) -> dict[str, object]:
+    binding: dict[str, object] = {
+        "authority_mode": SOURCE_ONLY_AUTHORITY_MODE,
+        "old_queue_sha256": args.old_queue_sha256,
+        "protected_targets_sha256": args.protected_targets_sha256,
+    }
+    if source1601_required(args):
+        binding.update(
+            {
+                "source1601_file": SOURCE1601_FILE,
+                "source1601_lines": list(SOURCE1601_LINES),
+                "source1601_sha256": SOURCE1601_SHA256,
+            }
+        )
+    return binding
+
+
 def descendant_binding(args: Args) -> list[dict[str, object]]:
     return [
         {
@@ -1978,6 +2196,8 @@ def audit_binding(args: Args) -> dict[str, object]:
                 "authority_envelope_file_sha256": args.authority_envelope_file_sha256,
             }
         )
+    if is_source_only_semantic_exception(args):
+        binding.update(source_only_audit_binding(args))
     if args.closed_owner_audit is not None:
         binding.update(
             {
@@ -2020,6 +2240,8 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
         allowed.add("protected_inventory")
     if is_source1485_replacement(args):
         allowed.update({"protected_inventory", "source1485_topology", "source1485_topology_sha256"})
+    if is_source_only_semantic_exception(args):
+        allowed.add("protected_inventory")
     if args.descendants:
         allowed.add("descendant_close_commitments")
         commitments = record.get("descendant_close_commitments")
@@ -2085,7 +2307,7 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
     for pin, entry in zip(args.children, entries[1:-2], strict=True):
         if digest(entry.before or b"") != pin.sha256:
             raise ReplaceError(f"private replacement audit child before-image changed: {pin.task}")
-    if is_pcodx_replacement(args) or is_source1485_replacement(args):
+    if uses_protected_inventory(args):
         protected_value = record.get("protected_inventory")
         if not isinstance(protected_value, list) or json_digest(protected_value) != args.protected_targets_sha256:
             raise ReplaceError("private replacement audit protected inventory binding changed")
@@ -2205,12 +2427,17 @@ def recovery_plan(
         raise ReplaceError("recovery found changed lifecycle file mode or group")
     authority = read_snapshot(task_path(args.root, args.authority_file), "recovery replacement authority")
     envelope = read_snapshot(task_path(args.root, args.authority_envelope_task), "recovery authority envelope")
+    source1601_authority = source1601_material(args)
     envelope_child_index = authority_envelope_child_index(args)
     if envelope_child_index is not None:
         envelope_entry = child_entries[envelope_child_index]
         if envelope_entry.before is None:
             raise ReplaceError("private replacement audit lost the authority-envelope child before image")
         envelope = Snapshot(envelope.path, envelope_entry.before, envelope.state)
+    if is_source_only_semantic_exception(args):
+        if old_entry.before is None:
+            raise ReplaceError("private replacement audit lost the source-only old-task authority before image")
+        envelope = Snapshot(envelope.path, old_entry.before, envelope.state)
     authority_items = authority_material(args, authority, envelope)
     empty_tree_authority: Snapshot | None = None
     if is_source1292_empty_tree(args) or is_source1292_descendant_tree(args):
@@ -2218,6 +2445,9 @@ def recovery_plan(
         authority_items = (*authority_items, empty_tree_item)
     if old_entry.before is None or todo_entry.before is None or any(entry.before is None for entry in child_entries):
         raise ReplaceError("private replacement audit lost a required before image")
+    old_before_metadata = metadata(old_entry.before, args.root, "recovery old manager before image")
+    if is_source_only_semantic_exception(args):
+        authority_items = (*authority_items, *source_only_added_goals(args, old_before_metadata.pending_task_items))
     old_before = Snapshot(old_path, old_entry.before, snapshots[0].state)
     old_after, successor_after, successor_queue = old_and_successor_text(
         old_entry.before,
@@ -2225,6 +2455,7 @@ def recovery_plan(
         args.old_target,
         args.new_target,
         authority_items,
+        human_goals_only=is_source_only_semantic_exception(args),
     )
     child_before: list[Snapshot] = []
     child_after: list[bytes] = []
@@ -2260,8 +2491,10 @@ def recovery_plan(
         or (not is_pcodx_replacement(args) and old_metadata.session_id.lower() != args.old_session_id)
     ):
         raise ReplaceError("private replacement audit does not describe the exact failed manager")
-    if (is_pcodx_replacement(args) or is_guest1269_replacement(args) or is_source1485_replacement(args)) and json_digest(list(old_metadata.pending_task_items)) != args.old_queue_sha256:
+    if uses_ordered_queue_binding(args) and json_digest(list(old_metadata.pending_task_items)) != args.old_queue_sha256:
         raise ReplaceError("private replacement audit old manager ordered queue changed")
+    if is_source_only_semantic_exception(args) and old_metadata.pending_task_items != source_only_expected_old_queue(args):
+        raise ReplaceError("private replacement audit source-only Human-provenance queue changed")
     protected: list[PaneIdentity] = []
     protected_value = record.get("protected_inventory", [])
     if not isinstance(protected_value, list):
@@ -2301,6 +2534,8 @@ def recovery_plan(
         tuple(PaneIdentity(canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks) for item in args.descendants),
         empty_tree_authority,
     )
+    if source1601_authority is not None:
+        plan = replace(plan, source1601_authority=source1601_authority)
     if is_source1485_replacement(args):
         topology = source1485_topology_binding(args, plan)
         if topology != record.get("source1485_topology") or json_digest(topology) != record.get("source1485_topology_sha256"):
@@ -2685,6 +2920,8 @@ def require_preclose_eligibility(args: Args, plan: Plan) -> None:
     require_snapshot(plan.todo, "pre-close TODO")
     require_snapshot(plan.authority, "pre-close replacement authority")
     require_snapshot(plan.authority_envelope, "pre-close replacement authority envelope")
+    if plan.source1601_authority is not None:
+        require_snapshot(plan.source1601_authority, "pre-close Source-1601 authority")
     if plan.empty_tree_authority is not None:
         require_snapshot(plan.empty_tree_authority, "pre-close Source-1292 empty-tree authority")
     for child in plan.children:
@@ -2720,7 +2957,7 @@ def stop_old_manager(
     protected_before: tuple[PaneIdentity, ...] = ()
     require_preclose_eligibility(args, plan)
     require_descendants_closed(args, plan, secret)
-    if is_pcodx_replacement(args) or is_source1485_replacement(args):
+    if uses_protected_inventory(args):
         before_inventory = pane_inventory()
         validate_live_bindings(args, before_inventory, require_descendants=False)
         protected_before = tuple(identity for identity in protected_inventory(args, before_inventory) if identity.target != canonical_target(args.old_target))
@@ -2754,7 +2991,7 @@ def stop_old_manager(
             human_close_authorization_source=args.authority_file if is_pcodx_replacement(args) else "",
             human_close_authorization_sha256=args.authority_sha256 if is_pcodx_replacement(args) else "",
             human_close_authorized_target=args.old_target if is_pcodx_replacement(args) else "",
-            bound_pre_input_check=(pre_input_check if is_pcodx_replacement(args) or is_source1289_whole_tree(args) or is_source1485_replacement(args) else None),
+            bound_pre_input_check=(pre_input_check if uses_protected_inventory(args) or is_source1289_whole_tree(args) else None),
         )
     )
     if session_id.lower() != args.old_session_id:
@@ -2768,8 +3005,11 @@ def stop_old_manager(
         raise ReplaceError("successor target launched before singular ownership proof")
     if any(identity.target in inventory or process_start_ticks(identity.pid) is not None for identity in plan.descendant_identities):
         raise ReplaceError("a bound descendant remains live after guarded close")
-    if (is_pcodx_replacement(args) or is_source1485_replacement(args)) and tuple(inventory.get(identity.target) for identity in protected_before) != protected_before:
-        raise ReplaceError("non-replaced protected pane/process inventory changed during close")
+    if uses_protected_inventory(args):
+        if is_source_only_semantic_exception(args):
+            validate_protected_bindings(args, inventory)
+        if tuple(inventory.get(identity.target) for identity in protected_before) != protected_before:
+            raise ReplaceError("non-replaced protected pane/process inventory changed during close")
 
 
 def require_descendants_closed(args: Args, plan: Plan, secret: str) -> None:
@@ -2789,6 +3029,8 @@ def prove_committed(args: Args, plan: Plan, old_after: Snapshot, child_after: tu
         _prepared, _authority, _source_args, _entries = authenticate_closed_owner_source(args)
         validate_closed_owner_absence(args)
     require_snapshot(plan.authority, "replacement authority")
+    if plan.source1601_authority is not None:
+        require_snapshot(plan.source1601_authority, "committed Source-1601 authority")
     authenticate_committed_authority_envelope(args, plan, child_after)
     if plan.empty_tree_authority is not None:
         require_snapshot(plan.empty_tree_authority, "Source-1292 empty-tree authority")
@@ -2832,6 +3074,8 @@ def prove_committed(args: Args, plan: Plan, old_after: Snapshot, child_after: tu
     if args.descendants and descendant_progress(args, audit.data) != "":
         raise ReplaceError("descendant close progress is incomplete at the singular ownership proof boundary")
     remaining_protected = tuple(identity for identity in plan.protected_identities if identity.target != canonical_target(args.old_target))
+    if is_source_only_semantic_exception(args):
+        validate_protected_bindings(args, inventory)
     if tuple(inventory.get(identity.target) for identity in remaining_protected) != remaining_protected:
         raise ReplaceError("protected pane/process inventory changed before singular ownership proof")
     expected_membership = tuple(sorted((*plan.initial_markdown_paths, plan.successor_path.resolve(strict=False)), key=str))
@@ -2848,6 +3092,7 @@ def replace_manager(args: Args) -> str:
     successor_path = task_path(args.root, args.successor_task)
     authority_source_path = task_path(args.root, args.authority_file)
     authority_envelope_path = task_path(args.root, args.authority_envelope_task)
+    source1601_path = task_path(args.root, SOURCE1601_FILE)
     empty_tree_authority_path = task_path(args.root, SOURCE1292_FILE)
     close_authority_path, proof_path = closed_owner_evidence_paths(args.audit_output)
     source_evidence_paths = () if args.closed_owner_audit is None else (args.closed_owner_audit, *closed_owner_evidence_paths(args.closed_owner_audit))
@@ -2860,6 +3105,7 @@ def replace_manager(args: Args) -> str:
                 successor_path,
                 authority_source_path,
                 authority_envelope_path,
+                *((source1601_path,) if source1601_required(args) else ()),
                 *((empty_tree_authority_path,) if is_source1292_empty_tree(args) or is_source1292_descendant_tree(args) else ()),
                 args.audit_output,
                 close_authority_path,
@@ -2878,7 +3124,7 @@ def replace_manager(args: Args) -> str:
                 canonical_target(args.old_target),
                 canonical_target(args.new_target),
                 *(canonical_target(child.target) for child in args.descendants),
-                *((canonical_target(target) for target in args.protected_targets) if is_source1485_replacement(args) else ()),
+                *((canonical_target(target) for target in args.protected_targets) if is_source1485_replacement(args) or is_source_only_semantic_exception(args) else ()),
             }
         ):
             locks.enter_context(task_target_lock(args.root, target))
@@ -2961,10 +3207,14 @@ def replace_manager(args: Args) -> str:
                     raise ReplaceError(f"manager stop failed and audit finalization failed: {exc}; audit: {audit_exc}") from exc
                 raise ReplaceError(f"manager stop failed before lifecycle mutation: {exc}") from exc
             record, audit_bytes = transition_audit(args.audit_output, audit_bytes, record, "owner_stopped", completed=())
+        if is_source_only_semantic_exception(args):
+            validate_protected_bindings(args, pane_inventory())
         completed: list[str] = []
         try:
             require_snapshot(plan.authority, "replacement authority")
             require_snapshot(plan.authority_envelope, "replacement authority envelope")
+            if plan.source1601_authority is not None:
+                require_snapshot(plan.source1601_authority, "Source-1601 replacement authority")
             if plan.empty_tree_authority is not None:
                 require_snapshot(plan.empty_tree_authority, "Source-1292 replacement authority")
             record, audit_bytes = transition_audit(args.audit_output, audit_bytes, record, "mutating", completed=())
