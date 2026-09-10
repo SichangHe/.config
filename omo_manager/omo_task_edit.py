@@ -57,6 +57,13 @@ SOURCE1503_EXCERPT = "Subject: Re: Close obsolete DeepWiki planner?\n\nClose the
 SOURCE1506_REF = Path("manager_mail/85c5dff58359-1506.txt")
 SOURCE1506_SHA256 = "a9dc947ccaf3be2a05af6b09a6092000b4ae9d7046352f4aa39850a0d96f7bcb"
 SOURCE1506_EXCERPT = "Subject: Re: Wix and B12 current counts and latest site\n\nwl:11\n"
+SOURCE1528_REF = Path("manager_mail/85c5dff58359-1528.txt")
+SOURCE1528_SHA256 = "80573dc300f1a9ae1b79c7161463131e3f3367201957a4118afc892d7e7f1db8"
+SOURCE1528_TASK = Path("dw_ops_mgr.md")
+SOURCE1528_DISPOSITION_RECORDS = (
+    '(verified removed pending item: Human said, “For a manager, close this task is not needed.” Interpreted and acknowledged in the existing Calendar owner email thread as cancelling only Calendar A15 follow-up, with no manager-role closure, calendar editor creation, or event mutation.)',
+    "(verified removed pending item: Acknowledged by email in the existing Calendar owner thread as cancelling only Calendar A15 follow-up; calendar queue item removed, persistent manager role preserved, and no calendar editor or event mutation occurred.)",
+)
 
 COMMAND_ALIASES = {
     "list": "pending-list",
@@ -98,6 +105,7 @@ class Args:
     authority_lines: tuple[int, int] = (0, 0)
     authority_sha256: str = ""
     completion_key: str = ""
+    expected_source_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -132,6 +140,7 @@ class ParsedArgs(argparse.Namespace):
     source_ref: str = ""
     preserve_live_source: bool = False
     completion_key: str = ""
+    expected_source_sha256: str = ""
     item_origin: str
 
 
@@ -210,6 +219,17 @@ def parse_args(argv: list[str]) -> Args:
     _ = source_dedupe_parser.add_argument(
         "--preserve-live-source", action="store_true", help="Leave an exact source pointer in a live `(pending)` block intact; requires an active matching queue item."
     )
+
+    source_disposition_parser = subparsers.add_parser(
+        "source-pointer-disposition-cleanup",
+        help="Remove the one registered bare Human-source pointer after exact same-task disposition.",
+        description="Source-bound cleanup for an already dispositioned request; never treats a single pointer as duplicate intake.",
+    )
+    source_disposition_parser.set_defaults(command="source-pointer-disposition-cleanup")
+    _ = source_disposition_parser.add_argument("task_file", type=Path)
+    _ = source_disposition_parser.add_argument("--source-ref", required=True)
+    _ = source_disposition_parser.add_argument("--expected-task-sha256", required=True)
+    _ = source_disposition_parser.add_argument("--expected-source-sha256", required=True)
 
     envelope_parser = subparsers.add_parser(
         "human-envelope-record",
@@ -335,6 +355,17 @@ def parse_args(argv: list[str]) -> Args:
                 evidence=normalized_comment_message(parsed.evidence),
                 source_ref=normalized_source_ref(parsed.source_ref),
                 preserve_live_source=parsed.preserve_live_source,
+            )
+        if command == "source-pointer-disposition-cleanup":
+            if re.fullmatch(r"[0-9a-f]{64}", parsed.expected_task_sha256) is None or re.fullmatch(r"[0-9a-f]{64}", parsed.expected_source_sha256) is None:
+                parser.error("source-pointer-disposition-cleanup requires lowercase task and source SHA-256 digests.")
+            return Args(
+                root,
+                parsed.task_file,
+                command,
+                source_ref=normalized_source_ref(parsed.source_ref),
+                expected_task_sha256=parsed.expected_task_sha256,
+                expected_source_sha256=parsed.expected_source_sha256,
             )
         if command == "human-envelope-record":
             if re.fullmatch(r"[0-9a-f]{64}", parsed.expected_task_sha256) is None or re.fullmatch(r"[0-9a-f]{64}", parsed.authority_sha256) is None:
@@ -829,6 +860,85 @@ def dedupe_bare_source_pointers(text: str, source_ref: str, evidence: str, *, pr
     return append_comment_line(updated, record), len(remove_indices)
 
 
+def dispositioned_source_pointer_cleanup(args: Args, path: Path, text: str) -> str:
+    """Remove the one registered pointer only after exact in-record disposition."""
+
+    if (
+        path != args.root / SOURCE1528_TASK
+        or args.source_ref != SOURCE1528_REF.as_posix()
+        or args.expected_source_sha256 != SOURCE1528_SHA256
+    ):
+        raise TaskFrontmatterError("source-pointer-disposition-cleanup requires the exact registered task and Human source binding.")
+    task_sha256 = hashlib.sha256(text.encode()).hexdigest()
+    if args.expected_task_sha256 != task_sha256:
+        raise TaskFrontmatterError("task bytes do not match --expected-task-sha256.")
+    metadata = require_metadata(text, args.root)
+    if (
+        metadata.status != "long_running"
+        or metadata.runat != "dw:18"
+        or metadata.managerat != "dw:15"
+        or not metadata.is_manager
+        or has_live_pending_marker(text)
+    ):
+        raise TaskFrontmatterError("registered disposition cleanup requires the unchanged persistent-manager lifecycle and no live pending marker.")
+    visible_lines: list[str] = []
+    in_fence = False
+    for line in text.splitlines():
+        if line.strip().startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            visible_lines.append(line)
+    if any(visible_lines.count(record) != 1 for record in SOURCE1528_DISPOSITION_RECORDS):
+        raise TaskFrontmatterError("task does not contain the exact unique same-task disposition records.")
+    source_path = args.root / SOURCE1528_REF
+    try:
+        source_before = source_path.stat(follow_symlinks=False)
+        source_bytes = source_path.read_bytes()
+        source_after = source_path.stat(follow_symlinks=False)
+    except OSError as error:
+        raise TaskFrontmatterError(f"could not bind the exact Human source: {error}") from error
+    if (
+        not stat.S_ISREG(source_before.st_mode)
+        or source_before.st_uid != os.getuid()
+        or stat.S_IMODE(source_before.st_mode) & 0o022
+        or not same_file_state(source_before, source_after)
+        or hashlib.sha256(source_bytes).hexdigest() != SOURCE1528_SHA256
+    ):
+        raise TaskFrontmatterError("Human source identity, permissions, or digest does not match the registered request.")
+    normalized_source = source_bytes.replace(b"\r\n", b"\n")
+    if not normalized_source.startswith(b"Subject: Re: Calendar owner needed for transcript_tasks.md\n\nFor a manager, close this task is not needed.\n"):
+        raise TaskFrontmatterError("Human source does not contain the exact registered request.")
+    pointer = f"(record and delegate {args.source_ref})"
+    lines = text.splitlines(keepends=True)
+    pointer_indices: list[int] = []
+    in_fence = False
+    in_pending_block = False
+    for index, line in enumerate(lines):
+        physical = line.rstrip("\r\n")
+        stripped = physical.strip()
+        if stripped.startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if stripped == PENDING_MARKER:
+            in_pending_block = True
+            continue
+        if physical == pointer:
+            if in_pending_block:
+                raise TaskFrontmatterError("refusing to remove a source pointer inside a live `(pending)` block.")
+            pointer_indices.append(index)
+    if len(pointer_indices) != 1:
+        raise TaskFrontmatterError("registered disposition cleanup requires exactly one bare source pointer.")
+    del lines[pointer_indices[0]]
+    updated = "".join(lines)
+    record = normalized_comment(
+        f"dispositioned source pointer removed for {args.source_ref}: source-sha256={SOURCE1528_SHA256} prior-task-sha256={task_sha256} exact same-task Calendar A15 cancellation records preserved"
+    )
+    return append_comment_line(updated, record)
+
+
 def pending_block_lines(text: str, line_number: int) -> list[str]:
     lines = text.splitlines()
     if line_number < 1 or line_number > len(lines):
@@ -1149,6 +1259,25 @@ def run(args: Args) -> int:
                 return 0
             write_if_changed(path, text, updated, before)
             print(f"removed {count} bare source pointer(s) for {args.source_ref} from {path.name}")
+            return 0
+        if command == "source-pointer-disposition-cleanup":
+            source_path = args.root / SOURCE1528_REF
+            with task_file_lock(path), task_file_lock(source_path):
+                current_before = path.stat()
+                current_bytes = path.read_bytes()
+                if b"\r" in current_bytes or not current_bytes.endswith(b"\n"):
+                    raise TaskFrontmatterError("dispositioned source-pointer cleanup requires canonical LF-terminated task bytes.")
+                try:
+                    current_text = current_bytes.decode("utf-8")
+                except UnicodeError as error:
+                    raise TaskFrontmatterError(f"task is not valid UTF-8: {error}") from error
+                if not same_file_state(before, current_before) or current_text != text:
+                    raise TaskFrontmatterError("task changed before dispositioned source-pointer cleanup.")
+                if hashlib.sha256(current_bytes).hexdigest() != args.expected_task_sha256:
+                    raise TaskFrontmatterError("raw task bytes do not match --expected-task-sha256.")
+                updated = dispositioned_source_pointer_cleanup(args, path, current_text)
+                replace_if_unchanged_locked(path, updated, current_before)
+            print(f"removed one dispositioned bare source pointer for {args.source_ref} from {path.name}")
             return 0
         if command == "human-envelope-record":
             spec = human_envelope_spec(args, path)

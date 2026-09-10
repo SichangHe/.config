@@ -12,9 +12,11 @@ import time
 import unittest
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 from omo_manager import omo_codex_stop, omo_stale_predecessor_input_disposition as subject
+from omo_manager.omo_repository_custody import HeldAbsolute
 from omo_manager.omo_stale_predecessor_close import PanePin
 from omo_manager.omo_task_metadata import TaskFrontmatterError
 
@@ -23,6 +25,33 @@ MENU_LINES = [
     "",
     "  /status      show current session configuration and token usage",
     "  /statusline  configure which items appear in the status line",
+]
+
+ACCUMULATED_STATUS_LINES = [
+    "│  Permissions:                 Full Access                                    │",
+    "│  Agents.md:                   ~/.codex/AGENTS.md, AGENTS.md                  │",
+    "│  Account:                     team@mi.inc (Pro)                              │",
+    "│  Thread name:                 Define manager worker defaults                 │",
+    "│  Collaboration mode:          Default                                        │",
+    "│  Session:                     01a07f0f-ffbd-7f13-89f1-4936c50be5c2           │",
+    "│                                                                              │",
+    "│  Context window:              30% left (183K used / 258K)                    │",
+    "│  gpt-reserve Weekly limit:    [████████████████████] 100% left               │",
+    "│                               (resets 16:27 on 15 Sep)                       │",
+    "│  Weekly limit:                [█████████████░░░░░░░] 66% left                │",
+    "│                               (resets 18:24 on 14 Sep)                       │",
+    "│  GPT-5.3-Codex-Spark limit:                                                  │",
+    "│  5h limit:                    [████████████████████] 100% left               │",
+    "│                               (resets 21:27)                                 │",
+    "│  Weekly limit:                [████████████████████] 100% left               │",
+    "│                               (resets 16:27 on 15 Sep)                       │",
+    "│  Warning:                     limits may be stale - run /status again shortl │",
+    "╰──────────────────────────────────────────────────────────────────────────────╯",
+    " ",
+    " ",
+    "› /status                 ",
+    " ",
+    "  gpt-5.6-sol high · /ssd1/sichangheagent/dw8 · weekly 60% left · 6.82M used · …",
 ]
 
 
@@ -54,15 +83,180 @@ def disposition_packet(tmp: Path) -> dict[str, object]:
 
 
 class StalePredecessorInputDispositionTests(unittest.TestCase):
+    def post_review_prepare_fixture(self, tmp: Path) -> tuple[argparse.Namespace, dict[str, object]]:
+        paths = {name: tmp / name for name in ("packet.json", "review.json", "close.json.prepared", "worker.md", "TODO.md", "manager.md", "ledger.tsv")}
+        for path in paths.values():
+            path.write_text(f"{path.name}\n")
+            if path.name in {"packet.json", "review.json", "close.json.prepared"}:
+                path.chmod(0o600)
+        prior: dict[str, object] = {
+            "root": str(tmp),
+            "audit": str(tmp / "close.json"),
+            "task": str(paths["worker.md"]),
+            "task_sha256": subject.sha256(paths["worker.md"].read_bytes()),
+            "todo": str(paths["TODO.md"]),
+            "todo_sha256": subject.sha256(paths["TODO.md"].read_bytes()),
+            "manager_task": str(paths["manager.md"]),
+            "manager_task_sha256": subject.sha256(paths["manager.md"].read_bytes()),
+            "manager_target": "dw:15",
+            "predecessor_target": subject.EXPECTED_SCOPE["predecessor_target"],
+            "predecessor_pane": subject.EXPECTED_SCOPE["predecessor_pane"],
+            "predecessor_session_id": subject.EXPECTED_SCOPE["predecessor_session_id"],
+            "protected_target": subject.EXPECTED_SCOPE["protected_target"],
+            "protected_pane": subject.EXPECTED_SCOPE["protected_pane"],
+            "protected_session_id": subject.EXPECTED_SCOPE["protected_session_id"],
+            "inputs": [
+                subject.file_input(paths["worker.md"], "protected task"),
+                subject.file_input(paths["TODO.md"], "TODO"),
+                subject.file_input(paths["manager.md"], "manager task"),
+                subject.file_input(paths["ledger.tsv"], "ledger"),
+            ],
+        }
+        args = argparse.Namespace(
+            prior_packet=paths["packet.json"],
+            prior_packet_sha256=subject.POST_REVIEW_CLOSE_PACKET_SHA256,
+            prior_review=paths["review.json"],
+            prior_review_sha256=subject.POST_REVIEW_CLOSE_REVIEW_SHA256,
+            prepared_close_audit=paths["close.json.prepared"],
+            prepared_close_audit_sha256=subject.POST_REVIEW_CLOSE_PREPARED_SHA256,
+            audit=tmp / "disposition.json",
+            output=tmp / "disposition-packet.json",
+        )
+        return args, prior
+
+    def recovery_execution_paths_fixture(self, tmp: Path) -> tuple[dict[str, object], dict[str, object], list[object], dict[str, Path]]:
+        paths = {name: tmp / name for name in ("manager", "root-audit", "packet", "review", "prepared", "complete", "recovery", "recovery-review")}
+        paths.update({f"input-{index}": tmp / f"input-{index}" for index in range(subject.SOURCE1485_INPUT_COUNT)})
+        for name, path in paths.items():
+            path.write_text(f"{name}\n")
+        paths["root-audit"].chmod(0o600)
+        manager_sha256 = subject.sha256(paths["manager"].read_bytes())
+        root_audit_sha256 = subject.sha256(paths["root-audit"].read_bytes())
+        packet: dict[str, object] = {
+            "schema": subject.SOURCE1485_SCHEMA,
+            "manager_task": str(paths["manager"]),
+            "manager_task_sha256": manager_sha256,
+            "source1485_root_audit": str(paths["root-audit"]),
+            "source1485_root_audit_sha256": root_audit_sha256,
+        }
+        recovery: dict[str, object] = {
+            "current_manager_task": str(paths["manager"]),
+            "source1485_root_audit": str(paths["root-audit"]),
+        }
+        raw_inputs: list[object] = [subject.file_input(paths[f"input-{index}"], f"input {index}") for index in range(subject.SOURCE1485_INPUT_COUNT)]
+        raw_inputs[subject.SOURCE1485_MANAGER_INPUT_INDEX] = subject.file_input(paths["manager"], "manager task")
+        raw_inputs[subject.SOURCE1485_ROOT_AUDIT_INPUT_INDEX] = subject.file_input(paths["root-audit"], "Source-1485 root audit", private=True)
+        return packet, recovery, raw_inputs, paths
+
+    def validate_recovery_execution_paths(
+        self,
+        packet: dict[str, object],
+        recovery: dict[str, object],
+        raw_inputs: list[object],
+        paths: dict[str, Path],
+    ) -> None:
+        subject.validate_todo_recovery_execution_paths(
+            packet,
+            recovery,
+            raw_inputs,
+            packet_path=paths["packet"],
+            review_path=paths["review"],
+            prepared_path=paths["prepared"],
+            complete_path=paths["complete"],
+            recovery_path=paths["recovery"],
+            recovery_review_path=paths["recovery-review"],
+            prior_controls=set(),
+        )
+
+    def source1485_recovery_inputs_fixture(self, tmp: Path) -> tuple[dict[str, object], list[object], list[dict[str, object]]]:
+        paths = [tmp / f"input-{index}" for index in range(14)]
+        for index, path in enumerate(paths):
+            path.write_text(f"input {index}\n")
+        raw_inputs: list[object] = [subject.file_input(path, f"input {index}") for index, path in enumerate(paths)]
+        expected_inputs = [subject.file_input(path, f"input {index}") for index, path in enumerate(paths)]
+        packet: dict[str, object] = {
+            "schema": subject.SOURCE1485_SCHEMA,
+            "task": str(paths[9]),
+            "task_sha256": subject.sha256(paths[9].read_bytes()),
+            "todo": str(paths[10]),
+            "todo_sha256": subject.sha256(paths[10].read_bytes()),
+            "manager_task": str(paths[11]),
+            "manager_task_sha256": subject.sha256(paths[11].read_bytes()),
+            "source1485_root_audit": str(paths[12]),
+            "helper": str(paths[13]),
+        }
+        return packet, raw_inputs, expected_inputs
+
     def todo_recovery_fixture(self, tmp: Path) -> tuple[dict[str, object], dict[str, object], Path]:
         task = tmp / "worker.md"
         todo = tmp / "TODO.md"
         manager = tmp / "manager.md"
-        task.write_text("worker\n")
+        current_manager = tmp / "dw_root_new.md"
+        before_task = b"---\nversion: v1.0.0\nstatus: blocked\nrunat: dw8:1\ntool: codex\nmanagerat: dw:0\nis_manager: false\npending_task_items: []\n---\nworker\n"
+        after_task = before_task.replace(b"managerat: dw:0\n", b"managerat: dw:15\n")
+        task.write_bytes(after_task)
         manager.write_text("manager\n")
+        current_manager.write_text("---\nversion: v1.0.0\nstatus: blocked\nrunat: dw:15\ntool: codex\nmanagerat: config:1\nis_manager: true\npending_task_items: []\n---\nmanager\n")
         todo.write_bytes(b"current:\nworker.md dw8:1\nother.md config:2\n")
         packet = disposition_packet(tmp)
-        packet.update({"todo_sha256": "a" * 64, "helper": str(Path(subject.__file__).resolve(strict=True))})
+        packet.update(
+            {
+                "task_sha256": subject.sha256(after_task),
+                "todo_sha256": "a" * 64,
+                "helper": str(Path(subject.__file__).resolve(strict=True)),
+                "helper_sha256": subject.RECOVERABLE_HELPER_SHA256,
+            }
+        )
+        root_audit = tmp / "root-audit.json"
+        root_audit.write_text(
+            json.dumps(
+                {
+                    "state": "committed",
+                    "operation": "manager-replace",
+                    "old_task": "dw_manager.md",
+                    "old_target": "dw:0",
+                    "successor_task": "dw_root_new.md",
+                    "new_target": "dw:15",
+                    "parent_target": "config:1",
+                    "children": [{"task": "worker.md", "sha256": subject.sha256(before_task), "queue_sha256": subject.sha256(b"[]")}],
+                    "source1485_topology": {
+                        "root_task": "dw_root_new.md",
+                        "root_target": "dw:15.0",
+                        "parent_target": "config:1.0",
+                        "rows": [
+                            {
+                                "task": "worker.md",
+                                "sha256": subject.sha256(after_task),
+                                "status": "blocked",
+                                "runat": "dw8:1.0",
+                                "managerat": "dw:15.0",
+                                "tool": "codex",
+                                "is_manager": False,
+                                "queue_sha256": subject.sha256(b"[]"),
+                            },
+                            {
+                                "task": "dw_root_new.md",
+                                "status": "blocked",
+                                "runat": "dw:15.0",
+                                "managerat": "config:1.0",
+                                "tool": "codex",
+                                "is_manager": True,
+                            },
+                        ],
+                    },
+                    "files": [
+                        {
+                            "task": "worker.md",
+                            "before": base64.b64encode(before_task).decode(),
+                            "after": base64.b64encode(after_task).decode(),
+                        }
+                    ],
+                }
+            )
+        )
+        root_audit.chmod(0o600)
+        self.enterContext(patch.object(subject, "SOURCE1485_ROOT_AUDIT_SHA256", subject.sha256(root_audit.read_bytes())))
+        self.enterContext(patch.object(subject, "SOURCE1485_ORIGINAL_TASK_SHA256", subject.sha256(before_task)))
         row, chunks = subject.partition_todo(todo.read_bytes(), subject.owned_todo_row(packet))
         unsigned: dict[str, object] = {
             "schema": subject.TODO_RECOVERY_SCHEMA,
@@ -74,6 +268,8 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             "prepared_audit": str(tmp / "disposition.json.prepared"),
             "prepared_audit_sha256": subject.RECOVERABLE_PREPARED_AUDIT_SHA256,
             "task": str(task),
+            "original_task_sha256": packet["task_sha256"],
+            "current_task_input": subject.file_input(task, "rebound protected task"),
             "todo": str(todo),
             "original_todo_sha256": packet["todo_sha256"],
             "owned_rows_base64": [base64.b64encode(row).decode()],
@@ -81,6 +277,10 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             "unrelated_todo_sha256": subject.sha256(b"".join(chunks)),
             "current_todo_input": subject.file_input(todo, "rebound TODO"),
             "recovery_helper_input": subject.file_input(Path(subject.__file__).resolve(strict=True), "TODO recovery helper"),
+            "source1485_root_audit": str(root_audit),
+            "source1485_root_audit_sha256": subject.SOURCE1485_ROOT_AUDIT_SHA256,
+            "current_manager_task": str(current_manager),
+            "current_manager_target": "dw:15",
         }
         return packet, {**unsigned, "binding_id": subject.bound_receipt_id(unsigned)}, todo
 
@@ -91,10 +291,17 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         *,
         prepared_exists: bool,
         recoverable: bool = False,
+        schema: str | None = None,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             tmp = Path(directory)
             packet = disposition_packet(tmp)
+            if schema is not None:
+                packet["schema"] = schema
+            if schema == subject.POST_REVIEW_SCHEMA:
+                reviewed_capture = "\n".join(ACCUMULATED_STATUS_LINES).encode() if states[0] == "status_input" else "\n".join(MENU_LINES).encode()
+                packet["menu_capture_base64"] = base64.b64encode(reviewed_capture).decode()
+                packet["menu_capture_sha256"] = subject.sha256(reviewed_capture)
             prepared_close = Path(str(packet["prepared_close_audit"]))
             prepared_close.write_bytes(b"preserved-close-audit\n")
             predecessor = PanePin("dw8:0", "%1", 101, 201)
@@ -168,6 +375,293 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         self.assertTrue(subject.exact_status_menu(lines))
         self.assertEqual("status_menu", subject.exact_recovery_state(lines))
 
+    def test_exact_accumulated_status_input_is_recognized(self) -> None:
+        self.assertTrue(subject.exact_accumulated_status_input(ACCUMULATED_STATUS_LINES))
+        repeated = [*ACCUMULATED_STATUS_LINES[:19], *ACCUMULATED_STATUS_LINES]
+        self.assertTrue(subject.exact_accumulated_status_input(repeated))
+
+    def test_accumulated_status_input_rejects_structural_drift(self) -> None:
+        cases = []
+        for index, replacement in (
+            (2, "│  Wrong:                       account                                        │"),
+            (18, "not a panel close"),
+            (20, "unexpected output"),
+            (21, "› /status now"),
+            (23, "footer without separators"),
+        ):
+            lines = list(ACCUMULATED_STATUS_LINES)
+            lines[index] = replacement
+            cases.append(lines)
+        for lines in cases:
+            with self.subTest(lines=lines):
+                self.assertFalse(subject.exact_accumulated_status_input(lines))
+        wrong_border = list(ACCUMULATED_STATUS_LINES)
+        wrong_border[18] = "╰foo╯"
+        self.assertFalse(subject.exact_accumulated_status_input(wrong_border))
+        wrong_value = list(ACCUMULATED_STATUS_LINES)
+        wrong_value[0] = "│  Permissions:                 Danger Zone                                    │"
+        self.assertFalse(subject.exact_accumulated_status_input(wrong_value))
+        inserted = [*ACCUMULATED_STATUS_LINES[:3], "│  Arbitrary:                   content                                        │", *ACCUMULATED_STATUS_LINES[3:]]
+        self.assertFalse(subject.exact_accumulated_status_input(inserted))
+        footer_drifts = (
+            "  gpt-5.6-sol high · /ssd1/sichangheagent/dw8 · weekly 60% left · 6.82M used",
+            "  gpt-5.6-sol high · /tmp/dw8 · weekly 60% left · 6.82M used · …",
+            "  gpt-5.6-sol high · /ssd1/sichangheagent/dw8 · weekly 60% left · 6.82M used · extra · …",
+            "  gpt-5.6-sol high · /ssd1/sichangheagent/dw8 · weekly sixty left · 6.82M used · …",
+            "  gpt-5.6-sol high · /ssd1/sichangheagent/dw8 · weekly 60% left · unknown used · …",
+            "  gpt-5.6-sol high · /ssd1/sichangheagent/dw8 · weekly 60% left · 6.82M used · ...",
+        )
+        for footer in footer_drifts:
+            with self.subTest(footer=footer):
+                lines = list(ACCUMULATED_STATUS_LINES)
+                lines[-1] = footer
+                self.assertFalse(subject.exact_accumulated_status_input(lines))
+
+    def test_post_review_prepare_binds_exact_failed_close_and_menu_without_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            args, prior = self.post_review_prepare_fixture(tmp)
+            menu = "\n".join(MENU_LINES).encode()
+            published: list[bytes] = []
+            with (
+                patch.object(subject, "validate_post_review_close_artifacts", return_value=prior) as validate_close,
+                patch.object(subject, "validate_post_review_lifecycle"),
+                patch.object(subject, "current_pin", return_value=True),
+                patch.object(
+                    subject,
+                    "session_from_process",
+                    side_effect=lambda pin: prior[f"{'predecessor' if pin.target == 'dw8:0' else 'protected'}_session_id"],
+                ),
+                patch.object(subject, "source1485_live_custody", return_value=True),
+                patch.object(subject, "validate_post_review_provenance", return_value=tmp / "ledger.tsv"),
+                patch.object(subject, "capture_fresh_preparation_menu", return_value=menu),
+                patch.object(subject, "publish_or_validate", side_effect=lambda _path, data, _label: published.append(data)),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                subject.prepare_post_review(args)
+            self.assertEqual(2, validate_close.call_count)
+            self.assertEqual(1, len(published))
+            packet = subject.validate_packet(published[0], subject.sha256(published[0]))
+            self.assertEqual(subject.POST_REVIEW_SCHEMA, packet["schema"])
+            self.assertEqual(subject.POST_REVIEW_CLOSE_PACKET_SHA256, packet["prior_packet_sha256"])
+            self.assertEqual(menu, base64.b64decode(str(packet["menu_capture_base64"])))
+
+    def test_post_review_prepare_rejects_capture_race_before_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            args, prior = self.post_review_prepare_fixture(tmp)
+            with (
+                patch.object(subject, "validate_post_review_close_artifacts", return_value=prior),
+                patch.object(subject, "validate_post_review_lifecycle"),
+                patch.object(subject, "current_pin", return_value=True),
+                patch.object(
+                    subject,
+                    "session_from_process",
+                    side_effect=lambda pin: prior[f"{'predecessor' if pin.target == 'dw8:0' else 'protected'}_session_id"],
+                ),
+                patch.object(subject, "source1485_live_custody", return_value=True),
+                patch.object(subject, "validate_post_review_provenance", return_value=tmp / "ledger.tsv"),
+                patch.object(subject, "capture_fresh_preparation_menu", side_effect=[b"menu", b"changed"]),
+                patch.object(subject, "publish_or_validate") as publish,
+                self.assertRaisesRegex(TaskFrontmatterError, "raced before publication"),
+            ):
+                subject.prepare_post_review(args)
+            publish.assert_not_called()
+
+    def test_post_review_prepare_holds_all_inputs_through_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            args, prior = self.post_review_prepare_fixture(tmp)
+            ledger = tmp / "ledger.tsv"
+            menu = b"menu"
+            captures = 0
+
+            def capture(
+                _predecessor: PanePin,
+                _protected: PanePin,
+                *,
+                allow_accumulated_status_input: bool = False,
+            ) -> bytes:
+                nonlocal captures
+                self.assertTrue(allow_accumulated_status_input)
+                captures += 1
+                if captures == 2:
+                    ledger.write_text("raced after static validation\n")
+                return menu
+
+            with (
+                patch.object(subject, "validate_post_review_close_artifacts", return_value=prior),
+                patch.object(subject, "validate_post_review_lifecycle"),
+                patch.object(subject, "current_pin", return_value=True),
+                patch.object(
+                    subject,
+                    "session_from_process",
+                    side_effect=lambda pin: prior[f"{'predecessor' if pin.target == 'dw8:0' else 'protected'}_session_id"],
+                ),
+                patch.object(subject, "source1485_live_custody", return_value=True),
+                patch.object(subject, "validate_post_review_provenance", return_value=ledger),
+                patch.object(subject, "capture_fresh_preparation_menu", side_effect=capture),
+                patch.object(subject, "publish_or_validate") as publish,
+                self.assertRaisesRegex(subject.CustodyError, "identity drifted"),
+            ):
+                subject.prepare_post_review(args)
+            publish.assert_not_called()
+
+    def test_post_review_prepare_rejects_final_session_race_before_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            args, prior = self.post_review_prepare_fixture(tmp)
+            predecessor_session = str(prior["predecessor_session_id"])
+            protected_session = str(prior["protected_session_id"])
+            with (
+                patch.object(subject, "validate_post_review_close_artifacts", return_value=prior),
+                patch.object(subject, "validate_post_review_lifecycle"),
+                patch.object(subject, "current_pin", return_value=True),
+                patch.object(
+                    subject,
+                    "session_from_process",
+                    side_effect=[predecessor_session, protected_session, "changed-session", protected_session],
+                ),
+                patch.object(subject, "source1485_live_custody", return_value=True),
+                patch.object(subject, "validate_post_review_provenance", return_value=tmp / "ledger.tsv"),
+                patch.object(subject, "capture_fresh_preparation_menu", return_value=b"menu"),
+                patch.object(subject, "publish_or_validate") as publish,
+                self.assertRaisesRegex(TaskFrontmatterError, "session changed"),
+            ):
+                subject.prepare_post_review(args)
+            publish.assert_not_called()
+
+    def test_post_review_prepare_rejects_capture_change_during_final_custody(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            args, prior = self.post_review_prepare_fixture(tmp)
+            predecessor_session = str(prior["predecessor_session_id"])
+            protected_session = str(prior["protected_session_id"])
+            with (
+                patch.object(subject, "validate_post_review_close_artifacts", return_value=prior),
+                patch.object(subject, "validate_post_review_lifecycle"),
+                patch.object(subject, "current_pin", return_value=True),
+                patch.object(
+                    subject,
+                    "session_from_process",
+                    side_effect=[predecessor_session, protected_session, predecessor_session, protected_session],
+                ),
+                patch.object(subject, "source1485_live_custody", return_value=True),
+                patch.object(subject, "validate_post_review_provenance", return_value=tmp / "ledger.tsv"),
+                patch.object(subject, "capture_fresh_preparation_menu", side_effect=[b"menu", b"menu", b"changed"]),
+                patch.object(subject, "publish_or_validate") as publish,
+                self.assertRaisesRegex(TaskFrontmatterError, "final custody validation"),
+            ):
+                subject.prepare_post_review(args)
+            publish.assert_not_called()
+
+    def test_post_review_static_evidence_rejects_wrong_root(self) -> None:
+        packet: dict[str, object] = {
+            "root": "/tmp/wrong-root",
+            "prior_packet": "/tmp/prior-packet",
+            "prior_packet_sha256": "0" * 64,
+            "prior_review": "/tmp/prior-review",
+            "prior_review_sha256": "1" * 64,
+            "prepared_close_audit": "/tmp/prior-audit.prepared",
+            "prepared_close_audit_sha256": "2" * 64,
+            "helper_sha256": "3" * 64,
+        }
+        prior: dict[str, object] = {"root": "/tmp/authenticated-root"}
+        with (
+            patch.object(subject, "validate_post_review_packet_scope"),
+            patch.object(subject, "validate_post_review_close_artifacts", return_value=prior),
+            patch.object(subject, "read_bound", return_value=b"helper"),
+            patch.object(subject, "post_review_input_records", return_value=[]),
+            self.assertRaisesRegex(TaskFrontmatterError, "evidence changed"),
+        ):
+            subject.static_post_review_evidence(packet)
+
+    def test_post_review_artifacts_reject_wrong_path_or_digest_before_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            args, _prior = self.post_review_prepare_fixture(tmp)
+            with (
+                patch.object(subject, "read_bound") as read,
+                self.assertRaisesRegex(TaskFrontmatterError, "outside the exact"),
+            ):
+                subject.validate_post_review_close_artifacts(
+                    args.prior_packet,
+                    args.prior_packet_sha256,
+                    args.prior_review,
+                    args.prior_review_sha256,
+                    args.prepared_close_audit,
+                    args.prepared_close_audit_sha256,
+                )
+            read.assert_not_called()
+
+    def test_post_review_inputs_rebind_only_todo_manager_and_authenticated_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            args, prior = self.post_review_prepare_fixture(tmp)
+            task = Path(str(prior["task"]))
+            prior_inputs = cast(list[dict[str, object]], prior["inputs"])
+            original_task_input = next(value for value in prior_inputs if subject.file_identity_from(value["file"], "input").path == str(task))
+            for name in ("TODO.md", "manager.md", "ledger.tsv"):
+                (tmp / name).write_text(f"current {name}\n")
+            with patch.object(subject, "validate_post_review_provenance", return_value=tmp / "ledger.tsv"):
+                records = subject.post_review_input_records(
+                    prior,
+                    args.prior_packet,
+                    args.prior_review,
+                    args.prepared_close_audit,
+                    Path(subject.__file__).resolve(strict=True),
+                )
+            identities = {
+                subject.file_identity_from(subject.object_map(value, "input")["file"], "input").path: subject.file_identity_from(subject.object_map(value, "input")["file"], "input")
+                for value in records
+            }
+            self.assertEqual(original_task_input["file"], next(value for value in records if subject.file_identity_from(value["file"], "input").path == str(task))["file"])
+            for name in ("TODO.md", "manager.md", "ledger.tsv"):
+                self.assertEqual(subject.sha256((tmp / name).read_bytes()), identities[str(tmp / name)].sha256)
+
+    def test_post_review_inputs_reject_unrelated_evidence_drift_and_read_race(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            args, prior = self.post_review_prepare_fixture(tmp)
+            task = Path(str(prior["task"]))
+            task.write_text("drift\n")
+            with (
+                patch.object(subject, "validate_post_review_provenance", return_value=tmp / "ledger.tsv"),
+                self.assertRaisesRegex(subject.CustodyError, "identity drifted"),
+            ):
+                subject.post_review_input_records(
+                    prior,
+                    args.prior_packet,
+                    args.prior_review,
+                    args.prepared_close_audit,
+                    Path(subject.__file__).resolve(strict=True),
+                )
+
+            args, prior = self.post_review_prepare_fixture(tmp)
+            ledger = tmp / "ledger.tsv"
+            original_validate = subject.validate_held_absolute
+            mutated = False
+
+            def race(held: HeldAbsolute) -> None:
+                nonlocal mutated
+                if not mutated:
+                    ledger.write_text("raced\n")
+                    mutated = True
+                original_validate(held)
+
+            with (
+                patch.object(subject, "validate_post_review_provenance", return_value=ledger),
+                patch.object(subject, "validate_held_absolute", side_effect=race),
+                self.assertRaisesRegex(subject.CustodyError, "identity drifted"),
+            ):
+                subject.post_review_input_records(
+                    prior,
+                    args.prior_packet,
+                    args.prior_review,
+                    args.prepared_close_audit,
+                    Path(subject.__file__).resolve(strict=True),
+                )
+
     def test_menu_recognizer_rejects_any_expansion_or_drift(self) -> None:
         cases = (
             ["› /status now", *MENU_LINES[1:]],
@@ -185,6 +679,31 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         self.assertEqual("other", subject.exact_recovery_state(["› /status"]))
         self.assertEqual("status_input", subject.exact_recovery_state(["› /status", "", "  gpt-5.5"]))
         self.assertEqual("ready", subject.exact_recovery_state(["› Ask Codex to do anything", "", "  gpt-5.5"]))
+
+    def test_post_escape_ready_capture_accepts_exact_tmux_n_footer_spacer(self) -> None:
+        lines = [
+            "│  Warning:                     limits may be stale - run /status again shortly │",
+            "╰──────────────────────────────────────────────────────────────────────────────╯",
+            " ",
+            " ",
+            "› Ask Codex to do anything",
+            " ",
+            "  gpt-5.6-sol high · /workspace/dw8 · weekly 66% left · 6.82M used · …",
+        ]
+        report = subject.report_from_lines(lines)
+        self.assertEqual(("ready", "Ask Codex to do anything"), (report.status, report.input_text))
+        self.assertEqual("ready", subject.exact_recovery_state(lines))
+
+    def test_post_escape_ready_capture_rejects_nonexact_footer_spacers(self) -> None:
+        base = [
+            "› Ask Codex to do anything",
+            " ",
+            "  gpt-5.6-sol high · /workspace/dw8 · weekly 66% left · 6.82M used · …",
+        ]
+        for spacer in ("  ", "\t", " unexpected"):
+            with self.subTest(spacer=repr(spacer)):
+                lines = [base[0], spacer, base[2]]
+                self.assertEqual("other", subject.exact_recovery_state(lines))
 
     def test_recovery_report_requirements_match_immutable_incident_wording(self) -> None:
         report_body = (
@@ -208,8 +727,260 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
     def test_todo_recovery_authenticates_owned_row_and_all_unrelated_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             packet, recovery, _todo = self.todo_recovery_fixture(Path(directory))
-            current = subject.validate_todo_recovery_current(packet, recovery)
+            current, _task, _manager, _target, _parent = subject.validate_todo_recovery_current(packet, recovery)
             self.assertEqual(b"current:\nworker.md dw8:1\nother.md config:2\n", current)
+
+    def test_source1485_todo_recovery_locates_shifted_inputs_by_exact_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, raw_inputs, expected_inputs = self.source1485_recovery_inputs_fixture(Path(directory))
+            for key, digest_key, label in (
+                ("task", "task_sha256", "task"),
+                ("todo", "todo_sha256", "TODO"),
+                ("manager_task", "manager_task_sha256", "manager"),
+            ):
+                subject.rebind_todo_recovery_input(raw_inputs, expected_inputs, str(packet[key]), packet[digest_key], label)
+            self.assertEqual(raw_inputs, expected_inputs)
+
+    def test_execute_allows_exact_source1485_manager_and_root_audit_input_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, raw_inputs, paths = self.recovery_execution_paths_fixture(Path(directory))
+            self.validate_recovery_execution_paths(packet, recovery, raw_inputs, paths)
+
+    def test_execute_rejects_manager_overlap_with_disposition_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, raw_inputs, paths = self.recovery_execution_paths_fixture(Path(directory))
+            paths["prepared"] = paths["manager"]
+            with self.assertRaisesRegex(TaskFrontmatterError, "paths overlap"):
+                self.validate_recovery_execution_paths(packet, recovery, raw_inputs, paths)
+
+    def test_execute_rejects_manager_overlap_with_different_evidence_role(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, raw_inputs, paths = self.recovery_execution_paths_fixture(Path(directory))
+            paths["packet"] = paths["manager"]
+            with self.assertRaisesRegex(TaskFrontmatterError, "paths overlap"):
+                self.validate_recovery_execution_paths(packet, recovery, raw_inputs, paths)
+
+    def test_execute_rejects_missing_duplicate_or_mismatched_manager_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, raw_inputs, paths = self.recovery_execution_paths_fixture(Path(directory))
+            manager_index = subject.SOURCE1485_MANAGER_INPUT_INDEX
+            for changed in (
+                [*raw_inputs[:manager_index], *raw_inputs[manager_index + 1 :]],
+                [*raw_inputs, raw_inputs[manager_index]],
+            ):
+                with self.subTest(count=len(changed)), self.assertRaisesRegex(TaskFrontmatterError, "paths overlap"):
+                    self.validate_recovery_execution_paths(packet, recovery, changed, paths)
+            packet["manager_task_sha256"] = "f" * 64
+            with self.assertRaisesRegex(TaskFrontmatterError, "paths overlap"):
+                self.validate_recovery_execution_paths(packet, recovery, raw_inputs, paths)
+
+    def test_execute_rejects_manager_or_root_audit_in_a_different_input_role(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, raw_inputs, paths = self.recovery_execution_paths_fixture(Path(directory))
+            for role_index in (subject.SOURCE1485_MANAGER_INPUT_INDEX, subject.SOURCE1485_ROOT_AUDIT_INPUT_INDEX):
+                changed = list(raw_inputs)
+                changed[0], changed[role_index] = changed[role_index], changed[0]
+                with self.subTest(role_index=role_index), self.assertRaisesRegex(TaskFrontmatterError, "paths overlap"):
+                    self.validate_recovery_execution_paths(packet, recovery, changed, paths)
+
+    def test_execute_rejects_missing_duplicate_or_mismatched_root_audit_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, raw_inputs, paths = self.recovery_execution_paths_fixture(Path(directory))
+            audit_index = subject.SOURCE1485_ROOT_AUDIT_INPUT_INDEX
+            for changed in (
+                [*raw_inputs[:audit_index], *raw_inputs[audit_index + 1 :]],
+                [*raw_inputs, raw_inputs[audit_index]],
+            ):
+                with self.subTest(count=len(changed)), self.assertRaisesRegex(TaskFrontmatterError, "paths overlap"):
+                    self.validate_recovery_execution_paths(packet, recovery, changed, paths)
+            packet["source1485_root_audit_sha256"] = "f" * 64
+            with self.assertRaisesRegex(TaskFrontmatterError, "paths overlap"):
+                self.validate_recovery_execution_paths(packet, recovery, raw_inputs, paths)
+
+    def test_execute_keeps_root_audit_output_overlap_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, raw_inputs, paths = self.recovery_execution_paths_fixture(Path(directory))
+            paths["recovery-review"] = paths["root-audit"]
+            with self.assertRaisesRegex(TaskFrontmatterError, "paths overlap"):
+                self.validate_recovery_execution_paths(packet, recovery, raw_inputs, paths)
+
+    def test_source1485_todo_recovery_rejects_swapped_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, raw_inputs, expected_inputs = self.source1485_recovery_inputs_fixture(Path(directory))
+            raw_inputs[9], raw_inputs[10] = raw_inputs[10], raw_inputs[9]
+            with self.assertRaisesRegex(TaskFrontmatterError, "task recovery binding is invalid"):
+                subject.rebind_todo_recovery_input(raw_inputs, expected_inputs, str(packet["task"]), packet["task_sha256"], "task")
+
+    def test_source1485_todo_recovery_rejects_duplicate_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, raw_inputs, expected_inputs = self.source1485_recovery_inputs_fixture(Path(directory))
+            raw_inputs[12] = raw_inputs[9]
+            with self.assertRaisesRegex(TaskFrontmatterError, "task recovery binding is invalid"):
+                subject.rebind_todo_recovery_input(raw_inputs, expected_inputs, str(packet["task"]), packet["task_sha256"], "task")
+
+    def test_source1485_todo_recovery_rejects_missing_input(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, raw_inputs, expected_inputs = self.source1485_recovery_inputs_fixture(Path(directory))
+            raw_inputs[9] = raw_inputs[12]
+            with self.assertRaisesRegex(TaskFrontmatterError, "task recovery binding is invalid"):
+                subject.rebind_todo_recovery_input(raw_inputs, expected_inputs, str(packet["task"]), packet["task_sha256"], "task")
+
+    def test_fresh_packet_authenticates_source1485_migration_custody(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, _todo = self.todo_recovery_fixture(Path(directory))
+            prior = {
+                "task": packet["task"],
+                "task_sha256": subject.SOURCE1485_ORIGINAL_TASK_SHA256,
+                "manager_task": packet["manager_task"],
+                "manager_target": packet["manager_target"],
+            }
+            task = Path(str(packet["task"]))
+            fresh = {
+                **packet,
+                "schema": subject.SOURCE1485_SCHEMA,
+                "task_sha256": subject.sha256(task.read_bytes()),
+                "original_task_sha256": subject.SOURCE1485_ORIGINAL_TASK_SHA256,
+                "manager_task": recovery["current_manager_task"],
+                "manager_target": recovery["current_manager_target"],
+                "original_manager_task": packet["manager_task"],
+                "original_manager_target": packet["manager_target"],
+                "source1485_root_audit": recovery["source1485_root_audit"],
+                "source1485_root_audit_sha256": recovery["source1485_root_audit_sha256"],
+            }
+            task_data, manager, target, parent = subject.validate_source1485_packet(fresh, prior)
+            self.assertEqual(task.read_bytes(), task_data)
+            self.assertEqual(Path(str(recovery["current_manager_task"])), manager)
+            self.assertEqual(("dw:15", "config:1"), (target, parent))
+
+    def test_fresh_packet_rejects_stale_pre_source1485_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, _todo = self.todo_recovery_fixture(Path(directory))
+            prior = {
+                "task": packet["task"],
+                "task_sha256": subject.SOURCE1485_ORIGINAL_TASK_SHA256,
+                "manager_task": packet["manager_task"],
+                "manager_target": packet["manager_target"],
+            }
+            fresh = {
+                **packet,
+                "schema": subject.SOURCE1485_SCHEMA,
+                "task_sha256": subject.sha256(Path(str(packet["task"])).read_bytes()),
+                "original_task_sha256": "f" * 64,
+                "manager_task": recovery["current_manager_task"],
+                "manager_target": recovery["current_manager_target"],
+                "original_manager_task": packet["manager_task"],
+                "original_manager_target": packet["manager_target"],
+                "source1485_root_audit": recovery["source1485_root_audit"],
+                "source1485_root_audit_sha256": recovery["source1485_root_audit_sha256"],
+            }
+            with self.assertRaisesRegex(TaskFrontmatterError, "pre-Source-1485 custody"):
+                subject.validate_source1485_packet(fresh, prior)
+
+    def test_fresh_prepare_rejects_capture_race(self) -> None:
+        predecessor = PanePin("dw8:0", "%1", 101, 201)
+        protected = PanePin("dw8:1", "%2", 102, 202)
+        ready = b"\xe2\x80\xba Ask Codex to do anything\n\n  gpt-5.5\n"
+        menu = "\n".join(MENU_LINES).encode()
+        with (
+            patch.object(subject, "capture_pinned", side_effect=[ready, menu, menu + b"changed\n"]),
+            self.assertRaisesRegex(TaskFrontmatterError, "capture raced"),
+        ):
+            subject.capture_fresh_preparation_menu(predecessor, protected)
+
+    def test_post_review_prepare_accepts_stable_accumulated_status_input(self) -> None:
+        predecessor = PanePin("dw8:0", "%1", 101, 201)
+        protected = PanePin("dw8:1", "%2", 102, 202)
+        ready = b"\xe2\x80\xba Ask Codex to do anything\n\n  gpt-5.5\n"
+        accumulated = "\n".join(ACCUMULATED_STATUS_LINES).encode()
+        with patch.object(subject, "capture_pinned", side_effect=[ready, accumulated, accumulated, ready]):
+            self.assertEqual(
+                accumulated,
+                subject.capture_fresh_preparation_menu(predecessor, protected, allow_accumulated_status_input=True),
+            )
+        with (
+            patch.object(subject, "capture_pinned", side_effect=[ready, accumulated]),
+            self.assertRaisesRegex(TaskFrontmatterError, "cancellable /status shape"),
+        ):
+            subject.capture_fresh_preparation_menu(predecessor, protected)
+
+    def test_only_v3_live_state_classifies_accumulated_status_input(self) -> None:
+        predecessor = PanePin("dw8:0", "%1", 101, 201)
+        protected = PanePin("dw8:1", "%2", 102, 202)
+        accumulated = "\n".join(ACCUMULATED_STATUS_LINES).encode()
+        ready = b"\xe2\x80\xba Ask Codex to do anything\n\n  gpt-5.5\n"
+        packet = disposition_packet(Path("/tmp"))
+        packet.update(
+            {
+                "schema": subject.POST_REVIEW_SCHEMA,
+                "menu_capture_base64": base64.b64encode(accumulated).decode(),
+                "menu_capture_sha256": subject.sha256(accumulated),
+            }
+        )
+
+        def observed_state(schema: str, *, require_original: bool, capture: bytes = accumulated) -> str:
+            packet["schema"] = schema
+            with (
+                patch.object(subject, "static_evidence", return_value=(predecessor, protected)),
+                patch.object(subject, "current_pin", return_value=True),
+                patch.object(
+                    subject,
+                    "session_from_process",
+                    side_effect=[packet["predecessor_session_id"], packet["protected_session_id"]],
+                ),
+                patch.object(subject, "capture_pinned", side_effect=[capture, ready]),
+            ):
+                return subject.live_state(packet, require_original_menu=require_original)[2]
+
+        self.assertEqual("status_input", observed_state(subject.POST_REVIEW_SCHEMA, require_original=True))
+        self.assertEqual("other", observed_state(subject.SOURCE1485_SCHEMA, require_original=False))
+        drifted = accumulated.replace(b"team@mi.inc", b"evil@mi.inc")
+        self.assertTrue(subject.exact_accumulated_status_input(subject.capture_lines(drifted)))
+        with self.assertRaisesRegex(TaskFrontmatterError, "independently reviewed capture"):
+            observed_state(subject.POST_REVIEW_SCHEMA, require_original=True, capture=drifted)
+
+    def test_fresh_prepare_rejects_nonready_or_changed_protected_successor(self) -> None:
+        predecessor = PanePin("dw8:0", "%1", 101, 201)
+        protected = PanePin("dw8:1", "%2", 102, 202)
+        ready = b"\xe2\x80\xba Ask Codex to do anything\n\n  gpt-5.5\n"
+        busy = b"\xe2\x80\xba /status\n"
+        menu = "\n".join(MENU_LINES).encode()
+        with (
+            patch.object(subject, "capture_pinned", return_value=busy),
+            self.assertRaisesRegex(TaskFrontmatterError, "not in its preserved ready state"),
+        ):
+            subject.capture_fresh_preparation_menu(predecessor, protected)
+        with (
+            patch.object(subject, "capture_pinned", side_effect=[ready, menu, menu, busy]),
+            self.assertRaisesRegex(TaskFrontmatterError, "successor changed"),
+        ):
+            subject.capture_fresh_preparation_menu(predecessor, protected)
+
+    def test_v2_review_and_execute_state_reject_protected_successor_drift(self) -> None:
+        packet = disposition_packet(Path("/tmp"))
+        packet.update(
+            {
+                "schema": subject.SOURCE1485_SCHEMA,
+                "authorized_input": "/status",
+                "menu_capture_base64": base64.b64encode("\n".join(MENU_LINES).encode()).decode(),
+                "menu_capture_sha256": subject.sha256("\n".join(MENU_LINES).encode()),
+            }
+        )
+        predecessor = PanePin("dw8:0", "%1", 101, 201)
+        protected = PanePin("dw8:1", "%2", 102, 202)
+        menu = "\n".join(MENU_LINES).encode()
+        busy = b"\xe2\x80\xba /status\n"
+        with (
+            patch.object(subject, "static_evidence", return_value=(predecessor, protected)),
+            patch.object(subject, "current_pin", return_value=True),
+            patch.object(
+                subject,
+                "session_from_process",
+                side_effect=[packet["predecessor_session_id"], packet["protected_session_id"]],
+            ),
+            patch.object(subject, "capture_pinned", side_effect=[menu, busy]),
+            self.assertRaisesRegex(TaskFrontmatterError, "left its preserved ready state"),
+        ):
+            subject.live_state(packet, require_original_menu=True)
 
     def test_todo_recovery_rejects_owned_row_drift_even_with_fresh_file_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -243,6 +1014,86 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             ):
                 subject.validate_todo_recovery_current(packet, recovery)
 
+    def test_todo_recovery_rejects_original_child_before_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, _todo = self.todo_recovery_fixture(Path(directory))
+            audit_path = Path(str(recovery["source1485_root_audit"]))
+            audit = json.loads(audit_path.read_bytes())
+            audit["children"][0]["sha256"] = "f" * 64
+            audit_path.write_text(json.dumps(audit))
+            recovery["source1485_root_audit_sha256"] = subject.sha256(audit_path.read_bytes())
+            self.enterContext(patch.object(subject, "SOURCE1485_ROOT_AUDIT_SHA256", recovery["source1485_root_audit_sha256"]))
+            with self.assertRaisesRegex(TaskFrontmatterError, "changed unsupported bytes"):
+                subject.validate_todo_recovery_current(packet, recovery)
+
+    def test_todo_recovery_rejects_migrated_packet_after_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, _todo = self.todo_recovery_fixture(Path(directory))
+            packet["task_sha256"] = "f" * 64
+            recovery["original_task_sha256"] = packet["task_sha256"]
+            with self.assertRaisesRegex(TaskFrontmatterError, "changed unsupported bytes"):
+                subject.validate_todo_recovery_current(packet, recovery)
+
+    def test_todo_recovery_rejects_protected_task_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, _todo = self.todo_recovery_fixture(Path(directory))
+            task = Path(str(packet["task"]))
+            task.write_bytes(task.read_bytes().replace(b"status: blocked\n", b"status: running\n"))
+            recovery["current_task_input"] = subject.file_input(task, "rebound protected task")
+            with self.assertRaisesRegex(TaskFrontmatterError, "transition evidence is invalid"):
+                subject.validate_todo_recovery_current(packet, recovery)
+
+    def test_todo_recovery_rejects_task_read_to_identity_race(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            packet, recovery, _todo = self.todo_recovery_fixture(Path(directory))
+            task = Path(str(packet["task"]))
+            original_read_bound = subject.read_bound
+
+            def raced_read(path: Path, expected_sha256: str, label: str, *, private: bool = False) -> bytes:
+                data = original_read_bound(path, expected_sha256, label, private=private)
+                if label == "rebound protected task":
+                    task.write_bytes(data + b"raced\n")
+                return data
+
+            with (
+                patch.object(subject, "read_bound", side_effect=raced_read),
+                self.assertRaisesRegex(TaskFrontmatterError, "current task recovery input changed"),
+            ):
+                subject.validate_todo_recovery_current(packet, recovery)
+
+    def test_todo_recovery_holds_current_task_and_detects_race(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            packet, recovery, todo = self.todo_recovery_fixture(tmp)
+            task = Path(str(packet["task"]))
+            manager = Path(str(packet["manager_task"]))
+            helper = Path(subject.__file__).resolve(strict=True)
+
+            def old_input(path: Path, digest: str, label: str) -> dict[str, object]:
+                value = subject.file_input(path, label)
+                identity = subject.object_map(value["file"], label)
+                identity["sha256"] = digest
+                value["file"] = identity
+                return value
+
+            packet.update(
+                {
+                    "inputs": [
+                        old_input(task, str(packet["task_sha256"]), "old task"),
+                        old_input(todo, str(packet["todo_sha256"]), "old TODO"),
+                        old_input(manager, "b" * 64, "old manager"),
+                        old_input(helper, subject.RECOVERABLE_HELPER_SHA256, "old helper"),
+                    ],
+                    "manager_task_sha256": "b" * 64,
+                }
+            )
+            with contextlib.ExitStack() as stack, patch.object(subject, "is_recoverable_prepared_packet", return_value=True):
+                held = subject.hold_inputs(packet, stack, rebind_recoverable_helper=True, todo_recovery=recovery)
+                self.assertEqual(subject.sha256(task.read_bytes()), held[0].identity.sha256)
+                task.write_bytes(task.read_bytes() + b"raced\n")
+                with self.assertRaises(subject.CustodyError):
+                    subject.validate_held_absolute(held[0])
+
     def test_todo_recovery_accepts_changed_manager_bytes_only_with_valid_semantic_custody(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             tmp = Path(directory)
@@ -262,16 +1113,65 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
                 return (task,) if target == "dw8:1" else ()
 
             with patch.object(subject, "authoritative_active_target_task_paths", side_effect=active):
-                subject.validate_lifecycle(packet, rebound_todo_data=todo.read_bytes(), allow_current_manager=True)
+                subject.validate_lifecycle(
+                    packet,
+                    rebound_todo_data=todo.read_bytes(),
+                    rebound_task_data=task.read_bytes(),
+                    current_manager_task=manager,
+                    current_manager_target="dw:0",
+                    current_manager_parent="config:1",
+                )
                 manager.write_text(manager.read_text().replace("status: running", "status: done"))
                 with self.assertRaisesRegex(TaskFrontmatterError, "lifecycle custody is invalid"):
-                    subject.validate_lifecycle(packet, rebound_todo_data=todo.read_bytes(), allow_current_manager=True)
+                    subject.validate_lifecycle(
+                        packet,
+                        rebound_todo_data=todo.read_bytes(),
+                        rebound_task_data=task.read_bytes(),
+                        current_manager_task=manager,
+                        current_manager_target="dw:0",
+                        current_manager_parent="config:1",
+                    )
+
+    def test_todo_recovery_rejects_reparented_or_mistooled_successor_manager(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            packet, recovery, todo = self.todo_recovery_fixture(tmp)
+            task = Path(str(packet["task"]))
+            manager = Path(str(recovery["current_manager_task"]))
+            task.write_text(task.read_text().replace("status: blocked", "status: running"))
+            manager.write_text(manager.read_text().replace("status: blocked", "status: running"))
+
+            def active(_root: Path, target: str) -> tuple[Path, ...]:
+                return (task,) if target == "dw8:1" else ()
+
+            with patch.object(subject, "authoritative_active_target_task_paths", side_effect=active):
+                manager.write_text(manager.read_text().replace("managerat: config:1", "managerat: config:2"))
+                with self.assertRaisesRegex(TaskFrontmatterError, "lifecycle custody is invalid"):
+                    subject.validate_lifecycle(
+                        packet,
+                        rebound_todo_data=todo.read_bytes(),
+                        rebound_task_data=task.read_bytes(),
+                        current_manager_task=manager,
+                        current_manager_target="dw:15",
+                        current_manager_parent="config:1",
+                    )
+                manager.write_text(manager.read_text().replace("managerat: config:2", "managerat: config:1").replace("tool: codex", "tool: omnigent"))
+                with self.assertRaisesRegex(TaskFrontmatterError, "lifecycle custody is invalid"):
+                    subject.validate_lifecycle(
+                        packet,
+                        rebound_todo_data=todo.read_bytes(),
+                        rebound_task_data=task.read_bytes(),
+                        current_manager_task=manager,
+                        current_manager_target="dw:15",
+                        current_manager_parent="config:1",
+                    )
 
     def test_todo_recovery_holds_current_manager_and_detects_race_before_key_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             tmp = Path(directory)
             packet, recovery, todo = self.todo_recovery_fixture(tmp)
             manager = Path(str(packet["manager_task"]))
+            task = Path(str(packet["task"]))
             helper = Path(subject.__file__).resolve(strict=True)
             old_todo = subject.file_input(todo, "old TODO")
             old_todo_file = subject.object_map(old_todo["file"], "old TODO")
@@ -281,6 +1181,10 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             old_manager_file = subject.object_map(old_manager["file"], "old manager")
             old_manager_file["sha256"] = "b" * 64
             old_manager["file"] = old_manager_file
+            old_task = subject.file_input(task, "old task")
+            old_task_file = subject.object_map(old_task["file"], "old task")
+            old_task_file["sha256"] = packet["task_sha256"]
+            old_task["file"] = old_task_file
             old_helper = subject.file_input(helper, "old helper")
             old_helper_file = subject.object_map(old_helper["file"], "old helper")
             old_helper_file["sha256"] = subject.RECOVERABLE_HELPER_SHA256
@@ -290,15 +1194,16 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
                     "todo_sha256": "a" * 64,
                     "manager_task_sha256": "b" * 64,
                     "helper": str(helper),
-                    "inputs": [old_todo, old_manager, old_helper],
+                    "inputs": [old_task, old_todo, old_manager, old_helper],
                 }
             )
             with contextlib.ExitStack() as stack, patch.object(subject, "is_recoverable_prepared_packet", return_value=True):
                 held = subject.hold_inputs(packet, stack, rebind_recoverable_helper=True, todo_recovery=recovery)
-                self.assertEqual(subject.sha256(manager.read_bytes()), held[1].identity.sha256)
-                manager.write_text("raced invalid manager\n")
+                current_manager = Path(str(recovery["current_manager_task"]))
+                self.assertEqual(subject.sha256(current_manager.read_bytes()), held[2].identity.sha256)
+                current_manager.write_text("raced invalid manager\n")
                 with self.assertRaises(subject.CustodyError):
-                    subject.validate_held_absolute(held[1])
+                    subject.validate_held_absolute(held[2])
 
     def test_prepare_todo_recovery_is_idempotent_and_rolls_back_before_publication(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -318,6 +1223,8 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
                 review_report=review_path,
                 review_report_sha256=subject.RECOVERABLE_REVIEW_SHA256,
                 todo_recovery_output=output,
+                source1485_root_audit=Path(str(_recovery["source1485_root_audit"])),
+                source1485_root_audit_sha256=subject.SOURCE1485_ROOT_AUDIT_SHA256,
             )
             with (
                 patch.object(subject, "load_exact_failed_disposition", return_value=(packet, packet_path, review_path, prepared_path)),
@@ -338,6 +1245,64 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             ):
                 subject.prepare_todo_recovery(args)
             self.assertFalse(rollback_output.exists())
+
+    def test_latest_failed_disposition_is_the_only_new_recovery_eligibility(self) -> None:
+        latest = subject.recoverable_incident(subject.LATEST_RECOVERABLE_PACKET_SHA256)
+        self.assertEqual(
+            (
+                subject.LATEST_RECOVERABLE_REVIEW_SHA256,
+                subject.LATEST_RECOVERABLE_PREPARED_AUDIT_SHA256,
+                subject.LATEST_RECOVERABLE_HELPER_SHA256,
+            ),
+            latest,
+        )
+        self.assertIsNone(subject.recoverable_incident("0" * 64))
+        packet: dict[str, object] = {"helper_sha256": subject.LATEST_RECOVERABLE_HELPER_SHA256}
+        with (
+            patch.object(subject, "packet_bytes", return_value=b"latest packet"),
+            patch.object(subject, "sha256", return_value=subject.LATEST_RECOVERABLE_PACKET_SHA256),
+        ):
+            self.assertTrue(subject.is_recoverable_prepared_packet(packet))
+            packet["helper_sha256"] = subject.RECOVERABLE_HELPER_SHA256
+            self.assertFalse(subject.is_recoverable_prepared_packet(packet))
+
+    def test_latest_prepared_helper_recovery_rejects_review_and_audit_drift(self) -> None:
+        packet: dict[str, object] = {}
+        prepared = b"latest prepared audit\n"
+        prepared_path = Path("/tmp/latest-prepared-audit")
+        with (
+            patch.object(subject, "is_recoverable_prepared_packet", return_value=True),
+            patch.object(subject, "sha256", return_value=subject.LATEST_RECOVERABLE_PREPARED_AUDIT_SHA256),
+            patch.object(subject, "read_bound", return_value=prepared),
+        ):
+            self.assertTrue(
+                subject.authorize_prepared_helper_recovery(
+                    packet,
+                    subject.LATEST_RECOVERABLE_PACKET_SHA256,
+                    subject.LATEST_RECOVERABLE_REVIEW_SHA256,
+                    prepared_path,
+                    prepared,
+                )
+            )
+            self.assertFalse(
+                subject.authorize_prepared_helper_recovery(
+                    packet,
+                    subject.LATEST_RECOVERABLE_PACKET_SHA256,
+                    subject.RECOVERABLE_REVIEW_SHA256,
+                    prepared_path,
+                    prepared,
+                )
+            )
+        with patch.object(subject, "is_recoverable_prepared_packet", return_value=True):
+            self.assertFalse(
+                subject.authorize_prepared_helper_recovery(
+                    packet,
+                    subject.LATEST_RECOVERABLE_PACKET_SHA256,
+                    subject.LATEST_RECOVERABLE_REVIEW_SHA256,
+                    prepared_path,
+                    b"drifted audit\n",
+                )
+            )
 
     def test_prepare_todo_recovery_reserves_every_absent_prior_close_control_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -360,6 +1325,8 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
                         review_report=review_path,
                         review_report_sha256=subject.RECOVERABLE_REVIEW_SHA256,
                         todo_recovery_output=output,
+                        source1485_root_audit=Path(str(_recovery["source1485_root_audit"])),
+                        source1485_root_audit_sha256=subject.SOURCE1485_ROOT_AUDIT_SHA256,
                     )
                     with (
                         patch.object(subject, "load_exact_failed_disposition", return_value=(packet, packet_path, review_path, prepared_path)),
@@ -382,6 +1349,36 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         prepared_index = next(index for index, event in enumerate(events) if event.startswith("publish:prepared"))
         escape_index = next(index for index, event in enumerate(events) if event.startswith("key:Escape:"))
         self.assertLess(prepared_index, escape_index)
+
+    def test_post_review_recurrence_uses_only_escape_then_status_cancel(self) -> None:
+        events: list[str] = []
+        self.execute_states(
+            ["status_menu", "status_menu", "status_input", "status_input", "ready", "ready"],
+            events,
+            prepared_exists=False,
+            schema=subject.POST_REVIEW_SCHEMA,
+        )
+        self.assertEqual(["key:Escape:status_menu", "key:C-c:status_input"], [event for event in events if event.startswith("key:")])
+
+    def test_post_review_accumulated_status_input_uses_only_status_cancel(self) -> None:
+        events: list[str] = []
+        self.execute_states(
+            ["status_input", "status_input", "ready", "ready"],
+            events,
+            prepared_exists=False,
+            schema=subject.POST_REVIEW_SCHEMA,
+        )
+        self.assertEqual(["key:C-c:status_input"], [event for event in events if event.startswith("key:")])
+        self.assertEqual(
+            ["state:status_input:True", "state:status_input:True"],
+            [event for event in events if event.startswith("state:")][:2],
+        )
+
+    def test_post_review_prepared_retry_is_idempotent_when_already_ready(self) -> None:
+        events: list[str] = []
+        self.execute_states(["ready", "ready"], events, prepared_exists=True, schema=subject.POST_REVIEW_SCHEMA)
+        self.assertFalse(any(event.startswith("key:") for event in events))
+        self.assertEqual(1, sum(event.startswith("publish:complete") for event in events))
 
     def test_prepared_recovery_completes_from_ready_without_keys(self) -> None:
         events: list[str] = []
@@ -476,6 +1473,13 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         self.assertEqual(["key:Escape:status_menu"], [event for event in events if event.startswith("key:")])
         self.assertFalse(any(event.startswith("publish:complete") for event in events))
 
+    def test_post_escape_ready_capture_race_never_publishes_complete(self) -> None:
+        events: list[str] = []
+        with self.assertRaisesRegex(TaskFrontmatterError, "unsupported state"):
+            self.execute_states(["status_menu", "status_menu", "ready", "other"], events, prepared_exists=True)
+        self.assertEqual(["key:Escape:status_menu"], [event for event in events if event.startswith("key:")])
+        self.assertFalse(any(event.startswith("publish:complete") for event in events))
+
     def test_ready_race_after_cancel_never_publishes_complete(self) -> None:
         events: list[str] = []
         with self.assertRaisesRegex(TaskFrontmatterError, "unsupported state"):
@@ -559,7 +1563,16 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
 
         with (
             patch.object(subject.secrets, "token_hex", return_value="a" * 32),
-            patch.object(subject, "bound_guarded_read", side_effect=["bunx|0|50\n", "", "", ""]),
+            patch.object(
+                subject,
+                "bound_guarded_read",
+                side_effect=["bunx|0|50\n", "", "", "", capture.decode() + "\n"],
+            ),
+            patch.object(
+                subject,
+                "tmux",
+                return_value=subprocess.CompletedProcess(["tmux"], 0, "", ""),
+            ),
             patch.object(subject, "tmux_guard_condition", return_value="PANE_IDENTITY"),
             patch.object(subject, "guarded_tmux_sequence", side_effect=guarded_sequence),
         ):
@@ -578,12 +1591,17 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         self.assertIn("#{==:#{pane_dead},0}", observed[0][4])
         self.assertIn("#{==:#{pane_current_command},bunx}", observed[0][4])
         self.assertIn("#{==:#{buffer-limit},50}", observed[0][4])
-        self.assertIn(f"set-option -p -o -t %1 {option}", observed[0][5])
+        self.assertNotIn(capture.decode(), observed[0][5])
         self.assertIn(f"set-option -g buffer-limit {subject.TEMPORARY_TMUX_BUFFER_LIMIT}", observed[0][5])
         self.assertIn("capture-pane -J -N -t %1", observed[0][5])
         self.assertIn("set-option -g buffer-limit 50", observed[0][5])
         self.assertIn(f"#{{==:#{{buffer_full}},#{{{option}}}}}", observed[0][5])
         self.assertIn("send-keys -t %1 Escape", observed[0][5])
+        self.assertNotIn("tmux -S", observed[0][5])
+        self.assertNotIn("run-shell", observed[0][5])
+        self.assertEqual(1, observed[0][5].count("if-shell -F"))
+        self.assertLess(observed[0][5].index("capture-pane"), observed[0][5].index("#{buffer_full}"))
+        self.assertLess(observed[0][5].index("#{buffer_full}"), observed[0][5].index("send-keys"))
         self.assertLess(observed[0][5].index("delete-buffer"), observed[0][5].index("send-keys"))
         self.assertNotIn("send-keys", observed[0][6])
         self.assertEqual(1, len(observed))
@@ -592,7 +1610,16 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         pin = PanePin("dw8:0", "%1", 101, 201)
         with (
             patch.object(subject.secrets, "token_hex", return_value="a" * 32),
-            patch.object(subject, "bound_guarded_read", side_effect=["bunx|0|50\n", "", "", ""]),
+            patch.object(
+                subject,
+                "bound_guarded_read",
+                side_effect=["bunx|0|50\n", "", "", "", "reviewed capture\n"],
+            ),
+            patch.object(
+                subject,
+                "tmux",
+                return_value=subprocess.CompletedProcess(["tmux"], 0, "", ""),
+            ),
             patch.object(subject, "tmux_guard_condition", return_value="PANE_IDENTITY"),
             patch.object(
                 subject,
@@ -624,7 +1651,16 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         buffers = "1\n" * 95
         with (
             patch.object(subject.secrets, "token_hex", return_value="b" * 32),
-            patch.object(subject, "bound_guarded_read", side_effect=["bunx|0|50\n", buffers, "", ""]),
+            patch.object(
+                subject,
+                "bound_guarded_read",
+                side_effect=["bunx|0|50\n", buffers, "", "", "reviewed capture\n"],
+            ),
+            patch.object(
+                subject,
+                "tmux",
+                return_value=subprocess.CompletedProcess(["tmux"], 0, "", ""),
+            ),
             patch.object(
                 subject,
                 "guarded_tmux_sequence",
@@ -648,7 +1684,10 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
             patch.object(
                 subject,
                 "bound_guarded_read",
-                side_effect=["bunx|0|50\n", "1\n" * (subject.MAX_TMUX_BUFFER_INVENTORY + 1)],
+                side_effect=[
+                    "bunx|0|50\n",
+                    "".join(f"buffer-{index}\n" for index in range(subject.MAX_TMUX_BUFFER_INVENTORY + 1)),
+                ],
             ),
             patch.object(subject, "guarded_tmux_sequence") as guarded,
             self.assertRaisesRegex(TaskFrontmatterError, "inventory exceeds"),
@@ -685,7 +1724,16 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
         pin = PanePin("dw8:0", "%1", 101, 201)
         with (
             patch.object(subject.secrets, "token_hex", return_value="d" * 32),
-            patch.object(subject, "bound_guarded_read", side_effect=["bunx|0|50\n", "", "", ""]),
+            patch.object(
+                subject,
+                "bound_guarded_read",
+                side_effect=["bunx|0|50\n", "", "", "", "reviewed capture\n"],
+            ),
+            patch.object(
+                subject,
+                "tmux",
+                return_value=subprocess.CompletedProcess(["tmux"], 0, "", ""),
+            ),
             patch.object(subject, "tmux_guard_condition", return_value="PANE_IDENTITY"),
             patch.object(
                 subject,
@@ -723,7 +1771,17 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
                     timeout=5,
                 )
 
-            run("new-session", "-d", "-s", "guard", "-x", "80", "-y", "24", "sleep 30")
+            run(
+                "new-session",
+                "-d",
+                "-s",
+                "guard",
+                "-x",
+                "80",
+                "-y",
+                "24",
+                "printf 'héllø 世界\\n#{literal}, braces and backslash \\\\\\ here\\nsecond line\\n'; sleep 30",
+            )
             try:
                 run("set-option", "-g", "buffer-limit", "100")
                 for index in range(95):
@@ -745,6 +1803,8 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
                 pane_id, raw_pid = identity.split("|", 1)
                 pin = PanePin("guard:0.0", pane_id, int(raw_pid), 1)
                 capture = run("capture-pane", "-p", "-J", "-N", "-t", pane_id).stdout.encode()
+                self.assertIn("héllø 世界\n#{literal}, braces and backslash \\\\ here\nsecond line\n".encode(), capture)
+                self.assertTrue(capture.endswith(b"\n"))
 
                 def isolated_tmux(args: list[str], check: bool = False) -> subprocess.CompletedProcess[str]:
                     return subprocess.run(
@@ -755,7 +1815,10 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
                         timeout=5,
                     )
 
-                with patch.object(omo_codex_stop, "tmux", side_effect=isolated_tmux):
+                with (
+                    patch.object(omo_codex_stop, "tmux", side_effect=isolated_tmux),
+                    patch.object(subject, "tmux", side_effect=isolated_tmux),
+                ):
                     state, _after = subject.guarded_tmux_command_for_capture(
                         pin,
                         ["send-keys", "-t", pane_id, "Escape"],
@@ -951,6 +2014,7 @@ class StalePredecessorInputDispositionTests(unittest.TestCase):
 
                 with (
                     patch.object(omo_codex_stop, "tmux", side_effect=isolated_tmux),
+                    patch.object(subject, "tmux", side_effect=isolated_tmux),
                     patch.object(subject, "guarded_tmux_sequence", side_effect=raced_sequence),
                     self.assertRaisesRegex(TaskFrontmatterError, "capture changed"),
                 ):

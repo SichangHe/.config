@@ -29,6 +29,7 @@ task custody
 - require either one exact unannotated `TASK.md TARGET` row under canonical `previous:`, or an export that binds the current done task to its report-time snapshot
   - a monthly archive requires its Git-authenticated original path and exact TODO bytes containing no reference
   - a root-retained task requires the exact report-time bytes after only reversing `status: done` to `status: running`, plus exactly one literal `previous:` header and one exact unindented row
+  - a root-retained task whose ordered queue was removed after report time may instead use the transcript-prefix custody contract in `root-retained-session-custody.md`; the described live Codex session must match that transcript
 - keep the TODO bytes unchanged
 
 pane closure
@@ -64,3 +65,32 @@ boundaries
 - do not use this mode for running, blocked, queued, manager, v2, Cursor, PCODX, or human-owned tasks
 - do not delete the completed audit or its sibling `.owner-stopped` proof; successful completion leaves no `.owner-close-started` name
 - the helper never calls the completion-email path
+
+source-bound WebConf recovery
+
+- `omo_webconf_exited_shell_close.py` is the incident-scoped path for the exact
+  `webconf_list_email.md` worker at `dw:19` left as an exited shell after its
+  private report was routed, while the task remains `blocked` only on
+  `done_close_in_progress`
+- it binds the complete task and TODO digests, the authoritative Source-1524
+  file and embedded Human envelope, the registered report commitment and
+  report bytes, the empty queue and sole ownership, the fixed resume UUID, and
+  the pane id/PID/start-ticks/capture digest
+- the helper sends no pane input, never resumes Codex, and never sends Human
+  mail; its only pane mutation is a tmux-server-guarded close of the exact
+  already-exited shell
+- use a fresh absolute owner-private audit path; retries accept only the exact
+  prepared, shell-closed, or completed transition associated with the same
+  immutable invocation, and conflicting task, TODO, pane, process, report,
+  source, ownership, or audit state fails closed
+- if only unrelated `TODO.md` bytes or the validated exited-shell capture have
+  changed since the incident release, first run
+  `omo_webconf_exited_shell_recovery.py --prepare` from one immutable helper
+  tree, then have an independent owner run its `--review` mode
+- the recovery packet binds the exact current WebConf row, every unrelated
+  TODO byte, task/source/report/session/pane/process identity, the validated
+  capture, the close-audit destination, and every helper input; pass the
+  packet and review paths and digests to `omo_webconf_exited_shell_close.py`
+- preparation, review, and close each recheck the exact packet inputs; any
+  intervening task, TODO, capture, identity, helper, packet, review, or output
+  drift fails before close

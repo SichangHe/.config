@@ -8572,6 +8572,176 @@ with exclusive_watcher_root(root):
                         change()
                         self.assertEqual(problem, watcher.filter_unchanged_dependency_blocked_idle_output(args, problem, {"worker.md": snapshot}))
 
+    def test_classify_blocked_human_stuck_input_binds_composer_and_realerts_on_drift(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            todo = "human pending:\nworker.md cfg:2\n"
+            task = task_frontmatter(
+                "blocked",
+                runat="cfg:2",
+                managerat="wl:1",
+                blocked_on="human",
+                pending_items=("Wait for the Human decision.",),
+            )
+            problem = (
+                "agent-problems: stuck_input=1\n"
+                "stuck_input: task=worker.md evidence=target=cfg:2 role=blocked_idle task_status=blocked "
+                "output=stale unstick=disabled:blocked_idle_blocked idle_status=stuck_input reason=human "
+                "owner_target=wl:1\n"
+            )
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+            pane: dict[str, object] = {
+                "report": watcher.CodexReport(
+                    "stuck_input",
+                    ["stable stale composer"],
+                    "exact stale input",
+                    False,
+                    "retained composer",
+                ),
+                "runtime": "%42\t1000\tcodex",
+            }
+
+            def baseline() -> None:
+                _ = (root / "TODO.md").write_text(todo, encoding="utf-8")
+                _ = (root / "worker.md").write_text(task, encoding="utf-8")
+                pane.update(
+                    report=watcher.CodexReport(
+                        "stuck_input",
+                        ["stable stale composer"],
+                        "exact stale input",
+                        False,
+                        "retained composer",
+                    ),
+                    runtime="%42\t1000\tcodex",
+                )
+
+            with patch.object(watcher, "inspect_codex", side_effect=lambda _args: pane["report"]), patch.object(
+                watcher,
+                "blocked_custody_runtime_identity",
+                side_effect=lambda _target: pane["runtime"],
+            ):
+                baseline()
+                self.assertTrue(watcher.classify_blocked_ready(args, "worker.md"))
+                snapshot = watcher.read_blocked_report_ledger(args)["worker.md"]
+                self.assertTrue(snapshot.startswith("human:"))
+                self.assertIsNone(watcher.filter_unchanged_dependency_blocked_idle_output(args, problem, {"worker.md": snapshot}))
+
+                for name, changed_problem in {
+                    "role": problem.replace("role=blocked_idle", "role=worker"),
+                    "unstick": problem.replace("unstick=disabled:blocked_idle_blocked", "unstick=sent_enter"),
+                }.items():
+                    with self.subTest(name=name):
+                        self.assertEqual(
+                            changed_problem,
+                            watcher.filter_unchanged_dependency_blocked_idle_output(
+                                args,
+                                changed_problem,
+                                {"worker.md": snapshot},
+                            ),
+                        )
+
+                changes = {
+                    "blocker": lambda: (root / "worker.md").write_text(task.replace("blocked_on: human", "blocked_on: human decision"), encoding="utf-8"),
+                    "queue": lambda: (root / "worker.md").write_text(task.replace("Wait for the Human decision.", "Wait for a revised Human decision."), encoding="utf-8"),
+                    "TODO custody": lambda: (root / "TODO.md").write_text("current:\nworker.md cfg:2\n", encoding="utf-8"),
+                    "target": lambda: (root / "worker.md").write_text(task.replace("runat: cfg:2", "runat: cfg:3"), encoding="utf-8"),
+                    "owner": lambda: (root / "worker.md").write_text(task.replace("managerat: wl:1", "managerat: wl:2"), encoding="utf-8"),
+                    "runtime": lambda: pane.update(runtime="%42\t2000\tcodex"),
+                    "pane": lambda: pane.update(
+                        report=watcher.CodexReport(
+                            "stuck_input",
+                            ["changed stale composer"],
+                            "changed stale input",
+                            False,
+                            "retained composer",
+                        )
+                    ),
+                    "submit safety": lambda: pane.update(
+                        report=watcher.CodexReport(
+                            "stuck_input",
+                            ["stable stale composer"],
+                            "exact stale input",
+                            True,
+                            "retained composer",
+                        )
+                    ),
+                    "input blocker": lambda: pane.update(
+                        report=watcher.CodexReport(
+                            "stuck_input",
+                            ["stable stale composer"],
+                            "exact stale input",
+                            False,
+                            "changed blocker",
+                        )
+                    ),
+                    "status": lambda: pane.update(report=watcher.CodexReport("running", ["working"])),
+                }
+                for name, change in changes.items():
+                    with self.subTest(name=name):
+                        baseline()
+                        change()
+                        self.assertEqual(problem, watcher.filter_unchanged_dependency_blocked_idle_output(args, problem, {"worker.md": snapshot}))
+
+                baseline()
+                _ = (root / "TODO.md").write_text("current:\nworker.md cfg:2\n", encoding="utf-8")
+                self.assertFalse(watcher.classify_blocked_ready(args, "worker.md"))
+
+                current_task = watcher.parse_task_lines(root / "TODO.md")[0]
+                self.assertFalse(watcher.line_matches_blocked_report_snapshot(root, problem.splitlines()[1], current_task, "custody:" + "0" * 64, "wl:1"))
+
+    def test_delivered_human_stuck_input_seeds_ledger_and_suppresses_repeat(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("human pending:\nworker.md cfg:2\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(
+                task_frontmatter(
+                    "blocked",
+                    runat="cfg:2",
+                    managerat="wl:1",
+                    blocked_on="human",
+                    pending_items=("Wait for the Human decision.",),
+                ),
+                encoding="utf-8",
+            )
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+            report = watcher.CodexReport(
+                "stuck_input",
+                ["stable stale composer"],
+                "exact stale input",
+                False,
+                "retained composer",
+            )
+            problem = (
+                "agent-problems: stuck_input=1\n"
+                "stuck_input: task=worker.md evidence=target=cfg:2 role=blocked_idle task_status=blocked "
+                "output=stale unstick=disabled:blocked_idle_blocked idle_status=stuck_input reason=human "
+                "owner_target=wl:1\n"
+            )
+            result = watcher.CommandOutput("agent-problems", 3, problem, "")
+            seen: dict[str, float] = {}
+
+            with patch.object(watcher, "inspect_codex", return_value=report), patch.object(
+                watcher,
+                "blocked_custody_runtime_identity",
+                return_value="%42\t1000\tcodex",
+            ), patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch.object(
+                watcher,
+                "push_manager_text_to_target",
+                return_value=0,
+            ) as push:
+                self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 10000.0))
+                snapshot = watcher.read_blocked_report_ledger(args)["worker.md"]
+                self.assertTrue(snapshot.startswith("human:"))
+                push.assert_called_once()
+
+                push.reset_mock()
+                self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 10001.0))
+                push.assert_not_called()
+
     def test_classify_blocked_ready_retains_concurrent_stable_rows_and_rejects_invalid_commands(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 

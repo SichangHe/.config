@@ -2370,6 +2370,319 @@ class TaskStatusTests(unittest.TestCase):
             manager_consumed_report_receipt_sha256=hashlib.sha256(evidence.read_bytes()).hexdigest(),
         )
 
+    def write_fallback_consumed_attestation(
+        self,
+        root: Path,
+        task: Path,
+        args: StatusArgs,
+    ) -> tuple[StatusArgs, dict[str, object], dict[str, object], Path]:
+        manager = root / "work_manager_2026-09-08.md"
+        args = self.write_consumed_attestation(root, task, replace(args, manager_target="config:4"), manager)
+        evidence = args.manager_consumed_report_receipt
+        assert evidence is not None
+        bundle = json.loads(evidence.read_text(encoding="utf-8"))
+        attestation = bundle["attestation"]
+        routing = attestation["transfer_receipt"]["routing"]
+        routing.update(
+            {
+                "requested_manager_target": "config:4",
+                "resolved_manager_target": "wl:1",
+                "route_kind": "main-manager-fallback",
+            }
+        )
+        attestation["consumption_evidence"]["transition"]["protocol"] = "watcher-locked-pointer-transition-v1"
+        unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
+        attestation["attestation_id"] = hashlib.sha256(
+            json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        verification: dict[str, object] = {
+            "manager": str(manager),
+            "manager_frontmatter_sha256": "not-applicable",
+            "manager_route_selection": "not-applicable",
+            "producer_target": args.active_target,
+            "requested_manager_target": args.manager_target,
+            "resolved_manager_target": "wl:1",
+            "root": str(root),
+            "route_kind": "main-manager-fallback",
+            "route_local_date": "2026-09-09",
+            "route_note": "Target manager `config:4` has no active manager task file. Main manager: find where that manager moved or reassign this report.",
+            "status": "done",
+            "task": str(task),
+        }
+        bundle["attestation"] = attestation
+        bundle["verification"] = verification
+        bundle_without_id = {key: value for key, value in bundle.items() if key != "export_id"}
+        bundle["export_id"] = hashlib.sha256(
+            json.dumps(bundle_without_id, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        evidence.write_text(json.dumps(bundle, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+        manager.write_text("daily manager report log\n", encoding="utf-8")
+        return (
+            replace(
+                args,
+                terminal_evidence=str(attestation["attestation_id"]),
+                manager_consumed_report_receipt_sha256=hashlib.sha256(evidence.read_bytes()).hexdigest(),
+            ),
+            attestation,
+            verification,
+            manager,
+        )
+
+    def write_configured_main_manager_consumed_attestation(
+        self,
+        root: Path,
+        task: Path,
+        args: StatusArgs,
+    ) -> tuple[StatusArgs, dict[str, object], dict[str, object], Path]:
+        manager = root / "work_manager_2026-09-08.md"
+        args = self.write_consumed_attestation(
+            root,
+            task,
+            replace(args, manager_target="wl:1"),
+            manager,
+        )
+        evidence = args.manager_consumed_report_receipt
+        assert evidence is not None
+        bundle = json.loads(evidence.read_text(encoding="utf-8"))
+        attestation = bundle["attestation"]
+        routing = attestation["transfer_receipt"]["routing"]
+        routing.update(
+            {
+                "requested_manager_target": "wl:1",
+                "resolved_manager_target": "wl:1",
+                "route_kind": "configured-main-manager",
+            }
+        )
+        attestation["consumption_evidence"]["transition"]["protocol"] = (
+            "watcher-locked-pointer-removal-transition-v2"
+        )
+        unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
+        attestation["attestation_id"] = hashlib.sha256(
+            json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        verification: dict[str, object] = {
+            "manager": str(manager),
+            "manager_frontmatter_sha256": "not-applicable",
+            "manager_route_selection": "not-applicable",
+            "producer_target": args.active_target,
+            "requested_manager_target": args.manager_target,
+            "resolved_manager_target": args.manager_target,
+            "root": str(root),
+            "route_kind": "configured-main-manager",
+            "route_local_date": "2026-09-09",
+            "route_note": "",
+            "status": "done",
+            "task": str(task),
+        }
+        bundle["attestation"] = attestation
+        bundle["verification"] = verification
+        bundle_without_id = {key: value for key, value in bundle.items() if key != "export_id"}
+        bundle["export_id"] = hashlib.sha256(
+            json.dumps(bundle_without_id, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        evidence.write_text(
+            json.dumps(bundle, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        manager.write_text("daily manager report log\n", encoding="utf-8")
+        return (
+            replace(
+                args,
+                terminal_evidence=str(attestation["attestation_id"]),
+                manager_consumed_report_receipt_sha256=hashlib.sha256(
+                    evidence.read_bytes()
+                ).hexdigest(),
+            ),
+            attestation,
+            verification,
+            manager,
+        )
+
+    def test_manager_consumed_report_accepts_strict_main_manager_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, _text, _todo, _todo_text, args = self.write_done_live_close_case(root)
+            args, attestation, _verification, _manager = self.write_fallback_consumed_attestation(
+                root,
+                task,
+                args,
+            )
+
+            with patch(
+                "omo_manager.omo_task_status.validate_consumed_closure_export_file",
+                return_value=attestation,
+            ):
+                self.assertTrue(validate_manager_consumed_report(args, task))
+
+    def test_manager_consumed_report_accepts_strict_configured_main_manager_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, _text, _todo, _todo_text, args = self.write_done_live_close_case(root)
+            args, attestation, verification, _manager = (
+                self.write_configured_main_manager_consumed_attestation(root, task, args)
+            )
+
+            validate_consumed_closure_attestation(
+                args,
+                task,
+                attestation,
+                export_verification=verification,
+            )
+            with patch(
+                "omo_manager.omo_task_status.validate_consumed_closure_export_file",
+                return_value=attestation,
+            ):
+                self.assertTrue(validate_manager_consumed_report(args, task))
+
+    def test_configured_main_manager_log_requires_exact_route_and_consumed_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, _text, _todo, _todo_text, args = self.write_done_live_close_case(root)
+            args, attestation, verification, manager = (
+                self.write_configured_main_manager_consumed_attestation(root, task, args)
+            )
+
+            for key, changed in (
+                ("manager", str(root / "work_manager_2026-09-07.md")),
+                ("manager_route_selection", "sole-active"),
+                ("manager_frontmatter_sha256", "0" * 64),
+                ("requested_manager_target", "wl:9"),
+                ("resolved_manager_target", "wl:9"),
+                ("route_kind", "main-manager-fallback"),
+                ("route_local_date", "09-09-2026"),
+                ("route_note", "fallback"),
+            ):
+                candidate = dict(verification)
+                candidate[key] = changed
+                with self.subTest(key=key), self.assertRaisesRegex(
+                    TaskFrontmatterError,
+                    "attestation (?:binding|transaction) is inconsistent",
+                ):
+                    validate_consumed_closure_attestation(
+                        args,
+                        task,
+                        attestation,
+                        export_verification=candidate,
+                    )
+
+            routing = attestation["transfer_receipt"]["routing"]
+            original_requested = routing["requested_manager_target"]
+            routing["requested_manager_target"] = "wl:9"
+            unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
+            attestation["attestation_id"] = hashlib.sha256(
+                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            args = replace(args, terminal_evidence=str(attestation["attestation_id"]))
+            with self.assertRaisesRegex(TaskFrontmatterError, "attestation binding is inconsistent"):
+                validate_consumed_closure_attestation(
+                    args,
+                    task,
+                    attestation,
+                    export_verification=verification,
+                )
+            routing["requested_manager_target"] = original_requested
+            unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
+            attestation["attestation_id"] = hashlib.sha256(
+                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            args = replace(args, terminal_evidence=str(attestation["attestation_id"]))
+
+            transition = attestation["consumption_evidence"]["transition"]
+            original_protocol = transition["protocol"]
+            transition["protocol"] = "locked-owner-restore-v1"
+            unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
+            attestation["attestation_id"] = hashlib.sha256(
+                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            args = replace(args, terminal_evidence=str(attestation["attestation_id"]))
+            with self.assertRaisesRegex(TaskFrontmatterError, "attestation transaction is inconsistent"):
+                validate_consumed_closure_attestation(
+                    args,
+                    task,
+                    attestation,
+                    export_verification=verification,
+                )
+            transition["protocol"] = original_protocol
+            unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
+            attestation["attestation_id"] = hashlib.sha256(
+                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            args = replace(args, terminal_evidence=str(attestation["attestation_id"]))
+
+            manager.write_text(
+                task_frontmatter(
+                    status="long_running",
+                    runat="wl:1",
+                    managerat="wl:9",
+                    is_manager=True,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(TaskFrontmatterError, "attestation transaction is inconsistent"):
+                validate_consumed_closure_attestation(
+                    args,
+                    task,
+                    attestation,
+                    export_verification=verification,
+                )
+
+            pointer = attestation["transfer_receipt"]["queue_item"]["pointer"]
+            manager.write_text(f"daily manager report log\n{pointer}\n", encoding="utf-8")
+            with self.assertRaisesRegex(TaskFrontmatterError, "attestation transaction is inconsistent"):
+                validate_consumed_closure_attestation(
+                    args,
+                    task,
+                    attestation,
+                    export_verification=verification,
+                )
+
+    def test_main_manager_fallback_requires_exact_export_and_consumed_manager_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, _text, _todo, _todo_text, args = self.write_done_live_close_case(root)
+            args, attestation, verification, manager = self.write_fallback_consumed_attestation(root, task, args)
+
+            with self.assertRaisesRegex(TaskFrontmatterError, "attestation binding is inconsistent"):
+                validate_consumed_closure_attestation(args, task, attestation)
+            for key, changed in (
+                ("manager", str(root / "work_manager_2026-09-07.md")),
+                ("manager_route_selection", "sole-active"),
+                ("requested_manager_target", "wl:9"),
+                ("resolved_manager_target", "wl:9"),
+                ("route_kind", "active-manager-task"),
+                ("route_local_date", "09-09-2026"),
+                ("route_note", "fallback"),
+            ):
+                candidate = dict(verification)
+                candidate[key] = changed
+                with self.subTest(key=key), self.assertRaisesRegex(
+                    TaskFrontmatterError,
+                    "attestation binding is inconsistent",
+                ):
+                    validate_consumed_closure_attestation(args, task, attestation, export_verification=candidate)
+
+            transition = attestation["consumption_evidence"]["transition"]
+            original_protocol = transition["protocol"]
+            transition["protocol"] = "locked-owner-restore-v1"
+            unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
+            attestation["attestation_id"] = hashlib.sha256(
+                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            args = replace(args, terminal_evidence=attestation["attestation_id"])
+            with self.assertRaisesRegex(TaskFrontmatterError, "attestation binding is inconsistent"):
+                validate_consumed_closure_attestation(args, task, attestation, export_verification=verification)
+            transition["protocol"] = original_protocol
+            unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
+            attestation["attestation_id"] = hashlib.sha256(
+                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            args = replace(args, terminal_evidence=attestation["attestation_id"])
+
+            pointer = attestation["transfer_receipt"]["queue_item"]["pointer"]
+            manager.write_text(f"daily manager report log\n{pointer}\n", encoding="utf-8")
+            with self.assertRaisesRegex(TaskFrontmatterError, "attestation transaction is inconsistent"):
+                validate_consumed_closure_attestation(args, task, attestation, export_verification=verification)
+
     def test_done_live_no_mail_parser_requires_bound_close_evidence(self) -> None:
         complete = [
             "--root", "/tmp/work_logs", "--close-done-live-no-mail",
@@ -2724,6 +3037,31 @@ class TaskStatusTests(unittest.TestCase):
             ).hexdigest()
             args = replace(args, terminal_evidence=attestation["attestation_id"])
             validate_consumed_closure_attestation(args, task, attestation, text.encode())
+            provenance = attestation["archive_custody"]["git_provenance"]
+            provenance["commitment_binding"] = {
+                "kind": "codex-session-prefix",
+                "session_id": args.expected_session_id,
+            }
+            unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
+            attestation["attestation_id"] = hashlib.sha256(
+                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            args = replace(args, terminal_evidence=attestation["attestation_id"])
+            validate_consumed_closure_attestation(args, task, attestation, text.encode())
+            provenance["commitment_binding"]["kind"] = "codex-top-level-no-mail-prefix"
+            unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
+            attestation["attestation_id"] = hashlib.sha256(
+                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            args = replace(args, terminal_evidence=attestation["attestation_id"])
+            validate_consumed_closure_attestation(args, task, attestation, text.encode())
+            with self.assertRaisesRegex(TaskFrontmatterError, "archive custody changed"):
+                validate_consumed_closure_attestation(
+                    replace(args, expected_session_id="11111111-2222-3333-4444-555555555555"),
+                    task,
+                    attestation,
+                    text.encode(),
+                )
 
             todo.write_text(todo_text.replace("task.md wl:2\n", ""), encoding="utf-8")
 

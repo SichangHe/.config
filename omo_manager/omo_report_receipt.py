@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -43,6 +44,7 @@ MAX_PROGRAM_BYTES = 4 * 1024 * 1024
 MAX_RECEIPT_BYTES = 4 * 1024 * 1024
 MAX_ROUTE_FILE_BYTES = 64 * 1024 * 1024
 MAX_ACK_STATE_BYTES = 4 * 1024 * 1024
+MAX_SESSION_PREFIX_BYTES = 64 * 1024 * 1024
 DEFAULT_ACK_TIMEOUT_S = 3.0
 AGENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 SAFE_VALUE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -64,6 +66,10 @@ VOLATILE_REPLAY_ROUTING_KEYS = frozenset({"route_evidence", "route_evidence_sha2
 ACTIVE_MANAGER_STATUSES = frozenset({"running", "long_running", "blocked"})
 RUNNING_MANAGER_STATUSES = frozenset({"running", "long_running"})
 MANAGER_ROUTE_SELECTIONS = frozenset({"not-applicable", "sole-active", "sole-running"})
+SESSION_ID_RE = re.compile(
+    r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"
+)
+MESSAGE_ID_RE = re.compile(r"^<[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+>$")
 
 
 class ReceiptError(RuntimeError):
@@ -96,6 +102,25 @@ class OwnerPrefixBinding:
 
 
 @dataclass(frozen=True)
+class RootRetainedEvidence:
+    transcript: Path
+    transcript_prefix_sha256: str
+    transcript_prefix_size_bytes: int
+    lifecycle_transcript: Path
+    lifecycle_transcript_prefix_sha256: str
+    lifecycle_transcript_prefix_size_bytes: int
+    acknowledgment_message_id: str
+    published_result_commit: str
+
+
+@dataclass(frozen=True)
+class RootRetainedNoMailEvidence:
+    transcript: Path
+    transcript_prefix_sha256: str
+    transcript_prefix_size_bytes: int
+
+
+@dataclass(frozen=True)
 class Arguments:
     mode: str
     helper: Path
@@ -123,6 +148,7 @@ class Arguments:
     tmux_pane_index: str
     tmux_pane_id: str
     tmux_window_name: str
+    root_retained_evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | None = None
 
 
 @dataclass(frozen=True)
@@ -178,6 +204,7 @@ class Plan:
     receipt_final: Path
     receipt_publication_temporary: Path
     receipt_publication_final: Path
+    root_retained_evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | None = None
 
 
 # 🧑 "Do not use `--task-file`, `--root`, `--manager-target`, or other manual route flags."
@@ -819,7 +846,61 @@ def parse_args(argv: list[str] | None = None) -> Arguments:
     _ = parser.add_argument("--tmux-pane-index", default="")
     _ = parser.add_argument("--tmux-pane-id", default="")
     _ = parser.add_argument("--tmux-window-name", default="")
+    _ = parser.add_argument("--root-retained-session-transcript", type=Path)
+    _ = parser.add_argument("--root-retained-session-prefix-sha256", default="")
+    _ = parser.add_argument("--root-retained-session-prefix-size-bytes", default=0, type=int)
+    _ = parser.add_argument("--root-retained-lifecycle-transcript", type=Path)
+    _ = parser.add_argument("--root-retained-lifecycle-transcript-prefix-sha256", default="")
+    _ = parser.add_argument("--root-retained-lifecycle-transcript-prefix-size-bytes", default=0, type=int)
+    _ = parser.add_argument("--ownership-acknowledgment-message-id", default="")
+    _ = parser.add_argument("--published-result-commit", default="")
+    _ = parser.add_argument("--root-retained-no-mail-transcript", type=Path)
+    _ = parser.add_argument("--root-retained-no-mail-prefix-sha256", default="")
+    _ = parser.add_argument("--root-retained-no-mail-prefix-size-bytes", default=0, type=int)
     parsed = parser.parse_args(argv)
+    evidence_values = (
+        parsed.root_retained_session_transcript,
+        parsed.root_retained_session_prefix_sha256,
+        parsed.root_retained_session_prefix_size_bytes,
+        parsed.root_retained_lifecycle_transcript,
+        parsed.root_retained_lifecycle_transcript_prefix_sha256,
+        parsed.root_retained_lifecycle_transcript_prefix_size_bytes,
+        parsed.ownership_acknowledgment_message_id,
+        parsed.published_result_commit,
+    )
+    if any(evidence_values) and not all(evidence_values):
+        raise ReceiptError("root-retained session evidence arguments are incomplete")
+    no_mail_values = (
+        parsed.root_retained_no_mail_transcript,
+        parsed.root_retained_no_mail_prefix_sha256,
+        parsed.root_retained_no_mail_prefix_size_bytes,
+    )
+    if any(no_mail_values) and not all(no_mail_values):
+        raise ReceiptError("root-retained no-mail evidence arguments are incomplete")
+    if all(evidence_values) and all(no_mail_values):
+        raise ReceiptError("root-retained evidence provenance is ambiguous")
+    evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | None = (
+        RootRetainedEvidence(
+            parsed.root_retained_session_transcript,
+            parsed.root_retained_session_prefix_sha256,
+            parsed.root_retained_session_prefix_size_bytes,
+            parsed.root_retained_lifecycle_transcript,
+            parsed.root_retained_lifecycle_transcript_prefix_sha256,
+            parsed.root_retained_lifecycle_transcript_prefix_size_bytes,
+            parsed.ownership_acknowledgment_message_id,
+            parsed.published_result_commit,
+        )
+        if all(evidence_values)
+        else (
+            RootRetainedNoMailEvidence(
+                parsed.root_retained_no_mail_transcript,
+                parsed.root_retained_no_mail_prefix_sha256,
+                parsed.root_retained_no_mail_prefix_size_bytes,
+            )
+            if all(no_mail_values)
+            else None
+        )
+    )
     return Arguments(
         parsed.mode,
         parsed.helper,
@@ -847,6 +928,7 @@ def parse_args(argv: list[str] | None = None) -> Arguments:
         parsed.tmux_pane_index,
         parsed.tmux_pane_id,
         parsed.tmux_window_name,
+        evidence,
     )
 
 
@@ -1214,6 +1296,29 @@ def frontmatter_snapshot(payload: bytes) -> tuple[dict[str, str], str] | None:
             values[key.strip()] = value.strip()
     digest = hashlib.sha256("".join(exact_lines[: end + 1]).encode()).hexdigest()
     return values, digest
+
+
+def frontmatter_top_level_key_count(payload: bytes, key: str) -> int:
+    """Count one key using the same grammar as frontmatter_snapshot."""
+
+    try:
+        lines = payload.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        return 0
+    if not lines or lines[0].strip() != "---":
+        return 0
+    try:
+        end = next(index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+    except StopIteration:
+        return 0
+    return sum(
+        1
+        for line in lines[1:end]
+        if line
+        and not line.startswith("  - ")
+        and line.partition(":")[1]
+        and line.partition(":")[0].strip() == key
+    )
 
 
 def manager_route_selection_matches(
@@ -1674,6 +1779,7 @@ def _build_plan_from_message(
         receipt_final=receipt_final,
         receipt_publication_temporary=receipt_publication_temporary,
         receipt_publication_final=receipt_publication_final,
+        root_retained_evidence=args.root_retained_evidence,
     )
     if archived_task is None:
         plan = orphan_transfer_plan(plan)
@@ -3254,6 +3360,28 @@ def validate_committed_route_evidence(
     return tuple(committed[path] for path in sorted(committed, key=str))
 
 
+def historical_route_locks(
+    plan: Plan,
+    preflight: object,
+    routing_sources: tuple[dict[str, object], ...],
+) -> tuple[tuple[Path, Path], ...]:
+    """Reconstruct the exact route locks frozen by a historical commitment."""
+
+    locks = preflight.get("locks") if isinstance(preflight, dict) else None
+    committed = locks.get("routing") if isinstance(locks, dict) else None
+    source_targets = [Path(str(item["path"])) for item in routing_sources]
+    if any(target != target.resolve(strict=False) for target in (plan.manager, *source_targets)):
+        raise ReceiptError("historical transaction commitment route locks are inconsistent")
+    expected_targets = sorted({plan.manager, *source_targets}, key=str)
+    expected = [
+        {"path": str(task_file_lock_path(target)), "source": str(target)}
+        for target in expected_targets
+    ]
+    if committed != expected:
+        raise ReceiptError("historical transaction commitment route locks are inconsistent")
+    return tuple((target, Path(str(item["path"]))) for target, item in zip(expected_targets, expected, strict=True))
+
+
 def validate_committed_allocation_identity(plan: Plan, file_state: dict[str, object]) -> None:
     committed_dev = file_state.get("dev")
     committed_inode = file_state.get("inode")
@@ -3815,19 +3943,12 @@ def plan_for_historical_commitment(
             routing_sources,
             require_current=False,
         )
-        route_locks = tuple(
-            sorted(
-                (
-                    (Path(str(item["path"])), task_file_lock_path(Path(str(item["path"]))))
-                    for item in validated_routing_sources
-                ),
-                key=lambda pair: str(pair[0]),
-            )
-        )
+        route_locks = historical_route_locks(plan, preflight, validated_routing_sources)
         return replace(
             plan,
             route_evidence=validated_routing_sources,
             route_locks=route_locks,
+            task_lock=next(lock for target, lock in route_locks if target == plan.manager),
             replay_id=replay_id,
             manager_temporary=plan.manager.parent / f".{plan.manager.name}.omo-report-{replay_id}.tmp",
             envelope_temporary=plan.envelope_directory / f".{plan.envelope_final.name}.{replay_id}.tmp",
@@ -3956,10 +4077,27 @@ def archived_task_custody(plan: Plan) -> dict[str, object]:
         plan.route_evidence,
         plan.replay_id,
         str(plan.routing["requested_manager_target"]),
+        plan.root_retained_evidence,
     )
     if inferred_task != task:
         raise ReceiptError("archived consumed export task provenance changed")
     task_payload = regular_file_bytes(task, maximum=MAX_ROUTE_FILE_BYTES, field="task")
+    commitment_binding = git_provenance.get("commitment_binding")
+    terminal_changed = git_provenance.get("schema") == "omo-report-terminal-task-transition/v1" and (
+        git_provenance.get("current_done_sha256") != hashlib.sha256(task_payload).hexdigest()
+        or git_provenance.get("current_done_size_bytes") != len(task_payload)
+    )
+    r100_archive_changed = isinstance(commitment_binding, dict) and commitment_binding.get(
+        "kind"
+    ) in {
+        "r100-terminal-status-transition",
+        "r100-top-level-no-mail-terminal-transition",
+    } and (
+        commitment_binding.get("done_sha256") != hashlib.sha256(task_payload).hexdigest()
+        or commitment_binding.get("done_size_bytes") != len(task_payload)
+    )
+    if terminal_changed or r100_archive_changed:
+        raise ReceiptError("completed task changed after terminal provenance verification")
     snapshot = frontmatter_snapshot(task_payload)
     todo_path = plan.root / "TODO.md"
     todo_payload = regular_file_bytes(todo_path, maximum=MAX_ROUTE_FILE_BYTES, field="TODO")
@@ -4166,6 +4304,29 @@ def consumed_closure_export(
         verification["archived_task"] = True
         verification["archived_task_path"] = str(plan.archived_task)
         verification["recovery_replay_id"] = plan.replay_id
+    if plan.root_retained_evidence is not None:
+        evidence = plan.root_retained_evidence
+        if isinstance(evidence, RootRetainedNoMailEvidence):
+            verification.update(
+                {
+                    "root_retained_no_mail_transcript": str(evidence.transcript),
+                    "root_retained_no_mail_prefix_sha256": evidence.transcript_prefix_sha256,
+                    "root_retained_no_mail_prefix_size_bytes": evidence.transcript_prefix_size_bytes,
+                }
+            )
+        else:
+            verification.update(
+                {
+                "root_retained_session_transcript": str(evidence.transcript),
+                "root_retained_session_prefix_sha256": evidence.transcript_prefix_sha256,
+                "root_retained_session_prefix_size_bytes": evidence.transcript_prefix_size_bytes,
+                "root_retained_lifecycle_transcript": str(evidence.lifecycle_transcript),
+                "root_retained_lifecycle_transcript_prefix_sha256": evidence.lifecycle_transcript_prefix_sha256,
+                "root_retained_lifecycle_transcript_prefix_size_bytes": evidence.lifecycle_transcript_prefix_size_bytes,
+                "ownership_acknowledgment_message_id": evidence.acknowledgment_message_id,
+                "published_result_commit": evidence.published_result_commit,
+                }
+            )
     record: dict[str, object] = {
         "attestation": attestation,
         "schema": "omo-report-consumed-export/v1",
@@ -4189,6 +4350,8 @@ def validate_consumed_closure_export(payload: bytes) -> dict[str, object]:
     export_id = unsigned.pop("export_id")
     verification = loaded.get("verification")
     attestation = loaded.get("attestation")
+    if not isinstance(verification, dict) or not isinstance(attestation, dict):
+        raise ReceiptError("consumed attestation export binding is invalid")
     expected_context = {
         "agent", "helper", "manager", "manager_frontmatter_sha256", "manager_route_evidence",
         "manager_route_selection", "message_file", "producer_target", "requested_manager_target",
@@ -4196,15 +4359,74 @@ def validate_consumed_closure_export(payload: bytes) -> dict[str, object]:
         "state_home", "task", "task_route_evidence", "tmux_pane_id", "tmux_pane_index", "tmux_session",
         "tmux_window_index", "tmux_window_name",
     }
-    archived = verification.get("archived_task") is True if isinstance(verification, dict) else False
+    archived = verification.get("archived_task") is True
     if archived:
         expected_context.update({"archived_task", "archived_task_path", "recovery_replay_id"})
+    root_retained_evidence = "root_retained_session_transcript" in verification
+    root_retained_no_mail_evidence = "root_retained_no_mail_transcript" in verification
+    if root_retained_evidence:
+        expected_context.update(
+            {
+                "root_retained_session_transcript",
+                "root_retained_session_prefix_sha256",
+                "root_retained_session_prefix_size_bytes",
+                "root_retained_lifecycle_transcript",
+                "root_retained_lifecycle_transcript_prefix_sha256",
+                "root_retained_lifecycle_transcript_prefix_size_bytes",
+                "ownership_acknowledgment_message_id",
+                "published_result_commit",
+            }
+        )
+        transcript = Path(str(verification.get("root_retained_session_transcript", "")))
+        prefix_size = verification.get("root_retained_session_prefix_size_bytes")
+        lifecycle_transcript = Path(str(verification.get("root_retained_lifecycle_transcript", "")))
+        lifecycle_prefix_size = verification.get("root_retained_lifecycle_transcript_prefix_size_bytes")
+        if (
+            not archived
+            or not transcript.is_absolute()
+            or transcript != transcript.absolute()
+            or HASH_RE.fullmatch(str(verification.get("root_retained_session_prefix_sha256", ""))) is None
+            or not isinstance(prefix_size, int)
+            or isinstance(prefix_size, bool)
+            or not 0 < prefix_size <= MAX_SESSION_PREFIX_BYTES
+            or not lifecycle_transcript.is_absolute()
+            or lifecycle_transcript != lifecycle_transcript.absolute()
+            or lifecycle_transcript == transcript
+            or HASH_RE.fullmatch(
+                str(verification.get("root_retained_lifecycle_transcript_prefix_sha256", ""))
+            ) is None
+            or not isinstance(lifecycle_prefix_size, int)
+            or isinstance(lifecycle_prefix_size, bool)
+            or not 0 < lifecycle_prefix_size <= MAX_SESSION_PREFIX_BYTES
+            or MESSAGE_ID_RE.fullmatch(str(verification.get("ownership_acknowledgment_message_id", ""))) is None
+            or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", str(verification.get("published_result_commit", ""))) is None
+        ):
+            raise ReceiptError("consumed attestation export root-retained evidence is invalid")
+    if root_retained_no_mail_evidence:
+        expected_context.update(
+            {
+                "root_retained_no_mail_transcript",
+                "root_retained_no_mail_prefix_sha256",
+                "root_retained_no_mail_prefix_size_bytes",
+            }
+        )
+        transcript = Path(str(verification.get("root_retained_no_mail_transcript", "")))
+        prefix_size = verification.get("root_retained_no_mail_prefix_size_bytes")
+        if (
+            not archived
+            or root_retained_evidence
+            or not transcript.is_absolute()
+            or transcript != transcript.absolute()
+            or HASH_RE.fullmatch(str(verification.get("root_retained_no_mail_prefix_sha256", ""))) is None
+            or not isinstance(prefix_size, int)
+            or isinstance(prefix_size, bool)
+            or not 0 < prefix_size <= MAX_SESSION_PREFIX_BYTES
+        ):
+            raise ReceiptError("consumed attestation export root-retained no-mail evidence is invalid")
     if (
         loaded.get("schema") != "omo-report-consumed-export/v1"
         or export_id != bound_receipt_id(unsigned)
-        or not isinstance(verification, dict)
         or set(verification) != expected_context
-        or not isinstance(attestation, dict)
     ):
         raise ReceiptError("consumed attestation export binding is invalid")
     receiver_path = Path(__file__).resolve(strict=True)
@@ -4223,6 +4445,25 @@ def validate_consumed_closure_export(payload: bytes) -> dict[str, object]:
     if archived:
         argv.extend(("--archived-task", str(verification["archived_task_path"])))
         argv.extend(("--recover-moved", str(verification["recovery_replay_id"])))
+    if root_retained_evidence:
+        for key in (
+            "root_retained_session_transcript",
+            "root_retained_session_prefix_sha256",
+            "root_retained_session_prefix_size_bytes",
+            "root_retained_lifecycle_transcript",
+            "root_retained_lifecycle_transcript_prefix_sha256",
+            "root_retained_lifecycle_transcript_prefix_size_bytes",
+            "ownership_acknowledgment_message_id",
+            "published_result_commit",
+        ):
+            argv.extend((f"--{key.replace('_', '-')}", str(verification[key])))
+    if root_retained_no_mail_evidence:
+        for key in (
+            "root_retained_no_mail_transcript",
+            "root_retained_no_mail_prefix_sha256",
+            "root_retained_no_mail_prefix_size_bytes",
+        ):
+            argv.extend((f"--{key.replace('_', '-')}", str(verification[key])))
     state_home = Path(str(verification["state_home"]))
     if not state_home.is_absolute():
         raise ReceiptError("consumed attestation export state home is invalid")
@@ -5004,12 +5245,1817 @@ def run(argv: list[str] | None = None, *, allow_archived_done: bool = False) -> 
     raise AssertionError("owner-prefix rebind loop exhausted")
 
 
+def read_append_only_session_prefix(
+    evidence: RootRetainedEvidence | RootRetainedNoMailEvidence,
+    *,
+    lifecycle: bool = False,
+) -> bytes:
+    """Read an exact immutable prefix while permitting later session appends."""
+
+    if lifecycle and isinstance(evidence, RootRetainedEvidence):
+        path = evidence.lifecycle_transcript
+        expected_sha256 = evidence.lifecycle_transcript_prefix_sha256
+        expected_size = evidence.lifecycle_transcript_prefix_size_bytes
+    elif lifecycle:
+        raise ReceiptError("root-retained no-mail evidence has no lifecycle transcript")
+    else:
+        path = evidence.transcript
+        expected_sha256 = evidence.transcript_prefix_sha256
+        expected_size = evidence.transcript_prefix_size_bytes
+    try:
+        resolved_path = path.resolve(strict=True)
+    except OSError as exc:
+        raise ReceiptError("root-retained session transcript is unavailable") from exc
+    if (
+        not path.is_absolute()
+        or path != path.absolute()
+        or resolved_path != path
+        or HASH_RE.fullmatch(expected_sha256) is None
+        or not 0 < expected_size <= MAX_SESSION_PREFIX_BYTES
+    ):
+        raise ReceiptError("root-retained session prefix identity is invalid")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise ReceiptError("root-retained session transcript is unavailable") from exc
+    try:
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) & 0o022
+            or before.st_size < expected_size
+        ):
+            raise ReceiptError("root-retained session transcript is not one safe owned file")
+        remaining = expected_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        _ = os.lseek(fd, 0, os.SEEK_SET)
+        repeated_chunks: list[bytes] = []
+        remaining = expected_size
+        while remaining:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            repeated_chunks.append(chunk)
+            remaining -= len(chunk)
+        repeated = b"".join(repeated_chunks)
+        after = os.fstat(fd)
+        current = path.lstat()
+    except OSError as exc:
+        raise ReceiptError("root-retained session transcript changed while it was read") from exc
+    finally:
+        os.close(fd)
+    if (
+        len(payload) != expected_size
+        or repeated != payload
+        or not payload.endswith(b"\n")
+        or hashlib.sha256(payload).hexdigest() != expected_sha256
+        or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+        or after.st_size < expected_size
+        or (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino)
+        or not stat.S_ISREG(current.st_mode)
+        or current.st_uid != os.getuid()
+        or current.st_nlink != 1
+        or stat.S_IMODE(current.st_mode) & 0o022
+    ):
+        raise ReceiptError("root-retained session transcript prefix changed or is invalid")
+    return payload
+
+
+def capture_session_prefix(path: Path, field: str) -> tuple[Path, bytes]:
+    """Capture one complete stable prefix from an owned append-only transcript."""
+
+    path = absolute_path(path)
+    try:
+        size_bytes = path.lstat().st_size
+    except OSError as exc:
+        raise ReceiptError(f"{field} is unavailable") from exc
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = -1
+    try:
+        fd = os.open(path, flags)
+        before = os.fstat(fd)
+        if (
+            size_bytes <= 0
+            or size_bytes > MAX_SESSION_PREFIX_BYTES
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) & 0o022
+            or before.st_size < size_bytes
+        ):
+            raise ReceiptError(f"{field} is not one safe owned file")
+        remaining = size_bytes
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+    except OSError as exc:
+        raise ReceiptError(f"{field} is unavailable") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if len(payload) != size_bytes or not payload.endswith(b"\n"):
+        raise ReceiptError(f"{field} has no complete stable prefix")
+    return path, payload
+
+
+def capture_root_retained_evidence(
+    transcript: Path,
+    lifecycle_transcript: Path,
+    acknowledgment_message_id: str,
+    published_result_commit: str,
+) -> RootRetainedEvidence:
+    """Bind complete-line prefixes from the owner and lifecycle transcripts."""
+
+    if MESSAGE_ID_RE.fullmatch(acknowledgment_message_id) is None:
+        raise ReceiptError("ownership acknowledgment Message-ID is invalid")
+    if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", published_result_commit) is None:
+        raise ReceiptError("published result commit is invalid")
+
+    transcript, payload = capture_session_prefix(transcript, "root-retained session transcript")
+    lifecycle_transcript, lifecycle_payload = capture_session_prefix(
+        lifecycle_transcript,
+        "root-retained lifecycle transcript",
+    )
+    if transcript == lifecycle_transcript:
+        raise ReceiptError("root-retained session and lifecycle transcripts must be distinct")
+    evidence = RootRetainedEvidence(
+        transcript,
+        hashlib.sha256(payload).hexdigest(),
+        len(payload),
+        lifecycle_transcript,
+        hashlib.sha256(lifecycle_payload).hexdigest(),
+        len(lifecycle_payload),
+        acknowledgment_message_id,
+        published_result_commit,
+    )
+    if (
+        read_append_only_session_prefix(evidence) != payload
+        or read_append_only_session_prefix(evidence, lifecycle=True) != lifecycle_payload
+    ):
+        raise ReceiptError("root-retained transcript prefix changed during capture")
+    return evidence
+
+
+def capture_root_retained_no_mail_evidence(transcript: Path) -> RootRetainedNoMailEvidence:
+    """Bind one complete top-level session prefix for a no-mail completion."""
+
+    transcript, payload = capture_session_prefix(
+        transcript,
+        "root-retained no-mail transcript",
+    )
+    evidence = RootRetainedNoMailEvidence(
+        transcript,
+        hashlib.sha256(payload).hexdigest(),
+        len(payload),
+    )
+    if read_append_only_session_prefix(evidence) != payload:
+        raise ReceiptError("root-retained no-mail transcript prefix changed during capture")
+    return evidence
+
+
+def root_retained_jsonl_records(payload: bytes, field: str) -> list[dict[str, object]]:
+    """Parse one complete transcript prefix without accepting non-object records."""
+
+    records: list[dict[str, object]] = []
+    for raw_line in payload.splitlines():
+        try:
+            record = json.loads(raw_line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ReceiptError(f"{field} is not valid JSONL") from exc
+        if not isinstance(record, dict):
+            raise ReceiptError(f"{field} contains a non-object record")
+        records.append(record)
+    return records
+
+
+def shell_tokens(command: object) -> list[str]:
+    """Return an exact leaf command from the wrappers recorded by Codex."""
+
+    if not isinstance(command, list) or not command or not all(isinstance(part, str) for part in command):
+        return []
+    try:
+        tokens = shlex.split(command[-1])
+        for _ in range(3):
+            if len(tokens) >= 3 and tokens[0] == "timeout" and re.fullmatch(r"[1-9][0-9]*s", tokens[1]):
+                tokens = tokens[2:]
+                continue
+            if len(tokens) == 3 and Path(tokens[0]).name in {"bash", "zsh", "sh"} and tokens[1] == "-lc":
+                tokens = shlex.split(tokens[2])
+                continue
+            break
+    except ValueError:
+        return []
+    return tokens
+
+
+def command_mentions_email_helper(command: object) -> bool:
+    """Conservatively detect a Human-mail helper anywhere in a shell command."""
+
+    return isinstance(command, list) and any(
+        isinstance(part, str) and re.search(r"(?:^|[^A-Za-z0-9_.-])email_me\.py(?:$|[^A-Za-z0-9_.-])", part)
+        for part in command
+    )
+
+
+def custom_exec_shell_command(raw_input: str) -> str:
+    """Extract the exact shell command from a canonical Codex exec call."""
+
+    match = re.search(
+        r'tools\.exec_command\(\{\s*(?:cmd|"cmd")\s*:\s*(?P<command>"(?:\\.|[^"\\])*")',
+        raw_input,
+    )
+    if match is None:
+        return raw_input
+    try:
+        command = json.loads(match.group("command"))
+    except json.JSONDecodeError:
+        return ""
+    return command if isinstance(command, str) else ""
+
+
+def yaml_double_quoted_scalar(value: str) -> str:
+    """Render PyYAML's unsplit, Unicode-enabled double-quoted scalar form."""
+
+    replacements = {
+        "\0": "0",
+        "\x07": "a",
+        "\x08": "b",
+        "\t": "t",
+        "\n": "n",
+        "\x0b": "v",
+        "\x0c": "f",
+        "\r": "r",
+        "\x1b": "e",
+        '"': '"',
+        "\\": "\\",
+        "\x85": "N",
+        "\u2028": "L",
+        "\u2029": "P",
+    }
+    rendered: list[str] = ['"']
+    for character in value:
+        codepoint = ord(character)
+        replacement = replacements.get(character)
+        if replacement is not None:
+            rendered.append(f"\\{replacement}")
+        elif (
+            "\x20" <= character <= "\x7e"
+            or "\xa0" <= character <= "\ud7ff"
+            or "\ue000" <= character <= "\ufffd"
+        ) and character != "\ufeff":
+            rendered.append(character)
+        elif codepoint <= 0xFF:
+            rendered.append(f"\\x{codepoint:02X}")
+        elif codepoint <= 0xFFFF:
+            rendered.append(f"\\u{codepoint:04X}")
+        else:
+            rendered.append(f"\\U{codepoint:08X}")
+    rendered.append('"')
+    return "".join(rendered)
+
+
+def authoritative_human_instruction(
+    root: Path,
+    task_payload: bytes,
+) -> tuple[dict[str, object], Path, bytes]:
+    """Bind one exact quoted Human instruction to its private mail source."""
+
+    try:
+        task_text = task_payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ReceiptError("root-retained Human authority block is not UTF-8") from exc
+    block_re = re.compile(
+        r'<human_instruction authoritative="true" source="(?P<source>[^"\r\n]+)">\n'
+        r"(?P<body>.*?)</human_instruction>",
+        re.DOTALL,
+    )
+    matches = list(block_re.finditer(task_text))
+    if (
+        len(matches) != 1
+        or task_text.count("<human_instruction") != 1
+        or task_text.count("</human_instruction>") != 1
+    ):
+        raise ReceiptError("root-retained Human authority block is absent or ambiguous")
+    match = matches[0]
+    locator = match.group("source")
+    locator_match = re.fullmatch(
+        r"((?:[0-9]{4}(?:0[1-9]|1[0-2])\/)?manager_mail\/[A-Za-z0-9_.-]+\.txt):([1-9][0-9]*)-([1-9][0-9]*)",
+        locator,
+    )
+    if locator_match is None:
+        raise ReceiptError("root-retained Human authority source locator is invalid")
+    relative = Path(locator_match.group(1))
+    parts = relative.parts
+    direct = len(parts) == 2
+    root = root.resolve(strict=True)
+    directory_states: list[tuple[Path, tuple[int, ...]]] = []
+
+    def state_tuple(state: os.stat_result) -> tuple[int, ...]:
+        return (
+            state.st_dev,
+            state.st_ino,
+            state.st_mode,
+            state.st_uid,
+            state.st_nlink,
+            state.st_size,
+            state.st_mtime_ns,
+            state.st_ctime_ns,
+        )
+
+    try:
+        with ExitStack() as descriptors:
+            directory_flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            directory_fd = os.open(root, directory_flags)
+            descriptors.callback(os.close, directory_fd)
+            current_path = root
+            for part in parts[:-1]:
+                current_path /= part
+                directory_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+                descriptors.callback(os.close, directory_fd)
+                state = os.fstat(directory_fd)
+                if (
+                    not stat.S_ISDIR(state.st_mode)
+                    or state.st_uid != os.getuid()
+                    or stat.S_IMODE(state.st_mode) & (0o077 if direct else 0o022)
+                ):
+                    raise ReceiptError("root-retained Human authority directory is not owner-controlled")
+                directory_states.append((current_path, state_tuple(state)))
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(parts[-1], flags, dir_fd=directory_fd)
+            descriptors.callback(os.close, fd)
+            before = os.fstat(fd)
+            remaining = MAX_ENVELOPE_BYTES + 1
+            chunks: list[bytes] = []
+            while remaining:
+                chunk = os.read(fd, min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            source_payload = b"".join(chunks)
+            after = os.fstat(fd)
+    except (OSError, ReceiptError) as exc:
+        raise ReceiptError("root-retained Human authority source is unavailable or unsafe") from exc
+    source = root.joinpath(*parts)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or before.st_nlink != 1
+        or stat.S_IMODE(before.st_mode) & 0o077
+        or len(source_payload) > MAX_ENVELOPE_BYTES
+        or state_tuple(before) != state_tuple(after)
+    ):
+        raise ReceiptError("root-retained Human authority source is unavailable or unsafe")
+    try:
+        if state_tuple(source.lstat()) != state_tuple(after):
+            raise ReceiptError("root-retained Human authority source changed while it was read")
+        for directory, expected_state in directory_states:
+            if state_tuple(directory.lstat()) != expected_state:
+                raise ReceiptError("root-retained Human authority directory changed while it was read")
+        source_lines = source_payload.decode("utf-8").splitlines(keepends=True)
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ReceiptError("root-retained Human authority source is invalid") from exc
+    start = int(locator_match.group(2))
+    end = int(locator_match.group(3))
+    if end < start or end > len(source_lines):
+        raise ReceiptError("root-retained Human authority line range exceeds its source")
+    excerpt = "".join(source_lines[start - 1 : end]).replace("\r\n", "\n").removesuffix("\n")
+    if excerpt != match.group("body").removesuffix("\n"):
+        raise ReceiptError("root-retained Human authority quote does not match its source")
+    prohibited = re.search(
+        r"\b(?:do not|don't|must not|never|no)\b[^\r\n.]{0,120}\bemail\b",
+        excerpt,
+        re.IGNORECASE,
+    )
+    authorized = re.search(
+        r"(?im)^\s*(?:please\s+)?email\s+(?:me|the\s+human)\b"
+        r"|^\s*(?:please\s+)?(?:ask|tell|send|contact)\b[^\r\n]*\b(?:by|via)\s+email\b",
+        excerpt,
+    )
+    if prohibited is not None or authorized is None:
+        raise ReceiptError("root-retained Human authority does not authorize a Human email")
+    return (
+        {
+            "human_instruction_source": locator,
+            "human_instruction_source_sha256": hashlib.sha256(source_payload).hexdigest(),
+            "human_instruction_excerpt_sha256": hashlib.sha256(excerpt.encode()).hexdigest(),
+        },
+        source,
+        source_payload,
+    )
+
+
+# 🧑 "Treat `<manager_delegation ...>` as an agent-authored task specification, never as the human's words."
+def top_level_no_mail_root_retained_provenance(
+    root: Path,
+    original_task: Path,
+    current_payload: bytes,
+    todo_payload: bytes,
+    source_sha256: str,
+    source_size: int,
+    replay_id: str,
+    manager_target: str,
+    evidence: RootRetainedNoMailEvidence,
+    *,
+    current_task: Path | None = None,
+) -> dict[str, object]:
+    """Authenticate one top-level report, no-mail removal, and terminal task."""
+
+    completed_task = original_task if current_task is None else current_task
+
+    prefix = read_append_only_session_prefix(evidence)
+    records = root_retained_jsonl_records(prefix, "root-retained no-mail prefix")
+    session_records = [record for record in records if record.get("type") == "session_meta"]
+    session_payload = session_records[0].get("payload") if session_records else None
+    session_id = str(session_payload.get("id", "")) if isinstance(session_payload, dict) else ""
+    session_cwd = Path(str(session_payload.get("cwd", ""))) if isinstance(session_payload, dict) else Path("")
+    if (
+        len(session_records) != 1
+        or not isinstance(session_payload, dict)
+        or records.index(session_records[0]) != 0
+        or session_records[0].get("ordinal") != 0
+        or session_payload.get("session_id") != session_id
+        or SESSION_ID_RE.fullmatch(session_id) is None
+        or not session_cwd.is_absolute()
+        or session_payload.get("originator") != "codex-tui"
+        or session_payload.get("source") != "cli"
+        or any(key in session_payload for key in ("forked_from_id", "parent_thread_id"))
+        or session_payload.get("thread_source") not in {None, "user"}
+        or not evidence.transcript.name.endswith(f"-{session_id}.jsonl")
+    ):
+        raise ReceiptError("root-retained no-mail transcript is not one top-level Codex session")
+
+    current_snapshot = frontmatter_snapshot(current_payload)
+    if (
+        current_snapshot is None
+        or current_snapshot[0].get("status") != "done"
+        or current_snapshot[0].get("managerat") != manager_target
+        or current_snapshot[0].get("tool") != "codex"
+        or current_snapshot[0].get("is_manager") != "false"
+        or current_snapshot[0].get("pending_task_items") != "[]"
+        or "blocked_on" in current_snapshot[0]
+        or any(
+            frontmatter_top_level_key_count(current_payload, key) != 1
+            for key in ("version", "status", "runat", "tool", "managerat", "is_manager", "pending_task_items")
+        )
+    ):
+        raise ReceiptError("root-retained no-mail task lifecycle metadata is inconsistent")
+
+    def successful_command(item: object, expected_stdout: str | None = None) -> list[str]:
+        if not isinstance(item, dict):
+            return []
+        stdout = item.get("stdout")
+        if (
+            item.get("type") != "CommandExecution"
+            or item.get("status") != "completed"
+            or item.get("exit_code") != 0
+            or not isinstance(stdout, str)
+            or item.get("aggregated_output") != stdout
+            or item.get("formatted_output") != stdout
+            or item.get("stderr") != ""
+            or item.get("cwd") != f"file://{session_cwd}"
+            or item.get("source") != "unified_exec_startup"
+            or (expected_stdout is not None and stdout != expected_stdout)
+        ):
+            return []
+        return shell_tokens(item.get("command"))
+
+    report_executions: list[
+        tuple[int, str, dict[str, object], str, str, str, dict[str, object]]
+    ] = []
+    removal_executions: list[tuple[int, str, dict[str, object], str, str, str, str, str]] = []
+    no_mail_removed_output = "removed 1 pending item(s) without email; verify each item was actually done or cancelled\n"
+    email_removed_output_re = re.compile(
+        r"^Emailed the human\nMessage-ID: (?P<message_id><[^\r\n]+>)\n"
+        r"removed 1 pending item\(s\); verify each item was actually done or cancelled\n"
+        r"Emailed the human with the exact removed work and evidence\.\n$"
+    )
+
+    def optional_pending_list(tokens: list[str]) -> bool:
+        return tokens == [] or (
+            len(tokens) == 2
+            and Path(tokens[0]).name == "omo_pending.py"
+            and tokens[1] == "list"
+        ) or (
+            len(tokens) == 4
+            and tokens[:2] == ["timeout", "20s"]
+            and Path(tokens[2]).name == "omo_pending.py"
+            and tokens[3] == "list"
+        )
+
+    def report_invocation(
+        tokens: list[str],
+        stdout: str,
+    ) -> tuple[str, dict[str, object]] | None:
+        report_status = ""
+        acceptance: object = None
+        if (
+            len(tokens) == 5
+            and Path(tokens[0]).name == "omo_report.sh"
+            and tokens[1] == "--status"
+            and tokens[3] == "--message-file"
+            and Path(tokens[4]).is_absolute()
+        ):
+            report_status = tokens[2]
+            try:
+                acceptance = json.loads(stdout)
+            except json.JSONDecodeError:
+                return None
+            if not isinstance(acceptance, dict) or canonical_json(acceptance) != stdout.encode():
+                return None
+        elif (
+            len(tokens) == 14
+            and Path(tokens[0]).name == "omo_report.sh"
+            and tokens[1:3] == ["--describe", "--status"]
+            and tokens[4] == "--message-file"
+            and Path(tokens[5]).is_absolute()
+            and tokens[6:9] == ["&&", "timeout", "30s"]
+            and Path(tokens[9]).name == "omo_report.sh"
+            and tokens[10] == "--status"
+            and tokens[12] == "--message-file"
+            and tokens[13] == tokens[5]
+            and tokens[3] == "done"
+        ):
+            report_status = tokens[3]
+            if tokens[11] != report_status:
+                return None
+            lines = stdout.splitlines(keepends=True)
+            if len(lines) != 2:
+                return None
+            try:
+                description = json.loads(lines[0])
+                acceptance = json.loads(lines[1])
+            except json.JSONDecodeError:
+                return None
+            description_routing = description.get("routing") if isinstance(description, dict) else None
+            acceptance_routing = acceptance.get("routing") if isinstance(acceptance, dict) else None
+            description_receipt = description.get("receipt") if isinstance(description, dict) else None
+            if (
+                not isinstance(description, dict)
+                or not isinstance(acceptance, dict)
+                or canonical_json(description) + canonical_json(acceptance) != stdout.encode()
+                or description.get("schema") != "omo-report-description/v1"
+                or description.get("status") != report_status
+                or description.get("input") != acceptance.get("input")
+                or description_routing != acceptance_routing
+                or not isinstance(description_receipt, dict)
+                or description_receipt.get("replay_id") != acceptance.get("replay_id")
+            ):
+                return None
+        else:
+            return None
+        return report_status, acceptance
+
+    for record_index, record in enumerate(records):
+        payload = record.get("payload")
+        item = payload.get("item") if isinstance(payload, dict) else None
+        if (
+            record.get("type") != "event_msg"
+            or not isinstance(payload, dict)
+            or payload.get("type") != "item_completed"
+            or payload.get("thread_id") != session_id
+            or not isinstance(payload.get("turn_id"), str)
+        ):
+            continue
+        turn_id = str(payload["turn_id"])
+        stdout = item.get("stdout") if isinstance(item, dict) else None
+        tokens = successful_command(item)
+        if isinstance(stdout, str):
+            invocation = report_invocation(tokens, stdout)
+            acceptance = invocation[1] if invocation is not None else None
+            transfer = acceptance.get("transfer_receipt") if isinstance(acceptance, dict) else None
+            routing = acceptance.get("routing") if isinstance(acceptance, dict) else None
+            authority = transfer.get("authority") if isinstance(transfer, dict) else None
+            queue_item = transfer.get("queue_item") if isinstance(transfer, dict) else None
+            report_status = invocation[0] if invocation is not None else ""
+            accepted_report = (
+                acceptance.get("accepted") is True
+                and acceptance.get("manager_acknowledged") is True
+                and acceptance.get("status") == "done"
+                and report_status == "done"
+            ) if isinstance(acceptance, dict) else False
+            manager_consumed_report = (
+                acceptance.get("accepted") is False
+                and acceptance.get("manager_acknowledged") is False
+                and acceptance.get("reason") == "routed; manager acknowledgment pending"
+                and acceptance.get("retry_required") is True
+                and acceptance.get("status") == "in-progress"
+                and report_status == "in-progress"
+            ) if isinstance(acceptance, dict) else False
+            manager_consumed_terminal_report = (
+                acceptance.get("accepted") is False
+                and acceptance.get("manager_acknowledged") is False
+                and acceptance.get("reason") == "routed; manager acknowledgment pending"
+                and acceptance.get("retry_required") is True
+                and acceptance.get("status") == "done"
+                and report_status == "done"
+            ) if isinstance(acceptance, dict) else False
+            report_disposition = (
+                "accepted"
+                if accepted_report
+                else "manager-pending-in-progress"
+                if manager_consumed_report
+                else "manager-pending-done"
+                if manager_consumed_terminal_report
+                else ""
+            )
+            if (
+                invocation is not None
+                and isinstance(acceptance, dict)
+                and acceptance.get("schema") == "omo-report-acceptance/v1"
+                and report_disposition
+                and acceptance.get("replay_id") == replay_id
+                and isinstance(routing, dict)
+                and routing.get("task") == str(original_task)
+                and routing.get("producer_target") == current_snapshot[0]["runat"]
+                and routing.get("requested_manager_target") == manager_target
+                and isinstance(authority, dict)
+                and authority.get("kind") == "agent-originated"
+                and authority.get("source_task") == str(original_task)
+                and authority.get("producer_target") == current_snapshot[0]["runat"]
+                and isinstance(queue_item, dict)
+                and queue_item.get("replay_id") == replay_id
+            ):
+                report_executions.append(
+                    (
+                        record_index,
+                        turn_id,
+                        record,
+                        stdout,
+                        report_status,
+                        report_disposition,
+                        acceptance,
+                    )
+                )
+        if (
+            len(tokens) >= 8
+            and Path(tokens[0]).name == "omo_pending.py"
+            and tokens[1:3] == ["remove", "--item"]
+            and isinstance(stdout, str)
+        ):
+            pending_item = tokens[3]
+            tail = tokens[4:]
+            if tail[:2] == ["--outcome", "completed"]:
+                tail = tail[2:]
+            if len(tail) >= 3 and tail[0] == "--evidence":
+                removal_evidence = tail[1]
+                if tail[2] == "--no-email" and stdout == no_mail_removed_output:
+                    remainder = tail[3:]
+                    if optional_pending_list(remainder):
+                        removal_executions.append(
+                            (record_index, turn_id, record, pending_item, removal_evidence, "no-email", "", stdout)
+                        )
+                elif len(tail) >= 8 and tail[2:8:2] == [
+                    "--completion-key",
+                    "--answer-subject-file",
+                    "--answer-message-file",
+                ]:
+                    completion_key, subject_file, message_file = tail[3], tail[5], tail[7]
+                    remainder = tail[8:]
+                    email_match = email_removed_output_re.fullmatch(stdout)
+                    message_id = email_match.group("message_id") if email_match is not None else ""
+                    if (
+                        HASH_RE.fullmatch(completion_key) is not None
+                        and Path(subject_file).is_absolute()
+                        and Path(message_file).is_absolute()
+                        and MESSAGE_ID_RE.fullmatch(message_id) is not None
+                        and optional_pending_list(remainder)
+                    ):
+                        removal_executions.append(
+                            (
+                                record_index,
+                                turn_id,
+                                record,
+                                pending_item,
+                                removal_evidence,
+                                "human-email",
+                                message_id,
+                                stdout,
+                            )
+                        )
+    def report_time_transition(
+        removal: tuple[int, str, dict[str, object], str, str, str, str, str],
+    ) -> tuple[bytes, int, int] | None:
+        pending_item = removal[3]
+        removal_evidence = removal[4]
+        removal_note = f"(verified removed pending item: {removal_evidence})\n".encode()
+        if not current_payload.endswith(removal_note):
+            return None
+        report_time_base = current_payload[: -len(removal_note)]
+        report_time_base, status_replacements = re.subn(
+            rb"(?m)^status: done$",
+            b"status: running",
+            report_time_base,
+            count=1,
+        )
+        pending_renderings = (
+            pending_item,
+            f"'{pending_item.replace(chr(39), chr(39) * 2)}'",
+            yaml_double_quoted_scalar(pending_item),
+        )
+        matches: list[tuple[bytes, int]] = []
+        for rendering in pending_renderings:
+            candidate, pending_replacements = re.subn(
+                rb"(?m)^pending_task_items: \[\]$",
+                lambda _match, rendering=rendering: f"pending_task_items:\n  - {rendering}".encode(),
+                report_time_base,
+                count=1,
+            )
+            if len(candidate) == source_size and hashlib.sha256(candidate).hexdigest() == source_sha256:
+                matches.append((candidate, pending_replacements))
+        if len(matches) != 1:
+            return None
+        return matches[0][0], status_replacements, matches[0][1]
+
+    authenticated_removals = [
+        (removal, transition)
+        for removal in removal_executions
+        if (transition := report_time_transition(removal)) is not None
+    ]
+    if len(report_executions) != 1 or len(authenticated_removals) != 1:
+        raise ReceiptError("root-retained no-mail transcript lacks one exact accepted report and pending removal")
+    (
+        report_record_index,
+        operation_turn_id,
+        report_record,
+        report_output,
+        report_status,
+        report_disposition,
+        report_acceptance,
+    ) = report_executions[0]
+    (
+        selected_removal,
+        (report_time_payload, status_replacements, pending_replacements),
+    ) = authenticated_removals[0]
+    (
+        removal_record_index,
+        removal_turn_id,
+        removal_record,
+        pending_item,
+        removal_evidence,
+        removal_mode,
+        completion_email_message_id,
+        removal_output,
+    ) = selected_removal
+    report_was_accepted = report_disposition == "accepted"
+    if (report_disposition, removal_mode) not in {
+        ("accepted", "no-email"),
+        ("manager-pending-in-progress", "human-email"),
+        ("manager-pending-done", "no-email"),
+    }:
+        raise ReceiptError("root-retained no-mail report and queue-removal modes are inconsistent")
+
+    def linked_execution(
+        event_index: int,
+        turn_id: str,
+        expected_output: str,
+        keywords: tuple[str, ...],
+        *,
+        output_contains: bool = False,
+    ) -> tuple[int, int, dict[str, object], dict[str, object]]:
+        calls: list[tuple[int, str, str, dict[str, object]]] = []
+        for record_index, record in enumerate(records):
+            payload = record.get("payload")
+            metadata = payload.get("internal_chat_message_metadata_passthrough") if isinstance(payload, dict) else None
+            raw_input = payload.get("input") if isinstance(payload, dict) else None
+            call_id = payload.get("call_id") if isinstance(payload, dict) else None
+            if (
+                record.get("type") == "response_item"
+                and isinstance(payload, dict)
+                and payload.get("type") == "custom_tool_call"
+                and payload.get("name") == "exec"
+                and isinstance(metadata, dict)
+                and metadata.get("turn_id") == turn_id
+                and isinstance(call_id, str)
+                and call_id
+                and isinstance(raw_input, str)
+                and all(keyword in raw_input for keyword in keywords)
+            ):
+                calls.append((record_index, call_id, raw_input, record))
+        linked: list[tuple[int, int, dict[str, object], dict[str, object]]] = []
+        for call_index, call_id, raw_input, call_record in calls:
+            for output_index, record in enumerate(records):
+                payload = record.get("payload")
+                metadata = (
+                    payload.get("internal_chat_message_metadata_passthrough")
+                    if isinstance(payload, dict)
+                    else None
+                )
+                output = payload.get("output") if isinstance(payload, dict) else None
+                output_texts = (
+                    [
+                        block.get("text")
+                        for block in output
+                        if isinstance(block, dict) and block.get("type") == "input_text"
+                    ]
+                    if isinstance(output, list)
+                    else []
+                )
+                if (
+                    record.get("type") == "response_item"
+                    and isinstance(payload, dict)
+                    and payload.get("type") == "custom_tool_call_output"
+                    and payload.get("call_id") == call_id
+                    and isinstance(metadata, dict)
+                    and metadata.get("turn_id") == turn_id
+                    and (
+                        any(expected_output in text for text in output_texts)
+                        if output_contains
+                        else expected_output in output_texts
+                    )
+                    and call_index < event_index < output_index
+                ):
+                    event_payload = records[event_index].get("payload")
+                    event_item = event_payload.get("item") if isinstance(event_payload, dict) else None
+                    event_command = event_item.get("command") if isinstance(event_item, dict) else None
+                    shell_command = event_command[-1] if isinstance(event_command, list) and event_command else None
+                    if isinstance(shell_command, str) and custom_exec_shell_command(raw_input) == shell_command:
+                        linked.append((call_index, output_index, call_record, record))
+        if len(linked) != 1:
+            raise ReceiptError(f"root-retained no-mail {keywords[0]} command execution order is invalid")
+        return linked[0]
+
+    report_call_index, report_output_index, report_call, report_call_output = linked_execution(
+        report_record_index,
+        operation_turn_id,
+        report_output,
+        ("omo_report.sh", "--status", "--message-file"),
+    )
+    removal_call_index, removal_output_index, removal_call, removal_call_output = linked_execution(
+        removal_record_index,
+        removal_turn_id,
+        removal_output,
+        (
+            ("omo_pending.py", "remove", "--item", "--evidence", "--no-email")
+            if removal_mode == "no-email"
+            else ("omo_pending.py", "remove", "--item", "--evidence", "--completion-key")
+        ),
+    )
+    manager_completion_directive: tuple[int, int, dict[str, object], dict[str, object]] | None = None
+    if report_disposition == "manager-pending-done":
+        report_input = report_acceptance.get("input")
+        report_input_sha256 = report_input.get("sha256") if isinstance(report_input, dict) else None
+        manager_confirmation = re.search(
+            r"(?i)\bmanager\b[^\r\n.]{0,80}\b(?:accepted|acknowledged|confirmed|consumed)\b",
+            removal_evidence,
+        )
+        if (
+            not isinstance(report_input_sha256, str)
+            or HASH_RE.fullmatch(report_input_sha256) is None
+            or report_input_sha256 not in removal_evidence
+            or replay_id not in removal_evidence
+            or manager_confirmation is None
+        ):
+            raise ReceiptError(
+                "root-retained terminal report removal lacks exact manager-consumption evidence"
+            )
+        directive_matches: list[
+            tuple[int, int, dict[str, object], dict[str, object]]
+        ] = []
+        for response_index, response_record in enumerate(records):
+            response_payload = response_record.get("payload")
+            response_metadata = (
+                response_payload.get("internal_chat_message_metadata_passthrough")
+                if isinstance(response_payload, dict)
+                else None
+            )
+            response_content = (
+                response_payload.get("content") if isinstance(response_payload, dict) else None
+            )
+            if (
+                not report_output_index < response_index < removal_call_index
+                or response_record.get("type") != "response_item"
+                or not isinstance(response_payload, dict)
+                or response_payload.get("type") != "message"
+                or response_payload.get("role") != "user"
+                or not isinstance(response_metadata, dict)
+                or response_metadata.get("turn_id") != operation_turn_id
+                or not isinstance(response_content, list)
+                or len(response_content) != 1
+                or not isinstance(response_content[0], dict)
+                or response_content[0].get("type") != "input_text"
+                or not isinstance(response_content[0].get("text"), str)
+            ):
+                continue
+            directive_text = str(response_content[0]["text"])
+            envelope = re.fullmatch(
+                r'<agent_message from="(?P<sender>[A-Za-z0-9_.:-]+)">\n'
+                r"(?P<body>.+)\n</agent_message>",
+                directive_text,
+                flags=re.DOTALL,
+            )
+            if envelope is None or envelope.group("sender") != manager_target:
+                continue
+            body = re.sub(r"\s+", " ", envelope.group("body")).strip()
+            if (
+                "omo_pending.py remove" not in body
+                or re.search(r"(?i)\b(?:complete|completed)\b", body) is None
+                or re.search(r"(?i)\bremove\b.+\bpending item\b", body) is None
+                or re.search(r"(?i)\breport\b", body) is None
+                or re.search(
+                    r"(?i)(?:\bno Human email\b|\bwithout (?:a )?Human email\b|"
+                    r"\bdo not\b[^.]{0,80}\bemail\b)",
+                    body,
+                )
+                is None
+            ):
+                continue
+            event_index = response_index + 1
+            if event_index >= len(records):
+                continue
+            event_record = records[event_index]
+            event_payload = event_record.get("payload")
+            event_item = event_payload.get("item") if isinstance(event_payload, dict) else None
+            event_content = event_item.get("content") if isinstance(event_item, dict) else None
+            if (
+                event_record.get("type") != "event_msg"
+                or not isinstance(event_payload, dict)
+                or event_payload.get("type") != "item_completed"
+                or event_payload.get("thread_id") != session_id
+                or event_payload.get("turn_id") != operation_turn_id
+                or not isinstance(event_item, dict)
+                or event_item.get("type") != "UserMessage"
+                or not isinstance(event_content, list)
+                or len(event_content) != 1
+                or not isinstance(event_content[0], dict)
+                or event_content[0]
+                != {"type": "text", "text": directive_text, "text_elements": []}
+            ):
+                continue
+            directive_matches.append(
+                (response_index, event_index, response_record, event_record)
+            )
+        if len(directive_matches) != 1:
+            raise ReceiptError(
+                "root-retained terminal report lacks one exact manager completion directive"
+            )
+        manager_completion_directive = directive_matches[0]
+    manager_acknowledgment: tuple[int, int, dict[str, object], dict[str, object]] | None = None
+    if removal_mode == "human-email":
+        report_acceptance = json.loads(report_output)
+        transfer = report_acceptance.get("transfer_receipt")
+        queue_item = transfer.get("queue_item") if isinstance(transfer, dict) else None
+        pointer = queue_item.get("pointer") if isinstance(queue_item, dict) else None
+        pointer_match = re.fullmatch(r"\(from agent [A-Za-z0-9_.:-]+ (/.+)\)", pointer or "")
+        envelope_path = pointer_match.group(1) if pointer_match is not None else ""
+        acknowledgment_matches: list[tuple[int, int, dict[str, object], dict[str, object]]] = []
+        for event_index, event_record in enumerate(records):
+            event_payload = event_record.get("payload")
+            event_item = event_payload.get("item") if isinstance(event_payload, dict) else None
+            event_stdout = event_item.get("stdout") if isinstance(event_item, dict) else None
+            event_command = event_item.get("command") if isinstance(event_item, dict) else None
+            shell_command = event_command[-1] if isinstance(event_command, list) and event_command else None
+            status_segments = shell_command.split("\n\n") if isinstance(shell_command, str) else []
+            try:
+                status_tokens = shlex.split(status_segments[0]) if status_segments else []
+                if len(status_tokens) >= 2 and status_tokens[0] == "timeout":
+                    status_tokens = status_tokens[2:]
+                trailing_status_commands = [shlex.split(segment) for segment in status_segments[1:]]
+            except ValueError:
+                status_tokens = []
+                trailing_status_commands = []
+            allowed_trailing = [
+                ["timeout", "20s", "omo_task_edit.py", "summary", str(original_task)],
+            ]
+            if (
+                not report_output_index < event_index < removal_call_index
+                or not isinstance(shell_command, str)
+                or not isinstance(event_stdout, str)
+                or len(status_tokens) != 4
+                or Path(status_tokens[0]).name != "omo_codex_status.py"
+                or status_tokens[1:3] != [manager_target, "--lines"]
+                or re.fullmatch(r"[1-9][0-9]{0,2}", status_tokens[3]) is None
+                or int(status_tokens[3]) > 200
+                or trailing_status_commands not in ([], allowed_trailing)
+                or not successful_command(event_item)
+            ):
+                continue
+            linked = linked_execution(
+                event_index,
+                operation_turn_id,
+                event_stdout,
+                ("omo_codex_status.py", manager_target, "--lines"),
+                output_contains=True,
+            )
+            output_payload = linked[3].get("payload")
+            output = output_payload.get("output") if isinstance(output_payload, dict) else None
+            output_text = "\n".join(
+                str(block.get("text"))
+                for block in output
+                if isinstance(block, dict) and block.get("type") == "input_text"
+            ) if isinstance(output, list) else ""
+            compact_output = re.sub(r"\s+", "", output_text)
+            if (
+                f'<agent_message from="{current_snapshot[0]["runat"]}">' in output_text
+                and "Agent report received; review it and handle any follow-up:" in output_text
+                and re.sub(r"\s+", "", f"(from agent {envelope_path})") in compact_output
+            ):
+                acknowledgment_matches.append(linked)
+        if len(acknowledgment_matches) != 1:
+            raise ReceiptError("root-retained Human-email completion lacks one manager consumption acknowledgment")
+        manager_acknowledgment = acknowledgment_matches[0]
+    terminal_records: list[tuple[int, dict[str, object]]] = []
+    for record_index, record in enumerate(records):
+        payload = record.get("payload")
+        if (
+            record_index > removal_output_index
+            and record.get("type") == "event_msg"
+            and isinstance(payload, dict)
+            and payload.get("type") == "task_complete"
+            and payload.get("turn_id") == operation_turn_id
+        ):
+            terminal_records.append((record_index, record))
+    if (
+        operation_turn_id != removal_turn_id
+        or not report_call_index < report_record_index < report_output_index < removal_call_index
+        or (
+            manager_acknowledgment is not None
+            and not report_output_index
+            < manager_acknowledgment[0]
+            < manager_acknowledgment[1]
+            < removal_call_index
+        )
+        or (
+            manager_completion_directive is not None
+            and not report_output_index
+            < manager_completion_directive[0]
+            < manager_completion_directive[1]
+            < removal_call_index
+        )
+        or not removal_call_index < removal_record_index < removal_output_index
+        or len(terminal_records) != 1
+    ):
+        raise ReceiptError("root-retained no-mail completion order is invalid")
+    terminal_index, terminal_record = terminal_records[0]
+    for record_index, record in enumerate(records):
+        payload = record.get("payload")
+        item = payload.get("item") if isinstance(payload, dict) else None
+        command = item.get("command") if isinstance(item, dict) else None
+        if (
+            report_output_index < record_index < terminal_index
+            and command_mentions_email_helper(command)
+        ):
+            raise ReceiptError("root-retained no-mail transcript contains an unbound Human email command")
+    if removal_mode == "no-email":
+        for record in records:
+            payload = record.get("payload")
+            item = payload.get("item") if isinstance(payload, dict) else None
+            command = item.get("command") if isinstance(item, dict) else None
+            if command_mentions_email_helper(command):
+                raise ReceiptError("root-retained no-mail transcript contains a Human email command")
+
+    report_snapshot = frontmatter_snapshot(report_time_payload)
+    no_mail_contract = re.findall(
+        rb"(?i)\b(?:do not|must not|never) email (?:the )?Human\b"
+        rb"|\bno Human email\b"
+        rb"|\bwithout\b[^\r\n.]{0,120}\bsending (?:Human )?email\b",
+        report_time_payload,
+    )
+    authority_binding: dict[str, object] = {}
+    authority_source: Path | None = None
+    authority_payload = b""
+    if removal_mode == "human-email":
+        authority_binding, authority_source, authority_payload = authoritative_human_instruction(
+            root,
+            report_time_payload,
+        )
+    if (
+        status_replacements != 1
+        or pending_replacements != 1
+        or report_snapshot is None
+        or report_snapshot[0].get("status") != "running"
+        or report_snapshot[0].get("pending_task_items") != ""
+        or (
+            removal_mode == "no-email"
+            and (len(no_mail_contract) != 1 or completion_email_message_id)
+        )
+        or (
+            removal_mode == "human-email"
+            and (
+                not pending_item.startswith("🧑 ")
+                or not completion_email_message_id
+            )
+        )
+    ):
+        raise ReceiptError("root-retained no-mail task transition does not authenticate the report source")
+    if (
+        read_append_only_session_prefix(evidence) != prefix
+        or regular_file_bytes(completed_task, maximum=MAX_ROUTE_FILE_BYTES, field="completed task")
+        != current_payload
+        or regular_file_bytes(root / "TODO.md", maximum=MAX_ROUTE_FILE_BYTES, field="TODO") != todo_payload
+        or (
+            authority_source is not None
+            and authoritative_human_instruction(root, report_time_payload)
+            != (authority_binding, authority_source, authority_payload)
+        )
+    ):
+        raise ReceiptError("root-retained no-mail evidence changed during verification")
+    return {
+        "schema": "omo-report-terminal-task-transition/v1",
+        "task_ref": original_task.relative_to(root).as_posix(),
+        "committed_running_sha256": source_sha256,
+        "committed_running_size_bytes": source_size,
+        "current_done_sha256": hashlib.sha256(current_payload).hexdigest(),
+        "current_done_size_bytes": len(current_payload),
+        "todo_previous_row": f"{original_task.relative_to(root).as_posix()} {current_snapshot[0]['runat']}",
+        "commitment_binding": {
+            "kind": "codex-top-level-no-mail-prefix",
+            "transcript": str(evidence.transcript),
+            "transcript_prefix_sha256": evidence.transcript_prefix_sha256,
+            "transcript_prefix_size_bytes": evidence.transcript_prefix_size_bytes,
+            "session_id": session_id,
+            "report_call_record_index": report_call_index,
+            "report_call_sha256": hashlib.sha256(canonical_json(report_call)).hexdigest(),
+            "report_record_index": report_record_index,
+            "report_record_sha256": hashlib.sha256(canonical_json(report_record)).hexdigest(),
+            "report_output_record_index": report_output_index,
+            "report_output_sha256": hashlib.sha256(canonical_json(report_call_output)).hexdigest(),
+            "removal_call_record_index": removal_call_index,
+            "removal_call_sha256": hashlib.sha256(canonical_json(removal_call)).hexdigest(),
+            "removal_record_index": removal_record_index,
+            "removal_record_sha256": hashlib.sha256(canonical_json(removal_record)).hexdigest(),
+            "removal_output_record_index": removal_output_index,
+            "removal_output_sha256": hashlib.sha256(canonical_json(removal_call_output)).hexdigest(),
+            "terminal_record_index": terminal_index,
+            "terminal_record_sha256": hashlib.sha256(canonical_json(terminal_record)).hexdigest(),
+            "report_status": report_status,
+            "report_was_accepted": report_was_accepted,
+            "completion_mode": removal_mode,
+            **(
+                {"no_human_email": True}
+                if removal_mode == "no-email"
+                else {
+                    "completion_email_message_id": completion_email_message_id,
+                    **authority_binding,
+                }
+            ),
+            **(
+                {
+                    "manager_acknowledgment_call_record_index": manager_acknowledgment[0],
+                    "manager_acknowledgment_call_sha256": hashlib.sha256(
+                        canonical_json(manager_acknowledgment[2])
+                    ).hexdigest(),
+                    "manager_acknowledgment_output_record_index": manager_acknowledgment[1],
+                    "manager_acknowledgment_output_sha256": hashlib.sha256(
+                        canonical_json(manager_acknowledgment[3])
+                    ).hexdigest(),
+                }
+                if manager_acknowledgment is not None
+                else {}
+            ),
+            **(
+                {
+                    "manager_completion_directive_record_index": manager_completion_directive[0],
+                    "manager_completion_directive_sha256": hashlib.sha256(
+                        canonical_json(manager_completion_directive[2])
+                    ).hexdigest(),
+                    "manager_completion_event_record_index": manager_completion_directive[1],
+                    "manager_completion_event_sha256": hashlib.sha256(
+                        canonical_json(manager_completion_directive[3])
+                    ).hexdigest(),
+                }
+                if manager_completion_directive is not None
+                else {}
+            ),
+            "verified_removal_note_count": 1,
+        },
+    }
+
+
+def session_root_retained_provenance(
+    root: Path,
+    original_task: Path,
+    current_payload: bytes,
+    todo_payload: bytes,
+    source_sha256: str,
+    source_size: int,
+    replay_id: str,
+    manager_target: str,
+    evidence: RootRetainedEvidence | RootRetainedNoMailEvidence,
+) -> dict[str, object]:
+    """Authenticate report-time task bytes and their narrow post-report evolution."""
+
+    if isinstance(evidence, RootRetainedNoMailEvidence):
+        return top_level_no_mail_root_retained_provenance(
+            root,
+            original_task,
+            current_payload,
+            todo_payload,
+            source_sha256,
+            source_size,
+            replay_id,
+            manager_target,
+            evidence,
+        )
+    if (
+        MESSAGE_ID_RE.fullmatch(evidence.acknowledgment_message_id) is None
+        or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", evidence.published_result_commit) is None
+    ):
+        raise ReceiptError("root-retained session evidence identity is invalid")
+    prefix = read_append_only_session_prefix(evidence)
+    records = root_retained_jsonl_records(prefix, "root-retained session prefix")
+    session_records = [
+        record
+        for record in records
+        if record.get("type") == "session_meta"
+    ]
+    if len(session_records) != 1:
+        raise ReceiptError("root-retained session prefix has ambiguous session metadata")
+    session_payload = session_records[0].get("payload")
+    session_git = session_payload.get("git") if isinstance(session_payload, dict) else None
+    session_id = str(session_payload.get("session_id", "")) if isinstance(session_payload, dict) else ""
+    session_commit = str(session_git.get("commit_hash", "")) if isinstance(session_git, dict) else ""
+    if (
+        not isinstance(session_payload, dict)
+        or records.index(session_records[0]) != 0
+        or session_records[0].get("ordinal") != 0
+        or session_payload.get("id") != session_id
+        or SESSION_ID_RE.fullmatch(session_id) is None
+        or session_payload.get("cwd") != str(root)
+        or session_payload.get("originator") != "codex-tui"
+        or session_payload.get("source") != "cli"
+        or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", session_commit) is None
+        or not evidence.transcript.name.endswith(f"-{session_id}.jsonl")
+    ):
+        raise ReceiptError("root-retained session metadata does not bind the work-log task")
+
+    task_matches: list[tuple[bytes, int, int]] = []
+    for record_index, record in enumerate(records):
+        payload = record.get("payload")
+        if (
+            record.get("type") != "response_item"
+            or not isinstance(payload, dict)
+            or payload.get("type") != "custom_tool_call_output"
+        ):
+            continue
+        output = payload.get("output")
+        if not isinstance(output, list):
+            continue
+        for block_index, block in enumerate(output):
+            text = block.get("text") if isinstance(block, dict) and block.get("type") == "input_text" else None
+            if not isinstance(text, str):
+                continue
+            encoded = text.encode("utf-8")
+            start = 0
+            while (offset := encoded.find(b"---\n", start)) >= 0:
+                candidate = encoded[offset : offset + source_size]
+                if len(candidate) == source_size and hashlib.sha256(candidate).hexdigest() == source_sha256:
+                    task_matches.append((candidate, record_index, block_index))
+                start = offset + 4
+    if len(task_matches) != 1:
+        raise ReceiptError("root-retained session prefix lacks one exact committed report-time task")
+    report_time_payload, task_record_index, task_block_index = task_matches[0]
+    report_snapshot = frontmatter_snapshot(report_time_payload)
+    current_snapshot = frontmatter_snapshot(current_payload)
+    if (
+        report_snapshot is None
+        or current_snapshot is None
+        or report_snapshot[0].get("status") != "running"
+        or report_snapshot[0].get("version") != current_snapshot[0].get("version")
+        or report_snapshot[0].get("runat") != current_snapshot[0].get("runat")
+        or report_snapshot[0].get("managerat") != manager_target
+        or report_snapshot[0].get("managerat") != current_snapshot[0].get("managerat")
+        or report_snapshot[0].get("tool") != "codex"
+        or current_snapshot[0].get("tool") != "codex"
+        or report_snapshot[0].get("is_manager") != "false"
+        or current_snapshot[0].get("is_manager") != "false"
+        or report_snapshot[0].get("pending_task_items") != ""
+        or "blocked_on" in report_snapshot[0]
+        or current_snapshot[0].get("status") != "done"
+        or current_snapshot[0].get("pending_task_items") != "[]"
+        or "blocked_on" in current_snapshot[0]
+        or any(
+            frontmatter_top_level_key_count(report_time_payload, key) != 1
+            for key in ("version", "status", "runat", "tool", "managerat", "is_manager", "pending_task_items")
+        )
+        or any(
+            frontmatter_top_level_key_count(current_payload, key) != 1
+            for key in ("version", "status", "runat", "tool", "managerat", "is_manager", "pending_task_items")
+        )
+    ):
+        raise ReceiptError("root-retained session task lifecycle metadata is inconsistent")
+    expected_done, status_replacements = re.subn(
+        rb"(?m)^status: running$",
+        b"status: done",
+        report_time_payload,
+        count=1,
+    )
+    expected_done, pending_replacements = re.subn(
+        rb"(?m)^pending_task_items:\n(?:  - [^\r\n]+\n)+",
+        b"pending_task_items: []\n",
+        expected_done,
+        count=1,
+    )
+    suffix = current_payload[len(expected_done) :] if current_payload.startswith(expected_done) else b""
+    try:
+        suffix_lines = suffix.decode("utf-8").splitlines(keepends=True)
+    except UnicodeDecodeError as exc:
+        raise ReceiptError("root-retained session task lifecycle suffix is not UTF-8") from exc
+    note_re = re.compile(r"^\(verified removed pending item: [^\r\n]+\)\n$")
+    replay_note = re.compile(rf"\b{re.escape(replay_id)}\b")
+    if (
+        status_replacements != 1
+        or pending_replacements != 1
+        or not suffix_lines
+        or b"\r" in suffix
+        or any(note_re.fullmatch(line) is None for line in suffix_lines)
+        or sum(replay_note.search(line) is not None for line in suffix_lines) != 1
+    ):
+        raise ReceiptError("root-retained session task has noncanonical post-report changes")
+    replay_suffix = next(line for line in suffix_lines if replay_note.search(line) is not None)
+
+    lifecycle_prefix = read_append_only_session_prefix(evidence, lifecycle=True)
+    lifecycle_records = root_retained_jsonl_records(
+        lifecycle_prefix,
+        "root-retained lifecycle prefix",
+    )
+    lifecycle_session_records = [
+        record for record in lifecycle_records if record.get("type") == "session_meta"
+    ]
+    lifecycle_payload = lifecycle_session_records[0].get("payload") if lifecycle_session_records else None
+    inherited_parent_payload = (
+        lifecycle_session_records[1].get("payload")
+        if len(lifecycle_session_records) == 2
+        else None
+    )
+    lifecycle_id = str(lifecycle_payload.get("id", "")) if isinstance(lifecycle_payload, dict) else ""
+    lifecycle_source = lifecycle_payload.get("source") if isinstance(lifecycle_payload, dict) else None
+    lifecycle_git = lifecycle_payload.get("git") if isinstance(lifecycle_payload, dict) else None
+    lifecycle_spawn = lifecycle_source.get("subagent") if isinstance(lifecycle_source, dict) else None
+    lifecycle_spawn = lifecycle_spawn.get("thread_spawn") if isinstance(lifecycle_spawn, dict) else None
+    if (
+        len(lifecycle_session_records) != 2
+        or not isinstance(lifecycle_payload, dict)
+        or lifecycle_records.index(lifecycle_session_records[0]) != 0
+        or lifecycle_session_records[0].get("ordinal") != 0
+        or lifecycle_records.index(lifecycle_session_records[1]) != 1
+        or lifecycle_session_records[1].get("ordinal") != 1
+        or inherited_parent_payload != session_payload
+        or lifecycle_payload.get("session_id") != session_id
+        or lifecycle_payload.get("forked_from_id") != session_id
+        or lifecycle_payload.get("parent_thread_id") != session_id
+        or SESSION_ID_RE.fullmatch(lifecycle_id) is None
+        or lifecycle_payload.get("cwd") != str(root)
+        or lifecycle_payload.get("originator") != "codex-tui"
+        or lifecycle_payload.get("thread_source") != "subagent"
+        or lifecycle_payload.get("agent_role") != "reviewer"
+        or not isinstance(lifecycle_git, dict)
+        or lifecycle_git.get("commit_hash") != session_commit
+        or not isinstance(lifecycle_spawn, dict)
+        or lifecycle_spawn.get("parent_thread_id") != session_id
+        or lifecycle_spawn.get("depth") != 1
+        or lifecycle_spawn.get("agent_role") != "reviewer"
+        or not evidence.lifecycle_transcript.name.endswith(f"-{lifecycle_id}.jsonl")
+    ):
+        raise ReceiptError("root-retained lifecycle transcript is not one child reviewer session")
+    lifecycle_starts: list[tuple[int, str, dict[str, object]]] = []
+    lifecycle_completions: list[tuple[int, str, dict[str, object]]] = []
+    for record_index, record in enumerate(records):
+        payload = record.get("payload")
+        item = payload.get("item") if isinstance(payload, dict) else None
+        if (
+            record.get("type") == "event_msg"
+            and isinstance(payload, dict)
+            and payload.get("type") == "item_completed"
+            and isinstance(item, dict)
+            and item.get("type") == "SubAgentActivity"
+            and item.get("agent_thread_id") == lifecycle_id
+            and item.get("agent_path") == lifecycle_payload.get("agent_path")
+            and item.get("agent_path") == lifecycle_spawn.get("agent_path")
+            and payload.get("thread_id") == session_id
+            and isinstance(payload.get("turn_id"), str)
+        ):
+            link = (record_index, str(payload["turn_id"]), record)
+            if item.get("kind") == "started":
+                lifecycle_starts.append(link)
+            elif item.get("kind") == "completed":
+                lifecycle_completions.append(link)
+    if len(lifecycle_starts) != 1:
+        raise ReceiptError("root-retained lifecycle transcript is not uniquely linked to the owner session")
+    lifecycle_start_index, lifecycle_link_turn_id, lifecycle_start_record = lifecycle_starts[0]
+    matching_completions = [
+        link
+        for link in lifecycle_completions
+        if link[0] > lifecycle_start_index and link[1] == lifecycle_link_turn_id
+    ]
+    if not matching_completions or not task_record_index < lifecycle_start_index:
+        raise ReceiptError("root-retained lifecycle transcript is not uniquely linked to the owner session")
+    # A reviewer can be resumed after its first terminal event.  The unique
+    # spawn and its first completion bind the operation; later completions are
+    # append-only interaction history for that same child.
+    lifecycle_completion_index, _completion_turn_id, lifecycle_completion_record = matching_completions[0]
+
+    pending_block = re.search(
+        rb"(?m)^pending_task_items:\n(?P<items>(?:  - [^\r\n]+\n)+)",
+        report_time_payload,
+    )
+    pending_items = (
+        re.findall(rb"(?m)^  - ([^\r\n]+)$", pending_block.group("items"))
+        if pending_block is not None
+        else []
+    )
+    replay_suffix_match = re.fullmatch(
+        r"\(verified removed pending item: (?P<evidence>[^\r\n]+)\)\n",
+        replay_suffix,
+    )
+    try:
+        pending_item = pending_items[0].decode("utf-8") if len(pending_items) == 1 else ""
+    except UnicodeDecodeError as exc:
+        raise ReceiptError("root-retained report-time pending item is not UTF-8") from exc
+    if not pending_item or replay_suffix_match is None:
+        raise ReceiptError("root-retained lifecycle evidence requires one exact removed pending item")
+    removal_evidence = replay_suffix_match.group("evidence")
+    removed_output = "removed 1 pending item(s) without email; verify each item was actually done or cancelled\n"
+
+    def successful_command(item: object, expected_stdout: str) -> list[str]:
+        if (
+            not isinstance(item, dict)
+            or item.get("type") != "CommandExecution"
+            or item.get("status") != "completed"
+            or item.get("exit_code") != 0
+            or item.get("stdout") != expected_stdout
+            or item.get("aggregated_output") != expected_stdout
+            or item.get("formatted_output") != expected_stdout
+            or item.get("stderr") != ""
+            or item.get("cwd") != f"file://{root}"
+            or item.get("source") != "unified_exec_startup"
+        ):
+            return []
+        return shell_tokens(item.get("command"))
+
+    report_executions: list[tuple[int, str, dict[str, object], str]] = []
+    removal_executions: list[tuple[int, str, dict[str, object]]] = []
+    for record_index, record in enumerate(lifecycle_records):
+        payload = record.get("payload")
+        item = payload.get("item") if isinstance(payload, dict) else None
+        if (
+            record.get("type") != "event_msg"
+            or not isinstance(payload, dict)
+            or payload.get("type") != "item_completed"
+            or payload.get("thread_id") != lifecycle_id
+            or not isinstance(payload.get("turn_id"), str)
+        ):
+            continue
+        turn_id = str(payload["turn_id"])
+        stdout = item.get("stdout") if isinstance(item, dict) else None
+        if isinstance(stdout, str):
+            report_tokens = successful_command(item, stdout)
+            try:
+                acceptance = json.loads(stdout)
+            except json.JSONDecodeError:
+                acceptance = None
+            transfer = acceptance.get("transfer_receipt") if isinstance(acceptance, dict) else None
+            routing = acceptance.get("routing") if isinstance(acceptance, dict) else None
+            authority = transfer.get("authority") if isinstance(transfer, dict) else None
+            queue_item = transfer.get("queue_item") if isinstance(transfer, dict) else None
+            if (
+                len(report_tokens) == 5
+                and Path(report_tokens[0]).name == "omo_report.sh"
+                and report_tokens[1:3] == ["--status", "done"]
+                and report_tokens[3] == "--message-file"
+                and Path(report_tokens[4]).is_absolute()
+                and isinstance(acceptance, dict)
+                and canonical_json(acceptance) == stdout.encode()
+                and acceptance.get("schema") == "omo-report-acceptance/v1"
+                and acceptance.get("status") == "done"
+                and acceptance.get("replay_id") == replay_id
+                and isinstance(acceptance.get("accepted"), bool)
+                and isinstance(routing, dict)
+                and routing.get("task") == str(original_task)
+                and routing.get("producer_target") == current_snapshot[0]["runat"]
+                and routing.get("requested_manager_target") == manager_target
+                and isinstance(authority, dict)
+                and authority.get("source_task") == str(original_task)
+                and authority.get("producer_target") == current_snapshot[0]["runat"]
+                and isinstance(queue_item, dict)
+                and queue_item.get("replay_id") == replay_id
+            ):
+                report_executions.append((record_index, turn_id, record, stdout))
+        removal_tokens = successful_command(item, removed_output)
+        if (
+            len(removal_tokens) == 7
+            and Path(removal_tokens[0]).name == "omo_pending.py"
+            and removal_tokens[1:3] == ["remove", "--item"]
+            and removal_tokens[3] == pending_item
+            and removal_tokens[4] == "--evidence"
+            and removal_tokens[5] == removal_evidence
+            and removal_tokens[6] == "--no-email"
+        ):
+            removal_executions.append((record_index, turn_id, record))
+    if len(report_executions) != 1 or len(removal_executions) != 1:
+        raise ReceiptError("root-retained lifecycle transcript lacks one exact report and pending removal")
+    report_record_index, lifecycle_turn_id, report_record, report_output = report_executions[0]
+    removal_record_index, removal_turn_id, removal_record = removal_executions[0]
+
+    def linked_execution(
+        event_index: int,
+        turn_id: str,
+        expected_output: str,
+        keywords: tuple[str, ...],
+    ) -> tuple[int, int, dict[str, object], dict[str, object]]:
+        calls: list[tuple[int, str, dict[str, object]]] = []
+        for record_index, record in enumerate(lifecycle_records):
+            payload = record.get("payload")
+            metadata = (
+                payload.get("internal_chat_message_metadata_passthrough")
+                if isinstance(payload, dict)
+                else None
+            )
+            raw_input = payload.get("input") if isinstance(payload, dict) else None
+            call_id = payload.get("call_id") if isinstance(payload, dict) else None
+            if (
+                record.get("type") == "response_item"
+                and isinstance(payload, dict)
+                and payload.get("type") == "custom_tool_call"
+                and payload.get("name") == "exec"
+                and isinstance(metadata, dict)
+                and metadata.get("turn_id") == turn_id
+                and isinstance(call_id, str)
+                and call_id
+                and isinstance(raw_input, str)
+                and all(keyword in raw_input for keyword in keywords)
+            ):
+                calls.append((record_index, call_id, record))
+        if len(calls) != 1:
+            raise ReceiptError("root-retained lifecycle command call is missing or ambiguous")
+        call_index, call_id, call_record = calls[0]
+        outputs: list[tuple[int, dict[str, object]]] = []
+        for record_index, record in enumerate(lifecycle_records):
+            payload = record.get("payload")
+            metadata = (
+                payload.get("internal_chat_message_metadata_passthrough")
+                if isinstance(payload, dict)
+                else None
+            )
+            output = payload.get("output") if isinstance(payload, dict) else None
+            output_texts = [
+                block.get("text")
+                for block in output
+                if isinstance(block, dict) and block.get("type") == "input_text"
+            ] if isinstance(output, list) else []
+            if (
+                record.get("type") == "response_item"
+                and isinstance(payload, dict)
+                and payload.get("type") == "custom_tool_call_output"
+                and payload.get("call_id") == call_id
+                and isinstance(metadata, dict)
+                and metadata.get("turn_id") == turn_id
+                and expected_output in output_texts
+            ):
+                outputs.append((record_index, record))
+        if len(outputs) != 1 or not call_index < event_index < outputs[0][0]:
+            raise ReceiptError("root-retained lifecycle command execution order is invalid")
+        return call_index, outputs[0][0], call_record, outputs[0][1]
+
+    report_call_index, report_output_index, report_call, report_call_output = linked_execution(
+        report_record_index,
+        lifecycle_turn_id,
+        report_output,
+        ("omo_report.sh", "--status", "--message-file"),
+    )
+    removal_call_index, removal_output_index, removal_call, removal_call_output = linked_execution(
+        removal_record_index,
+        removal_turn_id,
+        removed_output,
+        ("omo_pending.py", "remove", "--item", "--evidence", "--no-email"),
+    )
+    if (
+        lifecycle_turn_id != removal_turn_id
+        or not report_call_index < report_record_index < report_output_index < removal_call_index
+        or not removal_call_index < removal_record_index < removal_output_index
+    ):
+        raise ReceiptError("root-retained report and pending removal order is invalid")
+
+    expected_output = f"Email sent.\nMessage-ID: {evidence.acknowledgment_message_id}\n"
+    acknowledgment_matches: list[tuple[int, dict[str, object]]] = []
+    for record_index, record in enumerate(records):
+        payload = record.get("payload")
+        item = payload.get("item") if isinstance(payload, dict) else None
+        if (
+            record.get("type") != "event_msg"
+            or not isinstance(payload, dict)
+            or payload.get("type") != "item_completed"
+            or payload.get("thread_id") != session_id
+            or not isinstance(item, dict)
+            or item.get("type") != "CommandExecution"
+            or item.get("status") != "completed"
+            or item.get("exit_code") != 0
+            or item.get("stdout") != expected_output
+            or item.get("aggregated_output") != expected_output
+            or item.get("formatted_output") != expected_output
+            or item.get("stderr") != ""
+            or item.get("cwd") != f"file://{root}"
+            or item.get("source") != "unified_exec_startup"
+        ):
+            continue
+        tokens = shell_tokens(item.get("command"))
+        valid_command = (
+            len(tokens) == 5
+            and Path(tokens[0]).name == "email_me.py"
+            and tokens[1] == "--subject"
+            and bool(tokens[2])
+            and tokens[3] == "--message-file"
+            and Path(tokens[4]).is_absolute()
+        )
+        if valid_command:
+            acknowledgment_matches.append((record_index, record))
+    if len(acknowledgment_matches) != 1:
+        raise ReceiptError("root-retained session prefix lacks one successful ownership acknowledgment")
+    acknowledgment_record_index, acknowledgment_record = acknowledgment_matches[0]
+    acknowledgment_payload = acknowledgment_record["payload"]
+    assert isinstance(acknowledgment_payload, dict)
+    acknowledgment_turn_id = acknowledgment_payload.get("turn_id")
+    call_matches: list[tuple[int, str, dict[str, object]]] = []
+    for record_index, record in enumerate(records):
+        payload = record.get("payload")
+        metadata = payload.get("internal_chat_message_metadata_passthrough") if isinstance(payload, dict) else None
+        call_id = payload.get("call_id") if isinstance(payload, dict) else None
+        raw_input = payload.get("input") if isinstance(payload, dict) else None
+        if (
+            record.get("type") == "response_item"
+            and isinstance(payload, dict)
+            and payload.get("type") == "custom_tool_call"
+            and payload.get("name") == "exec"
+            and isinstance(metadata, dict)
+            and metadata.get("turn_id") == acknowledgment_turn_id
+            and isinstance(call_id, str)
+            and call_id
+            and isinstance(raw_input, str)
+            and "email_me.py" in raw_input
+            and "--subject" in raw_input
+            and "--message-file" in raw_input
+        ):
+            call_matches.append((record_index, call_id, record))
+    if len(call_matches) != 1:
+        raise ReceiptError("root-retained ownership acknowledgment call is missing or ambiguous")
+    call_record_index, acknowledgment_call_id, acknowledgment_call = call_matches[0]
+    output_matches: list[tuple[int, dict[str, object]]] = []
+    for record_index, record in enumerate(records):
+        payload = record.get("payload")
+        metadata = payload.get("internal_chat_message_metadata_passthrough") if isinstance(payload, dict) else None
+        output = payload.get("output") if isinstance(payload, dict) else None
+        output_texts = [
+            block.get("text")
+            for block in output
+            if isinstance(block, dict) and block.get("type") == "input_text"
+        ] if isinstance(output, list) else []
+        if (
+            record.get("type") == "response_item"
+            and isinstance(payload, dict)
+            and payload.get("type") == "custom_tool_call_output"
+            and payload.get("call_id") == acknowledgment_call_id
+            and isinstance(metadata, dict)
+            and metadata.get("turn_id") == acknowledgment_turn_id
+            and expected_output in output_texts
+        ):
+            output_matches.append((record_index, record))
+    if (
+        len(output_matches) != 1
+        or not call_record_index < acknowledgment_record_index < output_matches[0][0] < task_record_index
+    ):
+        raise ReceiptError("root-retained ownership acknowledgment execution order is invalid")
+    output_record_index, acknowledgment_output = output_matches[0]
+
+    def git(*arguments: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
+        try:
+            return subprocess.run(
+                ["git", "-C", str(root), *arguments],
+                capture_output=True,
+                timeout=30,
+                check=check,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ReceiptError("root-retained published result provenance is unavailable") from exc
+
+    repository = git("rev-parse", "--show-toplevel").stdout.decode("utf-8").strip()
+    published_ref = "refs/remotes/origin/main"
+    tip_before = git("rev-parse", "--verify", published_ref).stdout.decode("utf-8").strip()
+    published_commit = git(
+        "rev-parse", "--verify", f"{evidence.published_result_commit}^{{commit}}"
+    ).stdout.decode("utf-8").strip()
+    published_tree = git("rev-parse", f"{published_commit}^{{tree}}").stdout.decode("utf-8").strip()
+    session_ancestor = git("merge-base", "--is-ancestor", session_commit, published_commit, check=False)
+    published = git("merge-base", "--is-ancestor", published_commit, published_ref, check=False)
+    tip_after = git("rev-parse", "--verify", published_ref).stdout.decode("utf-8").strip()
+    git_object_re = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+    if (
+        Path(repository).resolve(strict=True) != root.resolve(strict=True)
+        or published_commit != evidence.published_result_commit
+        or git_object_re.fullmatch(published_tree) is None
+        or git_object_re.fullmatch(tip_before) is None
+        or tip_after != tip_before
+        or session_ancestor.returncode != 0
+        or published.returncode != 0
+    ):
+        raise ReceiptError("root-retained published result is not stable on origin/main")
+    if (
+        read_append_only_session_prefix(evidence) != prefix
+        or read_append_only_session_prefix(evidence, lifecycle=True) != lifecycle_prefix
+    ):
+        raise ReceiptError("root-retained transcript prefix changed during verification")
+    if regular_file_bytes(
+        original_task,
+        maximum=MAX_ROUTE_FILE_BYTES,
+        field="completed task",
+    ) != current_payload or regular_file_bytes(
+        root / "TODO.md",
+        maximum=MAX_ROUTE_FILE_BYTES,
+        field="TODO",
+    ) != todo_payload:
+        raise ReceiptError("root-retained task or TODO changed during session verification")
+    return {
+        "schema": "omo-report-terminal-task-transition/v1",
+        "task_ref": original_task.relative_to(root).as_posix(),
+        "committed_running_sha256": source_sha256,
+        "committed_running_size_bytes": source_size,
+        "current_done_sha256": hashlib.sha256(current_payload).hexdigest(),
+        "current_done_size_bytes": len(current_payload),
+        "todo_previous_row": f"{original_task.relative_to(root).as_posix()} {current_snapshot[0]['runat']}",
+        "commitment_binding": {
+            "kind": "codex-session-prefix",
+            "transcript": str(evidence.transcript),
+            "transcript_prefix_sha256": evidence.transcript_prefix_sha256,
+            "transcript_prefix_size_bytes": evidence.transcript_prefix_size_bytes,
+            "session_id": session_id,
+            "session_git_commit": session_commit,
+            "report_time_task_record_index": task_record_index,
+            "report_time_task_block_index": task_block_index,
+            "lifecycle_transcript": str(evidence.lifecycle_transcript),
+            "lifecycle_transcript_prefix_sha256": evidence.lifecycle_transcript_prefix_sha256,
+            "lifecycle_transcript_prefix_size_bytes": evidence.lifecycle_transcript_prefix_size_bytes,
+            "lifecycle_session_id": lifecycle_id,
+            "lifecycle_start_record_index": lifecycle_start_index,
+            "lifecycle_start_record_sha256": hashlib.sha256(
+                canonical_json(lifecycle_start_record)
+            ).hexdigest(),
+            "lifecycle_completion_record_index": lifecycle_completion_index,
+            "lifecycle_completion_record_sha256": hashlib.sha256(
+                canonical_json(lifecycle_completion_record)
+            ).hexdigest(),
+            "lifecycle_report_call_record_index": report_call_index,
+            "lifecycle_report_call_sha256": hashlib.sha256(canonical_json(report_call)).hexdigest(),
+            "lifecycle_report_record_index": report_record_index,
+            "lifecycle_report_record_sha256": hashlib.sha256(canonical_json(report_record)).hexdigest(),
+            "lifecycle_report_output_record_index": report_output_index,
+            "lifecycle_report_output_sha256": hashlib.sha256(
+                canonical_json(report_call_output)
+            ).hexdigest(),
+            "lifecycle_removal_call_record_index": removal_call_index,
+            "lifecycle_removal_call_sha256": hashlib.sha256(canonical_json(removal_call)).hexdigest(),
+            "lifecycle_removal_record_index": removal_record_index,
+            "lifecycle_removal_record_sha256": hashlib.sha256(canonical_json(removal_record)).hexdigest(),
+            "lifecycle_removal_output_record_index": removal_output_index,
+            "lifecycle_removal_output_sha256": hashlib.sha256(
+                canonical_json(removal_call_output)
+            ).hexdigest(),
+            "ownership_acknowledgment_message_id": evidence.acknowledgment_message_id,
+            "ownership_acknowledgment_call_record_index": call_record_index,
+            "ownership_acknowledgment_call_sha256": hashlib.sha256(
+                canonical_json(acknowledgment_call)
+            ).hexdigest(),
+            "ownership_acknowledgment_record_index": acknowledgment_record_index,
+            "ownership_acknowledgment_record_sha256": hashlib.sha256(
+                canonical_json(acknowledgment_record)
+            ).hexdigest(),
+            "ownership_acknowledgment_output_record_index": output_record_index,
+            "ownership_acknowledgment_output_sha256": hashlib.sha256(
+                canonical_json(acknowledgment_output)
+            ).hexdigest(),
+            "published_result_commit": published_commit,
+            "published_result_tree": published_tree,
+            "published_ref": published_ref,
+            "verified_removal_note_count": len(suffix_lines),
+        },
+    }
+
+
 def infer_archived_task_path(
     root: Path,
     original_task: Path,
     route_evidence: tuple[dict[str, object], ...] | list[dict[str, object]],
     replay_id: str,
     manager_target: str,
+    root_retained_evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | None = None,
 ) -> tuple[Path, dict[str, object]]:
     """Authenticate one archived task through immutable report and Git custody."""
 
@@ -5074,6 +7120,8 @@ def infer_archived_task_path(
             and previous_headers == 1
             and matching_rows == [("previous", expected_row)]
         ):
+            if root_retained_evidence is not None:
+                raise ReceiptError("root-retained session evidence is unnecessary for an exact status-only transition")
             return original_task, {
                 "schema": "omo-report-terminal-task-transition/v1",
                 "task_ref": original_ref,
@@ -5083,6 +7131,34 @@ def infer_archived_task_path(
                 "current_done_size_bytes": len(current_payload),
                 "todo_previous_row": expected_row,
             }
+        if root_retained_evidence is not None:
+            if (
+                Path(original_ref).parent != Path(".")
+                or previous_headers != 1
+                or matching_rows != [("previous", expected_row)]
+            ):
+                raise ReceiptError("root-retained session evidence requires one exact previous TODO row")
+            provenance = session_root_retained_provenance(
+                root,
+                original_task,
+                current_payload,
+                todo_payload,
+                str(source_sha256),
+                source_size,
+                replay_id,
+                manager_target,
+                root_retained_evidence,
+            )
+            if provenance["todo_previous_row"] != expected_row:
+                raise ReceiptError("root-retained session evidence target changed")
+            return original_task, provenance
+    if os.path.lexists(original_task):
+        raise ReceiptError("archived task Git rename provenance is missing or ambiguous")
+    if root_retained_evidence is not None and not isinstance(
+        root_retained_evidence,
+        RootRetainedNoMailEvidence,
+    ):
+        raise ReceiptError("root-retained session evidence cannot authenticate a monthly archive")
 
     def git(*arguments: str, text: bool = False) -> bytes | str:
         try:
@@ -5104,6 +7180,9 @@ def infer_archived_task_path(
     repository = str(git("rev-parse", "--show-toplevel", text=True)).strip()
     if Path(repository).resolve(strict=True) != root.resolve(strict=True):
         raise ReceiptError("archived task root is not the exact Git worktree")
+    head_commit = str(git("rev-parse", "--verify", "HEAD", text=True)).strip()
+    if git_object_re.fullmatch(head_commit) is None:
+        raise ReceiptError("archived task Git snapshot is invalid")
     candidates: list[Path] = []
     for month in root.iterdir():
         if re.fullmatch(r"20[0-9]{4}", month.name) is None:
@@ -5124,7 +7203,7 @@ def infer_archived_task_path(
         history = str(
             git(
                 "log", "--follow", "--format=commit:%H", "--name-status",
-                "--find-renames", "HEAD", "--", candidate_ref, text=True,
+                "--find-renames", head_commit, "--", candidate_ref, text=True,
             )
         ).splitlines()
         current_commit = ""
@@ -5151,13 +7230,40 @@ def infer_archived_task_path(
     rename_parent = parents[1]
     source_blob = str(git("rev-parse", f"{rename_parent}:{original_ref}", text=True)).strip()
     destination_blob = str(git("rev-parse", f"{rename_commit}:{candidate_ref}", text=True)).strip()
-    head_blob = str(git("rev-parse", f"HEAD:{candidate_ref}", text=True)).strip()
+    head_blob = str(git("rev-parse", f"{head_commit}:{candidate_ref}", text=True)).strip()
     if not all(git_object_re.fullmatch(value) for value in (source_blob, destination_blob, head_blob)):
         raise ReceiptError("archived task Git blob identity is invalid")
     current_payload = regular_file_bytes(candidate, maximum=MAX_ROUTE_FILE_BYTES, field="archived task")
-    head_payload = bytes(git("cat-file", "blob", head_blob))
+    todo_payload = regular_file_bytes(
+        root / "TODO.md",
+        maximum=MAX_ROUTE_FILE_BYTES,
+        field="TODO",
+    )
+    raw_head_payload = git("cat-file", "blob", head_blob)
+    if not isinstance(raw_head_payload, bytes):
+        raise AssertionError("binary Git command returned text")
+    head_payload = raw_head_payload
     if destination_blob != head_blob or current_payload != head_payload:
         raise ReceiptError("archived task differs from its authenticated Git rename destination")
+    current_sha256 = hashlib.sha256(current_payload).hexdigest()
+
+    restored_running, terminal_replacements = re.subn(
+        rb"(?m)^status: done$",
+        b"status: running",
+        current_payload,
+    )
+    current_snapshot = frontmatter_snapshot(current_payload)
+    terminal_transition_matches = (
+        Path(original_ref).parent == Path(".")
+        and similarity == "100"
+        and source_blob == destination_blob == head_blob
+        and current_snapshot is not None
+        and current_snapshot[0].get("status") == "done"
+        and frontmatter_top_level_key_count(current_payload, "status") == 1
+        and terminal_replacements == 1
+        and len(restored_running) == source_size
+        and hashlib.sha256(restored_running).hexdigest() == source_sha256
+    )
 
     committed_blobs: set[str] = set()
     raw_history = str(
@@ -5172,10 +7278,14 @@ def infer_archived_task_path(
         if git_object_re.fullmatch(blob) is not None and blob != zero_object
     }
     for blob in history_blobs:
-        payload = bytes(git("cat-file", "blob", blob))
+        payload = git("cat-file", "blob", blob)
+        if not isinstance(payload, bytes):
+            raise AssertionError("binary Git command returned text")
         if len(payload) == source_size and hashlib.sha256(payload).hexdigest() == source_sha256:
             committed_blobs.add(blob)
     if committed_blobs:
+        if root_retained_evidence is not None:
+            raise ReceiptError("root-retained session evidence is unnecessary for committed Git custody")
         commitment_binding: dict[str, object] = {
             "kind": "historical-git-blob",
             "blob": sorted(committed_blobs)[0],
@@ -5200,14 +7310,85 @@ def infer_archived_task_path(
             and match.group("replay") == replay_id
             and match.group("manager") == manager_target
         ]
-        if len(records) != 1 or len(matching_records) != 1:
+        if records and (len(records) != 1 or len(matching_records) != 1):
             raise ReceiptError("archived task Git history does not authenticate its committed report source")
-        record = matching_records[0].group(0)
-        commitment_binding = {
-            "kind": "archived-task-record",
-            "blob": head_blob,
-            "record_sha256": hashlib.sha256(record.encode()).hexdigest(),
-        }
+        if matching_records:
+            if root_retained_evidence is not None:
+                raise ReceiptError("root-retained session evidence is unnecessary for an archive record")
+            record = matching_records[0].group(0)
+            commitment_binding = {
+                "kind": "archived-task-record",
+                "blob": head_blob,
+                "record_sha256": hashlib.sha256(record.encode()).hexdigest(),
+            }
+        elif terminal_transition_matches:
+            if root_retained_evidence is not None:
+                raise ReceiptError("root-retained session evidence is unnecessary for an exact status transition")
+            commitment_binding = {
+                "kind": "r100-terminal-status-transition",
+                "from_status": "running",
+                "to_status": "done",
+                "transition_count": terminal_replacements,
+                "done_sha256": current_sha256,
+                "done_size_bytes": len(current_payload),
+            }
+        elif isinstance(root_retained_evidence, RootRetainedNoMailEvidence):
+            if (
+                Path(original_ref).parent != Path(".")
+                or similarity != "100"
+                or source_blob != destination_blob
+                or destination_blob != head_blob
+            ):
+                raise ReceiptError(
+                    "root-retained no-mail transcript requires one clean exact root-to-archive rename"
+                )
+            terminal_provenance = top_level_no_mail_root_retained_provenance(
+                root,
+                original_task,
+                current_payload,
+                todo_payload,
+                str(source_sha256),
+                source_size,
+                replay_id,
+                manager_target,
+                root_retained_evidence,
+                current_task=candidate,
+            )
+            if (
+                terminal_provenance.get("current_done_sha256") != current_sha256
+                or terminal_provenance.get("current_done_size_bytes") != len(current_payload)
+            ):
+                raise ReceiptError("archived terminal task transition changed")
+            commitment_binding = {
+                "kind": "r100-top-level-no-mail-terminal-transition",
+                "done_sha256": current_sha256,
+                "done_size_bytes": len(current_payload),
+                "terminal_provenance": terminal_provenance,
+            }
+        else:
+            raise ReceiptError("archived task Git history does not authenticate its committed report source")
+    if regular_file_bytes(
+        candidate,
+        maximum=MAX_ROUTE_FILE_BYTES,
+        field="archived task",
+    ) != current_payload:
+        raise ReceiptError("archived task changed during Git provenance verification")
+    worktree_status = str(
+        git(
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            original_ref,
+            candidate_ref,
+            text=True,
+        )
+    )
+    if worktree_status:
+        raise ReceiptError("archived task Git custody paths are not clean")
+    current_head = str(git("rev-parse", "--verify", "HEAD", text=True)).strip()
+    if current_head != head_commit:
+        raise ReceiptError("archived task Git snapshot changed during provenance verification")
     return candidate, {
         "schema": "omo-report-archived-task-git-provenance/v1",
         "original_ref": original_ref,
@@ -5224,7 +7405,15 @@ def infer_archived_task_path(
     }
 
 
-def export_archived_consumed_report(report_path: Path, output_path: Path) -> bytes:
+def export_archived_consumed_report(
+    report_path: Path,
+    output_path: Path,
+    session_transcript: Path | None = None,
+    lifecycle_transcript: Path | None = None,
+    acknowledgment_message_id: str = "",
+    published_result_commit: str = "",
+    no_mail_transcript: Path | None = None,
+) -> bytes:
     """Infer an archived transaction only from its exact private envelope."""
 
     report_path = absolute_path(report_path)
@@ -5345,12 +7534,37 @@ def export_archived_consumed_report(report_path: Path, output_path: Path) -> byt
     if len(roots) != 1:
         raise ReceiptError("archived private envelope work-log root is ambiguous")
     root = roots[0]
+    evidence_presence = (
+        session_transcript is not None,
+        lifecycle_transcript is not None,
+        bool(acknowledgment_message_id),
+        bool(published_result_commit),
+    )
+    if any(evidence_presence) and not all(evidence_presence):
+        raise ReceiptError(
+            "root-retained session evidence requires owner/lifecycle transcripts, acknowledgment, and commit"
+        )
+    root_retained_evidence = (
+        capture_root_retained_evidence(
+            session_transcript,
+            lifecycle_transcript,
+            acknowledgment_message_id,
+            published_result_commit,
+        )
+        if session_transcript is not None and lifecycle_transcript is not None
+        else None
+    )
+    if no_mail_transcript is not None:
+        if root_retained_evidence is not None:
+            raise ReceiptError("root-retained evidence provenance is ambiguous")
+        root_retained_evidence = capture_root_retained_no_mail_evidence(no_mail_transcript)
     archived_task, _git_provenance = infer_archived_task_path(
         root,
         task,
         routing_sources,
         commitment_path.stem,
         str(routing.get("requested_manager_target", "")),
+        root_retained_evidence,
     )
     route_manifest = json.dumps(routing_sources, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     route_kind = str(routing.get("route_kind", ""))
@@ -5384,6 +7598,7 @@ def export_archived_consumed_report(report_path: Path, output_path: Path) -> byt
         tmux_pane_index="",
         tmux_pane_id="",
         tmux_window_name="",
+        root_retained_evidence=root_retained_evidence,
     )
     verified_message, message_identity, message_fd = open_regular_file_snapshot(
         message_path,
@@ -5406,8 +7621,11 @@ def export_archived_consumed_report(report_path: Path, output_path: Path) -> byt
         output = canonical_json(attestation)
         if path_state(message_path) != submitted:
             raise ReceiptError("archived report allocation changed during verification")
+        consumed_output = arguments.consumed_attestation_output
+        if consumed_output is None:
+            raise AssertionError("archived consumed export has no output path")
         persist_consumed_closure_attestation(
-            arguments.consumed_attestation_output,
+            consumed_output,
             canonical_json(consumed_closure_export(plan, attestation, archived=True)),
         )
         return output
@@ -5419,6 +7637,21 @@ def main() -> int:
     try:
         if len(sys.argv) == 4 and sys.argv[1] == "--validate-consumed-export":
             output = validate_consumed_closure_export_input(Path(sys.argv[2]), sys.argv[3])
+        elif len(sys.argv) == 8 and sys.argv[1] == "--export-archived-consumed":
+            output = export_archived_consumed_report(
+                Path(sys.argv[2]),
+                Path(sys.argv[3]),
+                Path(sys.argv[4]),
+                Path(sys.argv[5]),
+                sys.argv[6],
+                sys.argv[7],
+            )
+        elif len(sys.argv) == 5 and sys.argv[1] == "--export-archived-consumed":
+            output = export_archived_consumed_report(
+                Path(sys.argv[2]),
+                Path(sys.argv[3]),
+                no_mail_transcript=Path(sys.argv[4]),
+            )
         elif len(sys.argv) == 4 and sys.argv[1] == "--export-archived-consumed":
             output = export_archived_consumed_report(Path(sys.argv[2]), Path(sys.argv[3]))
         elif "--validate-consumed-export" in sys.argv:

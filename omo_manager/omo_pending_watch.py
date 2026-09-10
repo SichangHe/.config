@@ -1409,7 +1409,7 @@ def parse_args(argv: list[str]) -> Args:
         "--classify-blocked-ready",
         metavar="TASK_FILE",
         default="",
-        help="Durably suppress one reverified blocked ready pane until its task, queue, TODO custody, owner, runtime, or pane evidence changes.",
+        help="Durably suppress one reverified blocked ready pane or exact Human-pending stuck composer until its bound evidence changes.",
     )
     _ = parser.add_argument(
         "--dry-run",
@@ -5443,7 +5443,7 @@ def evidence_target(line: str) -> str:
 
 MANAGER_SELF_PROBLEM_STATUSES = {"blocked_idle", "error", "manager_compaction", "manager_waiting_subagent", "missing", "not_codex", "ready", "stuck_input"}
 MANAGER_HUMAN_EMAIL_PROBLEM_STATUSES = {"error", "manager_waiting_subagent", "missing", "not_codex", "stuck_input"}
-SNAPSHOT_SUPPRESSED_BLOCKED_STATUSES = {"blocked_idle", "missing"}
+SNAPSHOT_SUPPRESSED_BLOCKED_STATUSES = {"blocked_idle", "missing", "stuck_input"}
 
 
 def problem_line_matches_manager_target(line: str, manager_target: str = "") -> bool:
@@ -6136,7 +6136,15 @@ def line_matches_blocked_report_snapshot(root: Path, line: str, task: TaskLine, 
         )
     if not snapshot.startswith(("human:", "custody:", "cascade:")):
         return status == "blocked_idle"
-    if status != "blocked_idle" or problem_line_value(line, "idle_status") != "ready":
+    stable_ready = status == "blocked_idle" and problem_line_value(line, "idle_status") == "ready"
+    stable_human_input = (
+        snapshot.startswith("human:")
+        and status == "stuck_input"
+        and problem_line_value(line, "role") == "blocked_idle"
+        and problem_line_value(line, "idle_status") == "stuck_input"
+        and problem_line_value(line, "unstick") == "disabled:blocked_idle_blocked"
+    )
+    if not (stable_ready or stable_human_input):
         return False
     task_path = resolve_task_path(root, task.task_file)
     state = scan_task_state(task_path, root) if task_path is not None else None
@@ -6742,13 +6750,19 @@ def blocked_report_snapshot_state(
         metadata = metadata_by_task.get(task.task_file)
         if task_path is None or state is None or metadata is None or state.status != "blocked" or not state.target or not state.manager_target or task_has_pending_marker(task_path):
             continue
-        report = inspect_codex(CodexStatusArgs(state.target, 80))
-        if report.status != "ready":
-            continue
         owner_target = effective_owner_target(root, task, task_path)
         human_wait = is_authoritative_human_blocked_ready_task(root, task, state)
+        report = inspect_codex(CodexStatusArgs(state.target, 80))
+        if report.status != "ready" and not (human_wait and report.status == "stuck_input"):
+            continue
         snapshot_builder = recorded_human_wait_snapshot if human_wait else recorded_blocked_custody_snapshot
-        pane_evidence = ready_report_evidence(report) if human_wait else blocked_custody_pane_evidence(state.target, report)
+        pane_evidence = (
+            blocked_custody_pane_evidence(state.target, report)
+            if report.status == "stuck_input"
+            else ready_report_evidence(report)
+            if human_wait
+            else blocked_custody_pane_evidence(state.target, report)
+        )
         if not pane_evidence:
             continue
         snapshot = snapshot_builder(
@@ -6796,7 +6810,7 @@ def classify_done_ready(args: Args, task_file: str) -> bool:
 
 # 🧑 "classifies and suppresses only these evidence-stable blocked-ready states until their authenticated state changes"
 def classify_blocked_ready(args: Args, task_file: str) -> bool:
-    """Persist one exact blocked ready-pane snapshot after fresh validation."""
+    """Persist one exact blocked ready-pane or Human-pending stuck-composer snapshot."""
 
     task_path = resolve_task_path(args.root, task_file)
     if task_path is None:
@@ -7504,9 +7518,9 @@ def main(argv: list[str]) -> int:
         return 0
     if args.classify_blocked_ready:
         if not classify_blocked_ready(args, args.classify_blocked_ready):
-            print("omo_pending_watch: task is not uniquely blocked with an exact stable ready Codex pane", file=sys.stderr)
+            print("omo_pending_watch: task is not uniquely blocked with an exact stable ready pane or Human-pending stuck composer", file=sys.stderr)
             return 1
-        print(f"omo_pending_watch: classified stable blocked ready pane for {args.classify_blocked_ready}")
+        print(f"omo_pending_watch: classified stable blocked pane evidence for {args.classify_blocked_ready}")
         return 0
     if args.once and args.dry_run:
         actor_controller = BlockingActorController(args.root, allow_existing=True)
