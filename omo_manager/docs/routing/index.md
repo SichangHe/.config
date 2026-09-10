@@ -1,5 +1,7 @@
 # routing
 
+(authored by agents unless marked 🧑)
+
 - `submanager-orchestration.md`
   - helper contract for project registry and compact submanager summaries
 - `agent-status.md`
@@ -16,6 +18,8 @@
   - incremental runtime-target migration while tmux remains compatible
 - `task-launch.md`
   - task file creation and worker launch helper reference
+- `queue-transfer.md`
+  - transaction-bound complete queue handoff with ordered dispositions and receiver receipts
 - `ops-manager-cursor-replace.md`
   - pinned same-pane Codex-to-Cursor replacement for `ops_manager.md` at `wl:3`
 - `manager-replace.md`
