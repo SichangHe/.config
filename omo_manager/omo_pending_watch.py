@@ -6126,7 +6126,14 @@ def line_matches_blocked_report_snapshot(root: Path, line: str, task: TaskLine, 
         )
     if not snapshot.startswith(("human:", "custody:", "cascade:")):
         return status == "blocked_idle"
-    if status != "blocked_idle" or problem_line_value(line, "idle_status") != "ready":
+    human_stuck = (
+        snapshot.startswith("human:")
+        and status == "stuck_input"
+        and problem_line_value(line, "role") == "blocked_idle"
+        and problem_line_value(line, "idle_status") == "stuck_input"
+        and problem_line_value(line, "unstick") == "disabled:blocked_idle_blocked"
+    )
+    if not human_stuck and (status != "blocked_idle" or problem_line_value(line, "idle_status") != "ready"):
         return False
     task_path = resolve_task_path(root, task.task_file)
     state = scan_task_state(task_path, root) if task_path is not None else None
@@ -6144,7 +6151,11 @@ def unchanged_dependency_blocked_idle_line(root: Path, line: str, current: dict[
 
     status = problem_line_status(line)
     task_status = problem_line_value(line, "task_status")
-    if not ((status in SNAPSHOT_SUPPRESSED_BLOCKED_STATUSES and task_status == "blocked") or status in {"ready", "done-stale"} and task_status in {"", "done"}):
+    if not (
+        (status in SNAPSHOT_SUPPRESSED_BLOCKED_STATUSES and task_status == "blocked")
+        or status == "stuck_input" and task_status == "blocked"
+        or status in {"ready", "done-stale"} and task_status in {"", "done"}
+    ):
         return False
     task_file = problem_line_task(line)
     if not task_file:
@@ -6558,12 +6569,16 @@ def blocked_report_snapshot_state(root: Path, report_state: Path = DEFAULT_STATE
         if task_path is None or state is None or metadata is None or state.status != "blocked" or not state.target or not state.manager_target or task_has_pending_marker(task_path):
             continue
         report = inspect_codex(CodexStatusArgs(state.target, 80))
-        if report.status != "ready":
-            continue
         owner_target = effective_owner_target(root, task, task_path)
         human_wait = is_authoritative_human_blocked_ready_task(root, task, state)
+        if report.status != "ready" and not (human_wait and report.status == "stuck_input"):
+            continue
         snapshot_builder = recorded_human_wait_snapshot if human_wait else recorded_blocked_custody_snapshot
-        pane_evidence = ready_report_evidence(report) if human_wait else blocked_custody_pane_evidence(state.target, report)
+        pane_evidence = (
+            ready_report_evidence(report)
+            if human_wait and report.status == "ready"
+            else blocked_custody_pane_evidence(state.target, report)
+        )
         if not pane_evidence:
             continue
         snapshot = snapshot_builder(
