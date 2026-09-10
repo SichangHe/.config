@@ -76,6 +76,7 @@ AUTHORITY_SHA256 = "2b1e6ed1b653cf79f459a8ff33113df6c262b665368ffb010fbdbb788862
 UPSTREAM_AUDIT = Path("/tmp/config16-continuity-close.fZOJoJ/audit.json")
 UPSTREAM_AUDIT_SHA256 = "e0aaa1395af521f92fb6fd2b7b8207b622edf3751aa272710a21bd9120893e27"
 UPSTREAM_SCHEMA = "omo-human-worker-continuity-close/v1"
+UPSTREAM_LABEL = "config:16 committed audit"
 REPLAY_ID = "205eec6dff48bc1feedd27d3521f86580d86d9943dad469056c63a33dec9d9dc"
 PENDING_ITEM = (
     "Repair only the consumed-report export/closure gap for completed queue-empty dw2_input_clear.md/config:16: "
@@ -202,7 +203,7 @@ def task_after(root: Path, text: str) -> bytes:
     if n_removed != 1:
         raise TaskFrontmatterError("config:18 closure did not remove exactly its satisfied pending item.")
     updated = update_frontmatter_status(cleared, "done", "", root)
-    evidence = f"config:16 committed audit {UPSTREAM_AUDIT}; SHA-256 {UPSTREAM_AUDIT_SHA256}"
+    evidence = f"{UPSTREAM_LABEL} {UPSTREAM_AUDIT}; SHA-256 {UPSTREAM_AUDIT_SHA256}"
     result = append_comment(updated, pending_remove_evidence_comment(1, evidence))
     metadata = parse_task_metadata(result, root)
     if metadata is None or metadata.status != "done" or metadata.pending_task_items:
