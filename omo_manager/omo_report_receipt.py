@@ -4093,12 +4093,7 @@ def consumed_closure_attestation(plan: Plan, *, archived: bool = False) -> dict[
         raise ReceiptError("consumed report has no exact watcher transition")
     if plan.pointer.encode() in manager_bytes(plan.manager):
         raise ReceiptError("consumed report pointer is still active")
-    if archived:
-        acceptance = validate_historical_acceptance_pair(plan, commitment)
-    else:
-        require_absent(plan.receipt_final, "durable receipt")
-        require_absent(plan.receipt_publication_final, "receipt publication record")
-        acceptance = None
+    acceptance = validate_historical_acceptance_pair(plan, commitment)
     recovery_residue = [
         {
             "path": str(path),

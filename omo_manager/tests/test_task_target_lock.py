@@ -7,10 +7,17 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_task_lock import task_target_lock, task_target_lock_path
+from omo_manager.omo_task_lock import task_file_lock, task_target_lock, task_target_lock_path
 
 
 class TaskTargetLockTests(unittest.TestCase):
+    def test_file_lock_can_bound_contention(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "task.md"
+            with task_file_lock(path), self.assertRaisesRegex(TimeoutError, "timed out acquiring task-file lock"):
+                with task_file_lock(path, timeout_s=0):
+                    self.fail("contended file lock was acquired")
+
     def test_lock_path_is_independent_of_process_temp_environment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

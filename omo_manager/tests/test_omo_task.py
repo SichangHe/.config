@@ -38,6 +38,7 @@ from omo_manager.omo_task import (
     new_window_bound,
     parse_args,
     prompt_input,
+    root_membership_lock,
     runat_goal_tree_error,
     runat_header_error,
     start_codex,
@@ -57,6 +58,7 @@ from omo_manager.omo_task import (
     worker_command,
     write_human_instruction_file,
 )
+from omo_manager.omo_task_lock import task_file_lock
 from omo_manager.tests.test_task_metadata_v2 import v2_task
 from omo_manager.omo_worker_successor import Args as SuccessorArgs
 from omo_manager.omo_worker_successor import (
@@ -3456,6 +3458,93 @@ class OmoTaskTests(unittest.TestCase):
             self.assertFalse((root / "x.md").exists())
             self.assertFalse((root / "TODO.md").exists())
 
+    def test_main_dry_run_does_not_wait_for_membership_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            with (
+                patch("omo_manager.omo_task.validate_launch_session", return_value="dw15"),
+                patch("omo_manager.omo_task.launch_session", return_value=LaunchSession("dw15", "$1")),
+                patch("omo_manager.omo_task.root_membership_lock", side_effect=AssertionError("dry run acquired membership lock")),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task-file",
+                        "dw_queue_mgr.md",
+                        "--tmux-session",
+                        "dw15",
+                        "--tmux-window",
+                        "1",
+                        "--tool",
+                        "codex",
+                        "--workdir",
+                        str(root),
+                        "--prompt-file",
+                        str(prompt),
+                        "--manager-target",
+                        "dw15:0",
+                        "--model",
+                        "gpt-5.6-sol",
+                        "--reasoning-effort",
+                        "low",
+                        "--dry-run",
+                    ]
+                )
+
+            self.assertEqual(0, result)
+
+    def test_membership_lock_does_not_relabel_body_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(TimeoutError, "operation body timed out"):
+                with root_membership_lock(Path(tmp)):
+                    raise TimeoutError("operation body timed out")
+
+    def test_main_launch_reports_bounded_membership_contention_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            stderr = io.StringIO()
+            with task_file_lock(root / ".omo-task-membership.lock"), patch(
+                "omo_manager.omo_task.TASK_MEMBERSHIP_LOCK_TIMEOUT_S", 0
+            ), patch("omo_manager.omo_task.validate_launch_session", return_value="dw15"), patch(
+                "omo_manager.omo_task.new_window"
+            ) as launch, contextlib.redirect_stderr(stderr):
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task-file",
+                        "dw_queue_mgr.md",
+                        "--tmux-session",
+                        "dw15",
+                        "--tmux-window",
+                        "1",
+                        "--tool",
+                        "codex",
+                        "--workdir",
+                        str(root),
+                        "--prompt-file",
+                        str(prompt),
+                        "--manager-target",
+                        "dw15:0",
+                        "--model",
+                        "gpt-5.6-sol",
+                        "--reasoning-effort",
+                        "low",
+                    ]
+                )
+
+            self.assertEqual(1, result)
+            self.assertIn("task membership is busy after 0s", stderr.getvalue())
+            launch.assert_not_called()
+            self.assertFalse((root / "dw_queue_mgr.md").exists())
+            self.assertFalse((root / "TODO.md").exists())
+
     def test_main_dry_run_plans_authorized_hwl_launch_with_sanitized_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3857,6 +3946,56 @@ class OmoTaskTests(unittest.TestCase):
             self.assertEqual(0, result)
             self.assertTrue((root / "x.md").is_file())
             self.assertTrue((root / "TODO.md").is_file())
+
+    def test_existing_target_mode_relinks_manager_without_launch_or_task_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "dw_queue_mgr.md"
+            original = (
+                "---\n"
+                "version: v1.0.0\n"
+                "status: long_running\n"
+                "blocked_on: redundant queue-empty manager; retirement awaiting canonical TODO linkage and strict fresh stop evidence\n"
+                "runat: dw15:1\n"
+                "tool: codex\n"
+                "managerat: dw15:0\n"
+                "is_manager: true\n"
+                "pending_task_items: []\n"
+                "---\n"
+                "preserved body\n"
+            )
+            task.write_text(original, encoding="utf-8")
+            (root / "TODO.md").write_text("current:\n\nprevious:\n", encoding="utf-8")
+
+            with (
+                patch("omo_manager.omo_task.exact_pane_id", return_value="%1"),
+                patch("omo_manager.omo_task.capture_pane", return_value=["ready"]),
+                patch("omo_manager.omo_task.status", return_value="ready"),
+                patch("omo_manager.omo_task.new_window_command", side_effect=AssertionError("registration launched a window")),
+                patch("omo_manager.omo_task.start_codex", side_effect=AssertionError("registration started Codex")),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task-file",
+                        "dw_queue_mgr.md",
+                        "--tmux-session",
+                        "dw15",
+                        "--tmux-window",
+                        "1",
+                        "--tool",
+                        "codex",
+                        "--manager-target",
+                        "dw15:0",
+                        "--is-manager",
+                    ]
+                )
+
+            self.assertEqual(0, result)
+            self.assertEqual(original, task.read_text(encoding="utf-8"))
+            self.assertEqual("current:\n\ndw_queue_mgr.md dw15:1\nprevious:\n", (root / "TODO.md").read_text(encoding="utf-8"))
 
     def test_existing_target_dry_run_does_not_require_live_pane(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

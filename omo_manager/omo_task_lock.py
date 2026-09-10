@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import math
 import os
 import re
 import stat
@@ -63,17 +64,19 @@ def watcher_report_state_maintenance_temporary(state: Path) -> Path:
 
 
 @contextmanager
-def task_target_lock(root: Path, target: str) -> Iterator[None]:
+def task_target_lock(root: Path, target: str, *, timeout_s: float | None = None) -> Iterator[None]:
     """Hold the cross-process ownership lock for `target` until the operation ends."""
 
-    with task_file_lock_at_path(task_target_lock_path(root, target)):
+    with task_file_lock_at_path(task_target_lock_path(root, target), timeout_s=timeout_s):
         yield
 
 
 @contextmanager
-def task_file_lock_at_path(lock_path: Path) -> Iterator[None]:
+def task_file_lock_at_path(lock_path: Path, *, timeout_s: float | None = None) -> Iterator[None]:
     """Hold one already-resolved task-file lock path."""
 
+    if timeout_s is not None and (not math.isfinite(timeout_s) or timeout_s < 0):
+        raise ValueError("task-file lock timeout must be finite and non-negative")
     lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     directory_fd = os.open(lock_path.parent, directory_flags)
@@ -87,7 +90,19 @@ def task_file_lock_at_path(lock_path: Path) -> Iterator[None]:
         lock_info = os.fstat(lock_fd)
         if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.getuid() or lock_info.st_mode & 0o022:
             raise OSError("task-file lock is unsafe")
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        if timeout_s is None:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        else:
+            deadline_s = time.monotonic() + timeout_s
+            while True:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining_s = deadline_s - time.monotonic()
+                    if remaining_s <= 0:
+                        raise TimeoutError(f"timed out acquiring task-file lock after {timeout_s:g}s: {lock_path}") from None
+                    time.sleep(min(0.05, remaining_s))
         try:
             bound_info = os.stat(lock_path.name, dir_fd=directory_fd, follow_symlinks=False)
             if (bound_info.st_dev, bound_info.st_ino) != (lock_info.st_dev, lock_info.st_ino):
@@ -102,10 +117,10 @@ def task_file_lock_at_path(lock_path: Path) -> Iterator[None]:
 
 
 @contextmanager
-def task_file_lock(path: Path) -> Iterator[None]:
+def task_file_lock(path: Path, *, timeout_s: float | None = None) -> Iterator[None]:
     """Serialize compare-and-replace writers for one canonical task path."""
 
-    with task_file_lock_at_path(task_file_lock_path(path)):
+    with task_file_lock_at_path(task_file_lock_path(path), timeout_s=timeout_s):
         yield
 
 

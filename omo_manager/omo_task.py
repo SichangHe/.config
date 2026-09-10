@@ -58,6 +58,7 @@ COMMAND_BY_TOOL = {
     "cursor": ("agent", "--force", "--sandbox", "disabled", "--trust"),
 }
 DEFAULT_TOOL = "cursor"
+TASK_MEMBERSHIP_LOCK_TIMEOUT_S = 5.0
 TASK_FRONTMATTER_VERSION = "v1.0.0"
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 TMUX_SESSION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
@@ -81,9 +82,18 @@ CODEX_TRUST_NO_RE = re.compile(r"^\s*2\. No, quit\s*$")
 CODEX_TRUST_CONFIRM_RE = re.compile(r"^\s*Press enter to continue(?: and create a sandbox\.\.\.)?\s*$")
 
 
+@contextlib.contextmanager
 def root_membership_lock(root: Path):
     """Serialize task creation and manager-owner membership changes."""
-    return task_file_lock(root / ".omo-task-membership.lock")
+
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(task_file_lock(root / ".omo-task-membership.lock", timeout_s=TASK_MEMBERSHIP_LOCK_TIMEOUT_S))
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"task membership is busy after {TASK_MEMBERSHIP_LOCK_TIMEOUT_S:g}s; retry the unchanged operation"
+            ) from exc
+        yield
 
 
 def infer_work_log_root(path: Path) -> Path:
@@ -3276,15 +3286,16 @@ def main(argv: list[str]) -> int:
                 print("reminder: the agent owns its queue.")
             print("reminder: launch verified; wait for the agent's report.")
             return 0
+        if args.dry_run:
+            args = replace(args, human_email_text=validate_inputs(args))
+            dry_run(args)
+            return 0
         existing_target = target(args) if args.workdir is None else ""
         with root_membership_lock(args.root):
             ownership_lock = task_target_lock(args.root, existing_target) if existing_target else contextlib.nullcontext()
             with ownership_lock:
                 args = replace(args, human_email_text=validate_inputs(args))
                 existing_pane_id = validate_existing_target_runtime(args)
-                if args.dry_run:
-                    dry_run(args)
-                    return 0
                 existed = task_path(args.root, args.task_file).exists()
                 launch_target = new_window(args)
                 tmux_target = str(launch_target)

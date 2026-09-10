@@ -169,6 +169,7 @@ class Args:
     wrapped_authority_reminder: bool = False
     wrapped_allow_one_space_blank: bool = False
     describe_existing_wrapped_file: Path | None = None
+    describe_existing_source_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -351,6 +352,7 @@ class ParsedArgs(argparse.Namespace):
     wrapped_authority_reminder: bool = False
     wrapped_allow_one_space_blank: bool = False
     describe_existing_wrapped_file: Path | None = None
+    describe_existing_source_sha256: str = ""
     describe_partial_cursor: bool = False
     clear_partial_cursor_sha256: str = ""
     enter_count: int = 1
@@ -389,6 +391,11 @@ def parse_args(argv: list[str]) -> Args:
         "--describe-existing-wrapped-file",
         type=Path,
         help="Read-only: authenticate one source-bound wrapped composer from complete tmux history.",
+    )
+    _ = parser.add_argument(
+        "--describe-existing-source-sha256",
+        metavar="SHA256",
+        help="Bind wrapped-composer description to this exact lowercase source-file SHA-256 digest.",
     )
     _ = parser.add_argument("--cancel-existing-source-sha256", metavar="SHA256", help=argparse.SUPPRESS)
     _ = parser.add_argument("--cancel-existing-rendered-sha256", metavar="SHA256", help=argparse.SUPPRESS)
@@ -517,10 +524,15 @@ def parse_args(argv: list[str]) -> Args:
         if any(foreground_values):
             parser.error("shell-started wrapped cancellation is unsupported.")
     elif describe_existing_wrapped:
-        if SHA256_RE.fullmatch(parsed.cancel_existing_source_sha256) is None:
+        if parsed.describe_existing_source_sha256 and parsed.cancel_existing_source_sha256:
+            parser.error("choose one wrapped-description source digest option.")
+        source_sha256 = parsed.describe_existing_source_sha256 or parsed.cancel_existing_source_sha256
+        if SHA256_RE.fullmatch(source_sha256) is None:
             parser.error("wrapped description requires an exact lowercase source digest.")
         if any((*wrapped_values[1:], *foreground_values)):
             parser.error("wrapped description derives rendering and runtime bindings read-only.")
+    elif parsed.describe_existing_source_sha256:
+        parser.error("--describe-existing-source-sha256 requires --describe-existing-wrapped-file.")
     elif any((*wrapped_values, *foreground_values)):
         parser.error("wrapped cancellation bindings require --cancel-existing-wrapped-file.")
     if parsed.wrapped_agent_source and AGENT_MESSAGE_SOURCE_RE.fullmatch(parsed.wrapped_agent_source) is None:
@@ -564,6 +576,7 @@ def parse_args(argv: list[str]) -> Args:
         parsed.wrapped_authority_reminder,
         parsed.wrapped_allow_one_space_blank,
         parsed.describe_existing_wrapped_file,
+        parsed.describe_existing_source_sha256,
     )
 
 
@@ -1123,6 +1136,7 @@ def wait_paste_visible(
     expected_cursor_pane_pid: int = 0,
     expected_cursor_pane_command: str = "",
     expected_cursor_input_text: str = "",
+    expected_codex_input_text: str = "",
 ) -> None:
     if options.submit_verify_timeout_s <= 0:
         return
@@ -1207,7 +1221,10 @@ def wait_paste_visible(
                 continue
         last_status = target_status(target, lines)
         input_text = current_input_text(lines)
-        if is_real_input_text(input_text) and (all(probe in input_text for probe in probes) or has_collapsed_paste_text(input_text)):
+        source_visible = bool(expected_codex_input_text) and codex_input_matches_source(input_text, expected_codex_input_text)
+        ordinary_visible = all(probe in input_text for probe in probes) if not expected_codex_input_text else source_visible
+        collapsed_visible = not expected_codex_input_text and has_collapsed_paste_text(input_text)
+        if is_real_input_text(input_text) and (ordinary_visible or collapsed_visible):
             if forbidden_input_text and re.sub(r"\s+", " ", forbidden_input_text).strip() in re.sub(r"\s+", " ", input_text).strip():
                 raise RuntimeError("Codex paste not verified: retained submitted Cursor composer was not replaced")
             return
@@ -1279,6 +1296,7 @@ def verify_submit(
     expected_cursor_pane_id: str = "",
     expected_cursor_pane_pid: int = 0,
     expected_cursor_pane_command: str = "",
+    expected_codex_input_text: str = "",
 ) -> None:
     if options.submit_verify_timeout_s <= 0:
         return
@@ -1323,7 +1341,10 @@ def verify_submit(
             continue
         input_text = current_input_text(lines)
         real_input_visible = is_real_input_text(input_text)
-        prompt_still_present = real_input_visible and (any(probe in input_text for probe in probes) or has_collapsed_paste_text(input_text))
+        source_visible = bool(expected_codex_input_text) and codex_input_matches_source(input_text, expected_codex_input_text)
+        ordinary_visible = any(probe in input_text for probe in probes) if not expected_codex_input_text else source_visible
+        collapsed_visible = not expected_codex_input_text and has_collapsed_paste_text(input_text)
+        prompt_still_present = real_input_visible and (ordinary_visible or collapsed_visible)
         if last_status in {"ready", "running", "waiting_subagent"} and not real_input_visible:
             return
         if real_input_visible and not prompt_still_present:
@@ -1640,6 +1661,7 @@ def is_deterministic_codex_wrap(rendered: str, source: str, expected_one_space_b
     rendered_idx = 0
     n_hard_wraps = 0
     n_one_space_blanks = 0
+    inserted_wrap_boundaries: set[int] = set()
     while source_idx < len(source) and rendered_idx < len(rendered):
         source_char = source[source_idx]
         if source.startswith("\n\n", source_idx) and rendered.startswith("\n ", rendered_idx):
@@ -1650,6 +1672,13 @@ def is_deterministic_codex_wrap(rendered: str, source: str, expected_one_space_b
         if source_char in {" ", "\n"} and rendered.startswith("\n  ", rendered_idx):
             n_hard_wraps += source_char == " "
             source_idx += 1
+            rendered_idx += 3
+            continue
+        if source_char != "\n" and rendered.startswith("\n  ", rendered_idx):
+            if source_idx == 0 or source_idx in inserted_wrap_boundaries:
+                return False
+            inserted_wrap_boundaries.add(source_idx)
+            n_hard_wraps += 1
             rendered_idx += 3
             continue
         if source_char == rendered[rendered_idx]:
@@ -1663,6 +1692,14 @@ def is_deterministic_codex_wrap(rendered: str, source: str, expected_one_space_b
         and n_hard_wraps > 0
         and n_one_space_blanks == expected_one_space_blanks
     )
+
+
+# 🧑 "fix whatever script that didn’t send the enter key it should have sent"
+def codex_input_matches_source(rendered: str, source: str) -> bool:
+    """Authenticate one exact pasted source across Codex hard wrapping."""
+
+    expected = source.removesuffix("\n")
+    return bool(expected) and (rendered == expected or is_deterministic_codex_wrap(rendered, expected))
 
 
 def source_bound_wrapped_candidates(
@@ -1696,7 +1733,8 @@ def describe_source_bound_wrapped_input(target: str, args: Args) -> None:
     if source_file is None:
         raise RuntimeError("wrapped description source file is required")
     source = read_exact_message_file(source_file)
-    require_authorized_existing_input_text(source, ExistingInputAuthorization(args.cancel_existing_source_sha256, source))
+    source_sha256 = args.describe_existing_source_sha256 or args.cancel_existing_source_sha256
+    require_authorized_existing_input_text(source, ExistingInputAuthorization(source_sha256, source))
     rendering_source = wrapped_rendering_source(source, args) or source
     runtime = exact_codex_runtime_binding(target, allow_shell=True)
     lines = capture_complete_input_lines(runtime.pane_id, full_history=True)
@@ -2685,6 +2723,7 @@ def _run_tmux_payload(
                     retained_cursor.pane_pid if retained_cursor is not None else 0,
                     retained_cursor.pane_command if retained_cursor is not None else "",
                     message if retained_cursor is not None else "",
+                    message if retained_cursor is None else "",
                 )
         except RuntimeError as exc:
             dedupe_s = int(os.environ.get("OMO_MANAGER_TMUX_DELIVERY_DEDUPE_S", str(DEFAULT_TMUX_DELIVERY_DEDUPE_S)))
@@ -2736,6 +2775,7 @@ def _run_tmux_payload(
             retained_cursor.pane_id if retained_cursor is not None else "",
             retained_cursor.pane_pid if retained_cursor is not None else 0,
             retained_cursor.pane_command if retained_cursor is not None else "",
+            message if retained_cursor is None else "",
         )
     finally:
         if claim_owned and not delivery_may_have_happened:

@@ -1,5 +1,7 @@
 # gradual OmniGent migration
 
+(authored by agents unless marked 🧑)
+
 authority
 
 - `manager_mail/85c5dff58359-1513.txt:3-8`
@@ -31,7 +33,10 @@ first migration step
 - create its session through OmniGent's `/v1/sessions` API on the selected online host
 - store the returned durable session as `runat: omnigent://SESSION_ID`
 - send prompts and later messages through `/v1/sessions/SESSION_ID/events`
+  - installed OmniGent intentionally excludes this internal ingestion route from OpenAPI
+  - the supported route returns `202` and a queued acknowledgement
 - inspect the session snapshot through `/v1/sessions/SESSION_ID`
+- report an idle session ready only when `runner_online` is exactly true; host liveness alone does not make it reachable
 - stop one session with the `stop_session` event when its task is completed
 - update normal task statuses with the existing task-file and TODO transactions
 - do not auto-unstick OmniGent sessions

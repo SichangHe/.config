@@ -1085,6 +1085,31 @@ work
 
             run.assert_called_once()
 
+    def test_owner_auth_accepts_implicit_pane_zero_for_exact_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "data_gen_mgr.md"
+            text = (
+                task_text()
+                .replace("status: running", "status: blocked\nblocked_on: done_close_failed")
+                .replace("runat: cfg:2", "runat: dw:29")
+                .replace("pending_task_items:\n  - finish review", "pending_task_items: []")
+            )
+            task.write_text(text, encoding="utf-8")
+            (root / "TODO.md").write_text("current:\ndata_gen_mgr.md dw:29\n", encoding="utf-8")
+            entrypoint = root / "omo_completion_email.py"
+            entrypoint.write_text("#!/bin/sh\n", encoding="utf-8")
+            entrypoint.chmod(0o700)
+
+            with patch("omo_manager.omo_task_context.current_tmux_target", return_value="dw:29.0"), patch(
+                "omo_manager.omo_completion_email.COMPLETION_ENTRYPOINT", entrypoint
+            ):
+                plan = plan_completion_email(root, task, text, "task done", semantic_key="a" * 64)
+
+            self.assertIsNotNone(plan)
+            assert plan is not None
+            self.assertEqual("dw:29", plan.target)
+
     def test_task_record_churn_cannot_replay_an_uncertain_notice(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
