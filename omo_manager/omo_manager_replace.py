@@ -155,6 +155,18 @@ SOURCE1611_OLD_QUEUE = (
     "🧑 Replace the manager, then have the new manager immediately replace their worker. Source: manager_mail/85c5dff58359-1611.txt.",
     "🧑 Replace the manager that took tasks outside its ownership, and require the successor manager to hand off all tasks completely to workers. Source: manager_mail/85c5dff58359-1612.txt.",
 )
+# Source-1611's second, serial action is deliberately separate from the
+# config:1 manager transfer above.  It may replace only that fresh manager's
+# direct DW manager once; its authority is consumed by the transition and is
+# not propagated to the successor (which would otherwise authorize recursion).
+SOURCE1611_DIRECT_WORKER_TASK = "dw_root_new.md"
+SOURCE1611_DIRECT_WORKER_OLD_TARGET = "dw:15"
+SOURCE1611_DIRECT_WORKER_SUCCESSOR_TASK = "dw_root_source1611.md"
+SOURCE1611_DIRECT_WORKER_SUCCESSOR_TARGET = "dw:16"
+SOURCE1611_DIRECT_WORKER_PARENT_TARGET = "config:23"
+SOURCE1611_DIRECT_WORKER_OLD_QUEUE = (
+    "🧑 Replace the current Pangram manager immediately. Tell the new owner to obey the Human order to try ephemeral AWS proxies for the 20 texts or face termination. Source: manager_mail/85c5dff58359-1597.txt.",
+)
 SOURCE1612_FILE = "manager_mail/85c5dff58359-1612.txt"
 SOURCE_ONLY_AUTHORITY_MODE = "source-only-old-task-before-image"
 PCODX_REPLACE_EVIDENCE_RE = re.compile(
@@ -250,6 +262,7 @@ class Args:
     descendants: tuple[DescendantPin, ...] = ()
     empty_tree_envelope_sha256: str = ""
     descendant_authority_envelope_sha256: str = ""
+    source1611_parent_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -300,6 +313,8 @@ class Plan:
     empty_tree_authority: Snapshot | None = None
     source1485_topology: dict[str, object] | None = None
     source1601_authority: Snapshot | None = None
+    source1597_authority: Snapshot | None = None
+    source1611_parent: Snapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -356,6 +371,7 @@ class ParsedArgs(argparse.Namespace):
     descendant: list[DescendantPin] = []
     empty_tree_envelope_sha256: str = ""
     descendant_authority_envelope_sha256: str = ""
+    source1611_parent_sha256: str = ""
 
 
 def digest(data: bytes) -> str:
@@ -464,13 +480,21 @@ def is_source1597_semantic_exception(args: Args) -> bool:
     )
 
 
-def is_source1611_semantic_exception(args: Args) -> bool:
+def is_source1611_mapping(
+    args: Args,
+    *,
+    old_task: str,
+    successor_task: str,
+    old_target: str,
+    successor_target: str,
+    parent_target: str,
+) -> bool:
     return (
-        args.old_task == SOURCE1611_TASK
-        and args.successor_task == SOURCE1611_SUCCESSOR_TASK
-        and canonical_target(args.old_target) == canonical_target(SOURCE1611_OLD_TARGET)
-        and canonical_target(args.new_target) == canonical_target(SOURCE1611_SUCCESSOR_TARGET)
-        and canonical_target(args.parent_target) == canonical_target(SOURCE1611_PARENT_TARGET)
+        args.old_task == old_task
+        and args.successor_task == successor_task
+        and canonical_target(args.old_target) == canonical_target(old_target)
+        and canonical_target(args.new_target) == canonical_target(successor_target)
+        and canonical_target(args.parent_target) == canonical_target(parent_target)
         and args.authority_file == SOURCE1611_FILE
         and args.authority_sha256 == SOURCE1611_SHA256
         and args.authority_lines == LineRange(*SOURCE1611_LINES)
@@ -478,6 +502,32 @@ def is_source1611_semantic_exception(args: Args) -> bool:
         and args.authority_envelope_task == args.old_task
         and args.authority_envelope_sha256 == args.old_sha256
     )
+
+
+def is_source1611_manager_semantic_exception(args: Args) -> bool:
+    return is_source1611_mapping(
+        args,
+        old_task=SOURCE1611_TASK,
+        successor_task=SOURCE1611_SUCCESSOR_TASK,
+        old_target=SOURCE1611_OLD_TARGET,
+        successor_target=SOURCE1611_SUCCESSOR_TARGET,
+        parent_target=SOURCE1611_PARENT_TARGET,
+    )
+
+
+def is_source1611_direct_worker_semantic_exception(args: Args) -> bool:
+    return is_source1611_mapping(
+        args,
+        old_task=SOURCE1611_DIRECT_WORKER_TASK,
+        successor_task=SOURCE1611_DIRECT_WORKER_SUCCESSOR_TASK,
+        old_target=SOURCE1611_DIRECT_WORKER_OLD_TARGET,
+        successor_target=SOURCE1611_DIRECT_WORKER_SUCCESSOR_TARGET,
+        parent_target=SOURCE1611_DIRECT_WORKER_PARENT_TARGET,
+    )
+
+
+def is_source1611_semantic_exception(args: Args) -> bool:
+    return is_source1611_manager_semantic_exception(args) or is_source1611_direct_worker_semantic_exception(args)
 
 
 def is_source_only_semantic_exception(args: Args) -> bool:
@@ -496,15 +546,28 @@ def source1601_required(args: Args) -> bool:
     return is_source1597_semantic_exception(args) or is_source1611_semantic_exception(args)
 
 
+def source1597_direct_worker_required(args: Args) -> bool:
+    """Whether Source-1611's serial worker handoff preserves Source-1597 work."""
+
+    return is_source1611_direct_worker_semantic_exception(args)
+
+
 def source_only_expected_old_queue(args: Args) -> tuple[str, ...]:
     if is_source1597_semantic_exception(args):
         return SOURCE1597_OLD_QUEUE
-    if is_source1611_semantic_exception(args):
+    if is_source1611_manager_semantic_exception(args):
         return SOURCE1611_OLD_QUEUE
+    if is_source1611_direct_worker_semantic_exception(args):
+        return SOURCE1611_DIRECT_WORKER_OLD_QUEUE
     raise ReplaceError("source-only queue is unavailable outside an exact replacement program")
 
 
 def source_only_added_goals(args: Args, queue: tuple[str, ...]) -> tuple[str, ...]:
+    # This is the terminal Source-1611 direct-worker transition.  Its exact
+    # authority has been consumed, so preserve only the old manager's original
+    # Human queue; do not grant a successor authority to replace another child.
+    if is_source1611_direct_worker_semantic_exception(args):
+        return ()
     added: list[str] = []
     if not any(args.authority_file in item for item in queue):
         added.append(f"🧑 Source {args.authority_file}: {source_only_directive(args)}")
@@ -602,6 +665,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--descendant", action="append", default=[], type=parse_descendant)
     _ = parser.add_argument("--empty-tree-envelope-sha256", default="")
     _ = parser.add_argument("--descendant-authority-envelope-sha256", default="")
+    _ = parser.add_argument("--source1611-parent-sha256", default="")
     _ = parser.add_argument("--old-pane-id", required=True)
     _ = parser.add_argument("--old-pane-pid", required=True, type=int)
     _ = parser.add_argument("--old-pane-start-ticks", required=True, type=int)
@@ -656,6 +720,8 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--closed-owner-audit must be absolute")
     if parsed.closed_owner_audit_sha256 and SHA256_RE.fullmatch(parsed.closed_owner_audit_sha256) is None:
         parser.error("closed-owner audit SHA-256 must be 64 lowercase hexadecimal characters")
+    if parsed.source1611_parent_sha256 and SHA256_RE.fullmatch(parsed.source1611_parent_sha256) is None:
+        parser.error("Source-1611 parent SHA-256 must be 64 lowercase hexadecimal characters")
     children = tuple(sorted(parsed.child, key=lambda child: child.task))
     if len({child.task for child in children}) != len(children):
         parser.error("--child task references must be unique")
@@ -704,6 +770,7 @@ def parse_args(argv: list[str]) -> Args:
         descendants=descendants,
         empty_tree_envelope_sha256=parsed.empty_tree_envelope_sha256,
         descendant_authority_envelope_sha256=parsed.descendant_authority_envelope_sha256,
+        source1611_parent_sha256=parsed.source1611_parent_sha256,
     )
     try:
         validate_targets(result)
@@ -1065,11 +1132,7 @@ def authority_material(args: Args, snapshot: Snapshot, envelope: Snapshot) -> tu
     if not excerpt.strip():
         raise ReplaceError("authority excerpt must not be empty")
     if is_source_only_semantic_exception(args):
-        if (
-            envelope.path != task_path(args.root, args.old_task)
-            or digest(envelope.data) != args.old_sha256
-            or canonical_excerpt != source_only_directive(args)
-        ):
+        if envelope.path != task_path(args.root, args.old_task) or digest(envelope.data) != args.old_sha256 or canonical_excerpt != source_only_directive(args):
             raise ReplaceError("source-only authority or old-task before image changed")
         return ()
     locator = f"{args.authority_file}:{args.authority_lines.start}-{args.authority_lines.end}"
@@ -1161,6 +1224,71 @@ def source1601_material(args: Args) -> Snapshot | None:
     if excerpt != SOURCE1601_DIRECTIVE:
         raise ReplaceError("Source-1601 original-Human-goals directive changed")
     return snapshot
+
+
+def source1597_direct_worker_material(args: Args) -> Snapshot | None:
+    """Bind the original Human source of the sole retained direct-worker goal."""
+
+    if not source1597_direct_worker_required(args):
+        return None
+    path = task_path(args.root, SOURCE1597_FILE)
+    snapshot = read_snapshot(path, "Source-1597 direct-worker authority")
+    try:
+        parent = path.parent.stat()
+    except OSError as exc:
+        raise ReplaceError(f"Source-1597 authority directory is unavailable: {exc}") from exc
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != os.getuid()
+        or stat.S_IMODE(parent.st_mode) & 0o077
+        or stat.S_IMODE(snapshot.state.st_mode) & 0o077
+        or digest(snapshot.data) != SOURCE1597_SHA256
+    ):
+        raise ReplaceError("Source-1597 direct-worker authority source or digest changed")
+    try:
+        lines = snapshot.data.decode().splitlines()
+    except UnicodeDecodeError as exc:
+        raise ReplaceError(f"Source-1597 direct-worker authority is not UTF-8: {exc}") from exc
+    excerpt = "\n".join(lines[SOURCE1597_LINES[0] - 1 : SOURCE1597_LINES[1]])
+    if excerpt != SOURCE1597_DIRECTIVE:
+        raise ReplaceError("Source-1597 direct-worker original-Human directive changed")
+    return snapshot
+
+
+def validate_source1611_direct_worker_parent(args: Args, snapshot: Snapshot, *, active_child: str | None = None) -> None:
+    """Prove the serial parent is the exact active first Source-1611 successor."""
+
+    expected_path = task_path(args.root, SOURCE1611_SUCCESSOR_TASK)
+    if snapshot.path != expected_path or digest(snapshot.data) != args.source1611_parent_sha256:
+        raise ReplaceError("Source-1611 direct-worker parent task or digest changed")
+    parent = metadata(snapshot.data, args.root, "Source-1611 direct-worker parent")
+    if (
+        parent.status != "long_running"
+        or canonical_target(parent.runat) != canonical_target(SOURCE1611_SUCCESSOR_TARGET)
+        or canonical_target(parent.managerat) != canonical_target(SOURCE1611_PARENT_TARGET)
+        or parent.tool != "codex"
+        or not parent.is_manager
+    ):
+        raise ReplaceError("Source-1611 direct-worker parent is not the exact active successor owner")
+    if authoritative_active_target_task_paths(args.root, args.parent_target) != (expected_path.resolve(),):
+        raise ReplaceError("Source-1611 direct-worker parent is not the sole active config:23 owner")
+    if active_child is not None and active_child not in active_child_task_refs(args.root, expected_path, args.parent_target):
+        raise ReplaceError("Source-1611 direct-worker is no longer an active child of its exact parent")
+
+
+def source1611_direct_worker_parent_material(args: Args, *, active_child: str | None = None) -> Snapshot | None:
+    if not source1597_direct_worker_required(args):
+        return None
+    snapshot = read_snapshot(task_path(args.root, SOURCE1611_SUCCESSOR_TASK), "Source-1611 direct-worker parent")
+    validate_source1611_direct_worker_parent(args, snapshot, active_child=active_child)
+    return snapshot
+
+
+def require_source1611_direct_worker_parent(args: Args, snapshot: Snapshot | None, label: str, *, active_child: str | None = None) -> None:
+    if snapshot is None:
+        return
+    require_snapshot(snapshot, label)
+    validate_source1611_direct_worker_parent(args, snapshot, active_child=active_child)
 
 
 def empty_tree_authority_material(args: Args, envelope: Snapshot) -> tuple[Snapshot, str]:
@@ -1488,6 +1616,11 @@ def validate_targets(args: Args) -> None:
         raise ReplaceError("ordered queue binding is accepted only for an exact PCODX, Source-1269, Source-1485, or source-only replacement")
     if not is_source1485_replacement(args) and any(child.queue_sha256 for child in args.children):
         raise ReplaceError("explicit child queue bindings are accepted only for an exact Source-1485 replacement")
+    if source1597_direct_worker_required(args):
+        if SHA256_RE.fullmatch(args.source1611_parent_sha256) is None:
+            raise ReplaceError("Source-1611 direct-worker replacement requires the exact active parent SHA-256 binding")
+    elif args.source1611_parent_sha256:
+        raise ReplaceError("Source-1611 parent binding is accepted only for the exact direct-worker replacement")
     if not uses_protected_inventory(args) and args.protected_targets_sha256:
         raise ReplaceError("protected inventory digest is accepted only for PCODX, exact Source-1485, or an exact source-only replacement")
     if not (is_pcodx_replacement(args) or is_source1485_replacement(args)) and args.authority_envelope_file_sha256:
@@ -1748,6 +1881,8 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
     authority = read_snapshot(authority_path, "replacement authority")
     authority_envelope = read_snapshot(authority_envelope_path, "replacement authority envelope")
     source1601_authority = source1601_material(args)
+    source1597_authority = source1597_direct_worker_material(args)
+    source1611_parent = source1611_direct_worker_parent_material(args, active_child=args.old_task)
     if digest(old.data) != args.old_sha256 or digest(todo.data) != args.todo_sha256:
         raise ReplaceError("old manager or TODO digest changed")
     if is_source1485_replacement(args) and args.old_task == SOURCE1485_ROOT_TASK:
@@ -1855,6 +1990,10 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
     )
     if source1601_authority is not None:
         plan = replace(plan, source1601_authority=source1601_authority)
+    if source1597_authority is not None:
+        plan = replace(plan, source1597_authority=source1597_authority)
+    if source1611_parent is not None:
+        plan = replace(plan, source1611_parent=source1611_parent)
     if is_source1485_replacement(args):
         topology = source1485_topology_binding(args, plan)
         plan = replace(plan, source1485_topology=topology)
@@ -2134,6 +2273,20 @@ def source_only_audit_binding(args: Args) -> dict[str, object]:
                 "source1601_file": SOURCE1601_FILE,
                 "source1601_lines": list(SOURCE1601_LINES),
                 "source1601_sha256": SOURCE1601_SHA256,
+            }
+        )
+    if source1597_direct_worker_required(args):
+        binding.update(
+            {
+                "source1597_file": SOURCE1597_FILE,
+                "source1597_lines": list(SOURCE1597_LINES),
+                "source1597_sha256": SOURCE1597_SHA256,
+            }
+        )
+        binding.update(
+            {
+                "source1611_parent_task": SOURCE1611_SUCCESSOR_TASK,
+                "source1611_parent_sha256": args.source1611_parent_sha256,
             }
         )
     return binding
@@ -2428,6 +2581,8 @@ def recovery_plan(
     authority = read_snapshot(task_path(args.root, args.authority_file), "recovery replacement authority")
     envelope = read_snapshot(task_path(args.root, args.authority_envelope_task), "recovery authority envelope")
     source1601_authority = source1601_material(args)
+    source1597_authority = source1597_direct_worker_material(args)
+    source1611_parent = source1611_direct_worker_parent_material(args)
     envelope_child_index = authority_envelope_child_index(args)
     if envelope_child_index is not None:
         envelope_entry = child_entries[envelope_child_index]
@@ -2536,6 +2691,10 @@ def recovery_plan(
     )
     if source1601_authority is not None:
         plan = replace(plan, source1601_authority=source1601_authority)
+    if source1597_authority is not None:
+        plan = replace(plan, source1597_authority=source1597_authority)
+    if source1611_parent is not None:
+        plan = replace(plan, source1611_parent=source1611_parent)
     if is_source1485_replacement(args):
         topology = source1485_topology_binding(args, plan)
         if topology != record.get("source1485_topology") or json_digest(topology) != record.get("source1485_topology_sha256"):
@@ -2922,6 +3081,14 @@ def require_preclose_eligibility(args: Args, plan: Plan) -> None:
     require_snapshot(plan.authority_envelope, "pre-close replacement authority envelope")
     if plan.source1601_authority is not None:
         require_snapshot(plan.source1601_authority, "pre-close Source-1601 authority")
+    if plan.source1597_authority is not None:
+        require_snapshot(plan.source1597_authority, "pre-close Source-1597 direct-worker authority")
+    require_source1611_direct_worker_parent(
+        args,
+        plan.source1611_parent,
+        "pre-close Source-1611 direct-worker parent",
+        active_child=args.old_task,
+    )
     if plan.empty_tree_authority is not None:
         require_snapshot(plan.empty_tree_authority, "pre-close Source-1292 empty-tree authority")
     for child in plan.children:
@@ -3031,6 +3198,9 @@ def prove_committed(args: Args, plan: Plan, old_after: Snapshot, child_after: tu
     require_snapshot(plan.authority, "replacement authority")
     if plan.source1601_authority is not None:
         require_snapshot(plan.source1601_authority, "committed Source-1601 authority")
+    if plan.source1597_authority is not None:
+        require_snapshot(plan.source1597_authority, "committed Source-1597 direct-worker authority")
+    require_source1611_direct_worker_parent(args, plan.source1611_parent, "committed Source-1611 direct-worker parent")
     authenticate_committed_authority_envelope(args, plan, child_after)
     if plan.empty_tree_authority is not None:
         require_snapshot(plan.empty_tree_authority, "Source-1292 empty-tree authority")
@@ -3047,6 +3217,8 @@ def prove_committed(args: Args, plan: Plan, old_after: Snapshot, child_after: tu
         raise ReplaceError("successor does not own the exact migrated active-child set")
     if active_child_task_refs(args.root, plan.old.path, args.old_target):
         raise ReplaceError("old manager retains an active child after replacement")
+    if plan.source1611_parent is not None and args.successor_task not in active_child_task_refs(args.root, plan.source1611_parent.path, args.parent_target):
+        raise ReplaceError("Source-1611 direct-worker successor is not an active child of its exact parent")
     if is_source1485_replacement(args):
         committed_plan = replace(
             plan,
@@ -3093,6 +3265,8 @@ def replace_manager(args: Args) -> str:
     authority_source_path = task_path(args.root, args.authority_file)
     authority_envelope_path = task_path(args.root, args.authority_envelope_task)
     source1601_path = task_path(args.root, SOURCE1601_FILE)
+    source1597_path = task_path(args.root, SOURCE1597_FILE)
+    source1611_parent_path = task_path(args.root, SOURCE1611_SUCCESSOR_TASK)
     empty_tree_authority_path = task_path(args.root, SOURCE1292_FILE)
     close_authority_path, proof_path = closed_owner_evidence_paths(args.audit_output)
     source_evidence_paths = () if args.closed_owner_audit is None else (args.closed_owner_audit, *closed_owner_evidence_paths(args.closed_owner_audit))
@@ -3106,6 +3280,8 @@ def replace_manager(args: Args) -> str:
                 authority_source_path,
                 authority_envelope_path,
                 *((source1601_path,) if source1601_required(args) else ()),
+                *((source1597_path,) if source1597_direct_worker_required(args) else ()),
+                *((source1611_parent_path,) if source1597_direct_worker_required(args) else ()),
                 *((empty_tree_authority_path,) if is_source1292_empty_tree(args) or is_source1292_descendant_tree(args) else ()),
                 args.audit_output,
                 close_authority_path,
@@ -3215,6 +3391,14 @@ def replace_manager(args: Args) -> str:
             require_snapshot(plan.authority_envelope, "replacement authority envelope")
             if plan.source1601_authority is not None:
                 require_snapshot(plan.source1601_authority, "Source-1601 replacement authority")
+            if plan.source1597_authority is not None:
+                require_snapshot(plan.source1597_authority, "Source-1597 direct-worker authority")
+            require_source1611_direct_worker_parent(
+                args,
+                plan.source1611_parent,
+                "Source-1611 direct-worker parent",
+                active_child=args.old_task,
+            )
             if plan.empty_tree_authority is not None:
                 require_snapshot(plan.empty_tree_authority, "Source-1292 replacement authority")
             record, audit_bytes = transition_audit(args.audit_output, audit_bytes, record, "mutating", completed=())
