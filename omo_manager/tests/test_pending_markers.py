@@ -8435,7 +8435,7 @@ with exclusive_watcher_root(root):
             _ = (root / "TODO.md").write_text("previous:\ncompleted.md cfg:9\n", encoding="utf-8")
             self.assertFalse(watcher.classify_done_ready(args, "completed.md"))
 
-    def test_classify_done_ready_accepts_one_stable_monthly_archive_row_without_mutation(self) -> None:
+    def test_classify_done_ready_survives_unrelated_monthly_archive_changes(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -8471,10 +8471,28 @@ with exclusive_watcher_root(root):
                     )
                 self.assertIn("suppressed unchanged blocked dependency report", out.getvalue())
                 _ = index.write_text(
-                    "archived from TODO.md previous on 2026-09-01:\ncompleted.md cfg:2\n\nunrelated archive note\n",
+                    "archived from TODO.md previous on 2026-09-01:\ncompleted.md cfg:2\nother.md cfg:9\n",
                     encoding="utf-8",
                 )
-                self.assertEqual(problem, watcher.filter_unchanged_dependency_blocked_idle_output(args, problem, watcher.read_blocked_report_ledger(args)))
+                _ = (archive / "other.md").write_text(task_frontmatter("done", runat="cfg:9", managerat="wl:1"), encoding="utf-8")
+                self.assertIsNone(watcher.filter_unchanged_dependency_blocked_idle_output(args, problem, watcher.read_blocked_report_ledger(args)))
+                _ = (archive / "other.md").unlink()
+                _ = index.write_bytes(original_index)
+                self.assertIsNone(watcher.filter_unchanged_dependency_blocked_idle_output(args, problem, watcher.read_blocked_report_ledger(args)))
+
+                for changed_index in (
+                    "archived from TODO.md previous on 2026-09-01:\ncompleted.md cfg:2 changed row\n",
+                    "archived from TODO.md previous on 2026-09-01:\n  completed.md cfg:2  \n",
+                    "archived from TODO.md previous on 2026-09-01:\n",
+                    "archived from TODO.md previous on 2026-09-01:\ncompleted.md cfg:2\ncompleted.md cfg:2\n",
+                ):
+                    with self.subTest(changed_index=changed_index):
+                        _ = index.write_text(changed_index, encoding="utf-8")
+                        self.assertEqual(
+                            problem,
+                            watcher.filter_unchanged_dependency_blocked_idle_output(args, problem, watcher.read_blocked_report_ledger(args)),
+                        )
+
                 _ = index.write_bytes(original_index)
                 _ = (root / "TODO.md").write_text("previous:\n202608/completed.md cfg:2\n", encoding="utf-8")
                 self.assertFalse(watcher.classify_done_ready(args, "202608/completed.md"))
@@ -8482,6 +8500,35 @@ with exclusive_watcher_root(root):
 
             self.assertEqual(original_index, index.read_bytes())
             self.assertEqual(original_task, task_path.read_bytes())
+
+    def test_classify_done_ready_rejects_index_mutation_between_validation_reads(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "202608"
+            archive.mkdir()
+            index = archive / "old_todos.md"
+            _ = (root / "TODO.md").write_text("previous:\n", encoding="utf-8")
+            _ = index.write_text("archived:\ncompleted.md cfg:2\n", encoding="utf-8")
+            _ = (archive / "completed.md").write_text(task_frontmatter("done", runat="cfg:2", managerat="wl:1"), encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+            snapshot_state = watcher.blocked_report_snapshot_state
+            n_reads = 0
+
+            def mutate_after_first_read(*call_args: object, **call_kwargs: object) -> object:
+                nonlocal n_reads
+                state = snapshot_state(*call_args, **call_kwargs)
+                n_reads += 1
+                if n_reads == 1:
+                    _ = index.write_text("archived:\ncompleted.md cfg:2\nother.md cfg:9\n", encoding="utf-8")
+                return state
+
+            with patch.object(watcher, "inspect_codex", return_value=watcher.CodexReport("ready", ["stale output"])), patch.object(
+                watcher, "blocked_custody_runtime_identity", return_value="%42\t1000\tcodex"
+            ), patch.object(watcher, "blocked_report_snapshot_state", side_effect=mutate_after_first_read):
+                self.assertFalse(watcher.classify_done_ready(args, "202608/completed.md"))
+            self.assertEqual({}, watcher.read_blocked_report_ledger(args))
 
     def test_monthly_archive_classification_rejects_group_or_world_writable_evidence(self) -> None:
         from omo_manager import omo_pending_watch as watcher

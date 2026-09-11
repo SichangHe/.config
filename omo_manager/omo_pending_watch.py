@@ -5661,6 +5661,17 @@ def recorded_blocked_custody_snapshot(
     return f"custody:{hashlib.sha256(identity + bytes(1) + task_evidence).hexdigest()}"
 
 
+def durable_done_ready_task_identity(task: TaskLine) -> tuple[str, str]:
+    """Exclude transient whole-index evidence from an archived task identity."""
+
+    section_parts = task.section.split(":", 3)
+    if len(section_parts) == 4:
+        section_kind, archive_index, row_digest, _index_evidence = section_parts
+        if section_kind == "archive" and archive_index and re.fullmatch(r"[0-9a-f]{64}", row_digest) is not None:
+            return f"archive:{archive_index}:{row_digest}", task.line
+    return task.section, task.line
+
+
 def recorded_done_ready_snapshot(
     task_path: Path,
     task: TaskLine,
@@ -5674,7 +5685,7 @@ def recorded_done_ready_snapshot(
         task_evidence = task_path.read_bytes()
     except OSError:
         return ""
-    identity = "\0".join((task.section, task.line, state.status, state.target, owner_target, pane_evidence)).encode("utf-8")
+    identity = "\0".join((*durable_done_ready_task_identity(task), state.status, state.target, owner_target, pane_evidence)).encode("utf-8")
     return f"done:{hashlib.sha256(identity + bytes(1) + task_evidence).hexdigest()}"
 
 
@@ -6571,7 +6582,11 @@ def monthly_archived_task_lines(root: Path, requested: set[str]) -> tuple[tuple[
             ):
                 continue
             index_bytes = index.read_bytes()
-            rows = parse_task_text(index_bytes.decode("utf-8"))
+            rows = tuple(
+                (row, hashlib.sha256(raw_row).hexdigest())
+                for raw_row in index_bytes.splitlines(keepends=True)
+                for row in parse_task_text(raw_row.decode("utf-8"))
+            )
             index_after = index.lstat()
             directory_after = directory.lstat()
         except (OSError, UnicodeDecodeError):
@@ -6594,7 +6609,7 @@ def monthly_archived_task_lines(root: Path, requested: set[str]) -> tuple[tuple[
         )
         if index_before_identity != index_after_identity or directory_before_identity != directory_after_identity:
             continue
-        for row in rows:
+        for row, row_digest in rows:
             relative = Path(row.task_file)
             if relative.name != row.task_file or relative.suffix != ".md":
                 continue
@@ -6626,7 +6641,7 @@ def monthly_archived_task_lines(root: Path, requested: set[str]) -> tuple[tuple[
                     replace(
                         row,
                         task_file=task_ref,
-                        section=f"archive:{index.relative_to(root).as_posix()}:{index_evidence}",
+                        section=f"archive:{index.relative_to(root).as_posix()}:{row_digest}:{index_evidence}",
                     ),
                     task_path,
                 )
