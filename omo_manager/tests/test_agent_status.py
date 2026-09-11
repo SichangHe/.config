@@ -15,6 +15,9 @@ from omo_manager.omo_agent_status import target_resolution_state
 from omo_manager.omo_agent_status import SessionRecord, StatusRow, TaskLine
 from omo_manager.omo_codex_status import Args as CodexStatusArgs, PlanPromptRecovery, Report, report_from_lines
 
+EXPECTED_DATA_GEN_QUEUE = (
+    "Own manager routing for helper_scripts_mgr.md at config:8 and todo_archive_0910.md at wl:40 after their managerat migration from wl:1; preserve singleton ownership, direct Human email by workers, and at most four direct reports. Ensure config:8 routes mailbox-compression threshold 20ff56453d75c4a7e80154cb570ce9aa to the existing singular mail_cleanup_now.md owner without duplication.",
+)
 EXPECTED_MAIL_REPLACE_QUEUE = (
     "🧑 Get a different agent to do the mail compression",
     "🧑 Mail compression worker should be in wl, not dw, and should report to me immediately upon accepting the task. Did you not read MANAGER.md?? What’s the must important is you should list out all the current agents and what they are doing in a nestest list and I’ll decide which ones to keep",
@@ -1646,7 +1649,9 @@ resolved_task_items: []
             def fake_inspect(args: object, **_: object) -> Report:
                 return Report("running", ["working"]) if getattr(args, "target") == "cfg:2" else Report("not_codex", [])
 
-            with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), redirect_stdout(out):
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), patch(
+                "omo_manager.omo_agent_status.target_resolution_state", return_value=False
+            ), redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
 
             self.assertEqual("", out.getvalue())
@@ -2600,6 +2605,88 @@ resolved_task_items: []
             self.assertNotIn("task=mail_replace_exec.md", text)
             self.assertNotIn("missing: task=", text)
             self.assertNotIn("not_codex: task=", text)
+
+    def test_problems_only_ignores_only_exact_data_gen_stopped_record(self) -> None:
+        exact_body = "(from agent dw4:0 /tmp/report.md)\n"
+        exact_text = task_frontmatter(
+            "blocked",
+            runat="dw:29",
+            managerat="dw:44",
+            is_manager=True,
+            blocked_on="human hold after explicit pane termination",
+            pending_items=EXPECTED_DATA_GEN_QUEUE,
+        ) + exact_body
+        exact_sha256 = hashlib.sha256(exact_text.encode()).hexdigest()
+
+        def scan(
+            *,
+            task_file: str = "data_gen_mgr.md",
+            section: str = "human pending",
+            target: str = "dw:29",
+            managerat: str = "dw:44",
+            is_manager: bool = True,
+            blocker: str = "human hold after explicit pane termination",
+            items: tuple[str, ...] = EXPECTED_DATA_GEN_QUEUE,
+            body: str = exact_body,
+            report: Report | None = None,
+            pending_marker: bool = False,
+            target_resolution: bool | None = False,
+            independent_inspection_fails: bool = False,
+        ) -> tuple[int, str]:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                registry = root / "sessions.json"
+                _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+                _ = (root / "TODO.md").write_text(f"{section}:\n{task_file} {target}\n", encoding="utf-8")
+                text = task_frontmatter(
+                    "blocked",
+                    runat=target,
+                    managerat=managerat,
+                    is_manager=is_manager,
+                    blocked_on=blocker,
+                    pending_items=items,
+                ) + body
+                if pending_marker:
+                    text += "(pending)\n"
+                _ = (root / task_file).write_text(text, encoding="utf-8")
+                out = StringIO()
+                selected_report = report if report is not None else Report("missing", [])
+                resolution_probe = (
+                    patch("omo_manager.omo_agent_status.subprocess.run", side_effect=subprocess.TimeoutExpired(["tmux"], 5))
+                    if independent_inspection_fails
+                    else patch("omo_manager.omo_agent_status.target_resolution_state", return_value=target_resolution)
+                )
+                with patch.dict(
+                    "omo_manager.omo_agent_status.EXPECTED_STOPPED_BLOCKED_TASK_SHA256",
+                    {"data_gen_mgr.md": exact_sha256},
+                ), patch("omo_manager.omo_agent_status.inspect", return_value=selected_report), resolution_probe, redirect_stdout(out):
+                    result = main(["--root", str(root), "--registry", str(registry), "--problems-only"])
+                return result, out.getvalue()
+
+        self.assertEqual((0, ""), scan())
+        cases = (
+            ("task", {"task_file": "other.md"}, "missing"),
+            ("queue", {"items": ("changed queue",)}, "missing"),
+            ("target", {"target": "dw:28"}, "missing"),
+            ("manager", {"managerat": "dw:45"}, "missing"),
+            ("role", {"is_manager": False}, "missing"),
+            ("blocker", {"blocker": "human hold after failed launch"}, "missing"),
+            ("custody", {"section": "current"}, "missing"),
+            ("artifact", {"body": "(from agent dw4:0 /tmp/changed-report.md)\n"}, "missing"),
+            ("pending delivery", {"pending_marker": True}, "missing"),
+            ("unknown target resolution", {"target_resolution": None}, "missing"),
+            ("independent inspection failure", {"independent_inspection_fails": True}, "missing"),
+            ("present/reused target", {"target_resolution": True}, "missing"),
+            ("ready runtime", {"report": Report("ready", ["ready"])}, "blocked_idle"),
+            ("not-Codex runtime", {"report": Report("not_codex", ["shell"])}, "not_codex"),
+            ("error runtime", {"report": Report("error", ["error"])}, "error"),
+            ("stuck runtime", {"report": Report("stuck_input", ["stuck"])}, "stuck_input"),
+        )
+        for name, changes, expected_status in cases:
+            with self.subTest(name=name):
+                result, output = scan(**changes)
+                self.assertEqual(3, result)
+                self.assertIn(f"{expected_status}: task={changes.get('task_file', 'data_gen_mgr.md')}", output)
 
     def test_problems_only_keeps_changed_stopped_records_actionable(self) -> None:
         cases = (

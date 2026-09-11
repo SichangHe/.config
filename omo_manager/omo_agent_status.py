@@ -179,6 +179,10 @@ EXPECTED_STOPPED_BLOCKED_TASKS: dict[str, tuple[str, str, str, bool, str, str, s
     "dw_reports_submgr.md": ("todo:human pending", "wl:33", "dw:34", True, HUMAN_TERMINATED_BLOCKED_REASON, "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "missing"),
     "lifecycle_reports.md": ("todo:human pending", "wl:35", "dw:34", True, HUMAN_TERMINATED_BLOCKED_REASON, "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945", "missing"),
     "mail_replace_exec.md": ("todo:current", "wl:2", "dw:34", False, REPLACEMENT_HELPER_BLOCKED_REASON, "99e0727906bf7d1469090c6a0c6182c89cc48fb302e48246f726d0fd05e30fa3", "not_codex"),
+    "data_gen_mgr.md": ("todo:human pending", "dw:29", "dw:44", True, HUMAN_TERMINATED_BLOCKED_REASON, "4d895af6d8f7dfa439d8f2597dd86c0efab7d796769f482842cf2b32db4c4081", "missing"),
+}
+EXPECTED_STOPPED_BLOCKED_TASK_SHA256 = {
+    "data_gen_mgr.md": "08f0be956b71c81c87f106e9d8cf29cdeeb92f40ce7b5859a95ceeb19ac374d8",
 }
 VAGUE_STOPPED_HUMAN_WAIT_RE = re.compile(
     r"\A(?:human|human\s+(?:approval|authorization|decision|discussion)|human[- ]pending|direct\s+human\s+discussion|waiting\s+(?:on|for)\s+(?:(?:a|the)\s+)?(?:human|person)(?:'s)?(?:\s+(?:action|answers?|approval|authorization|choice|confirmation|decision|discussion|feedback|follow-?up|guidance|input|repl(?:y|ies)|responses?|reviews?)|\s+to)?)\Z",
@@ -1055,11 +1059,17 @@ def is_expected_intentionally_stopped_blocked_task(root: Path, task: TaskLine, s
         or task.target != state.target
         or len(indexed) != 1
         or task_has_pending_marker(task_path)
+        or (classified.status == "missing" and target_resolution_state(state.target) is not False)
     ):
         return False
     queue_digest = hashlib.sha256(
         json.dumps(tuple(pending_task_items(task_path, root)), ensure_ascii=False, separators=(",", ":")).encode()
     ).hexdigest()
+    expected_task_sha256 = EXPECTED_STOPPED_BLOCKED_TASK_SHA256.get(task.task_file)
+    try:
+        task_sha256 = hashlib.sha256(task_path.read_bytes()).hexdigest() if expected_task_sha256 is not None else None
+    except OSError:
+        return False
     actual = (
         task.section,
         state.target,
@@ -1069,7 +1079,11 @@ def is_expected_intentionally_stopped_blocked_task(root: Path, task: TaskLine, s
         queue_digest,
         classified.status,
     )
-    return actual == expected and (classified.status != "not_codex" or CODEX_EXIT_RESUME_EVIDENCE_RE.search(classified.evidence) is not None)
+    return (
+        actual == expected
+        and task_sha256 == expected_task_sha256
+        and (classified.status != "not_codex" or CODEX_EXIT_RESUME_EVIDENCE_RE.search(classified.evidence) is not None)
+    )
 
 
 def is_human_token_quota_pause(root: Path, task: TaskLine, state: TaskState) -> bool:
