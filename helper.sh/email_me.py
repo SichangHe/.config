@@ -890,13 +890,13 @@ def fsync_directory(directory: Path) -> None:
 def validate_non_completion_owner(producer_target: str) -> None:
     """Permit operational Human mail from its exact active task owner."""
 
-    from omo_agent_status import read_task_metadata
-    from omo_task_context import infer_active_task
+    from omo_agent_status import DEFAULT_ROOT, read_task_metadata
+    from omo_task_context import infer_pending_task
 
     validate_invoking_owner_target(producer_target, "non-completion Human mail")
-    root = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs")).expanduser().resolve()
+    root = Path(os.environ.get("OMO_WORK_LOGS_ROOT", DEFAULT_ROOT)).expanduser().resolve()
     try:
-        task = infer_active_task(root, producer_target)
+        task = infer_pending_task(root, producer_target)
         metadata = read_task_metadata(task, root)
     except (OSError, ValueError) as exc:
         raise ValueError("non-completion Human mail requires an exact active task owner") from exc

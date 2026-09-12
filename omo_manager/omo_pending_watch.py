@@ -3470,6 +3470,7 @@ def push_marker_text_or_escalate(args: Args, marker: Marker, text: str, manager_
     return push_marker_delivery(args, marker, with_failed_target_escalation(text, manager_target, result), fallback_target, success_event).status
 
 
+# 🧑 “We should only dispatch ‘for manager’ type and replace/terminate type messages to managers.”
 def push_direct_ref(
     args: Args,
     seen: dict[str, float],
@@ -3480,29 +3481,12 @@ def push_direct_ref(
     """Deliver ordinary pending content directly and clear it after success."""
 
     target = marker_direct_target(args, marker)
-    manager_target = marker_for_manager_target(args, marker)
     marker_key = marker_seen_key(args, marker, attachments)
-    reminders = MANAGER_EMAIL_POLICY_REMINDERS if marker.source == "email" else MANAGER_POLICY_REMINDERS
-    fallback_event = manager_pending_delivery_event(marker_key, now_s)
-    repeated_manager_fallback = seen_contains(seen, manager_delivery_attempt_key(marker_key), now_s)
     if not target:
-        if repeated_manager_delivery_is_busy(args, seen, marker_key, manager_target, now_s):
-            return 1
-        fallback = direct_delivery_fallback_text(marker, attachments, "no usable frontmatter `runat` target was found")
-        status = push_marker_text_or_escalate(
-            args,
-            marker,
-            with_manager_policy_reminder(args, fallback, reminders),
-            manager_target,
-            fallback_event,
-        )
-        if status == ASYNC_DELIVERY_STARTED:
-            remember_seen(seen, marker_key, now_s)
-        remember_manager_delivery_attempt(seen, marker_key, now_s, status)
-        return status
+        remember_seen(seen, marker_key, now_s - DEFAULT_SEEN_TTL_S + PENDING_DELIVERY_FAILURE_RETRY_S)
+        return 1
 
     direct_key = direct_delivery_seen_key(args, marker, target, attachments)
-    failure_text = direct_delivery_fallback_text(marker, attachments, f"target `{target}` did not accept the message")
     result = push_marker_delivery(
         args,
         marker,
@@ -3518,23 +3502,13 @@ def push_direct_ref(
             clear_marker=marker,
             failure_seen_delays_s=((marker_key, PENDING_DELIVERY_FAILURE_RETRY_S),),
         ),
-        failure_fallback_target=manager_target,
-        failure_fallback_text=with_manager_policy_reminder(args, failure_text, reminders),
-        failure_success_event=fallback_event,
-        failure_fallback_defer_if_busy=repeated_manager_fallback,
     )
     if result.status == ASYNC_DELIVERY_STARTED:
         remember_seen(seen, marker_key, now_s)
         return result.status
     if result.status != 0:
-        if repeated_manager_delivery_is_busy(args, seen, marker_key, manager_target, now_s):
-            return 1
-        fallback = with_failed_target_escalation(failure_text, target, result)
-        status = push_marker_text_or_escalate(args, marker, fallback, manager_target, fallback_event)
-        if status == ASYNC_DELIVERY_STARTED:
-            remember_seen(seen, marker_key, now_s)
-        remember_manager_delivery_attempt(seen, marker_key, now_s, status)
-        return status
+        remember_seen(seen, marker_key, now_s - DEFAULT_SEEN_TTL_S + PENDING_DELIVERY_FAILURE_RETRY_S)
+        return result.status
     remember_seen(seen, direct_key, now_s)
     if args.dry_run or clear_pending_marker_if_current(args.root, marker):
         return 0
@@ -3884,26 +3858,8 @@ def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, a
     for_manager = marker_is_for_manager(marker, attachments)
     attachment_errors = any(attachment.error for attachment in attachments)
     if not for_manager and not is_main_manager_task_file(marker.file) and attachment_errors:
-        manager_target = marker_for_manager_target(args, marker)
-        error_key = attachment_error_seen_key(args, marker, attachments)
-        if seen_contains(seen, error_key, now_s):
-            return 1
-        if repeated_manager_delivery_is_busy(args, seen, error_key, manager_target, now_s):
-            return 1
-        text = direct_delivery_fallback_text(marker, attachments, "one or more linked sources could not be read safely")
-        status = push_lifecycle_manager_text(
-            args,
-            marker,
-            text,
-            manager_target,
-            error_key,
-            now_s,
-        )
-        reserve_async_marker(seen, error_key, now_s, status)
-        remember_manager_delivery_attempt(seen, error_key, now_s, status)
-        if status == 0:
-            remember_seen(seen, error_key, now_s)
-        return status if status not in {0, 2} else 1
+        remember_seen(seen, marker_key, now_s - DEFAULT_SEEN_TTL_S + PENDING_DELIVERY_FAILURE_RETRY_S)
+        return 1
     if not for_manager and not is_main_manager_task_file(marker.file):
         return push_direct_ref(args, seen, now_s, marker, attachments)
 

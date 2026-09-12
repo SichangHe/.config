@@ -2057,6 +2057,58 @@ class EmailMeTests(unittest.TestCase):
             finally:
                 self.non_completion_caller_patch.start()
 
+    def test_non_completion_owner_binding_uses_runnable_queue_over_blocked_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            running = root / "running.md"
+            blocked = root / "blocked.md"
+            running.write_text(
+                "---\nversion: v1.0.0\nstatus: running\nrunat: wl:1\ntool: codex\nmanagerat: main:0\n"
+                "is_manager: false\npending_task_items: []\n---\n",
+                encoding="utf-8",
+            )
+            blocked.write_text(
+                "---\nversion: v1.0.0\nstatus: blocked\nrunat: wl:1\ntool: codex\nmanagerat: main:0\n"
+                "is_manager: false\npending_task_items: []\n---\n",
+                encoding="utf-8",
+            )
+            (root / "TODO.md").write_text(
+                "current:\nrunning.md wl:1\nblocked.md wl:1\n\nlow priority:\n\nhuman pending:\n\nprevious:\n",
+                encoding="utf-8",
+            )
+            self.non_completion_caller_patch.stop()
+            try:
+                with patch.dict(os.environ, {"OMO_WORK_LOGS_ROOT": str(root), "TMUX_PANE": "%1"}, clear=False), patch.object(
+                    email_me, "current_tmux_window", return_value="wl:1"
+                ), patch.object(email_me, "invoking_process_belongs_to_pane", return_value=True):
+                    email_me.validate_non_completion_owner("wl:1")
+            finally:
+                self.non_completion_caller_patch.start()
+
+    def test_non_completion_owner_binding_uses_configured_work_log_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "worker.md"
+            task.write_text(
+                "---\nversion: v1.0.0\nstatus: running\nrunat: wl:1\ntool: codex\nmanagerat: main:0\n"
+                "is_manager: false\npending_task_items: []\n---\n",
+                encoding="utf-8",
+            )
+            (root / "TODO.md").write_text(
+                "current:\nworker.md wl:1\n\nlow priority:\n\nhuman pending:\n\nprevious:\n",
+                encoding="utf-8",
+            )
+            self.non_completion_caller_patch.stop()
+            try:
+                with patch.dict(os.environ, {"TMUX_PANE": "%1"}, clear=True), patch(
+                    "omo_agent_status.DEFAULT_ROOT", root
+                ), patch.object(email_me, "current_tmux_window", return_value="wl:1"), patch.object(
+                    email_me, "invoking_process_belongs_to_pane", return_value=True
+                ):
+                    email_me.validate_non_completion_owner("wl:1")
+            finally:
+                self.non_completion_caller_patch.start()
+
     def test_non_completion_owner_binding_rejects_inactive_or_ownerless_worker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

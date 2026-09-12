@@ -1095,28 +1095,22 @@ with exclusive_watcher_root(root):
             self.assertEqual("(record and delegate manager_mail/11734.txt)", pointer)
             self.assertNotIn("(pending)", path.read_text(encoding="utf-8"))
 
-    def test_missing_direct_target_escalates_without_clearing_or_recording_route_work(self) -> None:
-        from omo_manager.omo_pending_watch import scan_once
+    def test_missing_direct_target_scan_retains_marker_without_manager_delivery(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "worker.md"
             path.write_text(f"{task_frontmatter(runat='', managerat='wl:1')}\n(pending)\nPlease inspect the failing shard.\n", encoding="utf-8")
-            calls: list[list[str]] = []
-
-            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(capture_delivery_call(command))
-                return subprocess.CompletedProcess(command, 0)
-
             args = Args(
                 root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
             )
-            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
-                self.assertTrue(scan_once(args, {}, [path]))
+            seen: dict[str, float] = {}
+            with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=AssertionError("must not copy request to manager")):
+                self.assertFalse(watcher.scan_once(args, seen, [path]))
 
-            self.assertEqual("main:0.0", calls[0][calls[0].index("--manager-target") + 1])
-            self.assertIn("Direct delivery failed", calls[0][1])
-            self.assertIn("not work to record as a pending item", calls[0][1])
+            marker = watcher.find_markers(root, [path])[0]
+            self.assertIn(watcher.marker_seen_key(args, marker, []), seen)
             self.assertIn("(pending)", path.read_text(encoding="utf-8"))
 
     def test_for_manager_marker_overrides_dm_in_manager_task(self) -> None:
@@ -6316,6 +6310,36 @@ with exclusive_watcher_root(root):
             self.assertIn("cannot read source", calls[0][1])
             self.assertIn("Subject: now readable", calls[1][1])
 
+    def test_direct_email_attachment_error_retains_marker_without_manager_delivery(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text(
+                f"{task_frontmatter(runat='config:27', managerat='wl:1')}\n"
+                "(pending)\n(record and delegate manager_mail/missing.txt)\n",
+                encoding="utf-8",
+            )
+            args = Args(
+                root=root,
+                manager_url="",
+                state=root / "seen.tsv",
+                interval_s=1.0,
+                full_scan_interval_s=1.0,
+                idle_status_interval_s=1800.0,
+                status_script=Path("/bin/false"),
+                once=True,
+                dry_run=False,
+                manager_target="wl:1",
+            )
+            seen: dict[str, float] = {}
+            with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=AssertionError("must not copy source error to manager")):
+                self.assertFalse(watcher.scan_once(args, seen, [path]))
+            marker = watcher.find_markers(root, [path])[0]
+            self.assertIn(watcher.marker_seen_key(args, marker, watcher.marker_attachments(args, marker)), seen)
+            self.assertIn("(pending)", path.read_text(encoding="utf-8"))
+
     def test_same_process_seen_suppresses_unchanged_pending_marker(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -10517,7 +10541,7 @@ resolved_task_items: []
             self.assertEqual(1, len(seen))
             self.assertIn("failed to retain no-op TODO archive plan", error.getvalue())
 
-    def test_pending_delivery_launch_failure_is_retryable(self) -> None:
+    def test_missing_direct_target_is_retryable_without_delivery(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -10526,13 +10550,16 @@ resolved_task_items: []
             path.write_text("(pending)\nplease route\n", encoding="utf-8")
             args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, manager_target="wl:1")
             seen: dict[str, float] = {}
-            err = StringIO()
-            with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=OSError("exec failed")), redirect_stderr(err):
+            with patch(
+                "omo_manager.omo_pending_watch.send_to_codex",
+                side_effect=AssertionError("must not copy request to manager"),
+            ):
                 self.assertFalse(watcher.scan_once(args, seen, [path]))
-            self.assertEqual({}, seen)
-            self.assertIn("pending delivery failed: exec failed", err.getvalue())
+            marker = watcher.find_markers(root, [path])[0]
+            self.assertIn(watcher.marker_seen_key(args, marker, []), seen)
+            self.assertIn("(pending)", path.read_text(encoding="utf-8"))
 
-    def test_pending_delivery_async_fallback_marks_seen(self) -> None:
+    def test_missing_direct_target_retry_does_not_create_manager_attempt(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -10541,14 +10568,18 @@ resolved_task_items: []
             path.write_text("(pending)\nplease route\n", encoding="utf-8")
             args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, manager_target="wl:1")
             seen: dict[str, float] = {}
-            with patch("omo_manager.omo_pending_watch.send_to_codex", return_value=object()):
-                self.assertTrue(watcher.scan_once(args, seen, [path]))
+            with patch(
+                "omo_manager.omo_pending_watch.send_to_codex",
+                side_effect=AssertionError("must not copy request to manager"),
+            ):
+                self.assertFalse(watcher.scan_once(args, seen, [path]))
+                self.assertFalse(watcher.scan_once(args, seen, [path]))
             marker = watcher.find_markers(root, [path])[0]
             marker_key = watcher.marker_seen_key(args, marker, [])
             self.assertIn(marker_key, seen)
-            self.assertIn(watcher.manager_delivery_attempt_key(marker_key), seen)
+            self.assertNotIn(watcher.manager_delivery_attempt_key(marker_key), seen)
 
-    def test_direct_prepaste_failure_falls_back_to_managerat_without_clearing_marker(self) -> None:
+    def test_direct_prepaste_failure_retains_marker_without_manager_fallback(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -10556,7 +10587,6 @@ resolved_task_items: []
             path = root / "task.md"
             path.write_text(f"{task_frontmatter(runat='wl:2', managerat='vl:64')}\n(pending)\nplease route\n", encoding="utf-8")
             owner_future: Future[None] = Future()
-            fallback_future: Future[None] = Future()
             submitted: list[tuple[str, str, watcher.DeliverySuccessEvent | None, watcher.DeliveryFailureFallback | None]] = []
 
             def fake_send_to_codex(
@@ -10573,41 +10603,21 @@ resolved_task_items: []
                 self.assertEqual("wl:2", target)
                 return owner_future
 
-            def fake_submit(
-                target: str,
-                message: str,
-                _options: watcher.CodexSendOptions,
-                pending_guard: watcher.PendingGuard | None = None,
-                success_event: watcher.DeliverySuccessEvent | None = None,
-                failure_fallback: watcher.DeliveryFailureFallback | None = None,
-                root: Path | None = None,
-            ) -> Future[None]:
-                self.assertIsNotNone(pending_guard)
-                self.assertIsNone(failure_fallback)
-                self.assertEqual(Path(tmp), root)
-                submitted.append((target, message, success_event, failure_fallback))
-                self.assertEqual("vl:64", target)
-                return fallback_future
-
             args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, manager_target="wl:1")
             seen: dict[str, float] = {}
-            with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=fake_send_to_codex), patch("omo_manager.omo_pending_watch.submit_send", side_effect=fake_submit):
+            with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=fake_send_to_codex), patch(
+                "omo_manager.omo_pending_watch.submit_send", side_effect=AssertionError("must not copy request to manager")
+            ):
                 self.assertTrue(watcher.scan_once(args, seen, [path]))
                 self.assertEqual(1, len(seen))
+                self.assertIsNone(submitted[0][3])
                 owner_future.set_exception(RuntimeError("target is not a Codex pane before paste: wl:2"))
                 watcher.log_send_result(owner_future, submitted[0][2], submitted[0][3], root=root)
-                self.assertEqual(2, len(submitted))
-                self.assertEqual("vl:64", submitted[1][0])
-                self.assertIn("Delivery to resolved target `wl:2` failed: target is not a Codex pane before paste: wl:2", submitted[1][1])
-                self.assertIn("Direct delivery failed", submitted[1][1])
-                self.assertIn("please route", submitted[1][1])
-                fallback_future.set_result(None)
-                watcher.log_send_result(fallback_future, submitted[1][2])
                 self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
             self.assertIn("(pending)\nplease route\n", path.read_text(encoding="utf-8"))
             self.assertIn(watcher.marker_seen_key(args, watcher.find_markers(root, [path])[0], []), seen)
 
-    def test_repeated_direct_failure_defers_manager_fallback_while_manager_busy(self) -> None:
+    def test_repeated_direct_failure_never_creates_manager_fallback(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -10635,16 +10645,16 @@ resolved_task_items: []
 
             with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=fake_send_to_codex):
                 self.assertEqual(watcher.ASYNC_DELIVERY_STARTED, watcher.push_direct_ref(args, seen, 1001.0, marker, []))
+            self.assertIsNone(captured[0][1])
             owner_future.set_exception(RuntimeError("paste failed"))
-            with patch.object(watcher, "inspect_codex", return_value=MagicMock(status="running")), patch(
-                "omo_manager.omo_pending_watch.submit_send"
-            ) as fallback_send, patch("omo_manager.omo_pending_watch.time.time", return_value=1002.0):
+            with patch("omo_manager.omo_pending_watch.submit_send", side_effect=AssertionError("must not copy request to manager")), patch(
+                "omo_manager.omo_pending_watch.time.time", return_value=1002.0
+            ):
                 watcher.log_send_result(owner_future, captured[0][0], captured[0][1])
-                fallback_send.assert_not_called()
             self.assertTrue(watcher.drain_delivery_successes(args, seen, 1002.0))
             self.assertTrue(watcher.seen_contains(seen, marker_key, 1601.0))
 
-    def test_direct_target_rejection_escalates_to_managerat_without_clearing_marker(self) -> None:
+    def test_direct_target_rejection_retains_marker_without_manager_fallback(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -10652,27 +10662,22 @@ resolved_task_items: []
             path = root / "task.md"
             path.write_text(f"{task_frontmatter(runat='wl:2', managerat='vl:64')}\n(pending)\nplease route\n", encoding="utf-8")
             calls: list[tuple[str, str]] = []
-            fallback_future: Future[None] = Future()
-
             def fake_send_to_codex(target: str, message: str, _options: watcher.CodexSendOptions, **_: object) -> Future[None]:
                 calls.append((target, message))
-                if target == "wl:2":
-                    raise RuntimeError("status=not_codex")
-                self.assertEqual("vl:64", target)
-                return fallback_future
+                raise RuntimeError("status=not_codex")
 
             args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, manager_target="wl:1")
             seen: dict[str, float] = {}
             with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=fake_send_to_codex):
-                self.assertTrue(watcher.scan_once(args, seen, [path]))
-            self.assertEqual(["wl:2", "vl:64"], [target for target, _message in calls])
+                self.assertFalse(watcher.scan_once(args, seen, [path]))
+            self.assertEqual(["wl:2"], [target for target, _message in calls])
             marker = watcher.find_markers(root, [path])[0]
             marker_key = watcher.marker_seen_key(args, marker, [])
             self.assertIn(marker_key, seen)
-            self.assertIn(watcher.manager_delivery_attempt_key(marker_key), seen)
+            self.assertNotIn(watcher.manager_delivery_attempt_key(marker_key), seen)
             self.assertIn("(pending)\nplease route\n", path.read_text(encoding="utf-8"))
 
-    def test_missing_direct_target_async_escalation_remembers_marker(self) -> None:
+    def test_missing_direct_target_retains_marker_without_manager_delivery(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -10680,22 +10685,12 @@ resolved_task_items: []
             path = root / "task.md"
             path.write_text(f"{task_frontmatter(runat='', managerat='vl:64')}\n(pending)\nplease route\n", encoding="utf-8")
             marker = watcher.find_markers(root, [path])[0]
-            future: Future[None] = Future()
-            captured: list[watcher.DeliverySuccessEvent | None] = []
-
-            def fake_send_to_codex(_target: str, _message: str, _options: watcher.CodexSendOptions, *, success_event: watcher.DeliverySuccessEvent | None = None, **_: object) -> Future[None]:
-                captured.append(success_event)
-                return future
-
             args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, manager_target="wl:1")
             seen: dict[str, float] = {}
-            with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=fake_send_to_codex):
-                self.assertEqual(watcher.ASYNC_DELIVERY_STARTED, watcher.push_direct_ref(args, seen, 1000.0, marker, []))
+            with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=AssertionError("must not send to manager")):
+                self.assertEqual(1, watcher.push_direct_ref(args, seen, 1000.0, marker, []))
             self.assertIn(watcher.marker_seen_key(args, marker, []), seen)
-            future.set_result(None)
-            watcher.log_send_result(future, captured[0])
-            self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
-            self.assertIn(watcher.marker_seen_key(args, marker, []), seen)
+            self.assertIn("(pending)\nplease route\n", path.read_text(encoding="utf-8"))
 
     def test_direct_delivery_keeps_marker_after_unrelated_append(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -10779,7 +10774,7 @@ resolved_task_items: []
             self.assertEqual(1, updated.count("(pending)"))
             self.assertIn("second request", updated)
 
-    def test_async_fallback_skips_cleared_pending_marker(self) -> None:
+    def test_async_direct_failure_after_marker_clear_does_not_fallback(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -10807,12 +10802,13 @@ resolved_task_items: []
             seen: dict[str, float] = {}
             with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=fake_send_to_codex):
                 self.assertTrue(watcher.scan_once(args, seen, [path]))
+                self.assertIsNone(submitted[0][3])
                 path.write_text(f"{task_frontmatter(runat='wl:2', managerat='vl:64')}\nplease route\n", encoding="utf-8")
                 owner_future.set_exception(RuntimeError("pending marker cleared before tmux paste"))
                 err = StringIO()
                 with patch("omo_manager.omo_pending_watch.submit_send", side_effect=AssertionError("unexpected fallback")), redirect_stderr(err):
                     watcher.log_send_result(owner_future, submitted[0][2], submitted[0][3])
-                self.assertIn("async fallback skipped; pending marker cleared before fallback paste", err.getvalue())
+                self.assertIn("async delivery failed", err.getvalue())
             self.assertEqual(1, len(seen))
 
     def test_delivery_success_event_records_seen_key_on_watcher_thread(self) -> None:
