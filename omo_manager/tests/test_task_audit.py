@@ -211,6 +211,66 @@ blocked_on:
                 findings,
             )
 
+    def test_monthly_index_makes_line_only_archives_historical(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\nlive.md wl:2\n\nprevious:\nstale.md wl:2\n")
+            (root / "live.md").write_text(task("running", "wl:2"))
+            (root / "stale.md").write_text(task("blocked", "wl:2", "paused"))
+            (root / "done.md").write_text(task("done", "wl:3").replace("pending_task_items: []", "pending_task_items:\n  - preserved evidence"))
+            month = root / "202608"
+            month.mkdir()
+            (month / "old_todos.md").write_text("done.md\n")
+
+            findings = audit(root)
+
+            self.assertNotIn("duplicate_runat", {finding.kind for finding in findings})
+            self.assertNotIn("done_pending_items", {finding.kind for finding in findings})
+            self.assertNotIn("blocked_no_todo", {finding.kind for finding in findings})
+
+    def test_physical_month_archive_is_historical_without_an_index_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\n")
+            month = root / "202607"
+            month.mkdir()
+            (month / "done.md").write_text(task("done", "wl:2").replace("pending_task_items: []", "pending_task_items:\n  - preserved evidence"))
+
+            findings = audit(root)
+
+            self.assertNotIn("done_pending_items", {finding.kind for finding in findings})
+
+    def test_invalid_month_directory_is_not_historical(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\n")
+            month = root / "202613"
+            month.mkdir()
+            (month / "blocked.md").write_text(task("blocked", "wl:2", "human"))
+            (month / "old_todos.md").write_text("blocked.md wl:2\n")
+
+            findings = audit(root)
+
+            self.assertIn("blocked_no_todo", {finding.kind for finding in findings})
+
+    def test_archive_index_requires_one_matching_task_and_target(self) -> None:
+        for label, archive_rows in (
+            ("target", "orphan.md wl:9\n"),
+            ("duplicate", "orphan.md wl:2\norphan.md wl:2\n"),
+            ("prose", "- orphan.md was only mentioned in a note\n"),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "TODO.md").write_text("current:\n")
+                (root / "orphan.md").write_text(task("blocked", "wl:2", "human"))
+                month = root / "202608"
+                month.mkdir()
+                (month / "old_todos.md").write_text(archive_rows)
+
+                findings = audit(root)
+
+                self.assertIn("blocked_no_todo", {finding.kind for finding in findings})
+
     def test_todo_row_requires_a_valid_task_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

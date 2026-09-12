@@ -28,6 +28,7 @@ from omo_manager.omo_task_metadata import RETIRED_RUNAT, TaskBlocker, TaskFrontm
 
 TERMINAL_DISPOSITION_VERSION = "v1.0.0"
 TERMINAL_DISPOSITIONS = {"supported_closure", "owner_disposition_required", "archived_dependency"}
+ARCHIVE_MONTH_RE = re.compile(r"^20[0-9]{2}(?:0[1-9]|1[0-2])$")
 TerminalDispositionMap: TypeAlias = dict[str, str]
 FileSnapshot: TypeAlias = tuple[int, int, int, int, bytes]
 
@@ -111,6 +112,46 @@ def file_snapshot(path: Path) -> FileSnapshot:
     return (*before_identity, payload)
 
 
+def archived_task_paths(root: Path, snapshots: dict[Path, FileSnapshot], metadata_by_path: dict[Path, TaskMetadata]) -> set[Path]:
+    """Resolve unambiguous task rows from monthly archive indexes."""
+
+    counts: dict[Path, int] = defaultdict(int)
+    for index, snapshot in snapshots.items():
+        if index.name != "old_todos.md" or ARCHIVE_MONTH_RE.fullmatch(index.parent.name) is None:
+            continue
+        try:
+            rows = parse_task_text(snapshot[-1].decode("utf-8"))
+        except UnicodeError:
+            continue
+        for row in rows:
+            canonical_row = re.escape(row.task_file) if not row.target else rf"{re.escape(row.task_file)}\s+{re.escape(row.target)}"
+            if re.fullmatch(canonical_row, row.line) is None:
+                continue
+            ref = Path(row.task_file)
+            if ref.is_absolute() or ".." in ref.parts:
+                continue
+            candidates: set[Path] = set()
+            for candidate in (root / ref, index.parent / ref):
+                resolved = candidate.resolve(strict=False)
+                if resolved in metadata_by_path:
+                    candidates.add(resolved)
+            if len(candidates) != 1:
+                continue
+            candidate = candidates.pop()
+            metadata = metadata_by_path[candidate]
+            if row.target and canonical_target(row.target) != canonical_target(metadata.runat):
+                continue
+            counts[candidate] += 1
+    return {path for path, count in counts.items() if count == 1}
+
+
+def is_monthly_archive_path(root: Path, path: Path) -> bool:
+    """Return whether a task record is physically filed under `YYYYMM`."""
+
+    relative = path.relative_to(root)
+    return bool(relative.parts) and ARCHIVE_MONTH_RE.fullmatch(relative.parts[0]) is not None
+
+
 def audit(root: Path, *, include_terminal: bool = False, terminal_dispositions: TerminalDispositionMap | None = None) -> tuple[Finding, ...]:
     root = root.resolve(strict=True)
     todo_path = root / "TODO.md"
@@ -164,6 +205,8 @@ def audit(root: Path, *, include_terminal: bool = False, terminal_dispositions: 
         else:
             non_task_refs.add(path.relative_to(root).as_posix())
 
+    archived_paths = archived_task_paths(root, task_snapshots, metadata_by_path)
+
     findings = todo_path_findings
     terminal_tasks: list[str] = []
     active_targets: dict[str, list[Path]] = defaultdict(list)
@@ -177,7 +220,8 @@ def audit(root: Path, *, include_terminal: bool = False, terminal_dispositions: 
     for path, metadata in metadata_by_path.items():
         relative = path.relative_to(root).as_posix()
         rows = todo_rows.get(path, [])
-        if metadata.status == "done" and metadata.pending_task_items:
+        archived = not rows and (path in archived_paths or is_monthly_archive_path(root, path))
+        if metadata.status == "done" and metadata.pending_task_items and not archived:
             findings.append(
                 Finding(
                     "done_pending_items",
@@ -198,6 +242,9 @@ def audit(root: Path, *, include_terminal: bool = False, terminal_dispositions: 
                 if not include_terminal:
                     continue
                 kind, action, detail = "terminal_no_todo", "none", "done task is intentionally terminal"
+            # 🧑 "You just move tasks lines from “previous” to an older dir. You don’t check the “status”."
+            elif archived and disposition is None:
+                continue
             elif metadata.status == "blocked" and disposition == "archived_dependency":
                 matched_dispositions.add(relative)
                 kind, action, detail = "archived_dependency_no_todo", "none", "reviewed terminal disposition preserves this non-live dependency record"
@@ -224,7 +271,8 @@ def audit(root: Path, *, include_terminal: bool = False, terminal_dispositions: 
                     "owner_reconciliation",
                 )
             )
-        if metadata.status != "done" and metadata.runat != RETIRED_RUNAT:
+        live_indexed = any(section in {"todo:current", "todo:human pending", "todo:low priority"} for section, _target in rows)
+        if metadata.status != "done" and metadata.runat != RETIRED_RUNAT and (live_indexed or (not rows and not archived)):
             active_targets[canonical_target(metadata.runat)].append(path)
 
     if terminal_tasks and not include_terminal:
