@@ -2038,7 +2038,7 @@ class EmailMeTests(unittest.TestCase):
                 )
             self.assertIn("exact active manager owner", stderr.getvalue())
 
-    def test_non_completion_owner_binding_requires_active_manager_task(self) -> None:
+    def test_non_completion_owner_binding_accepts_active_manager_and_worker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task = root / "manager.md"
@@ -2059,7 +2059,32 @@ class EmailMeTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "does not match"):
                         email_me.validate_non_completion_owner("wl:2")
                     task.write_text(task.read_text(encoding="utf-8").replace("is_manager: true", "is_manager: false"), encoding="utf-8")
-                    with self.assertRaisesRegex(ValueError, "exact active manager owner"):
+                    email_me.validate_non_completion_owner("wl:1")
+            finally:
+                self.non_completion_caller_patch.start()
+
+    def test_non_completion_owner_binding_rejects_inactive_or_ownerless_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "worker.md"
+            active_worker = (
+                "---\nversion: v1.0.0\nstatus: running\nrunat: wl:1\ntool: codex\nmanagerat: main:0\n"
+                "is_manager: false\npending_task_items: []\n---\n"
+            )
+            task.write_text(active_worker, encoding="utf-8")
+            (root / "TODO.md").write_text(
+                "current:\nworker.md wl:1\n\nlow priority:\n\nhuman pending:\n\nprevious:\n", encoding="utf-8"
+            )
+            self.non_completion_caller_patch.stop()
+            try:
+                with patch.dict(os.environ, {"OMO_WORK_LOGS_ROOT": str(root), "TMUX_PANE": "%1"}, clear=False), patch.object(
+                    email_me, "current_tmux_window", return_value="wl:1"
+                ), patch.object(email_me, "invoking_process_belongs_to_pane", return_value=True):
+                    task.write_text(active_worker.replace("status: running", "status: done"), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "exact active task owner"):
+                        email_me.validate_non_completion_owner("wl:1")
+                    task.write_text(active_worker.replace("managerat: main:0", "managerat: "), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "exact active task owner"):
                         email_me.validate_non_completion_owner("wl:1")
             finally:
                 self.non_completion_caller_patch.start()

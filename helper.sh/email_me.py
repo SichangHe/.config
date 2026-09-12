@@ -888,7 +888,7 @@ def fsync_directory(directory: Path) -> None:
 
 
 def validate_non_completion_owner(producer_target: str) -> None:
-    """Permit operational Human mail only from an exact active manager owner."""
+    """Permit operational Human mail from its exact active task owner."""
 
     from omo_agent_status import read_task_metadata
     from omo_task_context import infer_active_task
@@ -899,13 +899,14 @@ def validate_non_completion_owner(producer_target: str) -> None:
         task = infer_active_task(root, producer_target)
         metadata = read_task_metadata(task, root)
     except (OSError, ValueError) as exc:
-        raise ValueError("non-completion Human mail requires an exact active manager owner") from exc
+        raise ValueError("non-completion Human mail requires an exact active task owner") from exc
+    # 🧑 "Worker agents must directly correspond to the human and only go through the managers when they need help."
     if (
         metadata is None
-        or not metadata.is_manager
         or canonical_email_tmux_target(metadata.runat) != canonical_email_tmux_target(producer_target)
+        or (not metadata.is_manager and not metadata.managerat)
     ):
-        raise ValueError("non-completion Human mail requires an exact active manager owner")
+        raise ValueError("non-completion Human mail requires an exact active task owner")
 
 
 def validate_invoking_owner_target(producer_target: str, purpose: str) -> None:
