@@ -42,6 +42,7 @@ from omo_manager.omo_task import (
     runat_goal_tree_error,
     runat_header_error,
     start_codex,
+    capture_fresh_codex_session,
     validate_inputs,
     verify_launch_window,
     cleanup_prepared_launch_window,
@@ -508,6 +509,34 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIsNotNone(metadata)
             assert metadata is not None
             self.assertEqual("vl:15", metadata.managerat)
+
+    def test_new_codex_task_frontmatter_carries_resume_session_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(
+                root,
+                "x.md",
+                "cfg",
+                "2",
+                "codex",
+                None,
+                "",
+                prompt,
+                False,
+                False,
+                "11111111-1111-4111-8111-111111111111",
+                "",
+                (),
+                manager_target="wl:1",
+            )
+
+            metadata = parse_task_metadata(ensure_task_file(args, "cfg:2").read_text(encoding="utf-8"))
+
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("11111111-1111-4111-8111-111111111111", metadata.session_id)
 
     def test_new_task_preserves_prompt_started_no_space_managerat_as_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2816,6 +2845,59 @@ class OmoTaskTests(unittest.TestCase):
             self.assertEqual((), wait_command_started_mock.call_args.kwargs["baseline_lines"])
             launch_marker = wait_command_started_mock.call_args.kwargs["launch_marker"]
             self.assertRegex(launch_marker, r"^\[omo:[0-9a-f]{32}\]$")
+
+    def test_fresh_codex_binds_session_before_initial_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "x.md"
+            prompt = root / "prompt.md"
+            task.write_text(
+                "---\nversion: v1.0.0\nstatus: running\nrunat: cfg:7\ntool: codex\nmanagerat: mgr:1\nis_manager: false\npending_task_items: []\n---\n",
+                encoding="utf-8",
+            )
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(root, "x.md", "cfg", "", "codex", root, "x", prompt, False, False, "", "medium", (), manager_target="mgr:1", model="gpt-5.6-sol")
+            events: list[str] = []
+
+            def capture(_target: str, bound_task: Path, captured: Path, expected: str) -> None:
+                self.assertEqual(task, bound_task)
+                self.assertEqual(hashlib.sha256(task.read_bytes()).hexdigest(), expected)
+                text = captured.read_text(encoding="utf-8")
+                self.assertTrue(text.startswith(DEFAULT_WORKER_INSTRUCTIONS.read_text(encoding="utf-8")))
+                self.assertIn('<manager_delegation from="mgr:1">', text)
+                self.assertIn(VALID_GOAL_TREE.rstrip(), text)
+                events.append("capture-and-prompt")
+
+            with (
+                patch("omo_manager.omo_task.exact_pane_id", return_value="%7"),
+                patch("omo_manager.omo_task.capture_pane", return_value=[]),
+                patch("omo_manager.omo_task.tmux") as tmux,
+                patch("omo_manager.omo_task.wait_command_started", return_value=CODEX_LAUNCH_STARTED),
+                patch("omo_manager.omo_task.capture_fresh_codex_session", side_effect=capture),
+            ):
+                start_codex("cfg:7", args)
+
+            self.assertNotIn("$(cat --", tmux.call_args_list[0].args[0][3])
+            self.assertEqual(["capture-and-prompt"], events)
+
+    def test_capture_fresh_codex_session_records_before_send(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "x.md"
+            prompt = Path(tmp) / "prompt.md"
+            task.write_text("task", encoding="utf-8")
+            prompt.write_text("prompt", encoding="utf-8")
+            pane = object()
+            events: list[str] = []
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.query_exact_status_session_id", return_value="11111111-1111-4111-8111-111111111111"),
+                patch("omo_manager.omo_codex_start.record_session_id", side_effect=lambda *_args, **_kwargs: events.append("record")) as record,
+                patch("omo_manager.omo_codex_start.send_prompt", side_effect=lambda *_args: events.append("send")),
+            ):
+                capture_fresh_codex_session("cfg:7", task, prompt, hashlib.sha256(b"task").hexdigest())
+
+            self.assertEqual(["record", "send"], events)
+            self.assertTrue(record.call_args.kwargs["replace_existing"])
 
     def test_start_codex_can_launch_cursor_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

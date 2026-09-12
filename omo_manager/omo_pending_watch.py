@@ -181,7 +181,8 @@ DEFAULT_AGENT_PROBLEM_TIMEOUT_S = float(
 DEFAULT_POLL_BACKSTOP_INTERVAL_S = float(os.environ.get("OMO_MANAGER_POLL_BACKSTOP_INTERVAL_S", "30"))
 BLOCKING_QUEUE_INTERVAL_S = 30.0
 PENDING_MARKERS = {"(pending)"}
-FOR_MANAGER_MARKERS = ("for manager", "for a manager")
+# 🧑 “We should only dispatch “for manager” type and replace/terminate type messages to managers.”
+FOR_MANAGER_MARKERS = ("for manager",)
 POINTER_WRAPPER_PAIRS = {"`": "`", "'": "'", '"': '"', "(": ")", "[": "]", "<": ">", "{": "}"}
 TASK_FILE_LINE_WARNING_THRESHOLD = 2000
 TODO_LINE_WARNING_THRESHOLD = 200
@@ -315,6 +316,7 @@ class Marker:
     pending_tail: str
     file_lines: int
     blocked_reason: str
+    file_pending_count: int = 1
 
     @property
     def ref(self) -> str:
@@ -964,6 +966,11 @@ def log_send_result(
         if success_event is not None and success_event.consume_on_unknown_outcome and not definitely_rejected_before_paste(exc):
             print("omo_pending_watch: delivery outcome unknown after submit; suppressing automatic replay", file=sys.stderr)
             DELIVERY_SUCCESS_EVENTS.put(success_event)
+            return
+        # 🧑 “I see the main manager got this, why? Why does email direct delivery to target agent not work?”
+        if failure_fallback is not None and failure_fallback.pending_guard is not None and not definitely_rejected_before_paste(exc):
+            print("omo_pending_watch: delivery outcome unknown after paste; retaining marker and suppressing manager fallback", file=sys.stderr)
+            queue_delivery_failure_event(success_event)
             return
         if failure_fallback is not None:
             if failure_fallback.pending_guard is not None and not pending_marker_present(
@@ -1771,43 +1778,56 @@ def marker_direct_target(args: Args, marker: Marker) -> str:
     return metadata.runat if metadata is not None else ""
 
 
-def pending_source_paths(root: Path, marker: Marker) -> list[str]:
-    sources: list[str] = []
-    if marker.delegate_source:
-        sources.append(marker.delegate_source)
-    for match in FILE_REF_RE.finditer(unquoted_pending_content(marker.block_text)):
-        source = match.group(1)
-        if not attachment_reference(root, source):
-            continue
-        if source not in sources:
-            sources.append(source)
-    return sources
+def email_source_attachment(root: Path, source: str) -> SourceAttachment | None:
+    """Read one canonical direct mail artifact without following mutable links."""
 
-
-def attachment_reference(root: Path, source: str) -> bool:
-    """Ignore bare helper command names unless they name a work-log file."""
-
-    if "/" in source or not source.endswith((".py", ".sh")):
-        return True
-    return (root / source).is_file()
+    path = Path(source)
+    if path.is_absolute() or path.as_posix() != source or len(path.parts) != 2 or path.parts[0] != "manager_mail" or path.suffix != ".txt":
+        return None
+    descriptors: list[int] = []
+    try:
+        directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        root_fd = os.open(root.resolve(strict=True), directory_flags)
+        descriptors.append(root_fd)
+        mail_fd = os.open("manager_mail", directory_flags, dir_fd=root_fd)
+        descriptors.append(mail_fd)
+        file_fd = os.open(path.name, file_flags, dir_fd=mail_fd)
+        descriptors.append(file_fd)
+        before = os.fstat(file_fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_mode & 0o022:
+            return None
+        chunks: list[bytes] = []
+        while chunk := os.read(file_fd, 64 * 1024):
+            chunks.append(chunk)
+        after = os.fstat(file_fd)
+        current = os.stat(path.name, dir_fd=mail_fd, follow_symlinks=False)
+        before_identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        current_identity = (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+        if before_identity != after_identity or after_identity != current_identity or not stat.S_ISREG(current.st_mode):
+            return None
+        text = b"".join(chunks).decode("utf-8", errors="replace")
+        return SourceAttachment(source, text, 1, line_count(text))
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            return None
+        return SourceAttachment(source, "", error=f"cannot read source: {exc}")
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
 
 def marker_attachments(args: Args, marker: Marker) -> list[SourceAttachment]:
-    if LIFECYCLE_EXPLANATION in marker.block_text:
-        return [source_attachment(args.root, marker.delegate_source)] if marker.delegate_source else []
-    if marker.origin == "agent" and marker.source == "agent":
-        match = AGENT_POINTER_WITH_TARGET_RE.fullmatch(adjacent_source_metadata(marker.block_text.splitlines()))
-        if match is not None:
-            return [source_attachment(args.root, match.group(2))]
-    return [source_attachment(args.root, source) for source in pending_source_paths(args.root, marker)]
+    # 🧑 “Let's only do the inlining for the emails from now on”
+    attachment = email_source_attachment(args.root, marker.delegate_source)
+    return [attachment] if attachment is not None else []
 
 
 def marker_has_authenticated_agent_report(marker: Marker, attachments: Sequence[SourceAttachment]) -> bool:
+    del attachments
     source_line = adjacent_source_metadata(marker.block_text.splitlines())
-    match = AGENT_POINTER_WITH_TARGET_RE.fullmatch(source_line)
-    if match is None or not valid_agent_report_artifact(source_line):
-        return False
-    return any(attachment.source == match.group(2) and not attachment.error for attachment in attachments)
+    return AGENT_POINTER_WITH_TARGET_RE.fullmatch(source_line) is not None and valid_agent_report_artifact(source_line)
 
 
 def attachment_payload_digest(text: str) -> str:
@@ -1831,16 +1851,8 @@ def agent_report_seen_key(args: Args, marker: Marker, attachments: Sequence[Sour
     """Identify a report by immutable source and content, never by marker line."""
 
     source = agent_report_source(marker, attachments)
-    stable_payloads: list[str] = []
-    for attachment in attachments:
-        if attachment.error:
-            continue
-        hash_line = next(
-            (line.strip() for line in attachment.text.splitlines() if re.fullmatch(r"\[message-sha256: [0-9a-f]{64}\]", line.strip())),
-            "",
-        )
-        stable_payloads.append(f"{attachment.source}\0{hash_line or agent_report_message_text(attachment.text)}")
-    payload = "\n".join(stable_payloads)
+    artifact = authenticated_agent_report(adjacent_source_metadata(marker.block_text.splitlines()))
+    payload = artifact.message_sha256 if artifact is not None else readable_attachment_payload(attachments)
     identity = f"{source}\0{payload}" if source else direct_message_text(marker, attachments)
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     return f"{args.root}:agent-report:{digest}"
@@ -2772,22 +2784,36 @@ def join_without_outer_blank_lines(lines: Sequence[str]) -> str:
     return "\n".join(lines[start:end])
 
 
+def pending_marker_warning(marker: Marker) -> str:
+    return PENDING_CONSUMPTION_INSTRUCTION if marker.file_pending_count > 1 else ""
+
+
 def manager_pending_instruction(marker: Marker, *, manager_only: bool = False) -> str:
     if marker.origin == "human":
         handling = (
-            "Handle and acknowledge this request yourself; do not dispatch it to the task's worker:"
+            "Handle the manager-directed part, dispatch concrete work to the responsible worker, and let that worker acknowledge acceptance:"
             if manager_only
             else "Then fully dispatch the task; the responsible agent must immediately email the Human to acknowledge acceptance:"
         )
-        return (
-            f"{PENDING_CONSUMPTION_INSTRUCTION}\n"
-            "Record every open item with human provenance and clear `(pending)` using `omo_record_pending.py`. "
-            f"Source: `{marker.file}:{marker.line}`. {handling}"
+        return "\n".join(
+            filter(
+                None,
+                (
+                    pending_marker_warning(marker),
+                    "Record every open item with human provenance and clear `(pending)` using `omo_record_pending.py`. "
+                    f"Source: `{marker.file}:{marker.line}`. {handling}",
+                ),
+            )
         )
-    return (
-        f"{PENDING_CONSUMPTION_INSTRUCTION}\n"
-        "Record every open item with agent provenance and clear `(pending)` using `omo_record_pending.py`. "
-        f"Source: `{marker.file}:{marker.line}`. Then dispatch the task:"
+    return "\n".join(
+        filter(
+            None,
+            (
+                pending_marker_warning(marker),
+                "Record every open item with agent provenance and clear `(pending)` using `omo_record_pending.py`. "
+                f"Source: `{marker.file}:{marker.line}`. Then dispatch the task:",
+            ),
+        )
     )
 
 
@@ -2804,31 +2830,30 @@ def marker_snippet_parts(marker: Marker, attachments: Sequence[SourceAttachment]
 
 
 def lifecycle_marker_delivery_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
-    """Render one lifecycle review from pointers, without recursively expanding task state."""
+    """Render one lifecycle command as a short manager-facing sentence."""
 
-    allowed = (
-        "requested_action:",
-        "human_mail:",
-        "addressed_task:",
-        "addressed_target:",
-        "responsible_manager_target:",
-        "task_status:",
-        "decision:",
-        "review_reason:",
-    )
-    fields = [line.strip() for line in marker.block_text.splitlines() if line.strip().startswith(allowed)]
+    fields = {
+        key: value.strip()
+        for line in marker.block_text.splitlines()
+        if ":" in line
+        for key, value in (line.split(":", 1),)
+        if key in {"requested_action", "addressed_target", "review_reason"}
+    }
+    action = fields.get("requested_action", "lifecycle action")
+    target = fields.get("addressed_target", "the addressed agent")
+    if action == "review":
+        summary = f"An exact agent lifecycle command for {target} needs manager handling: {fields.get('review_reason', 'direct handling was unavailable')}."
+    else:
+        summary = f"The Human asked to {action} {target}."
     parts = [
-        "A Human lifecycle request requires manager review.",
-        f"Authenticated transport: `{marker.file}:{marker.line}`. Use that stored block for custody evidence and supported consumption.",
-        *fields,
+        summary,
+        f"Use the supported lifecycle tool; its custody record is stored at `{marker.file}:{marker.line}`.",
     ]
     for attachment in attachments:
         if attachment.error:
             parts.append(source_error_section(attachment.source, attachment.error))
         else:
             parts.append(snippet_section(attachment.source, attachment.start_line, attachment.end_line, attachment.text, EMAIL_CONTENT_CHAR_LIMIT))
-    # Lifecycle queue and replacement-context fields are custody payloads, not
-    # previews. Truncating them can silently drop work or the Human's reason.
     return "\n".join(parts)
 
 
@@ -2968,12 +2993,15 @@ def marker_delivery_text(
 def marker_direct_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
     message = html.escape(direct_message_text(marker, attachments), quote=False)
     return "\n".join(
-        (
-            PENDING_CONSUMPTION_INSTRUCTION,
-            "Immediately email the Human to acknowledge acceptance. Record every open item with human provenance using `omo_pending.py add`:",
-            "<human_instruction>",
-            message,
-            "</human_instruction>",
+        filter(
+            None,
+            (
+                pending_marker_warning(marker),
+                "Immediately email the Human to acknowledge acceptance. Record every open item with human provenance using `omo_pending.py add`:",
+                "<human_instruction>",
+                message,
+                "</human_instruction>",
+            ),
         )
     )
 
@@ -2985,7 +3013,7 @@ def marker_agent_report_text(marker: Marker, attachments: Sequence[SourceAttachm
     excerpt = truncate_content(payload, PENDING_CONTENT_CHAR_LIMIT)
     pointer = display_pending_tail(adjacent_source_metadata(marker.block_text.splitlines()))
     message = html.escape("\n\n".join(filter(None, (excerpt, pointer))), quote=False)
-    return "\n".join((PENDING_CONSUMPTION_INSTRUCTION, "Agent report received; review it and handle any follow-up:", "<agent_report>", message, "</agent_report>"))
+    return "\n".join(filter(None, (pending_marker_warning(marker), "Agent report received; review it and handle any follow-up:", "<agent_report>", message, "</agent_report>")))
 
 
 def marker_agent_source_target(marker: Marker) -> str:
@@ -3004,7 +3032,7 @@ def agent_report_fallback_text(marker: Marker, attachments: Sequence[SourceAttac
     return "\n".join(
         (
             f"Agent report delivery failed for `{marker.file}:{marker.line}`: {reason}.",
-            "Inspect or correct the owning manager target, then deliver the attached report.",
+            "Inspect or correct the owning manager target, then open and handle the referenced report.",
             marker_agent_report_text(marker, attachments),
         )
     )
@@ -3015,12 +3043,15 @@ def marker_manager_delegation_text(marker: Marker, attachments: Sequence[SourceA
 
     message = html.escape(direct_message_text(marker, attachments), quote=False)
     return "\n".join(
-        (
-            PENDING_CONSUMPTION_INSTRUCTION,
-            "Manager delegation received; carry out the delegated work and report through the normal task channel:",
-            "<manager_delegation>",
-            message,
-            "</manager_delegation>",
+        filter(
+            None,
+            (
+                pending_marker_warning(marker),
+                "Manager delegation received; carry out the delegated work and report through the normal task channel:",
+                "<manager_delegation>",
+                message,
+                "</manager_delegation>",
+            ),
         )
     )
 
@@ -3049,6 +3080,7 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
 
     markers: list[Marker] = []
     for path in files:
+        first_marker = len(markers)
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
         except UnicodeDecodeError:
@@ -3092,6 +3124,9 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
                     blocked_reason=blocked_reason_for_marker(root, path, lines, idx),
                 )
             )
+        file_pending_count = len(markers) - first_marker
+        for marker_index in range(first_marker, len(markers)):
+            markers[marker_index] = replace(markers[marker_index], file_pending_count=file_pending_count)
     return markers
 
 

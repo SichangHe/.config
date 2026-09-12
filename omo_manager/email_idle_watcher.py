@@ -107,7 +107,7 @@ TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 PWD_FOOTER_RE = re.compile(r"(?:^|\n)PWD: [^\n]+\n?\Z")
 TMUX_FOOTER_RE = re.compile(r"(?:^|\n)tmux: [^\r\n]+\r?\n?\Z", re.IGNORECASE)
 AGENT_LIFECYCLE_DIRECT_RE = re.compile(
-    r"\A[ \t]*(?P<action>replace|terminate)[ \t]+this[ \t]+agent\b",
+    r"\A[ \t]*(?P<action>replace|terminate)[ \t]+this[ \t]+agent(?![\w'’])",
     re.IGNORECASE,
 )
 AGENT_LIFECYCLE_REPLY_TAG_RE = re.compile(r"^\s*(?:re:\s*)+\[[^\]\r\n]{1,128}\](?:\s+|$)", re.IGNORECASE)

@@ -33,7 +33,7 @@ from pathlib import Path
 try:
     from omo_manager.omo_agent_status import parse_task_text
     from omo_manager.omo_codex_status import Args as StatusArgs
-    from omo_manager.omo_codex_status import CODEX_FOOTER_RE, current_block, current_input_text, exact_tail, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
+    from omo_manager.omo_codex_status import CODEX_FOOTER_RE, current_block, current_input_text, exact_tail, has_plan_prompt, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
     from omo_manager.omo_codex_status import status as classify_status
     from omo_manager.omo_codex_stop import extract_new_status_session_id, query_status_session_id
     from omo_manager.omo_task_lock import task_file_lock, task_target_lock
@@ -43,7 +43,7 @@ try:
 except ModuleNotFoundError:
     from omo_agent_status import parse_task_text  # pyright: ignore[reportImplicitRelativeImport]
     from omo_codex_status import Args as StatusArgs
-    from omo_codex_status import CODEX_FOOTER_RE, current_block, current_input_text, exact_tail, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
+    from omo_codex_status import CODEX_FOOTER_RE, current_block, current_input_text, exact_tail, has_plan_prompt, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
     from omo_codex_status import status as classify_status
     from omo_codex_stop import extract_new_status_session_id, query_status_session_id
     from omo_task_lock import task_file_lock, task_target_lock
@@ -1284,7 +1284,7 @@ def verify_same_pane(expected: Pane) -> None:
         raise StartError("tmux pane or window identity changed during launch.")
 
 
-def verify_same_process(expected: Pane) -> None:
+def verify_same_process(expected: Pane | ReconciliationBinding) -> None:
     current = resolve_pane(expected.target)
     if current.pane_id != expected.pane_id or current.window_id != expected.window_id:
         raise StartError("tmux pane or window identity changed before process replacement.")
@@ -1325,7 +1325,7 @@ def send_prompt(pane: Pane, prompt_path: Path) -> None:
     buffer_name = f"omo-codex-prompt-{nonce}"
     accepted = f"OMO_PROMPT_ACCEPTED_{nonce}"
     rejected = f"OMO_PROMPT_REJECTED_{nonce}"
-    loaded = run(["tmux", "set-buffer", "-b", buffer_name, "--", prompt_path.read_text(encoding="utf-8")])
+    loaded = run(["tmux", "set-buffer", "-b", buffer_name, "--", prompt_path.read_bytes().decode("utf-8")])
     if loaded.returncode != 0:
         raise StartError("failed to load task prompt; no prompt was sent.")
     sequence = " ; ".join(
@@ -1336,11 +1336,65 @@ def send_prompt(pane: Pane, prompt_path: Path) -> None:
         )
     )
     try:
+        require_prompt_ready(pane)
         result = run(["tmux", "if-shell", "-F", "-t", pane.target, condition, sequence, f"display-message -p {rejected}"])
     finally:
         _ = run(["tmux", "delete-buffer", "-b", buffer_name])
     if result.returncode != 0 or result.stdout != accepted + "\n":
         raise StartError("pane/window/process identity changed before prompt delivery; no prompt was sent.")
+    verify_prompt_submitted(pane, condition, nonce)
+
+
+def guarded_prompt_enter(pane: Pane, condition: str, nonce: str, attempt: int) -> None:
+    accepted = f"OMO_PROMPT_RETRY_ACCEPTED_{nonce}_{attempt}"
+    rejected = f"OMO_PROMPT_RETRY_REJECTED_{nonce}_{attempt}"
+    sequence = f"send-keys -t {shlex.quote(pane.pane_id)} Enter ; display-message -p {accepted}"
+    result = run(["tmux", "if-shell", "-F", "-t", pane.target, condition, sequence, f"display-message -p {rejected}"])
+    if result.returncode != 0 or result.stdout != accepted + "\n":
+        raise StartError("pane/window/process identity changed before prompt retry.")
+
+
+def prompt_state(pane: Pane | ReconciliationBinding) -> tuple[str, list[str], str]:
+    """Capture one Codex state while the fresh pane process stays fixed."""
+
+    verify_same_process(pane)
+    exists, lines = exact_tail(pane.target, 2000)
+    verify_same_process(pane)
+    if not exists:
+        raise StartError("fresh Codex pane disappeared while handling its initial prompt.")
+    state = classify_status(lines, current_block(lines))
+    if state == "not_codex":
+        raise StartError("fresh prompt handling no longer sees a Codex interface.")
+    if visible_error_lines(current_block(lines).lines, allow_cursor_quota=False) or state == "error":
+        raise StartError("fresh Codex pane showed an error while handling its initial prompt.")
+    if has_plan_prompt(lines):
+        raise StartError("fresh Codex prompt handling is blocked by an unsafe Plan prompt.")
+    return state, lines, current_input_text(lines)
+
+
+def require_prompt_ready(pane: Pane | ReconciliationBinding) -> None:
+    """Require an empty authenticated Codex composer before the first paste."""
+
+    state, _lines, input_text = prompt_state(pane)
+    if state not in {"ready", "running", "waiting_subagent"} or not is_stock_placeholder_input_text(input_text):
+        raise StartError("fresh Codex composer is not empty before initial prompt delivery.")
+
+
+# 🧑 "Another stuck input. Get your shit together!!"
+def verify_prompt_submitted(pane: Pane, condition: str, nonce: str) -> None:
+    """Retry Enter while the fresh bound Codex composer still contains text."""
+
+    attempt = 0
+    while True:
+        state, _lines, input_text = prompt_state(pane)
+        if is_stock_placeholder_input_text(input_text) and state in {"ready", "running", "waiting_subagent"}:
+            return
+        if not input_text:
+            raise StartError("fresh Codex composer changed to an unsupported state during initial prompt delivery.")
+        attempt += 1
+        print(f"omo_codex_start: retrying guarded Enter for initial prompt attempt={attempt}", file=sys.stderr)
+        guarded_prompt_enter(pane, condition, nonce, attempt)
+        time.sleep(0.25)
 
 
 def visible_status_card_session_id(text: str) -> str:
@@ -1389,6 +1443,7 @@ def query_exact_status_session_id(pane: Pane, n_lines: int, wait_s: float, stale
         )
     )
     try:
+        require_prompt_ready(pane)
         result = run(["tmux", "if-shell", "-F", "-t", pane.target, condition, sequence, "display-message -p OMO_STATUS_REJECTED"])
     finally:
         _ = run(["tmux", "delete-buffer", "-b", buffer_name])
@@ -1417,7 +1472,14 @@ def query_exact_status_session_id(pane: Pane, n_lines: int, wait_s: float, stale
     return ""
 
 
-def record_session_id(path: Path, session_id: str, expected_sha256: str = "", *, lock_held: bool = False) -> None:
+def record_session_id(
+    path: Path,
+    session_id: str,
+    expected_sha256: str = "",
+    *,
+    lock_held: bool = False,
+    replace_existing: bool = False,
+) -> None:
     """Atomically bind the captured Codex UUID in existing task frontmatter."""
     if UUID_RE.fullmatch(session_id) is None:
         raise StartError("Codex status did not return one valid session UUID.")
@@ -1430,9 +1492,11 @@ def record_session_id(path: Path, session_id: str, expected_sha256: str = "", *,
         raise StartError("task file requires valid frontmatter before session binding.")
     frontmatter, body = parts
     existing = [line.split(":", 1)[1].strip() for line in frontmatter if line.startswith("session_id:")]
-    if existing and existing != [session_id]:
+    if existing and existing != [session_id] and not replace_existing:
         raise StartError("task frontmatter already contains a different Codex session UUID.")
-    if not existing:
+    if existing and existing != [session_id]:
+        frontmatter = [f"session_id: {session_id}" if line.startswith("session_id:") else line for line in frontmatter]
+    elif not existing:
         frontmatter.append(f"session_id: {session_id}")
     trailing = "\n" if text.endswith("\n") else ""
     try:
@@ -2517,6 +2581,7 @@ def source1717_visible_status_evidence(binding: ReconciliationBinding) -> Reconc
 def query_reconciliation_session_id(pane: Pane | ReconciliationBinding, n_lines: int, wait_s: float) -> str:
     """Run the sole authorized `/status` query with a server-side guard per input."""
 
+    require_prompt_ready(pane)
     before = reconciliation_capture(pane, n_lines)
     buffer_name = f"omo-rotation-reconcile-{os.getpid()}-{time.monotonic_ns()}"
     loaded = run(["tmux", "set-buffer", "-b", buffer_name, "--", "/status"])
@@ -2535,6 +2600,9 @@ def query_reconciliation_session_id(pane: Pane | ReconciliationBinding, n_lines:
         if session_id:
             return session_id
         if not fallback_sent and any(line.lstrip().startswith("› ") and "/status" in line for line in after.splitlines()[-20:]):
+            state, _lines, input_text = prompt_state(pane)
+            if state not in {"ready", "running", "waiting_subagent"} or input_text.strip() != "/status":
+                raise StartError("reconciliation status composer changed before guarded Enter retry.")
             guarded_reconciliation_tmux(pane, f"send-keys -t {pane.pane_id} Enter")
             fallback_sent = True
         time.sleep(0.25)

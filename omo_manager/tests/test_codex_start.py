@@ -1312,7 +1312,13 @@ class CodexStartTests(unittest.TestCase):
             shell = replace(initial, command="sh", pane_pid=6262)
             rotated = False
             stopped = False
-            captures = iter(((True, ["old screen"]), (True, ["old screen", "/status", "no session row"])))
+            captures = iter(
+                (
+                    (True, ["old screen"]),
+                    (True, ["› Use /skills to list available skills", "  gpt-5.6-terra high"]),
+                    (True, ["old screen", "/status", "no session row"]),
+                )
+            )
             last_capture = (True, ["old screen", "/status", "no session row"])
 
             def capture_tail(*_args: object) -> tuple[bool, list[str]]:
@@ -1410,7 +1416,8 @@ class CodexStartTests(unittest.TestCase):
         pane = Pane("cfg:2.0", "%2", "@2", "bun", Path("/tmp"), 5252)
         old = self.SESSION_ID
         other = "119f670b-6a2f-7463-b9be-9aa6ff0cec43"
-        captures = iter(((True, ["before"]), (True, ["before", "/status", f"Session: {old}", f"Session: {other}"])))
+        ready = (True, ["› Use /skills to list available skills", "  gpt-5.6-terra high · /tmp · Context 0% used"])
+        captures = iter(((True, ["before"]), ready, (True, ["before", "/status", f"Session: {old}", f"Session: {other}"])))
         last_capture = (True, ["before", "/status", f"Session: {old}", f"Session: {other}"])
 
         def capture_tail(*_args: object) -> tuple[bool, list[str]]:
@@ -2483,8 +2490,9 @@ class CodexStartTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, output, "")
             return subprocess.CompletedProcess(command, 0, "", "")
 
-        with patch("omo_manager.omo_codex_start.run", side_effect=tmux):
+        with patch("omo_manager.omo_codex_start.require_prompt_ready") as ready, patch("omo_manager.omo_codex_start.run", side_effect=tmux):
             self.assertEqual("119f670b-6a2f-7463-b9be-9aa6ff0cec43", query_reconciliation_session_id(pane, 240, 10.0))
+        ready.assert_called_once_with(pane)
         input_commands = [command for command in commands if "if-shell" in command]
         self.assertEqual(2, len(input_commands))
         for command in input_commands:
@@ -2494,6 +2502,52 @@ class CodexStartTests(unittest.TestCase):
             self.assertIn("#{==:#{pane_pid},5252}", condition)
             self.assertIn("#{==:#{pane_current_command},bun}", condition)
         self.assertFalse(any(command[1] in {"paste-buffer", "send-keys"} for command in commands))
+
+    def test_reconciliation_status_query_does_not_submit_from_unsafe_ui(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bun", Path("/tmp"), 5252)
+        cases = {
+            "plan": ["Create a plan? shift + tab use Plan mode esc dismiss", "› choose an option", "  gpt-5.6-terra high"],
+            "non_codex": ["shell prompt"],
+            "error": ["■ Error: 429 Too Many Requests", "› Use /skills to list available skills", "  gpt-5.6-terra high"],
+        }
+        for label, lines in cases.items():
+            with self.subTest(label=label):
+                with (
+                    patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                    patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, lines)),
+                    patch("omo_manager.omo_codex_start.run") as run,
+                    self.assertRaises(StartError),
+                ):
+                    query_reconciliation_session_id(pane, 240, 10.0)
+                self.assertFalse(any(call.args[0][:2] == ["tmux", "if-shell"] for call in run.call_args_list))
+
+    def test_reconciliation_status_retry_does_not_submit_after_ui_change(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bun", Path("/tmp"), 5252)
+        cases = {
+            "plan": ["Create a plan? shift + tab use Plan mode esc dismiss", "› /status", "  gpt-5.6-terra high"],
+            "non_codex": ["shell prompt", "› /status"],
+            "error": ["■ Error: 429 Too Many Requests", "› /status", "  gpt-5.6-terra high"],
+        }
+        for label, lines in cases.items():
+            with self.subTest(label=label):
+                commands: list[list[str]] = []
+
+                def tmux(command: list[str], *, timeout_s: float = 10.0) -> subprocess.CompletedProcess[str]:
+                    del timeout_s
+                    commands.append(command)
+                    return subprocess.CompletedProcess(command, 0, "", "")
+
+                with (
+                    patch("omo_manager.omo_codex_start.require_prompt_ready"),
+                    patch("omo_manager.omo_codex_start.reconciliation_capture", side_effect=("before\n", "before\n› /status\n")),
+                    patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                    patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, lines)),
+                    patch("omo_manager.omo_codex_start.run", side_effect=tmux),
+                    patch("omo_manager.omo_codex_start.time.monotonic", return_value=0.0),
+                    self.assertRaises(StartError),
+                ):
+                    query_reconciliation_session_id(pane, 240, 10.0)
+                self.assertEqual(2, sum("if-shell" in command for command in commands))
 
     def test_reconciliation_owner_scan_excludes_concurrent_membership_change(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:

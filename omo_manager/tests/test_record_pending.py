@@ -56,10 +56,13 @@ class RecordPendingTests(unittest.TestCase):
         base = ["--pending-file", "task.md", "--line", "10", "--item", "review request"]
         with self.assertRaises(SystemExit):
             parse_args(base)
-        self.assertEqual(("🧑 review request",), parse_args([*base, "--human"]).items)
-        self.assertEqual(("review request",), parse_args([*base, "--agent"]).items)
+        self.assertEqual(("🧑 review request",), parse_args([*base, "--human-authored"]).items)
+        self.assertEqual(("review request",), parse_args([*base, "--agent-authored"]).items)
         with self.assertRaises(SystemExit):
-            parse_args([*base, "--agent", "--ack-human"])
+            parse_args([*base, "--agent-authored", "--ack-human"])
+        for old_flag in ("--human", "--agent"):
+            with self.subTest(old_flag=old_flag), self.assertRaises(SystemExit):
+                parse_args([*base, old_flag])
 
     def test_records_human_item_as_v2_object_after_enablement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

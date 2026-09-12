@@ -1396,16 +1396,10 @@ class EmailMeTests(unittest.TestCase):
             "agent@example.test",
         )
         with patch.object(omo_email_subject, "find_recent_thread", return_value=header):
-            prepared = omo_email_subject.prepare_subject_and_headers(
-                "Re: [wl:3] Primary topic", "wl:7", route_profile=profile
-            )
-        self.assertEqual(
-            (
-                "Re: [wl:7] Primary topic",
-                {"In-Reply-To": parent, "References": f"<primary-root@example.test> {parent}"},
-            ),
-            prepared,
-        )
+            with self.assertRaisesRegex(omo_email_subject.SubjectInputError, "addressed to wl:3; wl:7 may not retag it"):
+                omo_email_subject.prepare_subject_and_headers(
+                    "Re: [wl:3] Primary topic", "wl:7", route_profile=profile
+                )
         with patch.object(omo_email_subject, "verified_recent_thread_header") as lookup:
             new_topic = omo_email_subject.prepare_subject_and_headers(
                 "回复：Primary new topic", "wl:7", route_profile=profile

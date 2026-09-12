@@ -145,7 +145,7 @@ class ParsedArgs(argparse.Namespace):
 
 
 def parse_args(argv: list[str]) -> Args:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -157,13 +157,19 @@ def parse_args(argv: list[str]) -> Args:
     list_parser.set_defaults(command="pending-list")
     _ = list_parser.add_argument("task_file", type=Path)
 
-    add_parser = subparsers.add_parser("pending-add", aliases=["add"], help="Append one or more pending_task_items.", description=PENDING_ITEM_PROVENANCE_HELP)
+    add_parser = subparsers.add_parser(
+        "pending-add",
+        aliases=["add"],
+        help="Append one or more pending_task_items.",
+        description=PENDING_ITEM_PROVENANCE_HELP,
+        allow_abbrev=False,
+    )
     add_parser.set_defaults(command="pending-add")
     _ = add_parser.add_argument("task_file", type=Path)
     _ = add_parser.add_argument("--item", action="append", required=True, help="Pending task item to add. Pass once per item.")
     origin = add_parser.add_mutually_exclusive_group(required=True)
-    _ = origin.add_argument("--human", action="store_const", const="human", dest="item_origin", help="Mark added items as Human requests.")
-    _ = origin.add_argument("--agent", action="store_const", const="agent", dest="item_origin", help="Mark added items as agent-created work.")
+    _ = origin.add_argument("--human-authored", action="store_const", const="human", dest="item_origin", help="Mark added items as Human-authored requests.")
+    _ = origin.add_argument("--agent-authored", action="store_const", const="agent", dest="item_origin", help="Mark added items as agent-authored work.")
 
     replace_parser = subparsers.add_parser("pending-replace", aliases=["replace", "update"], help="Replace one exact pending_task_item.")
     replace_parser.set_defaults(command="pending-replace")

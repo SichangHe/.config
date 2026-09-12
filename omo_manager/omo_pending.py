@@ -63,14 +63,19 @@ def pending_item_state(item: PendingTaskItem) -> str:
 
 
 def parse_args(argv: list[str]) -> Args:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list", help="Print open items, one per line.")
-    add = sub.add_parser("add", help="Add open work with explicit provenance.", description=PENDING_ITEM_PROVENANCE_HELP)
+    add = sub.add_parser(
+        "add",
+        help="Add open work with explicit provenance.",
+        description=PENDING_ITEM_PROVENANCE_HELP,
+        allow_abbrev=False,
+    )
     add.add_argument("--item", action="append", required=True)
     origin = add.add_mutually_exclusive_group(required=True)
-    origin.add_argument("--human", action="store_const", const="human", dest="item_origin", help="Mark added items as Human requests.")
-    origin.add_argument("--agent", action="store_const", const="agent", dest="item_origin", help="Mark added items as agent-created work.")
+    origin.add_argument("--human-authored", action="store_const", const="human", dest="item_origin", help="Mark added items as Human-authored requests.")
+    origin.add_argument("--agent-authored", action="store_const", const="agent", dest="item_origin", help="Mark added items as agent-authored work.")
     replace = sub.add_parser("replace", help="Replace one exact open item.")
     replace.add_argument("--old-item")
     replace.add_argument("--item-id")

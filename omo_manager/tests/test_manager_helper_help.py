@@ -30,7 +30,7 @@ class ManagerHelperHelpTests(unittest.TestCase):
             record_help,
             helper_help("omo_task_edit.py", "pending-add"),
         ):
-            self.assertIn("Pass exactly one of --human or --agent", provenance_help)
+            self.assertIn("Pass exactly one of --human-authored or --agent-authored", provenance_help)
             self.assertIn("Human requests appear with a 🧑 prefix", provenance_help)
 
         move_help = helper_help("omo_task_edit.py", "pending-move")

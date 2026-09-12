@@ -119,7 +119,7 @@ class AgentLifecycleCommandParserTests(unittest.TestCase):
             termination,
         )
 
-    def test_long_lifecycle_custody_payload_is_not_truncated(self) -> None:
+    def test_lifecycle_delivery_does_not_inline_custody_payload(self) -> None:
         context = "reason-" + ("x" * pending_watcher.LIFECYCLE_DELIVERY_CHAR_LIMIT)
         items = tuple(f"task-{index}-" + ("y" * 500) for index in range(12))
         binding = watcher.AgentLifecycleBinding(
@@ -182,10 +182,10 @@ class AgentLifecycleCommandParserTests(unittest.TestCase):
 
         termination_delivery = pending_watcher.lifecycle_marker_delivery_text(termination_marker, ())
         replacement_delivery = pending_watcher.lifecycle_marker_delivery_text(replacement_marker, ())
-        self.assertIn(json.dumps(list(items), ensure_ascii=False, separators=(",", ":")), termination_delivery)
-        self.assertIn(json.dumps(context, ensure_ascii=False), replacement_delivery)
-        self.assertNotIn("…", termination_delivery)
-        self.assertNotIn("…", replacement_delivery)
+        self.assertNotIn(json.dumps(list(items), ensure_ascii=False, separators=(",", ":")), termination_delivery)
+        self.assertNotIn(json.dumps(context, ensure_ascii=False), replacement_delivery)
+        self.assertLess(len(termination_delivery), 300)
+        self.assertLess(len(replacement_delivery), 300)
 
     def test_rejects_please_synonyms_nonleading_and_incomplete_phrases(self) -> None:
         for body in (
@@ -198,6 +198,9 @@ class AgentLifecycleCommandParserTests(unittest.TestCase):
             "Thanks.\n\nTerminate this agent",
             "> terminate this agent",
             "replace this agency",
+            "Replace this agent's instructions",
+            "Terminate this agent’s session",
+            "Stop saying DeepWiki. It’s DeGenTWeb, and you should simply say dw",
         ):
             with self.subTest(body=body):
                 self.assertIsNone(watcher.agent_lifecycle_command(body))
@@ -254,12 +257,12 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
             'decision: ordered queued task message text (do not record in manager pending_task_items): ["first task","second task"]',
             marker.block_text,
         )
-        self.assertIn("A Human lifecycle request requires manager review.", delivery)
-        self.assertIn("addressed_task: worker.md", delivery)
+        self.assertIn("The Human asked to terminate worker:2.", delivery)
+        self.assertNotIn("addressed_task:", delivery)
         self.assertNotIn("omo_queue_transfer.py", delivery)
-        self.assertIn('decision: ordered queued task message text (do not record in manager pending_task_items): ["first task","second task"]', delivery)
+        self.assertNotIn("pending_task_items_ordered_json", delivery)
         self.assertIn("Terminate this agent and preserve the queue.", delivery)
-        self.assertIn("Authenticated transport:", delivery)
+        self.assertIn("custody record is stored", delivery)
         self.assertNotIn("<human_instruction>", delivery)
 
         consumed_worker = parse_task_metadata(self.worker_task.read_text(encoding="utf-8"), self.root)
@@ -309,10 +312,8 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
             manager_only=True,
         )
 
-        self.assertIn(
-            'decision: after replacement, deliver this exact JSON-decoded text to the replacement agent: "\\nThe previous agent ignored the requested tests."',
-            delivery,
-        )
+        self.assertIn("The Human asked to replace worker:2.", delivery)
+        self.assertIn("The previous agent ignored the requested tests.", delivery)
 
     def test_manager_review_delivery_is_bounded_and_does_not_expand_referenced_records(self) -> None:
         manager_body = "manager history that must not be delivered\n" * 833
@@ -345,11 +346,10 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
         self.assertEqual("main:0", route.manager_target)
         self.assertEqual(["manager_mail/42.txt"], [attachment.source for attachment in attachments])
         self.assertLessEqual(len(delivery), pending_watcher.LIFECYCLE_DELIVERY_CHAR_LIMIT)
-        self.assertIn("requested_action: review", delivery)
-        self.assertIn("addressed_task: worker.md", delivery)
-        self.assertIn("addressed_target: dw:0", delivery)
-        self.assertIn("responsible_manager_target: main:0", delivery)
-        self.assertIn("task_status: long_running", delivery)
+        self.assertIn("An exact agent lifecycle command for dw:0 needs manager handling", delivery)
+        self.assertNotIn("addressed_task:", delivery)
+        self.assertNotIn("responsible_manager_target:", delivery)
+        self.assertNotIn("task_status:", delivery)
         self.assertIn("Review this lifecycle request.", delivery)
         self.assertNotIn("pending_task_items_ordered_json", delivery)
         self.assertNotIn("task_sha256_before_transport", delivery)
@@ -575,7 +575,6 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
         _route, first_line = watcher.append_agent_lifecycle_pending(
             self.args, self.mail, "Re: [worker:2] work", command
         )
-        marker = pending_watcher.find_markers(self.root, [self.worker_task])[0]
         after_first = self.worker_task.read_bytes()
 
         _route, replay_line = watcher.append_agent_lifecycle_pending(

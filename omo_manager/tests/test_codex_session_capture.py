@@ -4,13 +4,160 @@ from argparse import Namespace
 from pathlib import Path
 
 from unittest.mock import ANY, patch
-from omo_manager.omo_codex_start import Args, Pane, StartError, launch_command, query_exact_status_session_id, record_session_id
+from omo_manager.omo_codex_start import Args, Pane, StartError, launch_command, query_exact_status_session_id, record_session_id, send_prompt
 from omo_manager.omo_task_metadata import TaskFrontmatterError, parse_task_metadata
 from omo_manager.omo_codex_session_migrate import CODEX_PANE_COMMANDS, active_target_owners, authorized_human_targets, candidates, parse_args as parse_migration_args, run as run_migration, selected_candidates, submit_existing_input
 
 
 class CodexSessionCaptureTests(unittest.TestCase):
     UUID = "019f670b-6a2f-7463-b9be-9aa6ff0cec43"
+    READY = ["› Use /skills to list available skills", "  gpt-5.6-terra high · /tmp · Context 0% used"]
+
+    def test_fresh_prompt_retries_collapsed_composer_on_bound_process(self):
+        pane = Pane("dw:46.0", "%46", "@46", "bunx", Path("/tmp"), 4246)
+        ready = ["› Use /skills to list available skills", "  gpt-5.6-terra high · /tmp · Context 0% used"]
+        collapsed = [
+            "› [Pasted Content 2041 chars][Pasted Content 1024 chars]",
+            "  gpt-5.6-terra high · /tmp · Context 0% used",
+        ]
+        cleared = ["• Working", "› Use /skills to list available skills", "  gpt-5.6-terra high · /tmp · Context 1% used"]
+        calls: list[list[str]] = []
+
+        def run(argv, **_kwargs):
+            calls.append(argv)
+            if argv[:3] == ["tmux", "if-shell", "-F"]:
+                accepted = next(part for part in argv[6].split(" ; ") if part.startswith("display-message -p ")).split()[-1]
+                return __import__("subprocess").CompletedProcess(argv, 0, accepted + "\n", "")
+            return __import__("subprocess").CompletedProcess(argv, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            prompt = Path(directory) / "prompt"
+            prompt.write_bytes(b"first\r\nsecond\n")
+            with (
+                patch("omo_manager.omo_codex_start.run", side_effect=run),
+                patch("omo_manager.omo_codex_start.verify_same_process"),
+                patch("omo_manager.omo_codex_start.exact_tail", side_effect=((True, ready), (True, collapsed), (True, collapsed), (True, cleared))),
+                patch("omo_manager.omo_codex_start.time.monotonic", return_value=0.0),
+                patch("omo_manager.omo_codex_start.time.sleep"),
+            ):
+                send_prompt(pane, prompt)
+
+        self.assertEqual("first\r\nsecond\n", calls[0][-1])
+        guarded = [call for call in calls if call[:3] == ["tmux", "if-shell", "-F"]]
+        self.assertEqual(3, len(guarded))
+        self.assertTrue(all("#{pane_id},%46" in call[5] for call in guarded))
+        self.assertTrue(all("#{pane_pid},4246" in call[5] for call in guarded))
+        self.assertEqual(1, sum(call[:3] == ["tmux", "delete-buffer", "-b"] for call in calls))
+
+    def test_fresh_prompt_does_not_retry_plan_prompt(self):
+        pane = Pane("dw:46.0", "%46", "@46", "bunx", Path("/tmp"), 4246)
+        plan = ["Create a plan? shift + tab use Plan mode esc dismiss", "› choose an option", "  gpt-5.6-terra high"]
+        calls: list[list[str]] = []
+
+        def run(argv, **_kwargs):
+            calls.append(argv)
+            if argv[:3] == ["tmux", "if-shell", "-F"]:
+                accepted = next(part for part in argv[6].split(" ; ") if part.startswith("display-message -p ")).split()[-1]
+                return __import__("subprocess").CompletedProcess(argv, 0, accepted + "\n", "")
+            return __import__("subprocess").CompletedProcess(argv, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            prompt = Path(directory) / "prompt"
+            prompt.write_text("work", encoding="utf-8")
+            with (
+                patch("omo_manager.omo_codex_start.run", side_effect=run),
+                patch("omo_manager.omo_codex_start.verify_same_process"),
+                patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, plan)),
+                patch("omo_manager.omo_codex_start.time.monotonic", return_value=0.0),
+                self.assertRaisesRegex(StartError, "unsafe Plan prompt"),
+            ):
+                send_prompt(pane, prompt)
+
+        guarded = [call for call in calls if call[:3] == ["tmux", "if-shell", "-F"]]
+        self.assertEqual(0, len(guarded))
+
+    def test_fresh_prompt_stops_without_retry_after_process_identity_change(self):
+        pane = Pane("dw:46.0", "%46", "@46", "bunx", Path("/tmp"), 4246)
+        ready = ["› Use /skills to list available skills", "  gpt-5.6-terra high"]
+        collapsed = ["› [Pasted Content 2041 chars]", "  gpt-5.6-terra high"]
+        calls: list[list[str]] = []
+
+        def run(argv, **_kwargs):
+            calls.append(argv)
+            if argv[:3] == ["tmux", "if-shell", "-F"]:
+                accepted = next(part for part in argv[6].split(" ; ") if part.startswith("display-message -p ")).split()[-1]
+                return __import__("subprocess").CompletedProcess(argv, 0, accepted + "\n", "")
+            return __import__("subprocess").CompletedProcess(argv, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            prompt = Path(directory) / "prompt"
+            prompt.write_text("work", encoding="utf-8")
+            with (
+                patch("omo_manager.omo_codex_start.run", side_effect=run),
+                patch(
+                    "omo_manager.omo_codex_start.verify_same_process",
+                    side_effect=(None, None, None, StartError("tmux pane process identity changed before process replacement.")),
+                ),
+                patch("omo_manager.omo_codex_start.exact_tail", side_effect=((True, ready), (True, collapsed))),
+                self.assertRaisesRegex(StartError, "process identity changed"),
+            ):
+                send_prompt(pane, prompt)
+
+        guarded = [call for call in calls if call[:3] == ["tmux", "if-shell", "-F"]]
+        self.assertEqual(1, len(guarded))
+
+    def test_fresh_prompt_stops_without_retry_after_ui_change(self):
+        pane = Pane("dw:46.0", "%46", "@46", "bunx", Path("/tmp"), 4246)
+        ready = ["› Use /skills to list available skills", "  gpt-5.6-terra high"]
+        calls: list[list[str]] = []
+
+        def run(argv, **_kwargs):
+            calls.append(argv)
+            if argv[:3] == ["tmux", "if-shell", "-F"]:
+                accepted = next(part for part in argv[6].split(" ; ") if part.startswith("display-message -p ")).split()[-1]
+                return __import__("subprocess").CompletedProcess(argv, 0, accepted + "\n", "")
+            return __import__("subprocess").CompletedProcess(argv, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            prompt = Path(directory) / "prompt"
+            prompt.write_text("work", encoding="utf-8")
+            with (
+                patch("omo_manager.omo_codex_start.run", side_effect=run),
+                patch("omo_manager.omo_codex_start.verify_same_process"),
+                patch("omo_manager.omo_codex_start.exact_tail", side_effect=((True, ready), (True, ["shell prompt"]))),
+                self.assertRaisesRegex(StartError, "no longer sees a Codex interface"),
+            ):
+                send_prompt(pane, prompt)
+
+        guarded = [call for call in calls if call[:3] == ["tmux", "if-shell", "-F"]]
+        self.assertEqual(1, len(guarded))
+
+    def test_fresh_prompt_stops_without_retry_after_error(self):
+        pane = Pane("dw:46.0", "%46", "@46", "bunx", Path("/tmp"), 4246)
+        ready = ["› Use /skills to list available skills", "  gpt-5.6-terra high"]
+        error = ["■ Error: 429 Too Many Requests", "› [Pasted Content 2041 chars]", "  gpt-5.6-terra high"]
+        calls: list[list[str]] = []
+
+        def run(argv, **_kwargs):
+            calls.append(argv)
+            if argv[:3] == ["tmux", "if-shell", "-F"]:
+                accepted = next(part for part in argv[6].split(" ; ") if part.startswith("display-message -p ")).split()[-1]
+                return __import__("subprocess").CompletedProcess(argv, 0, accepted + "\n", "")
+            return __import__("subprocess").CompletedProcess(argv, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            prompt = Path(directory) / "prompt"
+            prompt.write_text("work", encoding="utf-8")
+            with (
+                patch("omo_manager.omo_codex_start.run", side_effect=run),
+                patch("omo_manager.omo_codex_start.verify_same_process"),
+                patch("omo_manager.omo_codex_start.exact_tail", side_effect=((True, ready), (True, error))),
+                self.assertRaisesRegex(StartError, "showed an error"),
+            ):
+                send_prompt(pane, prompt)
+
+        guarded = [call for call in calls if call[:3] == ["tmux", "if-shell", "-F"]]
+        self.assertEqual(1, len(guarded))
 
     def test_migration_accepts_live_bunx_launcher_command(self):
         self.assertIn("bunx", CODEX_PANE_COMMANDS)
@@ -233,6 +380,17 @@ class CodexSessionCaptureTests(unittest.TestCase):
             with self.assertRaises(StartError):
                 record_session_id(path, self.UUID, "0" * 64)
 
+    def test_deliberately_fresh_launch_can_replace_stale_session_id(self):
+        stale = "11111111-1111-4111-8111-111111111111"
+        text = f"---\nversion: v1.0.0\nstatus: running\nrunat: w:1\ntool: codex\nsession_id: {stale}\nmanagerat: w:2\nis_manager: false\npending_task_items: []\n---\n"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "task.md"
+            path.write_text(text)
+
+            record_session_id(path, self.UUID, replace_existing=True)
+
+            self.assertEqual(parse_task_metadata(path.read_text()).session_id, self.UUID)
+
     def test_non_codex_session_id_rejected(self):
         text = "---\nversion: v1.0.0\nstatus: running\nrunat: w:1\ntool: pcodx\nmanagerat: w:2\nis_manager: false\npending_task_items: []\nsession_id: %s\n---\n" % self.UUID
         with self.assertRaises(TaskFrontmatterError):
@@ -260,7 +418,7 @@ class CodexSessionCaptureTests(unittest.TestCase):
                 return __import__("subprocess").CompletedProcess(argv, 0, token + "\n", "")
             return completed
 
-        tails = iter(((True, ["before"]), (True, ["after"])))
+        tails = iter(((True, ["before"]), (True, self.READY), (True, ["after"])))
         with patch("omo_manager.omo_codex_start.run", side_effect=fake_run) as run_mock, patch("omo_manager.omo_codex_start.exact_tail", side_effect=lambda *_: next(tails)), patch("omo_manager.omo_codex_start.extract_new_status_session_id", return_value=self.UUID), patch("omo_manager.omo_codex_start.verify_same_process"):
             self.assertEqual(self.UUID, query_exact_status_session_id(pane, 80, 1))
         if_shell = next(call.args[0] for call in run_mock.call_args_list if call.args[0][:3] == ["tmux", "if-shell", "-F"])
@@ -278,7 +436,7 @@ class CodexSessionCaptureTests(unittest.TestCase):
             return completed
 
         status = f"╭────╮\n│ >_ OpenAI Codex (v0.150.1) │\n│ Session: {self.UUID} │\n╰────╯"
-        with patch("omo_manager.omo_codex_start.run", side_effect=fake_run), patch("omo_manager.omo_codex_start.exact_tail", side_effect=((True, [status]), (True, [status]))), patch("omo_manager.omo_codex_start.verify_same_process"):
+        with patch("omo_manager.omo_codex_start.run", side_effect=fake_run), patch("omo_manager.omo_codex_start.exact_tail", side_effect=((True, [status]), (True, self.READY), (True, [status]))), patch("omo_manager.omo_codex_start.verify_same_process"):
             self.assertEqual(self.UUID, query_exact_status_session_id(pane, 80, 1))
 
     def test_exact_status_ignores_stale_visible_uuid_until_new_response(self):
@@ -296,7 +454,7 @@ class CodexSessionCaptureTests(unittest.TestCase):
         new_status = f"{old_status}\n/status\n│ Session: {new_session} │"
         with (
             patch("omo_manager.omo_codex_start.run", side_effect=fake_run),
-            patch("omo_manager.omo_codex_start.exact_tail", side_effect=((True, [old_status]), (True, [old_status]), (True, [new_status]))),
+            patch("omo_manager.omo_codex_start.exact_tail", side_effect=((True, [old_status]), (True, self.READY), (True, [old_status]), (True, [new_status]))),
             patch("omo_manager.omo_codex_start.verify_same_process"),
             patch("omo_manager.omo_codex_start.time.sleep"),
         ):
@@ -315,7 +473,7 @@ class CodexSessionCaptureTests(unittest.TestCase):
 
         with (
             patch("omo_manager.omo_codex_start.run", side_effect=fake_run),
-            patch("omo_manager.omo_codex_start.exact_tail", side_effect=((True, ["fresh pane"]), (True, [f"/status\n{status}"]))),
+            patch("omo_manager.omo_codex_start.exact_tail", side_effect=((True, ["fresh pane"]), (True, self.READY), (True, [f"/status\n{status}"]))),
             patch("omo_manager.omo_codex_start.verify_same_process"),
         ):
             self.assertEqual(self.UUID, query_exact_status_session_id(pane, 80, 1, self.UUID))
@@ -335,12 +493,33 @@ class CodexSessionCaptureTests(unittest.TestCase):
 
         with (
             patch("omo_manager.omo_codex_start.run", side_effect=fake_run),
-            patch("omo_manager.omo_codex_start.exact_tail", side_effect=((True, [before]), (True, [after]))),
+            patch("omo_manager.omo_codex_start.exact_tail", side_effect=((True, [before]), (True, self.READY), (True, [after]))),
             patch("omo_manager.omo_codex_start.verify_same_process"),
             patch("omo_manager.omo_codex_start.time.monotonic", side_effect=(0.0, 0.5, 1.0)),
             patch("omo_manager.omo_codex_start.time.sleep"),
         ):
             self.assertEqual("", query_exact_status_session_id(pane, 80, 1, self.UUID))
+
+    def test_exact_status_does_not_submit_from_plan_or_non_codex_ui(self):
+        pane = Pane("w:1.0", "%1", "@1", "bun", Path("/tmp"), 42)
+        unsafe_states = (
+            ["Create a plan? shift + tab use Plan mode esc dismiss", "› choose an option", "  gpt-5.6-terra high"],
+            ["user@host:~$"],
+            ["■ Error: 429 Too Many Requests", "› Use /skills to list available skills", "  gpt-5.6-terra high"],
+        )
+        for unsafe in unsafe_states:
+            calls: list[list[str]] = []
+
+            def fake_run(argv):
+                calls.append(argv)
+                return __import__("subprocess").CompletedProcess(argv, 0, "", "")
+
+            with self.subTest(unsafe=unsafe), patch("omo_manager.omo_codex_start.run", side_effect=fake_run), patch(
+                "omo_manager.omo_codex_start.exact_tail", side_effect=((True, ["before"]), (True, unsafe))
+            ), patch("omo_manager.omo_codex_start.verify_same_process"), self.assertRaises(StartError):
+                query_exact_status_session_id(pane, 80, 1)
+
+            self.assertFalse(any(call[:3] == ["tmux", "if-shell", "-F"] for call in calls))
 
     def test_exact_status_rejects_plain_stale_session_line(self):
         from omo_manager.omo_codex_start import visible_status_card_session_id

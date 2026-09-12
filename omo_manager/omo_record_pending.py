@@ -57,6 +57,7 @@ def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
         epilog=f"""Use this helper for pending blocks that create new task items. It
 validates that the `(pending)` marker is still at --line before atomically
 recording the items and removing the marker.
@@ -73,8 +74,8 @@ paths out of worker prompts.""",
     _ = parser.add_argument("--task-file", type=Path, help="Initial owner task file that receives `pending_task_items`; defaults to --pending-file.")
     _ = parser.add_argument("--item", action="append", default=[], help="Pending task item to append. Pass once per item.")
     origin = parser.add_mutually_exclusive_group(required=True)
-    _ = origin.add_argument("--human", action="store_const", const="human", dest="item_origin", help="Mark added items as Human requests.")
-    _ = origin.add_argument("--agent", action="store_const", const="agent", dest="item_origin", help="Mark added items as agent-created work.")
+    _ = origin.add_argument("--human-authored", action="store_const", const="human", dest="item_origin", help="Mark added items as Human-authored requests.")
+    _ = origin.add_argument("--agent-authored", action="store_const", const="agent", dest="item_origin", help="Mark added items as agent-authored work.")
     _ = parser.add_argument("--ack-human", action="store_true", help="Email the human after the pending marker and items are recorded.")
     _ = parser.add_argument("--email-file", type=Path, help="Stored `manager_mail/*.txt` file whose `Subject:` header should be used for the human acknowledgement.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
@@ -85,7 +86,7 @@ paths out of worker prompts.""",
     if not items:
         parser.error("at least one --item is required; use omo_task_edit.py pending-marker-clear for no-item acknowledgements or omo_task_edit.py pending-replace/pending-remove for existing-item edits.")
     if parsed.ack_human and parsed.item_origin != "human":
-        parser.error("--ack-human requires --human.")
+        parser.error("--ack-human requires --human-authored.")
     return Args(parsed.root.resolve(), parsed.pending_file, parsed.line, parsed.task_file or parsed.pending_file, items, parsed.ack_human, parsed.email_file)
 
 

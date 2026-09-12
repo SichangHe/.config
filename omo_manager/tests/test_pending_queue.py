@@ -59,9 +59,22 @@ class PendingQueueTests(unittest.TestCase):
     def test_add_requires_and_encodes_explicit_provenance(self) -> None:
         with self.assertRaises(SystemExit):
             parse_args(["add", "--item", "review request"])
-        self.assertEqual(("🧑 review request",), parse_args(["add", "--human", "--item", "review request"]).items)
-        self.assertEqual(("review request",), parse_args(["add", "--agent", "--item", "review request"]).items)
-        self.assertEqual(("review request",), parse_args(["add", "--agent", "--item", "🧑 🧑 review request"]).items)
+        self.assertEqual(("🧑 review request",), parse_args(["add", "--human-authored", "--item", "review request"]).items)
+        self.assertEqual(("review request",), parse_args(["add", "--agent-authored", "--item", "review request"]).items)
+        self.assertEqual(("review request",), parse_args(["add", "--agent-authored", "--item", "🧑 🧑 review request"]).items)
+        for old_flag in ("--human", "--agent"):
+            with self.subTest(old_flag=old_flag), self.assertRaises(SystemExit):
+                parse_args(["add", old_flag, "--item", "review request"])
+
+    def test_add_help_defines_provenance_by_author(self) -> None:
+        output = StringIO()
+        with redirect_stdout(output), self.assertRaises(SystemExit):
+            parse_args(["add", "--help"])
+
+        help_text = " ".join(output.getvalue().split())
+        self.assertIn("trusted caller assertion; helpers do not infer authorship", help_text)
+        self.assertIn("who authored the pending item", help_text)
+        self.assertIn("even when it asks for or awaits a Human decision", help_text)
 
     def test_replace_preserves_human_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

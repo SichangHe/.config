@@ -1070,6 +1070,7 @@ def task_frontmatter(args: Args, runat: str, managerat: str) -> str:
                 "status": status,
                 "runat": runat,
                 "tool": effective_tool(args),
+                **({"session_id": args.session_id} if args.session_id and effective_tool(args) == "codex" else {}),
                 "managerat": managerat,
                 "is_manager": args.is_manager,
                 **({"blocked_on": blocked_on} if blocked_on else {}),
@@ -1088,6 +1089,7 @@ def task_frontmatter(args: Args, runat: str, managerat: str) -> str:
             *([f"blocked_on: {DEFAULT_LONG_RUNNING_BLOCKED_ON}"] if args.is_manager else []),
             f"runat: {runat}",
             f"tool: {effective_tool(args)}",
+            *([f"session_id: {args.session_id}"] if args.session_id and effective_tool(args) == "codex" else []),
             f"managerat: {managerat}",
             f"is_manager: {is_manager}",
             "pending_task_items: []",
@@ -1136,6 +1138,8 @@ def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> st
         external = [blocker for blocker in blockers if blocker.get("kind") not in {"pending_items", "persistent"}]
         values["runat"] = tmux_target
         values["tool"] = effective_tool(args)
+        if args.session_id and effective_tool(args) == "codex":
+            values["session_id"] = args.session_id
         if args.manager_target:
             values["managerat"] = args.manager_target
         if args.is_manager:
@@ -1157,6 +1161,8 @@ def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> st
         "runat": tmux_target,
         "tool": effective_tool(args),
     }
+    if args.session_id and effective_tool(args) == "codex":
+        updates["session_id"] = args.session_id
     if args.manager_target:
         updates["managerat"] = args.manager_target
     if args.is_manager:
@@ -1300,6 +1306,28 @@ def write_human_instruction_file(excerpt: str, source: str = "") -> Path:
 
 def write_manager_delegation_file(prompt_file: Path, source_target: str) -> Path:
     return write_instruction_file(manager_delegation(prompt_file.read_text(encoding="utf-8"), source_target), "omo-manager-delegation.")
+
+
+def write_combined_prompt_file(paths: list[Path]) -> Path:
+    """Freeze the prior command-substitution prompt bytes before a fresh launch."""
+    with tempfile.NamedTemporaryFile("wb", prefix="omo-task-codex-prompt-", delete=False) as handle:
+        os.fchmod(handle.fileno(), 0o600)
+        payload = b"".join(path.read_bytes() for path in paths).rstrip(b"\n")
+        handle.write(payload)
+        return Path(handle.name)
+
+
+# 🧑 "we would extract session IDs when we start codec or maybe cursor. So that we don't need to get the session ID when we close the agent, but instead we already have it always."
+def capture_fresh_codex_session(target: str, task: Path, prompt: Path, expected_task_sha256: str) -> None:
+    """Bind a fresh Codex UUID before delivering its first prompt."""
+    from omo_manager.omo_codex_start import query_exact_status_session_id, record_session_id, resolve_pane, send_prompt
+
+    pane = resolve_pane(target)
+    session_id = query_exact_status_session_id(pane, 240, 10.0)
+    if not session_id:
+        raise RuntimeError("could not capture the new Codex session id; no prompt was sent.")
+    record_session_id(task, session_id, expected_task_sha256, replace_existing=True)
+    send_prompt(pane, prompt)
 
 
 def prompt_input(
@@ -1779,10 +1807,31 @@ def start_codex(target: str, args: Args) -> None:
         else args.prompt_file
     )
     remove_manager_delegation_file = not prepared_exact_prompt and manager_delegation_file is not None and manager_delegation_file != args.prompt_file
+    captured_prompt: Path | None = None
+    expected_task_sha256 = ""
     try:
         pane_id = exact_pane_id_for_args(target, args if prepared_exact_prompt else None)
         if not pane_id:
             raise RuntimeError(f"new task target {target} does not resolve to its exact pane.")
+        capture_session = (
+            effective_tool(args) == "codex"
+            and not args.session_id
+            and not args.resume_idle
+            and not prepared_exact_prompt
+            and task_path(args.root, args.task_file).is_file()
+        )
+        if capture_session:
+            prompt_sources = [DEFAULT_WORKER_INSTRUCTIONS]
+            if vl_agent:
+                prompt_sources.append(VL_WORKER_INSTRUCTIONS)
+            if manager_file is not None:
+                prompt_sources.append(manager_file)
+            if manager_delegation_file is not None:
+                prompt_sources.append(manager_delegation_file)
+            if human_instruction_file is not None:
+                prompt_sources.append(human_instruction_file)
+            captured_prompt = write_combined_prompt_file(prompt_sources)
+            expected_task_sha256 = hashlib.sha256(task_path(args.root, args.task_file).read_bytes()).hexdigest()
         command = codex_cmd(
             args.session_id,
             args.reasoning_effort,
@@ -1793,7 +1842,7 @@ def start_codex(target: str, args: Args) -> None:
             args.model,
             manager_file,
             human_instruction_file,
-            not args.resume_idle and not prepared_exact_prompt,
+            not args.resume_idle and not prepared_exact_prompt and not capture_session,
             args.workdir,
             args.prepared_runtime_path,
         )
@@ -1823,13 +1872,19 @@ def start_codex(target: str, args: Args) -> None:
                 )
             require_same_launch_pane(target, pane_id, args if prepared_exact_prompt else None)
             _ = tmux_for_args(args if prepared_exact_prompt else None, ["send-keys", "-t", pane_id, shell_launch, "Enter"], check=True)
-            if wait_command_started(
+            launch_result = wait_command_started(
                 target,
                 launch_marker=launch_marker,
                 pane_id=pane_id,
                 baseline_lines=baseline_lines,
                 client_args=args if prepared_exact_prompt else None,
-            ) != CODEX_LAUNCH_UPDATED:
+            )
+            if launch_result != CODEX_LAUNCH_UPDATED:
+                if capture_session:
+                    if captured_prompt is None:
+                        raise RuntimeError("fresh Codex prompt was not captured.")
+                    task = task_path(args.root, args.task_file)
+                    capture_fresh_codex_session(target, task, captured_prompt, expected_task_sha256)
                 return
             if prepared_exact_prompt:
                 wait_shell(pane_id, timeout_s=15.0, client_args=args)
@@ -1841,6 +1896,8 @@ def start_codex(target: str, args: Args) -> None:
             human_instruction_file.unlink(missing_ok=True)
         if remove_manager_delegation_file and manager_delegation_file is not None:
             manager_delegation_file.unlink(missing_ok=True)
+        if captured_prompt is not None:
+            captured_prompt.unlink(missing_ok=True)
 
 
 def prepared_tmux_pane_inventory(args: Args) -> dict[str, TmuxPaneCreationIdentity]:

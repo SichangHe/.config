@@ -29,7 +29,12 @@ V2_ALLOWED_FIELDS = V2_REQUIRED_FIELDS | {"blocked_on", "resume_status", "sessio
 # agent-made ones. My sense is we enforce a mandatory flag when inserting, and then prepend a human emoji"
 HUMAN_PENDING_ITEM_PREFIX = "🧑 "
 PENDING_ITEM_ORIGINS = ("human", "agent")
-PENDING_ITEM_PROVENANCE_HELP = "Pass exactly one of --human or --agent. Human requests appear with a 🧑 prefix in pending-item lists."
+# 🧑 "Change the flags to --human-authored etc."
+PENDING_ITEM_PROVENANCE_HELP = (
+    "Pass exactly one of --human-authored or --agent-authored. Human requests appear with a 🧑 prefix in pending-item lists. "
+    "The flag is a trusted caller assertion; helpers do not infer authorship. Choose by who authored the pending item: "
+    "Use --agent-authored for agent-authored work even when it asks for or awaits a Human decision. "
+)
 
 
 class TaskFrontmatterError(ValueError):

@@ -1361,10 +1361,13 @@ class TaskEditTests(unittest.TestCase):
         self.assertEqual("pending-list", parse_args(["list", "task.md"]).command)
         with self.assertRaises(SystemExit):
             parse_args(["add", "task.md", "--item", "new"])
-        human_add = parse_args(["add", "task.md", "--human", "--item", "new"])
+        human_add = parse_args(["add", "task.md", "--human-authored", "--item", "new"])
         self.assertEqual("pending-add", human_add.command)
         self.assertEqual(("🧑 new",), human_add.items)
-        self.assertEqual(("new",), parse_args(["add", "task.md", "--agent", "--item", "new"]).items)
+        self.assertEqual(("new",), parse_args(["add", "task.md", "--agent-authored", "--item", "new"]).items)
+        for old_flag in ("--human", "--agent"):
+            with self.subTest(old_flag=old_flag), self.assertRaises(SystemExit):
+                parse_args(["add", "task.md", old_flag, "--item", "new"])
         self.assertEqual(
             "pending-remove",
             parse_args(["remove", "task.md", "--item", "old", "--evidence", "done", "--completion-key", "a" * 64]).command,

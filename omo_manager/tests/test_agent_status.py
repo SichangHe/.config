@@ -289,7 +289,7 @@ resolved_task_items: []
         assert metadata is not None
         self.assertEqual("", metadata.blocked_on)
 
-    def test_long_running_ready_is_quiet_but_error_is_reported(self) -> None:
+    def test_only_empty_long_running_ready_is_quiet(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -300,6 +300,22 @@ resolved_task_items: []
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(ready):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertEqual("", ready.getvalue())
+
+            (root / "contact.md").write_text(task_frontmatter("running", runat="cfg:5"), encoding="utf-8")
+            ordinary = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(ordinary):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("ready: task=contact.md", ordinary.getvalue())
+
+            (root / "contact.md").write_text(
+                task_frontmatter("long_running", runat="cfg:5", pending_items=("reconcile completed work",)),
+                encoding="utf-8",
+            )
+            pending = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(pending):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("ready: task=contact.md", pending.getvalue())
+
             failed = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("error", ["failed"])), redirect_stdout(failed):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))

@@ -3,9 +3,14 @@ from __future__ import annotations
 import tempfile
 import threading
 import unittest
+import subprocess
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
-from omo_manager.omo_task_audit import Finding, TerminalDispositionError, audit, audit_and_write_reconciliation_queue, load_terminal_dispositions, write_reconciliation_queue
+from omo_manager.omo_task_audit import Finding, TerminalDispositionError, audit, audit_and_write_reconciliation_queue, findings_introduced_since_git_head, load_terminal_dispositions, main, parse_task_lines, selected_findings, validate_selected_tasks, validate_selected_todo_refs, write_reconciliation_queue
+from omo_manager.omo_task_metadata import TaskFrontmatterError
 
 
 def task(status: str, runat: str, blocked_on: str = "") -> str:
@@ -14,6 +19,50 @@ def task(status: str, runat: str, blocked_on: str = "") -> str:
 
 
 class TaskAuditTests(unittest.TestCase):
+    def test_bare_command_fails_only_for_findings_introduced_since_git_head(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\na.md wl:2\n")
+            (root / "a.md").write_text(task("running", "wl:2"))
+            for command in (
+                ["git", "init", "-q"],
+                ["git", "config", "user.name", "Audit Test"],
+                ["git", "config", "user.email", "audit@example.test"],
+                ["git", "add", "TODO.md", "a.md"],
+                ["git", "commit", "-qm", "baseline"],
+            ):
+                subprocess.run(command, cwd=root, check=True)
+            (root / "TODO.md").write_text("current:\na.md wl:2\nb.md wl:2\n")
+            (root / "b.md").write_text(task("running", "wl:2"))
+            current = audit(root)
+
+            introduced = findings_introduced_since_git_head(root, current)
+
+            self.assertEqual({"duplicate_runat"}, {finding.kind for finding in introduced})
+            output = StringIO()
+            with patch("omo_manager.omo_task_audit.DEFAULT_ROOT", root), patch("sys.argv", ["omo_task_audit.py"]), redirect_stdout(output):
+                self.assertEqual(1, main())
+            self.assertIn("duplicate_runat", output.getvalue())
+
+            subprocess.run(["git", "add", "TODO.md", "b.md"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "accept baseline"], cwd=root, check=True)
+            output = StringIO()
+            with patch("omo_manager.omo_task_audit.DEFAULT_ROOT", root), patch("sys.argv", ["omo_task_audit.py"]), redirect_stdout(output):
+                self.assertEqual(0, main())
+            self.assertEqual("", output.getvalue())
+
+    def test_root_defaults_to_configured_work_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\na.md wl:2\n")
+            (root / "a.md").write_text(task("running", "wl:2"))
+            output = StringIO()
+
+            with patch("omo_manager.omo_task_audit.DEFAULT_ROOT", root), patch("sys.argv", ["omo_task_audit.py", "--task", "a.md", "--check"]), redirect_stdout(output):
+                self.assertEqual(0, main())
+
+            self.assertEqual("", output.getvalue())
+
     def test_reviewed_nineteen_record_manifest_distinguishes_archives(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -101,6 +150,164 @@ class TaskAuditTests(unittest.TestCase):
             self.assertIn(("blocked_no_todo", "orphan.md", "disposition_required"), kinds)
             self.assertIn(("zero_todo", "active.md", "owner_reconciliation"), kinds)
             self.assertEqual(findings, tuple(sorted(findings)))
+
+    def test_todo_target_must_match_frontmatter_runat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\na.md wl:3\n")
+            (root / "a.md").write_text(task("running", "wl:2"))
+
+            findings = audit(root)
+
+            self.assertIn(
+                Finding("todo_runat_mismatch", "a.md", ("a.md",), "todo=wl:3 frontmatter=wl:2", "owner_reconciliation"),
+                findings,
+            )
+
+    def test_done_task_with_pending_items_requires_reconciliation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("previous:\na.md wl:2\n")
+            (root / "a.md").write_text(task("done", "wl:2").replace("pending_task_items: []", "pending_task_items:\n  - stale work"))
+
+            findings = audit(root)
+
+            self.assertIn(
+                Finding("done_pending_items", "a.md", ("a.md",), "items=1", "owner_reconciliation"),
+                findings,
+            )
+
+    def test_todo_row_requires_a_valid_task_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\nmissing.md wl:2\ninvalid.md wl:3\n")
+            (root / "invalid.md").write_text("not task frontmatter\n")
+
+            findings = audit(root)
+
+            self.assertIn(Finding("todo_missing_task", "missing.md", ("missing.md",), "rows=1", "owner_reconciliation"), findings)
+            self.assertIn(Finding("todo_invalid_task", "invalid.md", ("invalid.md",), "rows=1", "owner_reconciliation"), findings)
+
+    def test_missing_root_todo_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            with self.assertRaisesRegex(TaskFrontmatterError, "cannot read root TODO file"):
+                audit(root)
+
+            with patch("sys.argv", ["omo_task_audit.py", "--root", str(root), "--check"]), patch(
+                "sys.stderr", new_callable=StringIO
+            ), self.assertRaises(SystemExit) as raised:
+                main()
+
+            self.assertEqual(2, raised.exception.code)
+
+    def test_todo_change_during_scan_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            todo = root / "TODO.md"
+            todo.write_text("current:\na.md wl:2\n")
+            (root / "a.md").write_text(task("running", "wl:2"))
+
+            def changed_rows(path: Path):
+                todo.write_text("current:\na.md wl:2\n../escaping.md wl:3\n")
+                return parse_task_lines(path)
+
+            with patch("omo_manager.omo_task_audit.parse_task_lines", side_effect=changed_rows), self.assertRaisesRegex(
+                TaskFrontmatterError, "changed during the scan"
+            ):
+                audit(root)
+
+    def test_todo_row_rejects_escape_and_symlink_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "logs"
+            root.mkdir()
+            (root / "TODO.md").write_text("current:\n../outside.md wl:2\nlink.md wl:3\n")
+            (base / "outside.md").write_text(task("running", "wl:2"))
+            (root / "actual.md").write_text(task("running", "wl:3"))
+            (root / "link.md").symlink_to("actual.md")
+
+            findings = audit(root)
+
+            self.assertIn(
+                Finding("todo_invalid_task_path", "../outside.md", ("../outside.md",), "path escapes audit root", "owner_reconciliation"),
+                findings,
+            )
+            self.assertIn(
+                Finding("todo_invalid_task_path", "link.md", ("actual.md", "link.md"), "canonical=actual.md", "owner_reconciliation"),
+                findings,
+            )
+            self.assertEqual(
+                (Finding("todo_invalid_task_path", "link.md", ("actual.md", "link.md"), "canonical=actual.md", "owner_reconciliation"),),
+                selected_findings(findings, ("actual.md",)),
+            )
+
+    def test_selected_task_must_be_a_valid_existing_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\n")
+            (root / "invalid.md").write_text("not task frontmatter\n")
+
+            for selected in ("missing.md", "invalid.md"):
+                with self.subTest(selected=selected), self.assertRaisesRegex(TaskFrontmatterError, selected):
+                    validate_selected_tasks(root, (selected,))
+
+            (root / "actual.md").write_text(task("running", "wl:2"))
+            (root / "link.md").symlink_to("actual.md")
+            with self.assertRaisesRegex(TaskFrontmatterError, "link.md"):
+                validate_selected_tasks(root, ("link.md",))
+
+            with patch("sys.argv", ["omo_task_audit.py", "--root", str(root), "--task", "missing.md", "--check"]), patch(
+                "sys.stderr", new_callable=StringIO
+            ), self.assertRaises(SystemExit) as raised:
+                main()
+
+            self.assertEqual(2, raised.exception.code)
+
+    def test_exact_todo_reference_supports_scoped_missing_and_escape_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\nmissing.md wl:2\n../outside.md wl:3\n")
+            output = StringIO()
+
+            validate_selected_todo_refs(root, ("missing.md", "../outside.md"))
+            with patch("sys.argv", ["omo_task_audit.py", "--root", str(root), "--todo-ref", "missing.md", "--check"]), redirect_stdout(output):
+                self.assertEqual(1, main())
+            self.assertIn("todo_missing_task", output.getvalue())
+
+            with self.assertRaisesRegex(TaskFrontmatterError, "unknown.md"):
+                validate_selected_todo_refs(root, ("unknown.md",))
+
+    def test_selected_findings_support_scoped_check(self) -> None:
+        findings = (
+            Finding("duplicate_runat", "wl:2", ("a.md", "b.md"), "claimants=2", "owner_reconciliation"),
+            Finding("zero_todo", "c.md", ("c.md",), "status=running", "owner_reconciliation"),
+        )
+        self.assertEqual((findings[0],), selected_findings(findings, ("b.md",)))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\na.md wl:2\nb.md wl:2\n")
+            (root / "a.md").write_text(task("running", "wl:2"))
+            (root / "b.md").write_text(task("running", "wl:2"))
+            output = StringIO()
+            with patch("sys.argv", ["omo_task_audit.py", "--root", str(root), "--task", "a.md", "--check"]), redirect_stdout(output):
+                self.assertEqual(1, main())
+            self.assertIn("duplicate_runat", output.getvalue())
+
+    def test_scoped_check_ignores_unrelated_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\na.md wl:2\nb.md wl:4\n")
+            (root / "a.md").write_text(task("running", "wl:2"))
+            (root / "b.md").write_text(task("running", "wl:3"))
+            output = StringIO()
+
+            with patch("sys.argv", ["omo_task_audit.py", "--root", str(root), "--task", "a.md", "--check"]), redirect_stdout(output):
+                self.assertEqual(0, main())
+
+            self.assertEqual("", output.getvalue())
 
     def test_target_canonicalization_structured_successor_and_escaped_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

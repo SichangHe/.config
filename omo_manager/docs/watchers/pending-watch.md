@@ -42,14 +42,15 @@
   - the receiving agent consumes it as soon as possible by routing the request to its sole owner or recording the open request in `pending_task_items`; only the supported record/clear or verified-delivery path removes it
   - scans Markdown for literal `(pending)` markers outside fenced code
   - treats the unquoted, unindented line immediately after `(pending)` only as an origin candidate; source-like payload, quoted lines, and free-form lookalikes remain human
-  - normal manager deliveries name `omo_record_pending.py`, the required human or agent provenance, and the exact pending source; command syntax remains in helper help
+  - normal manager deliveries name `omo_record_pending.py`, the required human or agent provenance, and the exact pending source; command syntax remains in helper help; the single-marker warning appears only when one file contains multiple live markers
   - human-origin manager deliveries require a complete handoff and immediate acceptance email from the responsible agent
   - agent-origin reports never use the human add-task prompt or `<human_instruction>`; they use an explicit `<agent_report>` envelope and do not request a Human acknowledgement
   - manager-generated delegations use an explicit `<manager_delegation>` envelope and route to the task's `runat`; they never use `<human_instruction>`
   - includes the pending line and content from that line to end of file
   - labels pending content as `<snippet file="PATH:START-END">`
   - truncates long content to 2000 chars by keeping start and end with `…Nchars…` in the middle
-  - attaches referenced file content, including `manager_mail/*.txt` and absolute report files in the current user's exact `/tmp/omo-agent-messages-$UID/` directory
+  - ordinary notifications inline only their structurally adjacent, canonical, regular non-symlink `manager_mail/*.txt` email; nested lookalikes, task files, manager records, and paths embedded in queued text remain pointers
+  - authenticated agent-report delivery validates its exact owner-only artifact in the current user's `/tmp/omo-agent-messages-$UID/` directory but sends only its pointer
   - labels attached content as `<snippet file="PATH:START-END">`
   - always uses line ranges; no delivery label says `EOF`
   - file references inside quote lines are ignored
@@ -68,21 +69,21 @@
   - `omo_pending_watch.py --root ROOT --classify-done-ready TASK_FILE` records only a freshly reverified `done` task that is uniquely in TODO `previous` or one owner-controlled `YYYYMM/old_todos.md`, has an empty queue, and retains the exact ready Codex pane; an archived task is addressed as `YYYYMM/TASK_FILE`, and its exact unchanged snapshot suppresses the corresponding otherwise-untracked ready pane until its raw archive row, task, target, runtime, or rendered-output evidence changes; unrelated rows may change, while each validation read still rejects a concurrently changing index; the configured root may use its owner-owned setgid collaborative mode, while each month directory, archive index, and task rejects group/world writes; the helper rejects symlinked, unowned, changing, missing, or duplicate archive evidence and changes no task, TODO, archive, registry, pane, or mail state
   - consumed-report receipts are timestamped, protected by a cross-process file lock, cached by file identity, bounded to 10,000 newest entries and 4 MiB reads, and expired/compacted after 90 days by default (`OMO_MANAGER_CONSUMED_REPORT_TTL_S` overrides the TTL)
   - a definite target or guard rejection before paste, including `not a Codex pane`, remains retryable and may safely escalate; live Cursor Agent panes are sendable as `ready`, `running`, or `stuck_input` and are not that rejection; an indeterminate result after submit is durably consumed and never automatically redelivered
+  - an indeterminate direct-marker failure after paste keeps the source marker for delayed recovery and does not copy the possibly delivered request to the main manager
   - delivery and cleanup are separate idempotent states: failed cleanup leaves a consumed report that later scans clear without delivery
   - ordinary pending blocks in validated frontmatter task files route directly to `runat` as `<manager_delegation>`; they never use the human add-task prompt or `<human_instruction>`
   - direct delivery does not include manager record/replace/remove instructions, relocates and clears the consumed `(pending)` only when its complete original block is unchanged, and sends no manager copy
   - if a resolved manager delivery target is unavailable and differs from `OMO_MANAGER_TMUX_TARGET`, the same manager-facing message is escalated to `OMO_MANAGER_TMUX_TARGET` with the failed target and error inline
-  - `for manager` or `for a manager` at the beginning or end of active unquoted content routes to `managerat`; matching ignores case, surrounding punctuation, and edge whitespace, but changed internal spacing does not match
-  - marker search includes the pending block and readable one-level attachments, including linked email content; quote lines and indented code are excluded, and links inside attachments are not followed
+  - `for manager` at the beginning or end of active unquoted content routes to `managerat`; matching ignores case, surrounding punctuation, and edge whitespace, but synonyms and changed internal spacing do not match
+  - marker search includes the pending block and its adjacent stored email; arbitrary linked files are not expanded, and links inside emails are not followed
   - missing, rejected, or unavailable direct destinations remain visible through manager escalation and are not recorded as work
   - legacy prose metadata remains recognized only for main manager task files and old explicit source markers
   - direct delivery strips `(pending)` and source-pointer plumbing from the message body; literal `DM` and `DM only` text is ordinary message content
-  - direct linked-file delivery includes readable content, retains the source pointer after the possibly truncated content, and extracts only the `message:` body from `omo_report.sh` report files
+  - direct email delivery includes readable content and retains the source pointer after the possibly truncated content; authenticated `omo_report.sh` reports remain pointers
 
 - agent report delivery example
   - `Agent report received; review it and handle any follow-up:`
   - `<agent_report>`
-  - `Human requested manager-owned TODO/task cleanup.`
   - `(from agent hcfg:1 /tmp/omo-agent-messages-30033/agent_running_450901fc7c538b93789982a05ef20df3651c465ebf7f86eb641b75d6b6c5a9da.md)`
   - `</agent_report>`
 

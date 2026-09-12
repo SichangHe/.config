@@ -893,7 +893,7 @@ def inspect_lines_for_message(message: str) -> int:
 def error_signature(lines: list[str]) -> tuple[str, ...]:
     if is_cursor_agent_capture(lines):
         return tuple(cursor_usage_limit_lines(lines))
-    return tuple(visible_error_lines(current_block(lines).lines, allow_cursor_quota=False))
+    return tuple(visible_error_lines(current_block(lines).lines, include_unmarked=False, allow_cursor_quota=False))
 
 
 def target_status(target: str, lines: list[str]) -> str:
@@ -959,7 +959,9 @@ def require_sendable_codex_target(target: str, n_lines: int = 80) -> tuple[str, 
     current_status = target_status(target, lines)
     if current_status == "not_codex":
         raise RuntimeError(f"target is not a Codex pane: {target}")
-    if current_status not in {"ready", "running", "stuck_input", "waiting_subagent", "error"}:
+    if current_status == "error":
+        raise RuntimeError(f"target is in a Codex error state before paste: {target}")
+    if current_status not in {"ready", "running", "stuck_input", "waiting_subagent"}:
         raise RuntimeError(f"target is not a supported Codex send state before paste: {target} status={current_status}")
     return error_signature(lines) or None
 
@@ -1126,6 +1128,76 @@ def send_guarded_wrapped_codex_cancel(target: str, runtime: CodexRuntimeBinding)
         raise RuntimeError("target Codex pane or process changed at wrapped cancellation")
 
 
+def exact_managed_runtime_binding(target: str, lines: list[str]) -> CodexRuntimeBinding:
+    """Authenticate one Codex or Cursor pane before a recovered submit."""
+
+    if is_cursor_agent_capture(lines):
+        pane_id, pane_pid, pane_command = exact_cursor_runtime_binding(target)
+        return CodexRuntimeBinding(pane_id, pane_pid, pane_command)
+    return exact_codex_runtime_binding(target, allow_shell=True)
+
+
+def require_same_managed_runtime(target: str, expected: CodexRuntimeBinding, phase: str) -> None:
+    if expected.pane_command in {"codex", "bunx", "npx"}:
+        require_same_wrapped_codex_target(target, expected, phase)
+        return
+    require_same_cursor_target(target, expected.pane_id, phase, expected.pane_pid, expected.pane_command)
+
+
+def send_enter_to_pinned_runtime(target: str, runtime: CodexRuntimeBinding) -> None:
+    """Send Enter only while tmux still resolves the authenticated pane process."""
+
+    condition = (
+        f"#{{&&:#{{==:#{{pane_id}},{runtime.pane_id}}},"
+        f"#{{&&:#{{==:#{{pane_pid}},{runtime.pane_pid}}},#{{==:#{{pane_current_command}},{runtime.pane_command}}}}}}}"
+    )
+    result = subprocess.run(
+        [
+            "tmux",
+            "if-shell",
+            "-F",
+            "-t",
+            target,
+            condition,
+            f"send-keys -t {runtime.pane_id} Enter",
+            "run-shell 'exit 1'",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("target Codex or Cursor pane changed at recovered submit")
+
+
+def send_overlay_enter_to_pinned_runtime(
+    target: str,
+    lines: list[str],
+    n_lines: int,
+    preexisting_error: tuple[str, ...] | None,
+    options: CodexSendOptions,
+    *,
+    cursor_followups: bool,
+) -> bool:
+    """Revalidate an overlay on one bound runtime before sending Enter."""
+
+    runtime = exact_managed_runtime_binding(target, lines)
+    require_same_managed_runtime(target, runtime, "before overlay recovery capture")
+    pinned_lines = tail_pane_id(runtime.pane_id, n_lines)
+    require_same_managed_runtime(target, runtime, "after overlay recovery capture")
+    validate_error_transition(pinned_lines, preexisting_error, target, "before overlay recovery")
+    if has_plan_prompt(pinned_lines) and not options.allow_plan_prompt_enter:
+        raise RuntimeError("Codex overlay recovery blocked by unsafe Plan prompt")
+    overlay_visible = has_cursor_followups_overlay(pinned_lines) if cursor_followups else bool(file_search_overlay_input_text(pinned_lines))
+    if not overlay_visible:
+        return False
+    if cursor_followups and not is_cursor_agent_capture(pinned_lines):
+        raise RuntimeError("Cursor follow-ups overlay is not in an authenticated Cursor interface")
+    send_enter_to_pinned_runtime(target, runtime)
+    return True
+
+
 def wait_paste_visible(
     target: str,
     message: str,
@@ -1137,12 +1209,12 @@ def wait_paste_visible(
     expected_cursor_pane_command: str = "",
     expected_cursor_input_text: str = "",
     expected_codex_input_text: str = "",
-) -> None:
+) -> Literal["expected", "changed"]:
     if options.submit_verify_timeout_s <= 0:
-        return
+        return "expected"
     probes = message_probes(message)
     if not probes:
-        return
+        return "expected"
     n_lines = inspect_lines_for_message(message)
     deadline_s = time.monotonic() + options.submit_verify_timeout_s
     last_status = "unknown"
@@ -1183,8 +1255,14 @@ def wait_paste_visible(
             if not recovered_overlay:
                 if expected_cursor_pane_id:
                     raise RuntimeError("Cursor paste entered an unexpected file-search overlay")
-                send_enter(target)
-                recovered_overlay = True
+                recovered_overlay = send_overlay_enter_to_pinned_runtime(
+                    target,
+                    lines,
+                    n_lines,
+                    preexisting_error,
+                    options,
+                    cursor_followups=False,
+                )
             now_s = time.monotonic()
             if now_s >= deadline_s:
                 raise RuntimeError(f"Codex paste not verified after {options.submit_verify_timeout_s:g}s: file search overlay did not transition")
@@ -1195,10 +1273,16 @@ def wait_paste_visible(
                 raise RuntimeError("Cursor paste entered an unexpected follow-ups overlay")
             overlay_text = "\n".join(lines)
             if all(probe in overlay_text for probe in probes) or has_collapsed_paste_text(overlay_text):
-                return
+                return "expected"
             if not recovered_overlay:
-                send_enter(target)
-                recovered_overlay = True
+                recovered_overlay = send_overlay_enter_to_pinned_runtime(
+                    target,
+                    lines,
+                    n_lines,
+                    preexisting_error,
+                    options,
+                    cursor_followups=True,
+                )
             now_s = time.monotonic()
             if now_s >= deadline_s:
                 raise RuntimeError(f"Codex paste not verified after {options.submit_verify_timeout_s:g}s: Cursor follow-ups overlay did not transition")
@@ -1207,11 +1291,11 @@ def wait_paste_visible(
         if expected_cursor_input_text:
             try:
                 _ = bottom_anchored_cursor_input(raw_lines, expected_cursor_input_text.removesuffix("\n"))
-                return
+                return "expected"
             except RuntimeError as exc:
                 input_text = current_input_text(lines)
                 if is_real_input_text(input_text):
-                    raise RuntimeError("Codex paste not verified: Cursor composer contains different or combined text") from exc
+                    return "changed"
                 now_s = time.monotonic()
                 if now_s >= deadline_s:
                     raise RuntimeError(
@@ -1223,17 +1307,53 @@ def wait_paste_visible(
         input_text = current_input_text(lines)
         source_visible = bool(expected_codex_input_text) and codex_input_matches_source(input_text, expected_codex_input_text)
         ordinary_visible = all(probe in input_text for probe in probes) if not expected_codex_input_text else source_visible
-        collapsed_visible = not expected_codex_input_text and has_collapsed_paste_text(input_text)
+        collapsed_visible = has_collapsed_paste_text(input_text)
         if is_real_input_text(input_text) and (ordinary_visible or collapsed_visible):
             if forbidden_input_text and re.sub(r"\s+", " ", forbidden_input_text).strip() in re.sub(r"\s+", " ", input_text).strip():
                 raise RuntimeError("Codex paste not verified: retained submitted Cursor composer was not replaced")
-            return
+            return "expected"
+        if is_real_input_text(input_text):
+            return "changed"
         last_input = "" if input_text in CODEX_PLACEHOLDER_INPUT_TEXTS else input_text
         now_s = time.monotonic()
         if now_s >= deadline_s:
             suffix = "input box has different text" if last_input else "prompt not visible in input"
             raise RuntimeError(f"Codex paste not verified after {options.submit_verify_timeout_s:g}s: {suffix}, status={last_status}")
         time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
+
+
+# 🧑 "We still got input stuck in input box, this should not happen, is your fix not live?"
+def submit_changed_composer(
+    target: str,
+    runtime: CodexRuntimeBinding,
+    options: CodexSendOptions,
+    preexisting_error: tuple[str, ...] | None,
+    n_lines: int,
+) -> None:
+    """Submit a changed composer until it clears, while its authenticated runtime remains fixed."""
+
+    attempt = 0
+    while True:
+        require_same_managed_runtime(target, runtime, "while recovering changed composer")
+        lines = tail_pane_id(runtime.pane_id, n_lines)
+        require_same_managed_runtime(target, runtime, "after recovering changed composer capture")
+        validate_error_transition(lines, preexisting_error, target, "before recovered submit")
+        last_status = target_status(target, lines)
+        input_text = current_input_text(lines)
+        if not is_real_input_text(input_text) and last_status in {"ready", "running", "waiting_subagent"}:
+            return
+        if last_status == "error":
+            raise RuntimeError("target entered a Codex error during recovered submit")
+        if last_status not in {"ready", "running", "stuck_input", "waiting_subagent"}:
+            raise RuntimeError(f"target is not a supported Codex send state before recovered submit: {target} status={last_status}")
+        if has_plan_prompt(lines) and not options.allow_plan_prompt_enter:
+            raise RuntimeError("Codex recovered submit blocked by unsafe Plan prompt")
+        if not is_real_input_text(input_text):
+            raise RuntimeError("target composer changed to an unsupported state during recovered submit")
+        attempt += 1
+        print(f"omo_tmux_send: retrying guarded Enter for retained composer attempt={attempt}", file=sys.stderr)
+        send_enter_to_pinned_runtime(target, runtime)
+        time.sleep(max(options.enter_delay_s, 0.25))
 
 
 def verify_placeholder_paste(target: str, message: str, options: CodexSendOptions) -> bool:
@@ -1288,6 +1408,7 @@ def wait_probe_removed(target: str, options: CodexSendOptions, probe: str, n_lin
         time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
 
 
+# 🧑 "After putting the message in the input box of Codex, the script should send ‘enter’. ... As long as the UI is still Codex (or Cursor for that matter) SEND THE FUCKING ENTER!! ... DONT LEAVE MESSAGES IN THE INPUT BOX!!"
 def verify_submit(
     target: str,
     message: str,
@@ -1297,6 +1418,7 @@ def verify_submit(
     expected_cursor_pane_pid: int = 0,
     expected_cursor_pane_command: str = "",
     expected_codex_input_text: str = "",
+    expected_runtime: CodexRuntimeBinding | None = None,
 ) -> None:
     if options.submit_verify_timeout_s <= 0:
         return
@@ -1308,7 +1430,11 @@ def verify_submit(
     last_status = "unknown"
     next_enter_s = 0.0
     while True:
-        if expected_cursor_pane_id:
+        if expected_runtime is not None:
+            require_same_managed_runtime(target, expected_runtime, "while verifying submit")
+            lines = tail_pane_id(expected_runtime.pane_id, n_lines)
+            require_same_managed_runtime(target, expected_runtime, "after verifying submit capture")
+        elif expected_cursor_pane_id:
             require_same_cursor_target(
                 target,
                 expected_cursor_pane_id,
@@ -1331,9 +1457,17 @@ def verify_submit(
         if has_cursor_followups_overlay(lines):
             now_s = time.monotonic()
             if now_s >= next_enter_s:
-                if expected_cursor_pane_id:
-                    raise RuntimeError("Cursor submit entered an unexpected follow-ups overlay")
-                send_enter(target)
+                if expected_runtime is not None:
+                    send_enter_to_pinned_runtime(target, expected_runtime)
+                elif expected_cursor_pane_id:
+                    send_enter_to_pinned_cursor(
+                        target,
+                        expected_cursor_pane_id,
+                        expected_cursor_pane_pid,
+                        expected_cursor_pane_command,
+                    )
+                else:
+                    send_enter(target)
                 next_enter_s = now_s + max(options.enter_delay_s, 0.25)
             if now_s >= deadline_s:
                 raise RuntimeError(f"Codex submit not verified after {options.submit_verify_timeout_s:g}s: Cursor follow-ups overlay still visible, status={last_status}")
@@ -1341,24 +1475,26 @@ def verify_submit(
             continue
         input_text = current_input_text(lines)
         real_input_visible = is_real_input_text(input_text)
-        source_visible = bool(expected_codex_input_text) and codex_input_matches_source(input_text, expected_codex_input_text)
-        ordinary_visible = any(probe in input_text for probe in probes) if not expected_codex_input_text else source_visible
-        collapsed_visible = not expected_codex_input_text and has_collapsed_paste_text(input_text)
-        prompt_still_present = real_input_visible and (ordinary_visible or collapsed_visible)
         if last_status in {"ready", "running", "waiting_subagent"} and not real_input_visible:
             return
-        if real_input_visible and not prompt_still_present:
-            raise RuntimeError(f"Codex submit not verified: different input remains visible, status={last_status}")
         if has_plan_prompt(lines) and not options.allow_plan_prompt_enter:
             raise RuntimeError("Codex submit blocked by unsafe Plan prompt")
         now_s = time.monotonic()
-        if prompt_still_present and now_s >= next_enter_s:
-            if expected_cursor_pane_id:
-                raise RuntimeError("Cursor prompt remained visible after guarded submit")
-            send_enter(target)
+        if real_input_visible and now_s >= next_enter_s:
+            if expected_runtime is not None:
+                send_enter_to_pinned_runtime(target, expected_runtime)
+            elif expected_cursor_pane_id:
+                send_enter_to_pinned_cursor(
+                    target,
+                    expected_cursor_pane_id,
+                    expected_cursor_pane_pid,
+                    expected_cursor_pane_command,
+                )
+            else:
+                send_enter(target)
             next_enter_s = now_s + max(options.enter_delay_s, 0.25)
         if now_s >= deadline_s:
-            suffix = "prompt still in input" if prompt_still_present else "target did not become running"
+            suffix = "prompt still in input" if real_input_visible else "target did not become running"
             raise RuntimeError(f"Codex submit not verified after {options.submit_verify_timeout_s:g}s: {suffix}, status={last_status}")
         time.sleep(min(0.25, max(0.05, min(deadline_s, next_enter_s) - now_s)))
 
@@ -1843,12 +1979,18 @@ def revalidate_authorized_cursor_input(
         raise RuntimeError("target Cursor pane or process changed before submit-existing")
 
 
-def send_enter_to_pinned_cursor(target: str, pane_id: str) -> None:
+def send_enter_to_pinned_cursor(target: str, pane_id: str, pane_pid: int = 0, pane_command: str = "") -> None:
     """Submit only while tmux still resolves the exact Cursor pane and command."""
 
     if re.fullmatch(r"%[0-9]+", pane_id) is None:
         raise RuntimeError("Cursor submit-existing requires an exact pane id")
-    condition = f"#{{&&:#{{==:#{{pane_id}},{pane_id}}},#{{==:#{{pane_current_command}},agent}}}}"
+    expected_command = pane_command or "agent"
+    condition = (
+        f"#{{&&:#{{==:#{{pane_id}},{pane_id}}},"
+        f"#{{&&:#{{==:#{{pane_pid}},{pane_pid}}},#{{==:#{{pane_current_command}},{expected_command}}}}}}}"
+        if pane_pid
+        else f"#{{&&:#{{==:#{{pane_id}},{pane_id}}},#{{==:#{{pane_current_command}},{expected_command}}}}}"
+    )
     result = subprocess.run(
         [
             "tmux",
@@ -2682,7 +2824,12 @@ def _run_tmux_payload(
         _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)
         if before_paste is not None:
             before_paste()
-        _ = revalidate_error_transition(target, inspect_lines_for_message(verification_message), preexisting_error, "before paste")
+        _ = revalidate_error_transition(
+            target,
+            inspect_lines_for_message(verification_message),
+            preexisting_error,
+            "before paste",
+        )
         paste_target = target
         if retained_cursor is None:
             require_no_existing_input(target)
@@ -2712,8 +2859,9 @@ def _run_tmux_payload(
             paste_to_retained_cursor(target, retained_cursor, buffer_name)
             delivery_may_have_happened = True
         try:
+            paste_visibility: Literal["expected", "changed"] = "expected"
             if retained_cursor is not None or not verify_placeholder_paste(target, verification_message, options):
-                wait_paste_visible(
+                paste_visibility = wait_paste_visible(
                     target,
                     verification_message,
                     options,
@@ -2731,12 +2879,25 @@ def _run_tmux_payload(
                 f"{exc}; delivery outcome is unknown and an exact retry is suppressed for {dedupe_s}s"
             ) from exc
         enter_n_lines = inspect_lines_for_message(verification_message)
+        if paste_visibility == "changed":
+            if retained_cursor is None:
+                changed_lines = revalidate_error_transition(target, enter_n_lines, preexisting_error, "before recovered submit")
+                runtime = exact_managed_runtime_binding(target, changed_lines)
+            else:
+                runtime = CodexRuntimeBinding(retained_cursor.pane_id, retained_cursor.pane_pid, retained_cursor.pane_command)
+            submit_changed_composer(target, runtime, options, preexisting_error, enter_n_lines)
+            return
         enter_count = 1 if retained_cursor is not None else options.enter_count
+        normal_runtime: CodexRuntimeBinding | None = None
         for idx in range(enter_count):
             if idx:
                 time.sleep(options.enter_delay_s)
             if retained_cursor is None:
                 lines = revalidate_error_transition(target, enter_n_lines, preexisting_error, "before submit")
+                if normal_runtime is None:
+                    normal_runtime = exact_managed_runtime_binding(target, lines)
+                else:
+                    require_same_managed_runtime(target, normal_runtime, "before repeated submit")
             else:
                 require_same_cursor_target(
                     target,
@@ -2766,7 +2927,8 @@ def _run_tmux_payload(
                 )
                 submit_to_retained_cursor(target, retained_cursor)
             else:
-                send_enter(target)
+                assert normal_runtime is not None
+                send_enter_to_pinned_runtime(target, normal_runtime)
         verify_submit(
             target,
             verification_message,
@@ -2776,6 +2938,7 @@ def _run_tmux_payload(
             retained_cursor.pane_pid if retained_cursor is not None else 0,
             retained_cursor.pane_command if retained_cursor is not None else "",
             message if retained_cursor is None else "",
+            normal_runtime,
         )
     finally:
         if claim_owned and not delivery_may_have_happened:
