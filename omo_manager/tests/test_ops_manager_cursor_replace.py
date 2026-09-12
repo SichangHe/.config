@@ -104,6 +104,16 @@ def live_codex_processes(pane: Pane) -> dict[int, ProcessInfo]:
 
 
 class OpsManagerCursorReplaceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.agent_instructions = patch(
+            "omo_manager.omo_ops_manager_cursor_replace.launch_instructions",
+            return_value=b"$ /test/getagentsmd\nsubmanager instructions\n",
+        )
+        _ = self.agent_instructions.start()
+
+    def tearDown(self) -> None:
+        self.agent_instructions.stop()
+
     def test_parse_args_is_pinned_and_refuses_h_targets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -274,10 +284,11 @@ class OpsManagerCursorReplaceTests(unittest.TestCase):
     def test_cursor_command_stays_fresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "MANAGER.md").write_text("manager\n", encoding="utf-8")
             prompt = root / "continuation.txt"
+            instructions = root / "getagentsmd-output.txt"
             prompt.write_text(CONTINUATION, encoding="utf-8")
-            rendered = cursor_command(pane_for(root), root, prompt)
+            instructions.write_text("$ /test/getagentsmd\nsubmanager instructions\n", encoding="utf-8")
+            rendered = cursor_command(pane_for(root), root, prompt, instructions)
             self.assertIn("--workspace", rendered)
             self.assertIn("cursor-grok-4.6-xhigh", rendered)
             self.assertIn("OMO_AGENT_TMUX_TARGET=wl:3.0", rendered)

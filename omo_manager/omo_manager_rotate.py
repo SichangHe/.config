@@ -21,8 +21,12 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    from omo_manager.omo_agent_instructions import AgentInstructionsError, launch_instructions
+except ModuleNotFoundError:
+    from omo_agent_instructions import AgentInstructionsError, launch_instructions  # pyright: ignore[reportImplicitRelativeImport]
+
 HELPER_DIR = Path(__file__).resolve().parent
-WORKER_DEFAULTS = HELPER_DIR / "WORKER_DEFAULTS.md"
 STATUS_HELPER = HELPER_DIR / "omo_codex_status.py"
 WATCHER_HELPER = HELPER_DIR / "omo_manager_setup_watchers.sh"
 TARGET_RE = re.compile(r"^(?P<session>[A-Za-z][A-Za-z0-9_-]*):(?P<window>0|[1-9][0-9]*)(?:\.(?P<pane>0|[1-9][0-9]*))?$")
@@ -374,16 +378,6 @@ def select_launch_metadata(
     return LaunchMetadata(model_override, effort_override, "override", launch.pid if launch else None, launch.argv if launch else ())
 
 
-def readable_text(path: Path, label: str) -> str:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise RotationError(f"cannot read {label} {path}: {exc}") from exc
-    if not text.strip():
-        raise RotationError(f"{label} is empty: {path}")
-    return text
-
-
 def capture_pane(pane_id: str) -> str:
     result = run(["tmux", "capture-pane", "-p", "-t", pane_id, "-S", "-"], timeout=10)
     if result.returncode != 0:
@@ -414,9 +408,10 @@ def preflight(args: Args) -> Preflight:
         raise RotationError("bunx is not available on PATH")
     if not STATUS_HELPER.is_file() or not WATCHER_HELPER.is_file():
         raise RotationError("required status or watcher helper is missing")
-    worker_defaults = readable_text(WORKER_DEFAULTS, "worker defaults")
-    manager_instructions = readable_text(args.root / "MANAGER.md", "manager instructions")
-    prompt = f"{worker_defaults.rstrip()}\n\n{manager_instructions.rstrip()}\n"
+    try:
+        prompt = launch_instructions("main_manager").decode()
+    except (AgentInstructionsError, UnicodeDecodeError) as exc:
+        raise RotationError(f"cannot load manager instructions: {exc}") from exc
     if args.replacement_email_file is not None:
         context = replacement_context(args.root, args.replacement_email_file)
         prompt = f"{prompt.rstrip()}\n\n<replacement_reason>{context}</replacement_reason>\n"

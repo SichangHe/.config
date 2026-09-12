@@ -159,11 +159,12 @@ class GetAgentsMdTest(unittest.TestCase):
             "Usage: getagentsmd [get INSTRUCTION_NAME]\n", err.getvalue()
         )
 
-    def test_new_commands_fail_without_remote_or_cache(self):
-        for args in (["get", "coding"],):
+    def test_instruction_commands_fail_without_remote_or_cache(self):
+        for args in ([], ["get", "coding"]):
             with self.subTest(args=args), tempfile.TemporaryDirectory() as tmp:
                 module = load_getagentsmd()
                 module.CACHE_DIR = Path(tmp)
+                module.CACHE_FILE = Path(tmp) / "AGENTS.md"
                 module.get = lambda url, timeout: (_ for _ in ()).throw(
                     module.RequestException("network down")
                 )

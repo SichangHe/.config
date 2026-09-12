@@ -46,7 +46,7 @@ Options:
   --workdir DIR           Directory where manager OpenCode should run (default: root)
   --tmux-target TARGET    Existing manager pane (default: OMO_MANAGER_TMUX_TARGET)
   --model MODEL           OpenCode model for the manager (default: OMO_MANAGER_MODEL or openai/gpt-5.6-terra)
-  --no-startup-prompt     Do not submit the post-restart work-log MANAGER.md prompt
+  --no-startup-prompt     Do not submit the post-restart getagentsmd transcript
   --no-refresh-watchers   Do not run omo_manager_setup_watchers.sh after health succeeds
   --force-port            Kill any non-manager listener still occupying the manager port after Ctrl-C
   --allow-new-tmux-session
@@ -94,6 +94,41 @@ if [[ "${tmux_target%%:*}" == h* ]]; then
   echo "manager restart refuses human-owned h* tmux targets" >&2
   exit 1
 fi
+getagentsmd_path="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/getagentsmd"
+manager_instruction_transcript=""
+if [ "$startup_prompt" -eq 1 ]; then
+  capture_instruction() {
+    local output
+    if ! output="$("$getagentsmd_path" "$@")"; then
+      printf '%s\n' "$output" >&2
+      return 1
+    fi
+    if [ -z "${output//[[:space:]]/}" ]; then
+      printf 'manager instruction command produced no text:' >&2
+      printf ' %q' "$getagentsmd_path" "$@" >&2
+      printf '\n' >&2
+      return 1
+    fi
+    printf '$ %q' "$getagentsmd_path"
+    if [ "$#" -gt 0 ]; then
+      printf ' %q' "$@"
+    fi
+    printf '\n%s\n' "$output"
+  }
+  # 🧑 “change the agent-spawning scripts to show which commands it runs and the content from running those commands, as opposed to the current file inclusion”
+  load_manager_instructions() {
+    if ! manager_instruction_transcript="$(
+      capture_instruction || exit 1
+      printf '\n'
+      capture_instruction get agent_manager || exit 1
+      printf '\n'
+      capture_instruction get main_manager || exit 1
+    )"; then
+      echo "cannot load manager instructions through getagentsmd" >&2
+      return 1
+    fi
+  }
+fi
 created_session_id=""
 created_session_name=""
 cleanup_created_session() {
@@ -110,6 +145,9 @@ if ! tmux has-session -t "=${tmux_target%%:*}:" 2>/dev/null; then
   if [ "$dry_run" -eq 1 ]; then
     echo "would explicitly create tmux session ${tmux_target%%:*} in $workdir; reuse an existing non-human session when practical"
     exit 0
+  fi
+  if [ "$startup_prompt" -eq 1 ]; then
+    load_manager_instructions
   fi
   echo "warning: explicitly creating tmux session ${tmux_target%%:*}; reuse an existing non-human session when practical" >&2
   created_identity="$(tmux new-session -d -P -F '#{session_id} #{pane_id} #{session_name}:#{window_index}.#{pane_index}' -s "${tmux_target%%:*}" -n manager -c "$workdir")"
@@ -135,6 +173,9 @@ if [[ ! "$tmux_session_id" =~ ^\$[0-9]+$ || ! "$tmux_pane_id" =~ ^%[0-9]+$ || "$
   exit 1
 fi
 tmux_pane_ref="$tmux_pane_id"
+if [ "$startup_prompt" -eq 1 ] && [ "$dry_run" -eq 0 ] && [ -z "$manager_instruction_transcript" ]; then
+  load_manager_instructions
+fi
 
 guard_tmux_target() {
   local current
@@ -348,7 +389,7 @@ PY
 }
 
 post_startup_prompt() {
-  python3 - "$base_url" "$root" <<'PY'
+  python3 - "$base_url" "$root" "$manager_instruction_transcript" <<'PY'
 from __future__ import annotations
 import http.client
 import json
@@ -357,8 +398,11 @@ import urllib.parse
 
 base_url = sys.argv[1].rstrip("/")
 root = sys.argv[2]
-prompt = f"""Follow `{root}/MANAGER.md`. Restarted by `omo_manager_restart.sh`.
-Run: `~/.config/getagentsmd`; `~/.config/omo_manager/omo_manager_setup_watchers.sh`; `~/.config/omo_manager/omo_pending_watch.py --once --dry-run`.
+instructions = sys.argv[3]
+prompt = f"""{instructions}
+
+Restarted by `omo_manager_restart.sh` for work-log root `{root}`.
+Run: `~/.config/omo_manager/omo_manager_setup_watchers.sh`; `~/.config/omo_manager/omo_pending_watch.py --once --dry-run`.
 Continue current pending/report/email refs. If old session was stuck/context-full, stay in this fresh session."""
 parsed = urllib.parse.urlparse(base_url)
 assert parsed.hostname is not None and parsed.port is not None

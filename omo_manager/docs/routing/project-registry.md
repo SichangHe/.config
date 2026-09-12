@@ -6,4 +6,4 @@ It writes `manager_projects.md`, leaving project-owned state and worker task fil
 
 `check` validates the registry and each referenced summary file against the contract in `submanager-orchestration.md`. The first pilot is VL: `vl_supervisor_current_7404.md` on `vl:9` owns detailed VL project routing, while the main manager consumes `vl_summary_for_main.md` first and reads detailed VL state only for audit, escalation, or stale heartbeat.
 
-Human-review note: this is helper documentation and pilot state, not an approved standing change to `MANAGER.md`.
+Human-review note: this is helper documentation and pilot state, not an approved standing change to the getagentsmd manager instructions.

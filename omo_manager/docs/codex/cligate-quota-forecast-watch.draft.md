@@ -41,4 +41,4 @@ For `unavailable`:
 
 ## Approval boundary
 
-This draft can be cited in an implementation status email as the proposed manager guide. It must not be treated as persistent operating policy or copied into `MANAGER.md` without explicit human approval.
+This draft can be cited in an implementation status email as the proposed manager guide. It must not be treated as persistent operating policy or copied into the getagentsmd manager instructions without explicit human approval.

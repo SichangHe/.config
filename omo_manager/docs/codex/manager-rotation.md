@@ -6,7 +6,7 @@ The target must be numeric `SESSION:WINDOW` or `SESSION:WINDOW.PANE`. Window sho
 
 1. finds exactly one live supported Codex launch argv below the pane PID, accepting both `@openai/codex@latest` and an existing legacy `@openai/codex` process;
 2. validates and normally infers its explicit model and `model_reasoning_effort`;
-3. reads `~/.config/omo_manager/WORKER_DEFAULTS.md` and `ROOT/MANAGER.md`;
+3. captures the command and output from `getagentsmd`, `get agent_manager`, and `get main_manager`;
 4. captures the existing pane output and writes the prompt plus a JSON audit record under the private manager state directory;
 5. runs `tmux respawn-pane -k` against the resolved pane ID with the pane's existing working directory;
 6. starts `bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox` with explicit model, effort, and the composed initial prompt;

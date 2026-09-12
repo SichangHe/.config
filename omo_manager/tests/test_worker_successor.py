@@ -74,9 +74,16 @@ class WorkerSuccessorTests(unittest.TestCase):
     @override
     def setUp(self) -> None:
         _ = self.panes.start()
+        self.agent_instructions = patch.object(
+            worker_successor,
+            "launch_instructions",
+            return_value=b"$ /test/getagentsmd\nagent instructions\n",
+        )
+        _ = self.agent_instructions.start()
 
     @override
     def tearDown(self) -> None:
+        self.agent_instructions.stop()
         self.panes.stop()
 
     def make_root(self, root: Path, *, old: str | None = None) -> Args:
@@ -160,6 +167,10 @@ class WorkerSuccessorTests(unittest.TestCase):
             )
             self.assertEqual(PROMPT, binding.prompt_data)
             self.assertEqual(QUEUE, binding.queue)
+            self.assertEqual(
+                b"$ /test/getagentsmd\nagent instructions\n",
+                worker_successor.decoded(binding.launch_config["agent_instructions"], "agent_instructions"),
+            )
 
     def test_retries_committed_transaction_idempotently(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1226,7 +1226,7 @@ resolved_task_items: []
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "mgr:1.0"]))
             text = out.getvalue()
             self.assertIn("agent-problems: manager_compaction=1", text)
-            self.assertIn("manager-action: manager_compaction>0 reread MANAGER.md", text)
+            self.assertIn("manager-action: manager_compaction>0 rerun getagentsmd manager and role commands", text)
             self.assertIn("manager_compaction: task=manager evidence=target=mgr:1.0 role=manager", text)
 
     def test_problems_only_skips_manager_compaction_when_reread_visible(self) -> None:

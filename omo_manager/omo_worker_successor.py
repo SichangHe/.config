@@ -27,6 +27,7 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from omo_manager.omo_agent_instructions import launch_instructions
 from omo_manager.omo_hees_final_artifact_replace import ReplaceError as HeesReplaceError
 from omo_manager.omo_hees_final_artifact_replace import active_owners, has_pending_marker
 from omo_manager.omo_manager_replace import (
@@ -59,8 +60,7 @@ TOOL_RE = re.compile(r"^(?:codex|pcodx|cursor)$")
 JOURNAL_RE = re.compile(r"^\.omo-worker-successor-[0-9a-f]{16,64}\.transaction$")
 MAX_JOURNAL_BYTES = 16 * 1024 * 1024
 CRASH_PHASES = ("prepared", "old", "todo", "successor", "committed")
-LAUNCH_MANIFEST_VERSION = "v1.0.0"
-DEFAULT_WORKER_INSTRUCTIONS = Path(__file__).with_name("WORKER_DEFAULTS.md")
+LAUNCH_MANIFEST_VERSION = "v1.1.0"
 
 
 class SuccessorError(RuntimeError):
@@ -341,6 +341,7 @@ def launch_manifest_bytes(
     window_name: str = "",
     codex_flags: tuple[str, ...] = (),
     amh_caller_agent: str = "",
+    agent_instructions: bytes | None = None,
 ) -> bytes:
     """Build canonical bytes binding every supported prepared-launch input."""
 
@@ -353,7 +354,13 @@ def launch_manifest_bytes(
         raise SuccessorError("prepared successor launch requires pane zero of one exact tmux window")
     if tool != "cursor":
         raise SuccessorError("prepared successor launch currently requires the pinned installed Cursor runtime")
-    defaults = read_frozen_prompt(DEFAULT_WORKER_INSTRUCTIONS)
+    instructions = launch_instructions() if agent_instructions is None else agent_instructions
+    try:
+        _ = instructions.decode()
+    except UnicodeDecodeError as exc:
+        raise SuccessorError("launch agent instructions are not UTF-8") from exc
+    if not instructions.strip():
+        raise SuccessorError("launch agent instructions are empty")
     runtime = cursor_runtime_identity()
     value = {
         "version": LAUNCH_MANIFEST_VERSION,
@@ -381,8 +388,8 @@ def launch_manifest_bytes(
         "shell_runtime": pinned_shell_identity(),
         "tmux_environment": minimal_tmux_environment(),
         "tmux_runtime": pinned_tmux_identity(),
-        "worker_defaults_path": str(DEFAULT_WORKER_INSTRUCTIONS.resolve(strict=True)),
-        "worker_defaults_sha256": digest(defaults.data),
+        "agent_instructions": encoded(instructions),
+        "agent_instructions_sha256": digest(instructions),
         "cursor_runtime": runtime,
     }
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -406,6 +413,7 @@ def validated_launch_config(
         raise SuccessorError(f"launch manifest is invalid JSON: {exc}") from exc
     if not isinstance(value, dict):
         raise SuccessorError("launch manifest must contain one object")
+    instructions = decoded(value.get("agent_instructions"), "agent_instructions", source="launch manifest")
     try:
         expected_bytes = launch_manifest_bytes(
             root=root,
@@ -419,6 +427,7 @@ def validated_launch_config(
             window_name=str(value.get("window_name", "")),
             codex_flags=tuple(value.get("codex_flags", ())) if isinstance(value.get("codex_flags"), list) else ("<invalid>",),
             amh_caller_agent=str(value.get("amh_caller_agent", "")),
+            agent_instructions=instructions,
         )
     except (OSError, RuntimeError, ValueError) as exc:
         if isinstance(exc, SuccessorError):
@@ -543,15 +552,15 @@ def encoded(data: bytes) -> str:
     return base64.b64encode(data).decode()
 
 
-def decoded(value: object, label: str) -> bytes:
+def decoded(value: object, label: str, *, source: str = "journal") -> bytes:
     if not isinstance(value, str):
-        raise SuccessorError(f"journal {label} is not text")
+        raise SuccessorError(f"{source} {label} is not text")
     try:
         data = base64.b64decode(value, validate=True)
     except ValueError as exc:
-        raise SuccessorError(f"journal {label} is not canonical base64") from exc
+        raise SuccessorError(f"{source} {label} is not canonical base64") from exc
     if encoded(data) != value:
-        raise SuccessorError(f"journal {label} is not canonical base64")
+        raise SuccessorError(f"{source} {label} is not canonical base64")
     return data
 
 

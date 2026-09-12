@@ -223,7 +223,7 @@ DELIVERY_RECOVERY_POLICY = (
     "Before a delivery-recovery stop, await every retained async sender result and refresh watcher status. "
     "A stop requires both a terminal failed sender result and fresh `not_codex` or unchanged fatal-error evidence after non-destructive recovery; visible input alone is insufficient."
 )
-MANAGER_COMPACTION_REMINDER = "Unless you know the exact content of MANAGER.md, read it. Normally, don't ack human"
+MANAGER_COMPACTION_REMINDER = "Unless you know the current manager instructions, run `getagentsmd get agent_manager` and your role command. Normally, don't ack human"
 TODO_LENGTH_REMINDER = (
     "omo_pending_watch detected TODO.md with {n_lines} lines is too long. "
     "Archive old completed tasks per docs/monthly-archive.md; keep only the newest 20 `previous` tasks in TODO.md and move older `previous` tasks to YYYYMM/old_todos.md."
@@ -254,7 +254,7 @@ MANAGER_POLICY_REMINDERS = (
     "Reminder: stay high level; route concrete work to agents.",
 )
 MANAGER_PERIODIC_POLICY_REMINDERS = (
-    "Reminder: reread MANAGER.md periodically.",
+    "Reminder: rerun `getagentsmd get agent_manager` and your role command periodically.",
     "Reminder: hand off each task completely, then have its responsible agent immediately acknowledge acceptance by email.",
 )
 MANAGER_EMAIL_POLICY_REMINDERS = MANAGER_POLICY_REMINDERS
@@ -5283,7 +5283,7 @@ def manager_actions_for_problem_lines(lines: list[str]) -> list[str]:
     if re.search(r"\bdone-registry-stale=\d+", count_line):
         actions.append("manager-action: done-registry-stale>0 close agents marked done but still open, or correct the task status")
     if re.search(r"\bmanager_compaction=\d+", count_line):
-        actions.append("manager-action: manager_compaction>0 reread MANAGER.md after compaction unless the compaction summary already included it")
+        actions.append("manager-action: manager_compaction>0 rerun getagentsmd manager and role commands after compaction unless the summary already included them")
     return actions
 
 
@@ -5333,7 +5333,7 @@ def problem_section(status: str, rows: list[ProblemRow]) -> list[str]:
         "not_codex": f"{len(rows)} not codex; check if agent failed to launch:",
         "blocked_idle": f"{len(rows)} blocked agents are ready; if they are not actually blocked, correct their status, otherwise make sure whatever is blocking them is being resolved:",
         "error": f"{len(rows)} have visible errors; inspect the pane, fix the error, or restart them:",
-        "manager_compaction": f"{len(rows)} are compacting; reread MANAGER.md after compaction unless the summary already included it:",
+        "manager_compaction": f"{len(rows)} are compacting; rerun getagentsmd manager and role commands after compaction unless the summary already included them:",
         "manager_waiting_subagent": f"{len(rows)} managers are waiting on a subagent and could not be interrupted automatically; inspect or interrupt them:",
         "ready": f"{len(rows)} ready and not blocked; consider resuming or closing them:",
         "stuck_input": f"{len(rows)} have visible input; refresh status and unstick safely; do not stop a live agent solely for this input:",

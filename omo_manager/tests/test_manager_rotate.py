@@ -57,17 +57,20 @@ class ManagerRotateTests(unittest.TestCase):
             self.assertEqual(".\r\nExact reason\r\n-- Human", replacement_context(root, mail))
 
             args = replace(self.args(root, root / "state"), replacement_email_file=mail)
-            (root / "MANAGER.md").write_text("manager instructions\n", encoding="utf-8")
             with (
                 patch("omo_manager.omo_manager_rotate.resolve_exact_pane", return_value=self.pane(root)),
                 patch("omo_manager.omo_manager_rotate.read_processes", return_value={100: process(100, 1, "bunx", "@openai/codex@latest", "--model", "gpt-5.6-terra", "--config", 'model_reasoning_effort="xhigh"')}),
                 patch("omo_manager.omo_manager_rotate.invocation_is_target", return_value=False),
                 patch("omo_manager.omo_manager_rotate.shutil.which", return_value="/bin/bunx"),
-                patch("omo_manager.omo_manager_rotate.readable_text", side_effect=lambda path, label: "worker defaults\n" if label == "worker defaults" else "manager instructions\n"),
+                patch(
+                    "omo_manager.omo_manager_rotate.launch_instructions",
+                    return_value=b"$ /test/getagentsmd\nroot\n\n$ /test/getagentsmd get agent_manager\ncommon\n\n$ /test/getagentsmd get main_manager\nmain\n",
+                ) as instructions,
                 patch("omo_manager.omo_manager_rotate.capture_pane", return_value="old output\n"),
             ):
                 prepared = preflight(args)
             self.assertIn("<replacement_reason>.\r\nExact reason\r\n-- Human</replacement_reason>", prepared.prompt)
+            instructions.assert_called_once_with("main_manager")
 
     def test_self_path_forwards_replacement_email_to_coordinator(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

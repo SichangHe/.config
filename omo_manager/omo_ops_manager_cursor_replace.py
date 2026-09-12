@@ -30,12 +30,13 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from omo_manager.omo_agent_instructions import AgentInstructionsError, launch_instructions
 from omo_manager.omo_agent_status import parse_task_lines, read_task_metadata, resolve_task_path, same_tmux_target, task_has_pending_marker
 from omo_manager.omo_codex_start import Pane, StartError, resolve_pane, respawn_codex
 from omo_manager.omo_codex_status import Args as StatusArgs
 from omo_manager.omo_codex_status import inspect, pane_has_exact_cursor_process
 from omo_manager.omo_manager_rotate import PaneIdentity, RotationError, default_state_dir, ensure_private_directory, invocation_is_target, is_codex_launch_argv, process_is_under, read_processes, resolve_exact_pane, write_private
-from omo_manager.omo_task import DEFAULT_WORKER_INSTRUCTIONS, codex_cmd, replace_frontmatter_fields
+from omo_manager.omo_task import codex_cmd, replace_frontmatter_fields
 from omo_manager.omo_task_lock import task_target_lock
 from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1, TaskFrontmatterError, TaskMetadata, parse_task_metadata
 from omo_manager.omo_task_status import replace_if_unchanged, tracked_dirty_state
@@ -380,8 +381,6 @@ def bind(args: Args) -> Snapshot:
     require_live_codex(pane)
     if shutil.which("agent") is None:
         raise ReplaceError("Cursor Agent CLI `agent` is not available on PATH")
-    if not DEFAULT_WORKER_INSTRUCTIONS.is_file() or not (args.root / "MANAGER.md").is_file():
-        raise ReplaceError("worker defaults or MANAGER.md is missing")
     text = resolved.read_text(encoding="utf-8")
     return Snapshot(pane, resolved, text, resolved.stat(), metadata, children, authority)
 
@@ -404,14 +403,14 @@ def verify_snapshot(args: Args, expected: Snapshot) -> Snapshot:
     return current
 
 
-def cursor_command(pane: Pane, root: Path, prompt_path: Path) -> str:
+def cursor_command(pane: Pane, root: Path, prompt_path: Path, agent_instructions_file: Path) -> str:
     command = codex_cmd(
         tool="cursor",
         model=CURSOR_MODEL,
         reasoning_effort=CURSOR_EFFORT,
         workdir=pane.workdir,
         prompt_file=prompt_path,
-        manager_file=root / "MANAGER.md",
+        agent_instructions_file=agent_instructions_file,
     )
     rendered = f"export OMO_AGENT_TMUX_TARGET={shlex.quote(pane.target)} OMO_WORK_LOGS_ROOT={shlex.quote(str(root))} && exec {command}"
     if "resume" in rendered.casefold() or UUID_RE.search(rendered) is not None:
@@ -446,6 +445,10 @@ def verify_children(root: Path, expected: tuple[ChildSnapshot, ...]) -> None:
 
 def replace_manager(args: Args) -> str:
     reject_h_target(args.target)
+    try:
+        instructions = launch_instructions("submanager")
+    except AgentInstructionsError as exc:
+        raise ReplaceError(f"cannot load manager instructions: {exc}") from exc
     with task_target_lock(args.root, REQUIRED_TARGET):
         snapshot = bind(args)
         if args.dry_run:
@@ -455,9 +458,11 @@ def replace_manager(args: Args) -> str:
         prompt_dir = args.state_dir / "ops-manager-cursor-replace"
         ensure_private_directory(prompt_dir)
         prompt_path = prompt_dir / "continuation.txt"
+        agent_instructions_file = prompt_dir / "getagentsmd-output.txt"
         write_private(prompt_path, CONTINUATION, replace=True)
+        write_private(agent_instructions_file, instructions.decode(), replace=True)
         snapshot = verify_snapshot(args, snapshot)
-        command = cursor_command(snapshot.pane, args.root, prompt_path)
+        command = cursor_command(snapshot.pane, args.root, prompt_path, agent_instructions_file)
         replaced = False
         try:
             respawn_codex(snapshot.pane, command)

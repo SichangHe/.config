@@ -13,7 +13,7 @@ It acts only when all of these remain true through the replacement boundary:
 - the helper is invoked from a different pane than `wl:3`
 - tracked dirty work-log files either are `ops_manager.md`, have parseable ownership that is not a competing `wl:3` runat, or the helper fails on dirty unknown state
 
-The helper then respawns that same pane into Cursor Agent with `cursor-grok-4.6-xhigh`, worker defaults, `MANAGER.md`, and a continuation prompt. After Cursor is `running` or `ready` with a new pane PID, it changes only frontmatter `tool` to `cursor`.
+The helper then respawns that same pane into Cursor Agent with `cursor-grok-4.6-xhigh`, captured `getagentsmd` common/submanager instructions, and a continuation prompt. After Cursor is `running` or `ready` with a new pane PID, it changes only frontmatter `tool` to `cursor`.
 
 `--dry-run` reruns the non-mutating gates, including the fresh pre-action revalidation. It does not respawn `wl:3` or edit the task record.
 

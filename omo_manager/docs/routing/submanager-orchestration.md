@@ -2,7 +2,7 @@
 
 status
 - helper contract, not standing manager policy
-- human review required before copying these rules into `MANAGER.md`
+- human review required before copying these rules into the getagentsmd manager instructions
 
 ownership
 - main manager owns `manager_projects.md`

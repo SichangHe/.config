@@ -1,11 +1,14 @@
 # shared helper reference
 
-This directory is non-authoritative helper documentation. Manager operating instructions live in the work-log root's `MANAGER.md`; helpers use `OMO_WORK_LOGS_ROOT` to locate that file.
+This directory is non-authoritative helper documentation. Manager operating
+instructions come from `getagentsmd`; helpers use `OMO_WORK_LOGS_ROOT` for task
+records and local state.
 
 - `file-based-prose.md` manager-authored prose and file-input conventions
 - `environment.md` Python environment and watcher setup wrapper
 - `quiet-checks.md` low-token aggregate check helpers
 - `agent-reports.md` durable agent-to-manager reports through `omo_report.sh`
+- `agent-tree.md` authoritative reporting-tree design; command usage lives only in `omo_agent_tree.py --help`
 - `amh_problem.py claim ID --action TEXT` claims one unchanged watcher problem for exactly 10 minutes; only the watcher can resolve it
 - `report-routing-human-answers.md` concise answers about report routing, `seen`, watcher restart, unsticking, and digests
 - `omo_record_pending.py` records pending items from a delivered `(pending)` block, removes that marker, and optionally emails the human

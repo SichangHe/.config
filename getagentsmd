@@ -178,8 +178,8 @@ def instruction_name(value: str) -> str | None:
 def main(args: list[str] | None = None) -> int:
     args = sys.argv[1:] if args is None else args
     if not args:
-        _ = print_remote_or_cache(AGENTS_MD_URL, CACHE_FILE, render_root=True)
-        return 0
+        found = print_remote_or_cache(AGENTS_MD_URL, CACHE_FILE, render_root=True)
+        return 0 if found else 1
     # 🧑 “The workflow agents will use is they will run getagentsmd and follow
     # through the linked commands to read the docs they need to read”
     if (

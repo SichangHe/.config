@@ -5961,7 +5961,10 @@ with exclusive_watcher_root(root):
 
     def test_manager_policy_reminders_include_periodic_manual_refresh(self) -> None:
         self.assertEqual(0.125, pending_watcher.MANAGER_POLICY_REMINDER_RATE)
-        self.assertIn("Reminder: reread MANAGER.md periodically.", pending_watcher.MANAGER_PERIODIC_POLICY_REMINDERS)
+        self.assertIn(
+            "Reminder: rerun `getagentsmd get agent_manager` and your role command periodically.",
+            pending_watcher.MANAGER_PERIODIC_POLICY_REMINDERS,
+        )
 
     def test_approved_manager_reminders_have_their_own_one_in_eight_path(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -5982,7 +5985,7 @@ with exclusive_watcher_root(root):
         )
         text = watcher.with_manager_policy_reminder(args, "base")
         self.assertNotIn("delegate work", text)
-        self.assertIn("Reminder: reread MANAGER.md periodically.", text)
+        self.assertIn("Reminder: rerun `getagentsmd get agent_manager` and your role command periodically.", text)
 
     def test_oversized_pending_task_file_output_includes_continuation_warning(self) -> None:
         from omo_manager.omo_pending_watch import scan_once
@@ -10090,7 +10093,7 @@ resolved_task_items: []
         result = watcher.CommandOutput(
             "agent-problems",
             3,
-            "agent-problems: manager_compaction=1\nmanager-action: manager_compaction>0 reread MANAGER.md after compaction unless the compaction summary already included it\nmanager_compaction: task=manager evidence=target=wl:1.0 role=manager output=• Compacting conversation / › Continue managing\n",
+            "agent-problems: manager_compaction=1\nmanager-action: manager_compaction>0 rerun getagentsmd manager and role commands after compaction unless the summary already included them\nmanager_compaction: task=manager evidence=target=wl:1.0 role=manager output=• Compacting conversation / › Continue managing\n",
             "",
         )
         seen: dict[str, float] = {}
@@ -10099,7 +10102,12 @@ resolved_task_items: []
             self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
             self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1001.0))
         text = out.getvalue()
-        self.assertEqual(1, text.count("Unless you know the exact content of MANAGER.md, read it. Normally, don't ack human"))
+        self.assertEqual(
+            1,
+            text.count(
+                "Unless you know the current manager instructions, run `getagentsmd get agent_manager` and your role command. Normally, don't ack human"
+            ),
+        )
         self.assertNotIn("manager agent problem: running task marker needs attention.", text)
 
     def test_agent_problem_check_ignores_stale_manager_compaction_target(self) -> None:
@@ -10109,14 +10117,14 @@ resolved_task_items: []
         result = watcher.CommandOutput(
             "agent-problems",
             3,
-            "agent-problems: manager_compaction=1\nmanager-action: manager_compaction>0 reread MANAGER.md after compaction unless the compaction summary already included it\nmanager_compaction: task=manager evidence=target=wl:1.0 role=manager output=• Compacting conversation / › Continue managing\n",
+            "agent-problems: manager_compaction=1\nmanager-action: manager_compaction>0 rerun getagentsmd manager and role commands after compaction unless the summary already included them\nmanager_compaction: task=manager evidence=target=wl:1.0 role=manager output=• Compacting conversation / › Continue managing\n",
             "",
         )
         out = StringIO()
         with redirect_stdout(out):
             self.assertFalse(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
         text = out.getvalue()
-        self.assertNotIn("Unless you know the exact content of MANAGER.md", text)
+        self.assertNotIn("Unless you know the current manager instructions", text)
         self.assertNotIn("manager (this is the main manager) wl:1.0", text)
 
     def test_agent_problem_check_clears_manager_compaction_active_when_gone(self) -> None:

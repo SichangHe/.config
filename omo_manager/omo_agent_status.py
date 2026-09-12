@@ -2075,7 +2075,7 @@ def format_problem_summary(rows: list[StatusRow], completed_stale: set[str] | di
     if completed_stale_evidence_map:
         lines.append("manager-action: done-registry-stale>0 close agents marked done but still open, or prune stale registry rows")
     if counts["manager_compaction"]:
-        lines.append("manager-action: manager_compaction>0 reread MANAGER.md after compaction unless the compaction summary already included it")
+        lines.append("manager-action: manager_compaction>0 rerun getagentsmd manager and role commands after compaction unless the summary already included them")
     for row in sorted(problem_rows, key=lambda item: (item.status, item.task_file)):
         lines.append(f"{row.status}: task={row.task_file} evidence={row.evidence} route_owner_target={row.owner_target or '-'}")
     unstuck: dict[str, tuple[str, str]] = {}

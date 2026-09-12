@@ -18,7 +18,6 @@ from omo_manager.omo_task import (
     Args,
     CursorProcessProof,
     DEFAULT_TOOL,
-    DEFAULT_WORKER_INSTRUCTIONS,
     LaunchSession,
     LaunchWindow,
     PCODX_WRAPPER,
@@ -76,6 +75,7 @@ from omo_manager.omo_worker_successor import (
 
 
 VALID_GOAL_TREE = "implement manager check\n- reject missing task goal tree\n"
+AGENT_INSTRUCTIONS = Path("/tmp/getagentsmd-output.txt")
 
 
 def trust_screen(launch_marker: str) -> list[str]:
@@ -111,6 +111,19 @@ CAPTURED_TRUST_POPUP = (
 
 
 class OmoTaskTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.launch_instructions = patch("omo_manager.omo_task.launch_instructions", return_value=b"$ /test/getagentsmd\nagent instructions\n")
+        self.launch_instructions_mock = self.launch_instructions.start()
+        self.successor_instructions = patch(
+            "omo_manager.omo_worker_successor.launch_instructions",
+            return_value=b"$ /test/getagentsmd\nagent instructions\n",
+        )
+        _ = self.successor_instructions.start()
+
+    def tearDown(self) -> None:
+        self.successor_instructions.stop()
+        self.launch_instructions.stop()
+
     @patch("omo_manager.omo_task.send_omnigent_message")
     @patch("omo_manager.omo_task.launch_omnigent_session", return_value="omnigent://session-123")
     def test_main_omnigent_launch_binds_task_and_delivers_initial_prompt(self, launch, send) -> None:
@@ -1353,10 +1366,10 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIn("exit_status: FileNotFoundError: [Errno 2] tmux unavailable", text)
 
     def test_codex_cmd_resumes_quoted_session(self) -> None:
-        self.assertTrue(codex_cmd("abc", tool="codex").startswith("bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox resume abc "))
-        self.assertTrue(codex_cmd("abc def", tool="codex").startswith("bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox resume 'abc def' "))
-        self.assertTrue(codex_cmd("abc", tool="pcodx").startswith(f"{PCODX_WRAPPER} resume abc "))
-        self.assertIn(str(DEFAULT_WORKER_INSTRUCTIONS), codex_cmd("abc", tool="pcodx"))
+        self.assertTrue(codex_cmd("abc", tool="codex", agent_instructions_file=AGENT_INSTRUCTIONS).startswith("bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox resume abc "))
+        self.assertTrue(codex_cmd("abc def", tool="codex", agent_instructions_file=AGENT_INSTRUCTIONS).startswith("bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox resume 'abc def' "))
+        self.assertTrue(codex_cmd("abc", tool="pcodx", agent_instructions_file=AGENT_INSTRUCTIONS).startswith(f"{PCODX_WRAPPER} resume abc "))
+        self.assertIn(str(AGENT_INSTRUCTIONS), codex_cmd("abc", tool="pcodx", agent_instructions_file=AGENT_INSTRUCTIONS))
 
     def test_codex_cmd_can_resume_without_submitting_prompt(self) -> None:
         self.assertEqual(
@@ -1411,25 +1424,25 @@ class OmoTaskTests(unittest.TestCase):
         self.assertTrue(args.resume_idle)
 
     def test_codex_cmd_uses_prompt_argument_from_file(self) -> None:
-        expected_paths = f"{DEFAULT_WORKER_INSTRUCTIONS} /tmp/prompt.md"
+        expected_paths = f"{AGENT_INSTRUCTIONS} /tmp/prompt.md"
         self.assertEqual(
             f'bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox "$(cat -- {expected_paths})"',
-            codex_cmd(prompt_file=Path("/tmp/prompt.md"), tool="codex"),
+            codex_cmd(prompt_file=Path("/tmp/prompt.md"), tool="codex", agent_instructions_file=AGENT_INSTRUCTIONS),
         )
 
     def test_codex_cmd_prepends_worker_defaults_to_prompt_file(self) -> None:
-        self.assertIn(str(DEFAULT_WORKER_INSTRUCTIONS), codex_cmd(prompt_file=Path("/tmp/prompt.md")))
+        self.assertIn(str(AGENT_INSTRUCTIONS), codex_cmd(prompt_file=Path("/tmp/prompt.md"), agent_instructions_file=AGENT_INSTRUCTIONS))
 
     def test_codex_cmd_adds_vl_worker_defaults_only_for_vl_agents(self) -> None:
-        self.assertNotIn(str(VL_WORKER_INSTRUCTIONS), codex_cmd(prompt_file=Path("/tmp/prompt.md")))
+        self.assertNotIn(str(VL_WORKER_INSTRUCTIONS), codex_cmd(prompt_file=Path("/tmp/prompt.md"), agent_instructions_file=AGENT_INSTRUCTIONS))
         self.assertEqual(
-            f'bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox "$(cat -- {DEFAULT_WORKER_INSTRUCTIONS} {VL_WORKER_INSTRUCTIONS} /tmp/prompt.md)"',
-            codex_cmd(prompt_file=Path("/tmp/prompt.md"), vl_agent=True, tool="codex"),
+            f'bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox "$(cat -- {AGENT_INSTRUCTIONS} {VL_WORKER_INSTRUCTIONS} /tmp/prompt.md)"',
+            codex_cmd(prompt_file=Path("/tmp/prompt.md"), vl_agent=True, tool="codex", agent_instructions_file=AGENT_INSTRUCTIONS),
         )
 
     def test_codex_cmd_adds_defaults_without_custom_prompt(self) -> None:
-        command = codex_cmd(vl_agent=True)
-        self.assertIn(str(DEFAULT_WORKER_INSTRUCTIONS), command)
+        command = codex_cmd(vl_agent=True, agent_instructions_file=AGENT_INSTRUCTIONS)
+        self.assertIn(str(AGENT_INSTRUCTIONS), command)
         self.assertIn(str(VL_WORKER_INSTRUCTIONS), command)
 
     def test_vl_agent_scope_uses_task_file_or_tmux_session(self) -> None:
@@ -1442,19 +1455,19 @@ class OmoTaskTests(unittest.TestCase):
 
     def test_codex_cmd_adds_reasoning_effort_and_extra_flags(self) -> None:
         self.assertTrue(
-            codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="codex").startswith(
+            codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="codex", include_prompt=False).startswith(
                 "bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
             )
         )
 
     def test_codex_cmd_orders_and_quotes_explicit_model_and_effort(self) -> None:
         self.assertTrue(
-            codex_cmd(model="model name", reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="codex").startswith(
+            codex_cmd(model="model name", reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="codex", include_prompt=False).startswith(
                 "bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox --model 'model name' --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
             )
         )
         self.assertTrue(
-            codex_cmd(model="model name", reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="pcodx").startswith(
+            codex_cmd(model="model name", reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="pcodx", include_prompt=False).startswith(
                 f"{PCODX_WRAPPER} --model 'model name' --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
             )
         )
@@ -1466,11 +1479,12 @@ class OmoTaskTests(unittest.TestCase):
             prompt_file=Path("/tmp/prompt.md"),
             tool="cursor",
             workdir=Path("/work/tree"),
+            agent_instructions_file=AGENT_INSTRUCTIONS,
         )
         self.assertTrue(command.startswith("agent --force --sandbox disabled --trust --workspace /work/tree --model gpt-5.6-terra-medium"))
         self.assertIn("$(cat --", command)
         self.assertTrue(
-            codex_cmd(model="cursor-grok-4.6", reasoning_effort="xhigh", workdir=Path("/work")).startswith(
+            codex_cmd(model="cursor-grok-4.6", reasoning_effort="xhigh", workdir=Path("/work"), include_prompt=False).startswith(
                 "agent --force --sandbox disabled --trust --workspace /work --model cursor-grok-4.6-xhigh"
             )
         )
@@ -1525,12 +1539,12 @@ class OmoTaskTests(unittest.TestCase):
 
     def test_codex_cmd_resume_carries_explicit_model_and_effort(self) -> None:
         self.assertTrue(
-            codex_cmd("abc def", reasoning_effort="max", model="gpt-5.6-terra", tool="codex").startswith(
+            codex_cmd("abc def", reasoning_effort="max", model="gpt-5.6-terra", tool="codex", include_prompt=False).startswith(
                 "bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-terra --config 'model_reasoning_effort=\"max\"' resume 'abc def'",
             )
         )
         self.assertTrue(
-            codex_cmd("abc def", reasoning_effort="max", model="gpt-5.6-terra", tool="pcodx").startswith(
+            codex_cmd("abc def", reasoning_effort="max", model="gpt-5.6-terra", tool="pcodx", include_prompt=False).startswith(
                 f"{PCODX_WRAPPER} --model gpt-5.6-terra --config 'model_reasoning_effort=\"max\"' resume 'abc def'",
             )
         )
@@ -1539,7 +1553,7 @@ class OmoTaskTests(unittest.TestCase):
         self.assertTrue(PCODX_WRAPPER.is_absolute())
         self.assertEqual(Path(__file__).resolve().parents[1] / "pcodx", PCODX_WRAPPER)
         self.assertTrue(
-            codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="pcodx").startswith(
+            codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="pcodx", include_prompt=False).startswith(
                 f"{PCODX_WRAPPER} --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
             )
         )
@@ -2048,7 +2062,7 @@ class OmoTaskTests(unittest.TestCase):
             with self.subTest(effort=effort):
                 args = parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--reasoning-effort", effort])
                 self.assertEqual(effort, args.reasoning_effort)
-                self.assertIn(f'model_reasoning_effort="{effort}"', codex_cmd(reasoning_effort=effort, tool="codex"))
+                self.assertIn(f'model_reasoning_effort="{effort}"', codex_cmd(reasoning_effort=effort, tool="codex", include_prompt=False))
 
     def test_parse_args_accepts_prelaunch_source(self) -> None:
         args = parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--prelaunch-source", "/tmp/pre launch.sh"])
@@ -2202,21 +2216,27 @@ class OmoTaskTests(unittest.TestCase):
             self.assertFalse((root / "TODO.md").exists())
             tmux_mock.assert_not_called()
 
-    def test_prompt_orders_defaults_manager_custom_and_exact_human_excerpt(self) -> None:
+    def test_prompt_orders_getagentsmd_vl_custom_and_exact_human_excerpt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            manager = root / "MANAGER.md"
+            instructions = root / "getagentsmd-output.txt"
             custom = root / "custom.md"
-            manager.write_bytes(b"MANAGER\n")
+            instructions.write_bytes(b"GETAGENTSMD\nMANAGER\n")
             custom.write_bytes(b"CUSTOM\n")
             excerpt = "human first\r\nhuman second\r\n"
             human_instruction = write_human_instruction_file(excerpt)
             try:
-                rendered = self.render_prompt(prompt_input(custom, vl_agent=True, manager_file=manager, human_instruction_file=human_instruction))
+                rendered = self.render_prompt(
+                    prompt_input(
+                        custom,
+                        vl_agent=True,
+                        human_instruction_file=human_instruction,
+                        agent_instructions_file=instructions,
+                    )
+                )
                 expected = (
-                    DEFAULT_WORKER_INSTRUCTIONS.read_bytes()
+                    instructions.read_bytes()
                     + VL_WORKER_INSTRUCTIONS.read_bytes()
-                    + manager.read_bytes()
                     + custom.read_bytes()
                     + b'\n<human_instruction authoritative="true">\n'
                     + excerpt.encode()
@@ -2255,8 +2275,12 @@ class OmoTaskTests(unittest.TestCase):
             )
             excerpt = validate_inputs(args)
             human_instruction = write_human_instruction_file(excerpt)
+            instructions = root / "getagentsmd-output.txt"
+            instructions.write_text("GETAGENTSMD\n", encoding="utf-8")
             try:
-                rendered = self.render_prompt(prompt_input(None, human_instruction_file=human_instruction))
+                rendered = self.render_prompt(
+                    prompt_input(None, human_instruction_file=human_instruction, agent_instructions_file=instructions)
+                )
                 self.assertTrue(rendered.endswith(b'<human_instruction authoritative="true">\nexact one\r\nexact two</human_instruction>'))
                 self.assertNotIn(b"private-source-name.md", rendered)
                 self.assertNotIn(b"2-3", rendered)
@@ -2295,7 +2319,11 @@ class OmoTaskTests(unittest.TestCase):
             root = Path(tmp)
             prompt = root / "prompt.md"
             prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
-            with contextlib.redirect_stderr(io.StringIO()), patch("omo_manager.omo_task.tmux") as tmux_mock:
+            with (
+                contextlib.redirect_stderr(io.StringIO()),
+                patch("omo_manager.omo_task.launch_instructions", side_effect=RuntimeError("getagentsmd failed")),
+                patch("omo_manager.omo_task.tmux") as tmux_mock,
+            ):
                 result = main(
                     [
                         "--root",
@@ -2361,7 +2389,7 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIn(VALID_GOAL_TREE, text)
             self.assertNotIn("manager-only-secret", text)
             self.assertIn('<human_instruction authoritative="true" source="manager_mail/request.md:1-1">\nemail-only-secret\n</human_instruction>', text)
-            self.assertNotIn(DEFAULT_WORKER_INSTRUCTIONS.read_text(encoding="utf-8"), text)
+            self.assertNotIn("$ /test/getagentsmd", text)
 
     def test_task_file_separates_manager_delegation_from_sourced_human_words(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2863,7 +2891,7 @@ class OmoTaskTests(unittest.TestCase):
                 self.assertEqual(task, bound_task)
                 self.assertEqual(hashlib.sha256(task.read_bytes()).hexdigest(), expected)
                 text = captured.read_text(encoding="utf-8")
-                self.assertTrue(text.startswith(DEFAULT_WORKER_INSTRUCTIONS.read_text(encoding="utf-8")))
+                self.assertTrue(text.startswith("$ /test/getagentsmd\nagent instructions\n"))
                 self.assertIn('<manager_delegation from="mgr:1">', text)
                 self.assertIn(VALID_GOAL_TREE.rstrip(), text)
                 events.append("capture-and-prompt")
@@ -3123,11 +3151,9 @@ class OmoTaskTests(unittest.TestCase):
             command = tmux.call_args_list[0].args[0]
             self.assertIn(str(VL_WORKER_INSTRUCTIONS), command[3])
 
-    def test_start_codex_automatically_adds_root_manager_instructions(self) -> None:
+    def test_start_codex_automatically_adds_getagentsmd_manager_instructions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            manager = root / "MANAGER.md"
-            manager.write_text("manager instructions\n", encoding="utf-8")
             args = Args(root, "x.md", "cfg", "", "codex", root, "x", None, False, False, "", "", (), is_manager=True)
             with (
                 patch("omo_manager.omo_task.exact_pane_id", return_value="%7"),
@@ -3137,7 +3163,8 @@ class OmoTaskTests(unittest.TestCase):
             ):
                 start_codex("cfg:7", args)
             command = tmux.call_args_list[0].args[0][3]
-            self.assertLess(command.index(str(DEFAULT_WORKER_INSTRUCTIONS)), command.index(str(manager)))
+            self.assertIn("omo-getagentsmd-output-", command)
+            self.launch_instructions_mock.assert_called_with("submanager")
 
     def test_start_codex_rejects_context_free_vl_launch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

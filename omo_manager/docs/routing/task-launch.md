@@ -16,9 +16,16 @@ New ordinary worker tasks start with `status: running`; `--is-manager` tasks sta
 
 Non-submanager VL worker launches, identified by a `vl_` task filename or the `vl` tmux session, require `--manager-target` so reports and watcher status route to the owning VL submanager. Raw `--codex-flag` MCP server config tokens such as `mcp_servers.*` require explicit `--tool pcodx`, so ordinary new Codex agents do not inherit private partial-compaction MCP registration. The MCP tools provide an auditable partial-compaction ledger; they do not rewrite Codex's hidden native transcript.
 
-Every prompted launch begins its initial prompt with `WORKER_DEFAULTS.md`, including launches without `--prompt-file`; `--resume-idle` is the no-prompt recovery exception. Prompted VL launches add `VL_WORKER_DEFAULTS.md` after the common defaults and still require `--prompt-file` for task-local context. Manager launches selected with `--is-manager` then add `ROOT/MANAGER.md`; the launch fails before task, TODO, or tmux mutation if that file is missing or unreadable. The launcher labels `--prompt-file` content as agent-authored with `<manager_delegation from="MANAGER_TARGET">`. The complete order is common worker defaults, optional VL defaults, optional manager instructions, manager delegation, then any authoritative human excerpt.
-
-The PB-specific continuation and human-email rule in `WORKER_DEFAULTS.md` has the same deployment boundary: newly prompted launches receive it; already-running agents and `--resume-idle` launches do not.
+Every prompted launch begins with a transcript showing the `getagentsmd`
+command and its output; `--resume-idle` is the no-prompt recovery exception.
+Prompted VL launches add `VL_WORKER_DEFAULTS.md` and still require
+`--prompt-file` for task-local context. Manager launches selected with
+`--is-manager` also capture `get agent_manager` and `get submanager`. A failed
+or empty instruction command stops launch before task, TODO, or tmux mutation.
+The launcher labels `--prompt-file` content as agent-authored with
+`<manager_delegation from="MANAGER_TARGET">`. The complete order is captured
+instruction commands, optional VL guidance, manager delegation, then any
+authoritative human excerpt.
 
 Use paired `--human-email-file FILE --human-email-lines START-END` options with `--prompt-file` on `--workdir` launches to append an inclusive excerpt from human email as the final prompt content. The custom prompt supplies the agent-authored task goal and subgoals; the email options supply the separately labeled human words. Relative `FILE` paths resolve from `ROOT`, and the resolved path must remain inside `ROOT/manager_mail`. The launcher requires both options, validates that the readable file and `END` line exist before mutation, preserves the selected text exactly, and wraps it in `<human_instruction authoritative="true" source="FILE:START-END">` tags. It rejects excerpts containing `</human_instruction>`. The durable task body and worker prompt both retain the root-relative source and selected lines so later agents can distinguish exact human words from manager synthesis. The wrapped runtime excerpt uses an owner-private temporary file across any update retry and is removed after launch verification. These options are not accepted in registration-only, resume-idle, or manager-ownership-migration mode.
 
@@ -26,7 +33,17 @@ Tmux sessions whose names begin with `h` are human-owned. `omo_task.py --workdir
 `--allow-new-tmux-session` does not broaden that authority. Creating a missing `h*` session additionally requires direct authoritative text that explicitly creates the exact named session; permission merely to launch an agent there is insufficient. If a newly created session returns invalid identity or its first pane does not become ready, the helper removes only that returned session while its session ID and name still match.
 Manager rotation always rejects `h*` targets. Lower-level `omo_codex_start.py` also rejects them except for its documented byte-exact, same-pane `hwl:3` restart authorization; that exception cannot launch, create, move, or recover any other human-owned pane.
 
-Launcher-managed defaults and `MANAGER.md` are prompt-only. The task body stores each `--prompt-file` inside a manager-delegation envelope and stores each selected human excerpt in a separate authoritative human-instruction envelope. The launcher rejects a manager prompt containing `<human_instruction` or `</manager_delegation>` and rejects a human excerpt containing `</human_instruction>`, so neither source can forge the other's provenance boundary. Cursor receives the initial prompt as its launch argument. A fresh ordinary Codex launch starts without the prompt, captures and stores its session UUID through `/status`, then pastes the prompt into the same authenticated empty pane and retries a guarded Enter until submission succeeds or the pane leaves a safe Codex state.
+Captured instruction-command output is prompt-only. The task body stores each
+`--prompt-file` inside a manager-delegation envelope and stores each selected
+human excerpt in a separate authoritative human-instruction envelope. The
+launcher rejects a manager prompt containing `<human_instruction` or
+`</manager_delegation>` and rejects a human excerpt containing
+`</human_instruction>`, so neither source can forge the other's provenance
+boundary. Cursor receives the initial prompt as its launch argument. A fresh
+ordinary Codex launch starts without the prompt, captures and stores its session
+UUID through `/status`, then pastes the prompt into the same authenticated empty
+pane and retries a guarded Enter until submission succeeds or the pane leaves a
+safe Codex state.
 
 Use `--prelaunch-source SCRIPT` when a worker needs launcher-time environment setup. `omo_task.py` sources that readable shell script inside the worker pane before exporting `OMO_AGENT_TMUX_TARGET` and starting the worker.
 
@@ -36,7 +53,16 @@ Dry-run launch planning does not acquire the root membership lock. Mutating laun
 
 The helper writes task/TODO state after tmux creates the worker target and before starting the worker, then verifies that the pane leaves the shell. A worker launch failure is explicit but can leave that manager-owned bookkeeping in place for diagnosis or retry. When tmux cannot create the session or window, the error names a private temporary diagnostic file containing the exact failed tmux command, selected tmux environment, task/prompt/workdir state, exit status, stdout, stderr, and any current session windows. For a directory-trust prompt, `omo_task.py` records the newly created pane's exact tmux ID and pre-launch capture, emits a full UUID marker absent from that baseline, and recognizes only Codex's contiguous bottom-anchored `You are in`/warning/choices/confirmation frame. Confirmation also requires exactly one live supported Codex launch below the pinned pane process; new launches use `@openai/codex@latest`, while an existing legacy `@openai/codex` process remains recognizable. `h*` sessions are never auto-confirmed. Immediately before selecting the default `Yes, continue` choice once, the helper rechecks that process provenance and requires the logical task target to resolve to the same pane ID, then sends Enter to that exact ID. Split-window active-pane changes, stale scrollback, unframed text, registration-only panes, and arbitrary `not_codex` panes cannot authorize confirmation. If Codex stops on its update prompt, the helper presses Enter to run the update, waits for the restart message, and reruns the original launch command once.
 
-Use `--model MODEL_NAME` for model selection and follow `MANAGER.md` for the current model policy. `--reasoning-effort EFFORT` passes `--config 'model_reasoning_effort="EFFORT"'`; allowed values are `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`. Both model and reasoning effort are emitted explicitly for fresh and prompted resumed Codex and PCODX launches. Use repeatable `--codex-flag` only for unrelated extra Codex argv tokens, for example `--codex-flag=--profile --codex-flag deep-review`; raw `--model...` and `-m...` tokens are rejected. Use `--session-id UUID` to start `codex ... resume UUID` or, with `--tool pcodx`, `pcodx ... resume UUID` instead of a fresh session. Pane 0 is implied.
+Use `--model MODEL_NAME` for model selection and follow the applicable
+`getagentsmd` instructions for current model policy. `--reasoning-effort EFFORT`
+passes `--config 'model_reasoning_effort="EFFORT"'`; allowed values are `low`,
+`medium`, `high`, `xhigh`, `max`, and `ultra`. Both model and reasoning effort
+are emitted explicitly for fresh and prompted resumed Codex and PCODX launches.
+Use repeatable `--codex-flag` only for unrelated extra Codex argv tokens, for
+example `--codex-flag=--profile --codex-flag deep-review`; raw `--model...` and
+`-m...` tokens are rejected. Use `--session-id UUID` to start
+`codex ... resume UUID` or, with `--tool pcodx`, `pcodx ... resume UUID` instead
+of a fresh session. Pane 0 is implied.
 
 New workers default to `--tool cursor`. Use `--model cursor-grok-4.6 --reasoning-effort xhigh`; the launcher passes this to Cursor as `cursor-grok-4.6-xhigh`. Pass `--tool codex` to start Codex instead. This Cursor guidance does not change the Codex model guidance above.
 

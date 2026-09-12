@@ -44,8 +44,9 @@ class ManagerHelperHelpTests(unittest.TestCase):
         self.assertIn("link the task in TODO.md unless --no-link", launch_help)
         self.assertIn("open a tmux window with its normal shell", launch_help)
         self.assertIn("--prompt-file becomes the worker's initial prompt argument", launch_help)
-        self.assertIn("start Cursor Agent there unless --tool codex", launch_help)
-        self.assertIn("WORKER_DEFAULTS.md", launch_help)
+        self.assertIn("start Cursor Agent there unless --tool codex or pcodx", launch_help)
+        self.assertIn("captures the command and output from getagentsmd", launch_help)
+        self.assertIn("common and submanager instruction documents", launch_help)
         self.assertIn("gpt-5.6-sol medium is the default", launch_help)
         self.assertIn("cursor-grok-4.6-xhigh", launch_help)
         self.assertIn("Keep --task-file as manager-side bookkeeping", launch_help)
@@ -89,14 +90,7 @@ class ManagerHelperHelpTests(unittest.TestCase):
         self.assertIn("infers routing from the producer pane", report_help)
         self.assertIn("do not pass task-file, root, manager-target", report_help)
 
-    def test_worker_defaults_points_to_complete_unread_report_replacement_help(self) -> None:
-        worker_defaults = (OMO_DIR / "WORKER_DEFAULTS.md").read_text(encoding="utf-8")
-        self.assertIn(
-            "To remove a message you previously sent to the human, read and follow `omo_manager_mail_compress.py agent-trash-replaced --help`.",
-            worker_defaults,
-        )
-        self.assertEqual(1, worker_defaults.count("agent-trash-replaced"))
-
+    def test_complete_unread_report_replacement_help(self) -> None:
         replacement_help = helper_help("omo_manager_mail_compress.py", "agent-trash-replaced")
         for required in (
             "Only revoke mail the human has not read",
@@ -114,6 +108,25 @@ class ManagerHelperHelpTests(unittest.TestCase):
             "Do not schedule this cleanup",
         ):
             self.assertIn(required, replacement_help)
+
+    def test_agent_tree_help_is_the_complete_command_reference(self) -> None:
+        tree_help = helper_help("omo_agent_tree.py")
+        for required in (
+            "Defaults and root selection",
+            "Records and validation",
+            "Output and depth",
+            "Exit status",
+            "--agent",
+            "--full-tree",
+            "--main-manager",
+            "--depth",
+            "--status",
+            "--all-statuses",
+            "--json",
+            "omnigent://",
+            "no open work recorded",
+        ):
+            self.assertIn(required, tree_help)
 
     def test_ops_manager_cursor_replace_help_owns_pin_and_fail_closed_details(self) -> None:
         replace_help = helper_help("omo_ops_manager_cursor_replace.py")

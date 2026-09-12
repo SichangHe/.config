@@ -31,28 +31,31 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 try:
+    from omo_manager.omo_agent_instructions import AgentInstructionsError, launch_instructions
     from omo_manager.omo_agent_status import parse_task_text
     from omo_manager.omo_codex_status import Args as StatusArgs
     from omo_manager.omo_codex_status import CODEX_FOOTER_RE, current_block, current_input_text, exact_tail, has_plan_prompt, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
     from omo_manager.omo_codex_status import status as classify_status
     from omo_manager.omo_codex_stop import extract_new_status_session_id, query_status_session_id
+    from omo_manager.omo_manager_env import load_local_env
     from omo_manager.omo_task_lock import task_file_lock, task_target_lock
-    from omo_manager.omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, frontmatter_parts, parse_task_metadata
+    from omo_manager.omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, canonical_target, frontmatter_parts, parse_task_metadata, runat_kind
     from omo_manager.omo_task_status import authoritative_active_target_task_paths, root_membership_lock
     from omo_manager.omo_manager_rotation_contain import ContainmentError, ProcessIdentity, process_argv, process_snapshot, process_stat, stable_process_identity
 except ModuleNotFoundError:
+    from omo_agent_instructions import AgentInstructionsError, launch_instructions  # pyright: ignore[reportImplicitRelativeImport]
     from omo_agent_status import parse_task_text  # pyright: ignore[reportImplicitRelativeImport]
     from omo_codex_status import Args as StatusArgs
     from omo_codex_status import CODEX_FOOTER_RE, current_block, current_input_text, exact_tail, has_plan_prompt, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
     from omo_codex_status import status as classify_status
     from omo_codex_stop import extract_new_status_session_id, query_status_session_id
+    from omo_manager_env import load_local_env  # pyright: ignore[reportImplicitRelativeImport]
     from omo_task_lock import task_file_lock, task_target_lock
-    from omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, frontmatter_parts, parse_task_metadata
+    from omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, canonical_target, frontmatter_parts, parse_task_metadata, runat_kind
     from omo_task_status import authoritative_active_target_task_paths, root_membership_lock  # pyright: ignore[reportImplicitRelativeImport]
     from omo_manager_rotation_contain import ContainmentError, ProcessIdentity, process_argv, process_snapshot, process_stat, stable_process_identity  # pyright: ignore[reportImplicitRelativeImport]
 
 HELPER_DIR = Path(__file__).resolve().parent
-WORKER_DEFAULTS = HELPER_DIR / "WORKER_DEFAULTS.md"
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
 SUCCESS_STATUSES = {"ready", "running"}
 RESTARTABLE_STATUSES = {"error", "ready", "running", "stuck_input", "waiting_subagent"}
@@ -1221,17 +1224,40 @@ def pcodx_state(pane: Pane) -> dict[str, str]:
     return state
 
 
-def prompt_text(args: Args, is_manager: bool) -> str:
+def instruction_role(args: Args) -> str | None:
+    """Select manager instructions from authoritative task metadata."""
+
+    if args.rotate_worker:
+        return None
+    path = task_path(args.root, args.task_file)
+    try:
+        metadata = parse_task_metadata(path.read_text(encoding="utf-8"), args.root)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise StartError(f"cannot select launch instructions from {path}: {exc}") from exc
+    if metadata is None or not metadata.is_manager:
+        return None
+    configured = load_local_env().get("OMO_MANAGER_TMUX_TARGET", "")
+    if runat_kind(configured) != "tmux":
+        raise StartError("cannot select manager role: OMO_MANAGER_TMUX_TARGET is missing or invalid")
+    return "main_manager" if canonical_target(metadata.runat) == canonical_target(configured) else "submanager"
+
+
+def launch_instruction_text(args: Args) -> str:
+    try:
+        return launch_instructions(instruction_role(args)).decode().rstrip()
+    except (AgentInstructionsError, UnicodeDecodeError) as exc:
+        raise StartError(f"cannot load agent instructions: {exc}") from exc
+
+
+def prompt_text(args: Args, agent_instructions: str | None = None) -> str:
     if args.prompt_file is None:
         return ""
-    sources = [WORKER_DEFAULTS]
-    if is_manager:
-        sources.append(args.root / "MANAGER.md")
-    sources.append(args.prompt_file)
+    sources = [args.prompt_file]
     for source in sources:
         if not source.is_file():
             raise StartError(f"required prompt source is not readable: {source}")
-    text = "\n\n".join(source.read_text(encoding="utf-8").rstrip() for source in sources) + "\n"
+    instructions = launch_instruction_text(args) if agent_instructions is None else agent_instructions
+    text = "\n\n".join((instructions, *(source.read_text(encoding="utf-8").rstrip() for source in sources))) + "\n"
     if args.rotate_worker and args.replacement_email_file is not None:
         try:
             from omo_manager.omo_manager_rotate import replacement_context
@@ -3511,6 +3537,7 @@ def start(args: Args) -> str:
         raise StartError("--recover-resume-cwd-prompt requires --session-id and does not accept --prompt-file.")
     if args.recover_resume_cwd_prompt and (not args.resume_cwd_choice or args.expected_session_directory is None):
         raise StartError("--recover-resume-cwd-prompt requires a choice and expected saved session directory.")
+    agent_instructions = launch_instruction_text(args) if args.rotate_worker or args.prompt_file is not None else None
     pane = resolve_pane(args.target)
     human_restart_authority = require_human_restart_authority(args, pane)
     source1206_authority = require_source1206_authority(args, pane)
@@ -3595,7 +3622,7 @@ def start(args: Args) -> str:
         if args.rotate_worker:
             rotation_snapshot = capture_rotation_snapshot(args, pane, task_binding)
             effective_args = replace(args, prompt_file=path, session_id="")
-        text = prompt_text(effective_args, False if args.rotate_worker else task_binding.is_manager)
+        text = prompt_text(effective_args, agent_instructions)
         prompt_path: Path | None = None
         try:
             if text:

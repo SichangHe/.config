@@ -31,6 +31,7 @@ if __name__ == "__main__" and Path(sys.prefix).resolve() != HELPER_ENV.resolve()
         os.execv(project_python, [project_python, __file__, *sys.argv[1:]])
 
 try:
+    from omo_manager.omo_agent_instructions import launch_instructions
     from omo_manager.omo_omnigent import launch_session as launch_omnigent_session
     from omo_manager.omo_omnigent import send_message as send_omnigent_message
     from omo_manager.omo_codex_status import current_block, exact_pane_id, status, tail
@@ -40,6 +41,7 @@ try:
     from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1, TASK_FRONTMATTER_V2, first_version, frontmatter_text, runat_kind
     from omo_manager.omo_task_lock import process_start_ticks, task_file_lock, task_target_lock
 except ModuleNotFoundError:
+    from omo_agent_instructions import launch_instructions  # pyright: ignore[reportImplicitRelativeImport]
     from omo_omnigent import launch_session as launch_omnigent_session
     from omo_omnigent import send_message as send_omnigent_message
     from omo_codex_status import current_block, exact_pane_id, status, tail
@@ -49,7 +51,6 @@ except ModuleNotFoundError:
     from omo_task_metadata import TASK_FRONTMATTER_V1, TASK_FRONTMATTER_V2, first_version, frontmatter_text, runat_kind
     from omo_task_lock import process_start_ticks, task_file_lock, task_target_lock
 
-DEFAULT_WORKER_INSTRUCTIONS = HELPER_DIR / "WORKER_DEFAULTS.md"
 VL_WORKER_INSTRUCTIONS = HELPER_DIR / "VL_WORKER_DEFAULTS.md"
 PCODX_WRAPPER = HELPER_DIR / "pcodx"
 COMMAND_BY_TOOL = {
@@ -180,6 +181,7 @@ class Args:
     prepared_tmux_environment: tuple[tuple[str, str], ...] = ()
     omnigent: bool = False
     omnigent_host_id: str = ""
+    agent_instructions_file: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -314,16 +316,18 @@ def parse_args(argv: list[str]) -> Args:
         allow_abbrev=False,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Launch behavior:
-  With --workdir, create or update task frontmatter, link the task in TODO.md
-  unless --no-link is passed, then launch in tmux by default. Pass --omnigent
+  With --workdir, open a tmux window with its normal shell, create or update
+  task frontmatter, link the task in TODO.md unless --no-link is passed, then
+  start Cursor Agent there unless --tool codex or pcodx is selected. Pass --omnigent
   to create a host-backed OmniGent session instead; --tool still names the
   actual codex or cursor harness, while runat identifies the metaframework.
   This does not stop already running Codex panes. --prompt-file becomes the
   worker's initial prompt argument. Every new launch requires --model and
   --reasoning-effort; model selection in --codex-flag is rejected. Pass
-  --is-manager for manager launches. WORKER_DEFAULTS.md is injected into every
-  prompt, followed by MANAGER.md for manager launches. Do not repeat
-  instructions to read those files. For a launch caused by email, pass
+  --is-manager for submanager launches. Every fresh launch captures the command
+  and output from getagentsmd; manager launches also capture the common and
+  submanager instruction documents. Do not repeat those instructions. For a
+  launch caused by email, pass
   --human-email-file and the exact relevant --human-email-lines. Keep
   --prompt-file narrowly task-specific. Keep --task-file as manager-side
   bookkeeping and out of worker prompts.
@@ -1255,11 +1259,11 @@ def task_instruction_text(args: Args, manager_target: str) -> str:
 def omnigent_initial_prompt(args: Args) -> str:
     """Build the same provenance-separated prompt used by a tmux launch."""
     manager_target = managerat_for_task(args, "omnigent://pending")
-    paths = [DEFAULT_WORKER_INSTRUCTIONS]
+    if args.agent_instructions_file is None:
+        raise RuntimeError("prompted launch has no captured `getagentsmd` output")
+    paths = [args.agent_instructions_file]
     if is_vl_agent(args.task_file, ""):
         paths.append(VL_WORKER_INSTRUCTIONS)
-    if args.is_manager:
-        paths.append(args.root / "MANAGER.md")
     parts = [path.read_text(encoding="utf-8").rstrip() for path in paths]
     instruction = task_instruction_text(args, manager_target).rstrip()
     if instruction:
@@ -1300,6 +1304,16 @@ def write_instruction_file(text: str, prefix: str) -> Path:
         return Path(handle.name)
 
 
+def write_agent_instructions_file(is_manager: bool) -> Path:
+    """Freeze public instruction-command output before mutating launch state."""
+
+    instructions = launch_instructions("submanager" if is_manager else None)
+    with tempfile.NamedTemporaryFile("wb", prefix="omo-getagentsmd-output-", delete=False) as handle:
+        os.fchmod(handle.fileno(), 0o600)
+        _ = handle.write(instructions)
+        return Path(handle.name)
+
+
 def write_human_instruction_file(excerpt: str, source: str = "") -> Path:
     return write_instruction_file(authoritative_human_instruction(excerpt, source), "omo-human-instruction.")
 
@@ -1333,14 +1347,14 @@ def capture_fresh_codex_session(target: str, task: Path, prompt: Path, expected_
 def prompt_input(
     prompt_file: Path | None,
     vl_agent: bool = False,
-    manager_file: Path | None = None,
     human_instruction_file: Path | None = None,
+    agent_instructions_file: Path | None = None,
 ) -> str:
-    paths = [DEFAULT_WORKER_INSTRUCTIONS]
+    if agent_instructions_file is None:
+        raise ValueError("prompted launch has no captured `getagentsmd` output")
+    paths = [agent_instructions_file]
     if vl_agent:
         paths.append(VL_WORKER_INSTRUCTIONS)
-    if manager_file is not None:
-        paths.append(manager_file)
     if prompt_file is not None:
         paths.append(prompt_file)
     if human_instruction_file is not None:
@@ -1357,11 +1371,11 @@ def codex_cmd(
     tool: str = DEFAULT_TOOL,
     vl_agent: bool = False,
     model: str = "",
-    manager_file: Path | None = None,
     human_instruction_file: Path | None = None,
     include_prompt: bool = True,
     workdir: Path | None = None,
     cursor_runtime: Path | None = None,
+    agent_instructions_file: Path | None = None,
 ) -> str:
     if tool == "cursor" and cursor_runtime is not None:
         args = [str(cursor_runtime), *COMMAND_BY_TOOL[tool][1:]]
@@ -1383,7 +1397,7 @@ def codex_cmd(
             args.extend(("--resume", session_id))
         parts = [shlex.quote(arg) for arg in args]
         if include_prompt:
-            parts.append(prompt_input(prompt_file, vl_agent, manager_file, human_instruction_file))
+            parts.append(prompt_input(prompt_file, vl_agent, human_instruction_file, agent_instructions_file))
         return " ".join(parts)
     if model:
         args.extend(("--model", model))
@@ -1396,7 +1410,7 @@ def codex_cmd(
         args.extend(("resume", session_id))
     parts = [shlex.quote(arg) for arg in args]
     if include_prompt:
-        parts.append(prompt_input(prompt_file, vl_agent, manager_file, human_instruction_file))
+        parts.append(prompt_input(prompt_file, vl_agent, human_instruction_file, agent_instructions_file))
     return " ".join(parts)
 
 
@@ -1795,7 +1809,10 @@ def start_codex(target: str, args: Args) -> None:
     if vl_agent and args.prompt_file is None and not args.resume_idle:
         raise ValueError("VL launches require --prompt-file so the end-goal and reviewer guidance has task-local context.")
     prepared_exact_prompt = args.prepared_runtime_path is not None
-    manager_file = args.root / "MANAGER.md" if args.is_manager else None
+    local_agent_instructions: Path | None = None
+    if not args.resume_idle and not prepared_exact_prompt and args.agent_instructions_file is None:
+        local_agent_instructions = write_agent_instructions_file(args.is_manager)
+        args = replace(args, agent_instructions_file=local_agent_instructions)
     excerpt = human_email_excerpt(args)
     human_instruction_file = write_human_instruction_file(excerpt, human_email_source(args)) if excerpt else None
     manager_source = args.manager_target.strip() or current_manager_target() or "unknown"
@@ -1821,11 +1838,11 @@ def start_codex(target: str, args: Args) -> None:
             and task_path(args.root, args.task_file).is_file()
         )
         if capture_session:
-            prompt_sources = [DEFAULT_WORKER_INSTRUCTIONS]
+            if args.agent_instructions_file is None:
+                raise RuntimeError("prompted launch has no captured `getagentsmd` output")
+            prompt_sources = [args.agent_instructions_file]
             if vl_agent:
                 prompt_sources.append(VL_WORKER_INSTRUCTIONS)
-            if manager_file is not None:
-                prompt_sources.append(manager_file)
             if manager_delegation_file is not None:
                 prompt_sources.append(manager_delegation_file)
             if human_instruction_file is not None:
@@ -1840,11 +1857,11 @@ def start_codex(target: str, args: Args) -> None:
             effective_tool(args),
             vl_agent,
             args.model,
-            manager_file,
             human_instruction_file,
             not args.resume_idle and not prepared_exact_prompt and not capture_session,
             args.workdir,
             args.prepared_runtime_path,
+            args.agent_instructions_file,
         )
         if prepared_exact_prompt:
             if manager_delegation_file is None:
@@ -1896,6 +1913,8 @@ def start_codex(target: str, args: Args) -> None:
             human_instruction_file.unlink(missing_ok=True)
         if remove_manager_delegation_file and manager_delegation_file is not None:
             manager_delegation_file.unlink(missing_ok=True)
+        if local_agent_instructions is not None:
+            local_agent_instructions.unlink(missing_ok=True)
         if captured_prompt is not None:
             captured_prompt.unlink(missing_ok=True)
 
@@ -2220,20 +2239,19 @@ def dry_run(args: Args) -> None:
         command = ["tmux", *new_window_command(bound_args, session.create)]
         print("tmux: " + " ".join(shlex.quote(part) for part in command))
         launch_target = tmux_target
-        manager_file = args.root / "MANAGER.md" if args.is_manager else None
         human_instruction_file = Path(tempfile.gettempdir()) / "omo-human-instruction.DRYRUN" if args.human_email_file is not None else None
         launch_command = codex_cmd(
-            args.session_id,
-            args.reasoning_effort,
-            args.codex_flags,
-            args.prompt_file,
-            effective_tool(args),
-            is_vl_agent(args.task_file, launch_target),
-            args.model,
-            manager_file,
-            human_instruction_file,
-            not args.resume_idle,
-            args.workdir,
+            session_id=args.session_id,
+            reasoning_effort=args.reasoning_effort,
+            codex_flags=args.codex_flags,
+            prompt_file=args.prompt_file,
+            tool=effective_tool(args),
+            vl_agent=is_vl_agent(args.task_file, launch_target),
+            model=args.model,
+            human_instruction_file=human_instruction_file,
+            include_prompt=not args.resume_idle,
+            workdir=args.workdir,
+            agent_instructions_file=args.agent_instructions_file,
         )
         launch = [
             "tmux",
@@ -2328,12 +2346,8 @@ def validate_inputs(args: Args) -> str:
         _ = human_email_excerpt(args)
     if args.workdir is not None and not args.omnigent:
         _ = validate_launch_session(args)
-    if args.workdir is not None and not args.resume_idle:
-        readable_file(DEFAULT_WORKER_INSTRUCTIONS, "worker defaults")
-        if is_vl_agent(args.task_file, target(args)):
-            readable_file(VL_WORKER_INSTRUCTIONS, "VL worker defaults")
-    if args.workdir is not None and args.is_manager and not args.resume_idle:
-        readable_file(args.root / "MANAGER.md", "manager instructions")
+    if args.workdir is not None and not args.resume_idle and is_vl_agent(args.task_file, target(args)):
+        readable_file(VL_WORKER_INSTRUCTIONS, "VL worker defaults")
     if args.prompt_file is not None and not args.prompt_file.is_file():
         raise ValueError(f"prompt file not found: {args.prompt_file}")
     if args.prompt_file is not None:
@@ -2798,13 +2812,15 @@ def cleanup_prepared_launch_window(window: LaunchWindow, args: Args | None = Non
         raise RuntimeError("prepared launch cleanup did not preserve an authenticated sibling pane identity.")
 
 
-def prepared_exact_prompt(binding, config: dict[str, object], defaults_path: Path) -> bytes:
-    from omo_manager.omo_worker_successor import read_frozen_prompt
+def prepared_exact_prompt(binding, config: dict[str, object], current_instructions: bytes) -> bytes:
+    from omo_manager.omo_worker_successor import decoded
 
-    defaults = read_frozen_prompt(defaults_path)
-    if hashlib.sha256(defaults.data).hexdigest() != config["worker_defaults_sha256"]:
-        raise RuntimeError("prepared launch worker-default instruction bytes changed.")
-    return defaults.data + b"\n" + manager_delegation(binding.prompt_data.decode(), binding.manager_target).encode()
+    instructions = decoded(config.get("agent_instructions"), "agent_instructions", source="launch manifest")
+    if hashlib.sha256(instructions).hexdigest() != config["agent_instructions_sha256"]:
+        raise RuntimeError("prepared launch `getagentsmd` instruction bytes changed.")
+    if instructions != current_instructions:
+        raise RuntimeError("prepared launch `getagentsmd` command/output changed since preparation.")
+    return instructions + b"\n" + manager_delegation(binding.prompt_data.decode(), binding.manager_target).encode()
 
 
 def bound_prepared_launch_args(
@@ -2844,7 +2860,6 @@ def prepared_successor_launch(args: Args) -> tuple[Path, str]:
 
     from omo_manager.omo_manager_replace import create_snapshot, read_snapshot, replace_snapshot
     from omo_manager.omo_worker_successor import (
-        DEFAULT_WORKER_INSTRUCTIONS as PREPARED_WORKER_DEFAULTS,
         binding_from_committed_journal,
         canonical_target,
         cursor_runtime_identity,
@@ -2858,6 +2873,7 @@ def prepared_successor_launch(args: Args) -> tuple[Path, str]:
     journal_path = args.prepared_successor_journal
     if journal_path is None:
         raise RuntimeError("prepared-successor launch requires its committed journal.")
+    current_instructions = launch_instructions()
     binding = binding_from_committed_journal(
         journal_path,
         expected_journal_sha256=args.expected_prepared_journal_sha256,
@@ -2957,7 +2973,7 @@ def prepared_successor_launch(args: Args) -> tuple[Path, str]:
             verify_prelaunch_state=False,
         )
         captured_prompt: Path | None = None
-        exact_prompt = prepared_exact_prompt(binding, config, PREPARED_WORKER_DEFAULTS)
+        exact_prompt = prepared_exact_prompt(binding, config, current_instructions)
         launch_args = bound_prepared_launch_args(
             args,
             prompt_file=binding.prompt_path,
@@ -3307,8 +3323,12 @@ def prepared_successor_launch(args: Args) -> tuple[Path, str]:
 
 
 def main(argv: list[str]) -> int:
+    agent_instructions_file: Path | None = None
     try:
         args = parse_args(argv)
+        if args.workdir is not None and not args.resume_idle and args.prepared_successor_journal is None:
+            agent_instructions_file = write_agent_instructions_file(args.is_manager)
+            args = replace(args, agent_instructions_file=agent_instructions_file)
         if args.migrate_manager_owner:
             migration_path = task_path(args.root, args.task_file)
             migration_text = migration_path.read_text(encoding="utf-8") if migration_path.is_file() else ""
@@ -3383,6 +3403,9 @@ def main(argv: list[str]) -> int:
     except Exception as exc:
         print(f"omo_task: {exc}", file=sys.stderr)
         return 1
+    finally:
+        if agent_instructions_file is not None:
+            agent_instructions_file.unlink(missing_ok=True)
     return 0
 
 

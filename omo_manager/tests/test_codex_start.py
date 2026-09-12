@@ -40,6 +40,7 @@ from omo_manager.omo_codex_start import (
     consume_recovery_receipt,
     delivery_event_path,
     finish_rotation_audit,
+    instruction_role,
     is_codex_update_prompt,
     launch_command,
     main,
@@ -93,6 +94,12 @@ class CodexStartTests(unittest.TestCase):
         self.audit_process_guard = patch("omo_manager.omo_codex_start.validate_audit_bound_replacement_process")
         self.audit_process_guard.start()
         self.addCleanup(self.audit_process_guard.stop)
+        self.agent_instructions = patch(
+            "omo_manager.omo_codex_start.launch_instructions",
+            return_value=b"$ /test/getagentsmd\nagent instructions\n",
+        )
+        self.agent_instructions.start()
+        self.addCleanup(self.agent_instructions.stop)
 
     def recovery_task(self, pane: Pane) -> TaskBinding:
         return TaskBinding(
@@ -147,7 +154,7 @@ class CodexStartTests(unittest.TestCase):
             mail.write_bytes(b"Subject: Re: [cfg:2] work\n\nReplace this agent.\r\nExact reason\r\n-- Human")
             args = self.args(root, session_id="", prompt_file=task, rotate_worker=True, replacement_email_file=mail)
 
-            text = prompt_text(args, False)
+            text = prompt_text(args, "$ /test/getagentsmd\nagent instructions")
 
             self.assertIn("<replacement_reason>.\r\nExact reason\r\n-- Human</replacement_reason>", text)
 
@@ -865,15 +872,34 @@ class CodexStartTests(unittest.TestCase):
         ):
             wait_resume_cwd_recovery(pane, self.SESSION_ID, 1.0)
 
-    def test_fresh_manager_prompt_includes_defaults_manager_and_task(self) -> None:
+    def test_fresh_manager_prompt_includes_getagentsmd_output_and_task(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
             prompt = root / "prompt.txt"
             prompt.write_text("task prompt\n", encoding="utf-8")
-            (root / "MANAGER.md").write_text("manager instructions\n", encoding="utf-8")
-            with patch("omo_manager.omo_codex_start.WORKER_DEFAULTS", prompt):
-                text = prompt_text(self.args(root, session_id="", prompt_file=prompt), True)
-            self.assertEqual("task prompt\n\nmanager instructions\n\ntask prompt\n", text)
+            text = prompt_text(
+                self.args(root, session_id="", prompt_file=prompt),
+                "$ /test/getagentsmd\nagent instructions",
+            )
+            self.assertEqual("$ /test/getagentsmd\nagent instructions\n\ntask prompt\n", text)
+
+    def test_manager_instruction_role_uses_configured_main_target(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, runat="wl:1.0", manager=True)
+            args = self.args(root, target="wl:1")
+            with patch("omo_manager.omo_codex_start.load_local_env", return_value={"OMO_MANAGER_TMUX_TARGET": "wl:1"}):
+                self.assertEqual("main_manager", instruction_role(args))
+
+            self.write_task(root, runat="config:27", manager=True)
+            args = self.args(root, target="config:27")
+            with patch("omo_manager.omo_codex_start.load_local_env", return_value={"OMO_MANAGER_TMUX_TARGET": "wl:1"}):
+                self.assertEqual("submanager", instruction_role(args))
+
+            with patch("omo_manager.omo_codex_start.load_local_env", return_value={}), self.assertRaisesRegex(
+                StartError, "OMO_MANAGER_TMUX_TARGET"
+            ):
+                instruction_role(args)
 
     def test_fresh_command_quotes_prompt_substitution_as_one_argument(self) -> None:
         root = Path("/tmp/work logs")
@@ -1098,7 +1124,7 @@ class CodexStartTests(unittest.TestCase):
             self.assertTrue(rotated)
             prompt.assert_called_once()
             deliver.assert_called_once()
-            self.assertFalse(prompt.call_args.args[1])
+            self.assertEqual("$ /test/getagentsmd\nagent instructions", prompt.call_args.args[1])
             self.assertEqual(task_before, (root / "worker.md").read_bytes())
             audit = root / "rotation.audit"
             self.assertEqual(0o600, audit.stat().st_mode & 0o777)
@@ -2879,7 +2905,7 @@ class CodexStartTests(unittest.TestCase):
 
             prompt.assert_called_once()
             deliver.assert_called_once()
-            self.assertFalse(prompt.call_args.args[1])
+            self.assertEqual("$ /test/getagentsmd\nagent instructions", prompt.call_args.args[1])
             self.assertEqual(task_before, (root / "worker.md").read_bytes())
             audit = (root / "rotation.audit").read_text(encoding="utf-8")
             self.assertIn("old-session-id: unavailable-asserted-legacy\nlegacy-missing-session-id: asserted-and-observed\n", audit)
