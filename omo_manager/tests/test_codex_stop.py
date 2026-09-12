@@ -869,6 +869,12 @@ class CodexStopTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             parse_args(["--target", "cfg:1.0", "--preserve-pane"])
 
+    def test_dangerous_check_override_requires_no_feedback(self) -> None:
+        with self.assertRaises(SystemExit):
+            parse_args(["--target", "cfg:1.0", "--dangerously-ignore-checks"])
+        args = parse_args(["--target", "cfg:1.0", "--no-feedback", "--dangerously-ignore-checks"])
+        self.assertTrue(args.dangerously_ignore_checks)
+
     def test_extract_resume_id_from_resume_command(self) -> None:
         text = "To resume, run codex resume 11111111-2222-3333-4444-555555555555\n"
         self.assertEqual("11111111-2222-3333-4444-555555555555", extract_resume_id(text))
@@ -1766,6 +1772,56 @@ class CodexStopTests(unittest.TestCase):
             stop(Args("cfg:1.0", 0.0, 10, False, False))
         query.assert_not_called()
         interrupt.assert_not_called()
+
+    def test_dangerous_check_override_closes_pinned_nonhuman_pane_without_probes(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", side_effect=("%1", "%1", "%1", "")),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%2"),
+            patch("omo_manager.omo_codex_stop.target_session_name", return_value="cfg"),
+            patch("omo_manager.omo_codex_stop.pane_target", return_value="cfg:1.0"),
+            patch("omo_manager.omo_codex_stop.inspect") as inspect_call,
+            patch("omo_manager.omo_codex_stop.query_status_session_id") as query,
+            patch("omo_manager.omo_codex_stop.capture", side_effect=("before", "after")),
+            patch("omo_manager.omo_codex_stop.send_exit_keys") as interrupt,
+            patch("omo_manager.omo_codex_stop.wait_shell", return_value=True),
+            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+        ):
+            self.assertEqual("", stop(Args("cfg:1.0", 0.0, 10, False, False, no_feedback=True, dangerously_ignore_checks=True)))
+        inspect_call.assert_not_called()
+        query.assert_not_called()
+        self.assertEqual("%1", interrupt.call_args.args[0])
+        self.assertTrue(callable(interrupt.call_args.args[1]))
+        close.assert_called_once_with("%1")
+        self.assertIn("ignoring Codex status and session checks", errors.getvalue())
+
+    def test_dangerous_check_override_refuses_unverified_interrupt(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%1"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%2"),
+            patch("omo_manager.omo_codex_stop.target_session_name", return_value="cfg"),
+            patch("omo_manager.omo_codex_stop.pane_target", return_value="cfg:1.0"),
+            patch("omo_manager.omo_codex_stop.capture", return_value="before"),
+            patch("omo_manager.omo_codex_stop.send_exit_keys"),
+            patch("omo_manager.omo_codex_stop.wait_shell", return_value=False),
+            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaisesRegex(RuntimeError, "could not verify that the pane reached a shell"),
+        ):
+            stop(Args("cfg:1.0", 0.0, 10, False, False, no_feedback=True, dangerously_ignore_checks=True))
+        close.assert_not_called()
+
+    def test_dangerous_check_override_keeps_human_owned_target_guard(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%caller"),
+            patch("omo_manager.omo_codex_stop.target_session_name", return_value="hwork"),
+            patch("omo_manager.omo_codex_stop.pane_target", return_value="hwork:1.0"),
+            patch("omo_manager.omo_codex_stop.inspect") as inspect_call,
+            self.assertRaisesRegex(RuntimeError, "human-owned"),
+        ):
+            stop(Args("%42", 0.0, 10, False, False, no_feedback=True, dangerously_ignore_checks=True))
+        inspect_call.assert_not_called()
 
     def test_stop_cursor_agent_does_not_send_codex_status_probe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

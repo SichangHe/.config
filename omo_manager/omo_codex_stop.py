@@ -162,6 +162,8 @@ class Args:
     # Keep new internal fields appended so historical positional callers are
     # not reinterpreted.
     bound_staged_status_check: Callable[[], None] | None = None
+    # 🧑 “Add a flag --dangerously-ignore-checks ... so agents can override broken checks when closing agents”
+    dangerously_ignore_checks: bool = False
 
 
 @dataclass(frozen=True)
@@ -182,6 +184,7 @@ class ParsedArgs(argparse.Namespace):
     feedback_wait_s: float = 180.0
     human_close_authorization_source: str = ""
     human_close_authorization_sha256: str = ""
+    dangerously_ignore_checks: bool = False
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -206,6 +209,11 @@ an exact `h*` task target with hash-bound human-close authority; it requires
     _ = parser.add_argument("--feedback-wait-s", type=float, default=180.0, help="Seconds to wait for feedback response before closing.")
     _ = parser.add_argument("--human-close-authorization-source", default="", help="Exact trusted manager_mail/<id>.txt record that directly authorizes closing this human-owned task target.")
     _ = parser.add_argument("--human-close-authorization-sha256", default="", help="Lowercase SHA-256 of the exact human-close authorization record.")
+    _ = parser.add_argument(
+        "--dangerously-ignore-checks",
+        action="store_true",
+        help="Close the exact pane without Codex status or session checks; requires --no-feedback and retains identity and ownership guards.",
+    )
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.wait_s < 0:
         parser.error("--wait-s must be non-negative.")
@@ -215,6 +223,8 @@ an exact `h*` task target with hash-bound human-close authority; it requires
         parser.error("--task-file must end with `.md`.")
     if parsed.feedback_wait_s < 0:
         parser.error("--feedback-wait-s must be non-negative.")
+    if parsed.dangerously_ignore_checks and not parsed.no_feedback:
+        parser.error("--dangerously-ignore-checks requires --no-feedback so no unchecked input is submitted.")
     authority_values = (parsed.human_close_authorization_source.strip(), parsed.human_close_authorization_sha256.strip())
     if any(authority_values) and (not all(authority_values) or not is_human_owned_target(parsed.target)):
         parser.error("human-close authorization requires both source and digest and an explicit human-owned h* target.")
@@ -234,6 +244,7 @@ an exact `h*` task target with hash-bound human-close authority; it requires
         parsed.feedback_wait_s,
         authority_values[0],
         authority_values[1],
+        dangerously_ignore_checks=parsed.dangerously_ignore_checks,
     )
 
 
@@ -2464,7 +2475,7 @@ def maybe_request_feedback(args: Args) -> None:
 
 def stop(args: Args) -> str:
     if runat_kind(args.target) == "omnigent":
-        if args.allow_self or args.bound_symbolic_target or args.bound_pane_id or args.bound_expected_session_id:
+        if args.allow_self or args.bound_symbolic_target or args.bound_pane_id or args.bound_expected_session_id or args.dangerously_ignore_checks:
             raise RuntimeError("OmniGent stop does not accept tmux identity options")
         stop_omnigent_session(args.target, dry_run=args.dry_run)
         return omnigent_session_id(args.target)
@@ -2518,6 +2529,15 @@ def stop(args: Args) -> str:
         raise RuntimeError("bound close operation requires its exact proof capability and audit digest")
     if tmux_guard is not None and not args.no_feedback:
         raise RuntimeError("bound stop requires --no-feedback so every pane access remains server-guarded")
+    if args.dangerously_ignore_checks and (
+        not args.no_feedback
+        or tmux_guard is not None
+        or args.bound_expected_session_id
+        or args.bound_pre_input_check is not None
+        or args.bound_staged_status_check is not None
+        or any(proof_fields)
+    ):
+        raise RuntimeError("dangerous check override requires --no-feedback and is unavailable for lifecycle-bound closes")
     if not args.allow_self and target_pane == current_pane_id():
         raise RuntimeError(f"refusing to stop the current pane: {args.target}")
     if args.task_file:
@@ -2572,18 +2592,21 @@ def stop(args: Args) -> str:
             return target_session_name(target_pane) == authorized_target.partition(":")[0] and numeric_target in target_aliases(authorized_target)
         return True
 
-    if tmux_guard is None:
-        report = inspect(StatusArgs(numeric_target, 80)) if numeric_target else None
-    else:
-        initial_capture = guarded_capture(target_pane, 80, tmux_guard, args.bound_pane_pid)
-        lines = [line.rstrip() for line in initial_capture.splitlines()]
-        while lines and not lines[-1]:
-            lines.pop()
-        report = report_from_lines(lines)
-    if report is None or report.status not in STOPPABLE_CODEX_STATUSES:
-        actual = report.status if report is not None else "missing"
-        raise RuntimeError(f"target is not a supported live Codex pane: {args.target} status={actual}")
+    if not args.dangerously_ignore_checks:
+        if tmux_guard is None:
+            report = inspect(StatusArgs(numeric_target, 80)) if numeric_target else None
+        else:
+            initial_capture = guarded_capture(target_pane, 80, tmux_guard, args.bound_pane_pid)
+            lines = [line.rstrip() for line in initial_capture.splitlines()]
+            while lines and not lines[-1]:
+                lines.pop()
+            report = report_from_lines(lines)
+        if report is None or report.status not in STOPPABLE_CODEX_STATUSES:
+            actual = report.status if report is not None else "missing"
+            raise RuntimeError(f"target is not a supported live Codex pane: {args.target} status={actual}")
     resolved_args = replace(args, target=target_pane)
+    if resolved_args.dangerously_ignore_checks:
+        print(f"warning: ignoring Codex status and session checks for exact pane {target_pane}", file=sys.stderr)
     if resolved_args.dry_run:
         print(f"would send Ctrl-C to {resolved_args.target}")
         return ""
@@ -2599,8 +2622,11 @@ def stop(args: Args) -> str:
         or (args.bound_staged_status_check is not None and args.bound_pre_input_check is None)
     ):
         raise RuntimeError("bound pre-input check requires a session-bound guarded close capability")
-    identity_check = identity_is_current if human_authorized or args.bound_symbolic_target else None
-    if task_tool(args) == "cursor":
+    identity_check = identity_is_current if human_authorized or args.bound_symbolic_target or args.dangerously_ignore_checks else None
+    if resolved_args.dangerously_ignore_checks:
+        before_close = capture(resolved_args.target, resolved_args.lines)
+        session_id = ""
+    elif task_tool(args) == "cursor":
         before_close = (
             capture(resolved_args.target, resolved_args.lines) if tmux_guard is None else guarded_capture(resolved_args.target, resolved_args.lines, tmux_guard, resolved_args.bound_pane_pid)
         )
@@ -2633,7 +2659,9 @@ def stop(args: Args) -> str:
             resolved_args.bound_pane_pid,
             resolved_args.bound_pre_input_check,
         )
-    _ = wait_shell(resolved_args.target, time.monotonic() + resolved_args.wait_s, tmux_guard, resolved_args.bound_pane_pid)
+    reached_shell = wait_shell(resolved_args.target, time.monotonic() + resolved_args.wait_s, tmux_guard, resolved_args.bound_pane_pid)
+    if resolved_args.dangerously_ignore_checks and not reached_shell:
+        raise RuntimeError("dangerous check override could not verify that the pane reached a shell; pane was not closed")
     after = capture(resolved_args.target, resolved_args.lines) if tmux_guard is None else guarded_capture(resolved_args.target, resolved_args.lines, tmux_guard, resolved_args.bound_pane_pid)
     if identity_check is not None and not identity_is_current():
         raise RuntimeError("tmux pane identity changed before close")
@@ -2657,6 +2685,8 @@ def stop(args: Args) -> str:
         close_authorized_human_pane(resolved_args.target, identity_is_current)
     else:
         close_tmux_target(resolved_args.target)
+    if resolved_args.dangerously_ignore_checks and pane_id(resolved_args.target):
+        raise RuntimeError("dangerous check override could not verify pane closure")
     return session_id or extract_exit_resume_id(before_close, after)
 
 

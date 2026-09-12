@@ -4306,7 +4306,7 @@ class TaskStatusTests(unittest.TestCase):
                 self.assertEqual(0, run(args))
             self.assertEqual(1, build.call_count)
             validate.assert_called_once_with(record_args)
-            close.assert_called_once_with(root, task, parse_task_metadata(text, root), "manager_mail/authority.txt", "a" * 64)
+            close.assert_called_once_with(root, task, parse_task_metadata(text, root), "manager_mail/authority.txt", "a" * 64, False)
 
     def test_low_priority_current_normalization_promotes_only_one_exact_active_manager_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5471,6 +5471,21 @@ resolved_task_items: []
             stop_call.assert_not_called()
             self.assertEqual("wl:3", stop_args.target)
             self.assertEqual("", session_id)
+
+    def test_stop_done_agent_passes_dangerous_check_override_to_exact_pane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            path.write_text(task_frontmatter(runat="wl:3") + "body\n", encoding="utf-8")
+            metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
+            assert metadata is not None
+            with (
+                patch("omo_manager.omo_task_status.exact_pane_id", return_value="%3"),
+                patch("omo_manager.omo_task_status.stop", return_value="") as stop_call,
+            ):
+                stop_done_agent(root, path, metadata, dangerously_ignore_checks=True)
+        self.assertEqual("%3", stop_call.call_args.args[0].target)
+        self.assertTrue(stop_call.call_args.args[0].dangerously_ignore_checks)
 
     def test_cli_done_closes_verified_missing_pane_and_moves_todo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7049,6 +7064,41 @@ resolved_task_items: []
             self.assertIn("status: blocked\nblocked_on: done_close_failed: tmux target not found\n", path.read_text(encoding="utf-8"))
             self.assertIn("failed to close done agent", stderr.getvalue())
 
+    def test_cli_dangerous_done_stays_blocked_when_interrupt_does_not_reach_shell(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text(task_frontmatter() + "body\n", encoding="utf-8")
+            with (
+                patch("omo_manager.omo_task_status.exact_pane_id", return_value="%3"),
+                patch("omo_manager.omo_task_status.pane_id", return_value="%3"),
+                patch("omo_manager.omo_codex_stop.pane_id", return_value="%3"),
+                patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%9"),
+                patch("omo_manager.omo_codex_stop.target_session_name", return_value="wl"),
+                patch("omo_manager.omo_codex_stop.pane_target", return_value="wl:2.0"),
+                patch("omo_manager.omo_codex_stop.capture", return_value="non-shell pane"),
+                patch("omo_manager.omo_codex_stop.send_exit_keys"),
+                patch("omo_manager.omo_codex_stop.wait_shell", return_value=False),
+                patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+                redirect_stderr(io.StringIO()),
+            ):
+                exit_code = run(StatusArgs(root, Path("task.md"), "done", "", dangerously_ignore_checks=True))
+            self.assertEqual(2, exit_code)
+            self.assertIn("status: blocked\nblocked_on: done_close_failed: dangerous check override could not verify that the pane reached a shell", path.read_text(encoding="utf-8"))
+            close.assert_not_called()
+
+    def test_cli_dangerous_done_rejects_omnigent_before_task_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            original = task_frontmatter(runat="omnigent://worker-1") + "body\n"
+            path.write_text(original, encoding="utf-8")
+            with patch("omo_manager.omo_task_status.stop") as stop_call, redirect_stderr(io.StringIO()):
+                exit_code = run(StatusArgs(root, Path("task.md"), "done", "", dangerously_ignore_checks=True))
+            self.assertEqual(2, exit_code)
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+            stop_call.assert_not_called()
+
     def test_cli_done_marks_blocked_when_close_bookkeeping_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "task.md"
@@ -7264,6 +7314,12 @@ resolved_task_items: []
             parse_args(["--completion-key", "ABC", "task.md", "done"])
         args = parse_args(["--completion-key", "a" * 64, "task.md", "done"])
         self.assertEqual("a" * 64, args.completion_key)
+
+    def test_dangerous_check_override_is_only_valid_for_normal_done(self) -> None:
+        with self.assertRaises(SystemExit):
+            parse_args(["--dangerously-ignore-checks", "task.md", "blocked", "--blocked-on", "human"])
+        args = parse_args(["--dangerously-ignore-checks", "--completion-key", "a" * 64, "task.md", "done"])
+        self.assertTrue(args.dangerously_ignore_checks)
 
     def test_index_reconciliation_mode_does_not_require_completion_key(self) -> None:
         args = parse_args(["--reconcile-long-running-human-index", "task.md"])

@@ -242,6 +242,7 @@ class Args:
     completion_key: str = ""
     reconcile_dependency_blocked_current: bool = False
     dependency_sha256: str = ""
+    dangerously_ignore_checks: bool = False
 
 
 class ParsedArgs(argparse.Namespace):
@@ -289,6 +290,7 @@ class ParsedArgs(argparse.Namespace):
     describe_done_live_no_mail: bool = False
     manager_consumed_report_receipt: Path | None = None
     manager_consumed_report_receipt_sha256: str = ""
+    dangerously_ignore_checks: bool = False
     shared_target: str = ""
     protected_shared_task: Path | None = None
     protected_shared_sha256: str = ""
@@ -431,6 +433,11 @@ shutdown.""",
         "--human-close-authorization-source", default="", help="Exact manager_mail/<id>.txt record that directly authorizes closing this human-owned task target during normal done closure."
     )
     _ = parser.add_argument("--human-close-authorization-sha256", default="", help="Lowercase SHA-256 of that exact human-close authorization record.")
+    _ = parser.add_argument(
+        "--dangerously-ignore-checks",
+        action="store_true",
+        help="For normal done closure, bypass only Codex status and session checks while retaining target, ownership, and bookkeeping guards.",
+    )
     _ = parser.add_argument("--expected-task-sha256", default="", help="Exact SHA-256 of unchanged task bytes required with --park-unlinked or --reattest-park-unlinked.")
     _ = parser.add_argument("--expected-todo-sha256", default="", help="Exact SHA-256 of unchanged TODO bytes required with --park-unlinked or --reattest-park-unlinked.")
     _ = parser.add_argument("--expected-receipt-sha256", default="", help="Exact SHA-256 of the complete v1 or v2 receipt required with --reattest-park-unlinked.")
@@ -475,35 +482,33 @@ shutdown.""",
         parser.error("--closure-repository must be an explicit absolute Git worktree root.")
     if parsed.dirty_path_handoff is not None and parsed.closure_repository is None:
         parser.error("--dirty-path-handoff requires --closure-repository.")
-    if (
-        sum(
-            (
-                parsed.finish_closed_done,
-                parsed.finish_replaced_done,
-                parsed.recover_exited_shell_done,
-                parsed.park_unlinked,
-                parsed.reattest_park_unlinked,
-                parsed.retire_blocked_target,
-                parsed.reconcile_missing_target,
-                parsed.close_missing_target,
-                parsed.complete_live_no_mail,
-                parsed.close_active_task_tree_no_mail,
-                parsed.close_done_live_no_mail,
-                parsed.describe_done_live_no_mail,
-                parsed.reconcile_long_running_human_index,
-                parsed.reconcile_blocked_index,
-                parsed.reconcile_dependency_blocked_current,
-                parsed.restore_terminal_target,
-                parsed.close_shared_target,
-                parsed.cancel_shared_target,
-                parsed.close_retired_done,
-                parsed.normalize_retired_todo,
-                parsed.normalize_low_priority_current,
-            )
-        )
-        > 1
-    ):
+    recovery_modes = (
+        parsed.finish_closed_done,
+        parsed.finish_replaced_done,
+        parsed.recover_exited_shell_done,
+        parsed.park_unlinked,
+        parsed.reattest_park_unlinked,
+        parsed.retire_blocked_target,
+        parsed.reconcile_missing_target,
+        parsed.close_missing_target,
+        parsed.complete_live_no_mail,
+        parsed.close_active_task_tree_no_mail,
+        parsed.close_done_live_no_mail,
+        parsed.describe_done_live_no_mail,
+        parsed.reconcile_long_running_human_index,
+        parsed.reconcile_blocked_index,
+        parsed.reconcile_dependency_blocked_current,
+        parsed.restore_terminal_target,
+        parsed.close_shared_target,
+        parsed.cancel_shared_target,
+        parsed.close_retired_done,
+        parsed.normalize_retired_todo,
+        parsed.normalize_low_priority_current,
+    )
+    if sum(recovery_modes) > 1:
         parser.error("finish and recovery modes are mutually exclusive.")
+    if parsed.dangerously_ignore_checks and (parsed.status != "done" or any(recovery_modes)):
+        parser.error("--dangerously-ignore-checks is valid only for a normal done transition.")
     if parsed.dependency_sha256 and not parsed.reconcile_dependency_blocked_current:
         parser.error("--dependency-sha256 requires --reconcile-dependency-blocked-current.")
     if any((parsed.protected_shared_task, parsed.protected_shared_sha256)) and not (parsed.cancel_shared_target or parsed.close_active_task_tree_no_mail):
@@ -1531,6 +1536,7 @@ shutdown.""",
         human_close_authorization_source=human_close_authority[0],
         human_close_authorization_sha256=human_close_authority[1],
         completion_key=parsed.completion_key.strip(),
+        dangerously_ignore_checks=parsed.dangerously_ignore_checks,
     )
 
 
@@ -1973,6 +1979,7 @@ def stop_done_agent(
     metadata: TaskMetadata,
     human_close_authorization_source: str = "",
     human_close_authorization_sha256: str = "",
+    dangerously_ignore_checks: bool = False,
 ) -> tuple[StopArgs, str]:
     """Close the task's Codex pane and return the captured session id."""
 
@@ -1985,6 +1992,7 @@ def stop_done_agent(
             if human_target
             else StopArgs(metadata.runat, 10.0, 2000, False, False, root, task_file, True, 0.0)
         )
+        record_args = replace(record_args, dangerously_ignore_checks=dangerously_ignore_checks)
         if not stable_pane_id:
             return record_args, ""
         allow_self = bool(stable_pane_id and worker_self_close_allowed(root, path, metadata))
@@ -6817,6 +6825,8 @@ def run(args: Args) -> int:
         else:
             metadata = parse_task_metadata(text, args.root)
             if metadata is not None and args.status == "done":
+                if args.dangerously_ignore_checks and runat_kind(metadata.runat) != "tmux":
+                    raise TaskFrontmatterError("--dangerously-ignore-checks supports only tmux-backed task closure.")
                 ensure_manager_has_no_active_children(args.root, path, metadata)
                 if args.closure_repository is not None:
                     ensure_repository_closure_custody(args.closure_repository, args.dirty_path_handoff)
@@ -6846,7 +6856,18 @@ def run(args: Args) -> int:
                 try:
                     assert metadata is not None
                     if runat_kind(metadata.runat) == "omnigent":
-                        close_args = StopArgs(metadata.runat, 10.0, 2000, False, False, args.root, path.relative_to(args.root).as_posix(), True, 0.0)
+                        close_args = StopArgs(
+                            metadata.runat,
+                            10.0,
+                            2000,
+                            False,
+                            False,
+                            args.root,
+                            path.relative_to(args.root).as_posix(),
+                            True,
+                            0.0,
+                            dangerously_ignore_checks=args.dangerously_ignore_checks,
+                        )
                         session_id = stop(close_args)
                     else:
                         close_args, session_id = stop_done_agent(
@@ -6855,6 +6876,7 @@ def run(args: Args) -> int:
                             metadata,
                             args.human_close_authorization_source,
                             args.human_close_authorization_sha256,
+                            args.dangerously_ignore_checks,
                         )
                 except Exception as exc:
                     rollback_before = path.stat()
