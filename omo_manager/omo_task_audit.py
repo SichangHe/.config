@@ -76,13 +76,14 @@ def task_files(root: Path) -> tuple[Path, ...]:
     return tuple(sorted((path for path in root.rglob("*.md") if not ignored.intersection(path.parts)), key=lambda path: path.relative_to(root).as_posix()))
 
 
-def successor_refs(metadata: TaskMetadata) -> tuple[str, ...]:
+def successor_refs(metadata: TaskMetadata, non_task_refs: set[str]) -> tuple[str, ...]:
     typed = tuple(blocker.task for blocker in metadata.blockers if isinstance(blocker, TaskBlocker))
     if typed:
         return tuple(sorted(set(typed)))
     if metadata.version == "v2.0.0":
         return ()
-    return tuple(sorted(set(re.findall(r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.md", metadata.blocked_on))))
+    refs = set(re.findall(r"(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.md", metadata.blocked_on))
+    return tuple(sorted(refs.difference(non_task_refs)))
 
 
 def root_todo_rows(root: Path):
@@ -146,6 +147,7 @@ def audit(root: Path, *, include_terminal: bool = False, terminal_dispositions: 
     paths = task_files(root)
     task_snapshots: dict[Path, FileSnapshot] = {}
     metadata_by_path = {}
+    non_task_refs: set[str] = set()
     for path in paths:
         resolved = path.resolve(strict=False)
         if resolved == root or root not in resolved.parents:
@@ -155,9 +157,12 @@ def audit(root: Path, *, include_terminal: bool = False, terminal_dispositions: 
         try:
             metadata = parse_task_metadata(snapshot[-1].decode("utf-8"), root)
         except (UnicodeError, TaskFrontmatterError):
+            non_task_refs.add(path.relative_to(root).as_posix())
             continue
         if metadata is not None:
             metadata_by_path[resolved] = metadata
+        else:
+            non_task_refs.add(path.relative_to(root).as_posix())
 
     findings = todo_path_findings
     terminal_tasks: list[str] = []
@@ -186,7 +191,7 @@ def audit(root: Path, *, include_terminal: bool = False, terminal_dispositions: 
             sections = ",".join(sorted(section for section, _target in rows))
             findings.append(Finding("duplicate_todo", relative, (relative,), f"rows={len(rows)} sections={sections}", "owner_reconciliation"))
         elif not rows:
-            successors = successor_refs(metadata)
+            successors = successor_refs(metadata, non_task_refs)
             disposition = (terminal_dispositions or {}).get(relative)
             if metadata.status == "done":
                 terminal_tasks.append(relative)

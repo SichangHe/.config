@@ -151,6 +151,40 @@ class TaskAuditTests(unittest.TestCase):
             self.assertIn(("zero_todo", "active.md", "owner_reconciliation"), kinds)
             self.assertEqual(findings, tuple(sorted(findings)))
 
+    def test_legacy_existing_non_task_markdown_is_not_a_successor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\n")
+            (root / "legacy-artifact.md").write_text(task("blocked", "wl:2", "paused and routed to task-data.md"))
+            (root / "legacy-missing.md").write_text(task("blocked", "wl:3", "replacement.md"))
+            (root / "task-data.md").write_text("preserved task data\n")
+            (root / "structured.md").write_text(
+                """---
+version: v2.0.0
+task_id: task_00000000-0000-7000-8000-000000000001
+status: blocked
+resume_status: running
+runat: wl:4
+tool: codex
+managerat: manager:0
+is_manager: false
+pending_task_items: []
+resolved_task_items: []
+blocked_on:
+  - kind: task
+    task: task-data.md
+    reason: waiting
+---
+"""
+            )
+
+            findings = audit(root)
+            by_task = {finding.key: (finding.kind, finding.action) for finding in findings}
+
+            self.assertEqual(("blocked_no_todo", "disposition_required"), by_task["legacy-artifact.md"])
+            self.assertEqual(("successor_blocked_no_todo", "verify_successor"), by_task["legacy-missing.md"])
+            self.assertEqual(("successor_blocked_no_todo", "verify_successor"), by_task["structured.md"])
+
     def test_todo_target_must_match_frontmatter_runat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
