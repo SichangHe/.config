@@ -211,6 +211,7 @@ class AgentLifecycleAction(Enum):
 class AgentLifecycleCommand:
     action: AgentLifecycleAction
     reason: str = ""
+    replacement_context: str = ""
 
 
 @dataclass(frozen=True)
@@ -505,12 +506,12 @@ def message_text(msg: Message) -> str:
 
 def agent_lifecycle_command(body: str) -> AgentLifecycleCommand | None:
     """Recognize either exact command phrase at the reply's start."""
-    normalized = body.replace("\r\n", "\n").replace("\r", "\n")
-    match = AGENT_LIFECYCLE_DIRECT_RE.match(normalized)
+    match = AGENT_LIFECYCLE_DIRECT_RE.match(body)
     if match is None:
         return None
     action = AgentLifecycleAction.REPLACE if match.group("action").casefold() == "replace" else AgentLifecycleAction.TERMINATE
-    return AgentLifecycleCommand(action)
+    replacement_context = body[match.end() :] if action is AgentLifecycleAction.REPLACE else ""
+    return AgentLifecycleCommand(action, replacement_context=replacement_context)
 
 
 def stored_mail_may_contain_lifecycle_command(path: Path) -> bool:
@@ -1009,23 +1010,27 @@ def lifecycle_action_guidance(command: AgentLifecycleCommand, binding: AgentLife
                 "decision: replace the main manager in place",
                 "supported_tool: omo_manager_rotate.py",
                 "required_invariant: preserve exactly one active main-manager owner",
+                f"decision: after replacement, deliver this exact JSON-decoded text to the replacement agent: {json.dumps(command.replacement_context, ensure_ascii=False)}",
             ]
         if binding.is_manager:
             return [
                 "decision: replace the addressed submanager in place",
-                "supported_tool_constraint: use the manager lifecycle path; omo_codex_start.py --rotate-worker rejects manager tasks",
+                "supported_tool: omo_manager_rotate.py with the marker's replacement_email_file; omo_codex_start.py --rotate-worker rejects manager tasks",
                 "required_invariant: preserve exactly one active owner throughout replacement",
+                f"decision: after replacement, deliver this exact JSON-decoded text to the replacement agent: {json.dumps(command.replacement_context, ensure_ascii=False)}",
             ]
         return [
             "decision: replace the addressed worker in place",
             "supported_tool: omo_codex_start.py --rotate-worker",
             "required_invariant: bind the exact task bytes, status, manager, ordered queue, protected targets, pane, and sole ownership",
+            f"decision: after replacement, deliver this exact JSON-decoded text to the replacement agent: {json.dumps(command.replacement_context, ensure_ascii=False)}",
         ]
     return [
-        "decision: terminate the addressed agent only after pending-work custody is complete",
-        "supported_tools: first omo_queue_transfer.py, then manager-owned omo_task_status.py TASK.md done",
-        "required_invariant: transfer or explicitly disposition every ordered pending item before closure",
-        "queue_rule: do not add the Human email itself to the addressed task's pending_task_items",
+        "decision: terminate the addressed agent only after the responsible manager receives the complete ordered queue as message text",
+        "supported_tools: after verified manager delivery, remove the delivered items from the addressed queue and use manager-owned omo_task_status.py TASK.md done",
+        "required_invariant: preserve source order in the manager message and remove exactly those delivered items before closure",
+        f"decision: ordered queued task message text (do not record in manager pending_task_items): {json.dumps(list(binding.pending_items), ensure_ascii=False, separators=(',', ':'))}",
+        "queue_rule: do not add a delivered queue item or the Human email to any manager pending_task_items",
     ]
 
 
@@ -1057,30 +1062,25 @@ def lifecycle_marker_text(
         *lifecycle_action_guidance(command, binding, main_manager=main_manager),
         "(for manager)",
     ]
-    mail_ref = source_ref(args.root, txt_path)
-    if not main_manager and not same_agent_target(binding.manager_target, args.manager_target):
-        manager_ref = source_ref(args.root, binding.manager_task_file)
-        manager_item = f"Handle the Human lifecycle request from `{mail_ref}`."
-        consume = (
-            "consume_command: omo_record_pending.py "
-            f"--root {shlex.quote(str(args.root))} --pending-file {shlex.quote(str(task_ref))} --line {pending_line} "
-            f"--task-file {shlex.quote(str(manager_ref))} --human --email-file {shlex.quote(str(mail_ref))} "
-            f"--item {shlex.quote(manager_item)} --ack-human"
+    if command.action is AgentLifecycleAction.REPLACE:
+        lines.insert(-1, f"replacement_email_file: {txt_path}")
+    if main_manager and command.action is AgentLifecycleAction.REPLACE:
+        command_line = shlex.join(
+            (
+                "omo_manager_rotate.py",
+                "--target",
+                binding.target,
+                "--root",
+                str(args.root),
+                "--state-dir",
+                str(args.state_dir),
+                "--replacement-email-file",
+                str(txt_path),
+            )
         )
-        lines.insert(-2, consume)
-    else:
-        clear_comment = "lifecycle request handled by the main manager without adding it to the addressed task queue"
-        consume = (
-            "consume_command: omo_task_edit.py "
-            f"--root {shlex.quote(str(args.root))} pending-marker-clear {shlex.quote(str(task_ref))} --line {pending_line} "
-            f"--comment {shlex.quote(clear_comment)} --clear-kind report-only --ack-human --email-file {shlex.quote(str(mail_ref))}"
-        )
-        lines.insert(
-            -2,
-            "consume_override: the main-manager log has no pending_task_items; ignore the generic omo_record_pending instruction "
-            "and use the following command when the supported lifecycle flow is ready to clear this transport",
-        )
-        lines.insert(-2, consume)
+        lines.insert(-1, "decision: execute this replacement before unrelated work and do not treat the Human email as ordinary task input")
+        lines.insert(-1, f"supported_command: {command_line}")
+    lines.insert(-1, "delivery_rule: the pending watcher clears this transport only after verified manager delivery")
     return "\n".join(lines)
 
 
@@ -1240,6 +1240,111 @@ def append_agent_lifecycle_pending(
         logging.warning("lifecycle command requires main-manager review: target=%s error=%s", requested_target, exc)
         review = AgentLifecycleCommand(AgentLifecycleAction.REVIEW, str(exc))
         return append_main_lifecycle_review(args, txt_path, review, requested_target)
+
+
+def is_main_manager_replacement(args: Args, subject: str, command: AgentLifecycleCommand) -> bool:
+    return command.action is AgentLifecycleAction.REPLACE and same_agent_target(
+        lifecycle_subject_target(args, subject), args.manager_target
+    )
+
+
+def execute_main_manager_replacement(args: Args, txt_path: Path) -> str:
+    """Run the supported atomic rotation from the watcher, never through the old manager."""
+
+    try:
+        mail_digest = hashlib.sha256(txt_path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise RuntimeError(f"main-manager replacement email is unavailable: {exc}") from exc
+    receipt = args.state_dir / "email-lifecycle-replacements" / f"{mail_digest}.json"
+    started = json.dumps(
+        {"outcome": "started", "target": args.manager_target, "mail_sha256": mail_digest, "audit_output": ""},
+        ensure_ascii=True,
+        sort_keys=True,
+    ) + "\n"
+    receipt.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        fd = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+    except FileExistsError:
+        try:
+            prior = json.loads(receipt.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"main-manager replacement receipt is invalid: {exc}") from exc
+        if prior.get("mail_sha256") != mail_digest or prior.get("target") != args.manager_target or prior.get("outcome") != "succeeded":
+            raise RuntimeError("main-manager replacement receipt does not match this command")
+        return str(prior.get("audit_output", "replacement receipt"))
+    except OSError as exc:
+        raise RuntimeError(f"main-manager replacement could not claim this email: {exc}") from exc
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(started)
+        handle.flush()
+        os.fsync(handle.fileno())
+    fsync_directory(receipt.parent)
+
+    helper = Path(__file__).with_name("omo_manager_rotate.py")
+    command = [
+        str(helper),
+        "--target",
+        args.manager_target,
+        "--root",
+        str(args.root),
+        "--state-dir",
+        str(args.state_dir),
+        "--replacement-email-file",
+        str(txt_path),
+        "--skip-watcher-refresh",
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=180, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"main-manager replacement could not start: {exc}") from exc
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        raise RuntimeError(f"main-manager replacement failed: {detail}")
+    output = result.stdout.strip()
+    if not output.startswith("audit_record: "):
+        raise RuntimeError("main-manager replacement did not complete with an audit record")
+    audit_path = Path(output.removeprefix("audit_record: ").strip())
+    try:
+        audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"main-manager replacement audit is unavailable: {exc}") from exc
+    if (
+        audit.get("outcome") != "succeeded"
+        or not same_agent_target(str(audit.get("target", "")), args.manager_target)
+        or Path(str(audit.get("replacement_email_file", ""))).resolve(strict=False) != txt_path.resolve(strict=False)
+    ):
+        raise RuntimeError("main-manager replacement audit does not prove success for the exact target")
+    write_private_state(
+        receipt,
+        json.dumps(
+            {
+                "outcome": "succeeded",
+                "target": args.manager_target,
+                "mail_sha256": mail_digest,
+                "audit_output": output,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+    return output
+
+
+def record_main_manager_replacement(args: Args, txt_path: Path, audit_output: str) -> None:
+    manager_file = current_manager_file(args).resolve()
+    mail_ref = source_ref(args.root, txt_path)
+    line = (
+        f"(manager handled: {mail_ref}; authenticated main-manager replacement completed; "
+        f"successor received exact post-command text; {sanitized_one_line(audit_output)})\n"
+    )
+    with task_file_lock(manager_file):
+        with manager_file.open("a", encoding="utf-8") as handle:
+            handle.write("\n" if manager_file.stat().st_size else "")
+            handle.write(line)
+            handle.flush()
+            os.fsync(handle.fileno())
+        fsync_directory(manager_file.parent)
 
 
 def is_recovery_subject(subject: str) -> bool:
@@ -3778,7 +3883,12 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
                 handled = True
         else:
             try:
-                if lifecycle_command is None:
+                if lifecycle_command is not None and is_main_manager_replacement(args, subject, lifecycle_command):
+                    audit_output = execute_main_manager_replacement(args, txt_path)
+                    record_main_manager_replacement(args, txt_path, audit_output)
+                    route = None
+                    pending_line = 0
+                elif lifecycle_command is None:
                     route = email_route(args, subject, body_text)
                     pending_line = append_pending(
                         args.root,
@@ -3794,12 +3904,20 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
                 unaccepted_changed = True
                 handled = True
                 continue
-            route_args = replace(args, manager_file=route.manager_file, manager_target=route.manager_target)
-            if args.guest_hees:
+            if route is None:
+                unaccepted_pending_uids.discard(uid)
+                unaccepted_changed = True
+                if mark_seen_after_human_intake(client, uid, args, msg):
+                    processed_uids.add(uid)
+                    processed_changed = True
+                    handled = True
+            elif args.guest_hees:
                 unaccepted_pending_uids.add(uid)
                 unaccepted_changed = True
                 handled = True
-            elif route.pending_watcher_delivery or push_email_ref(route_args, pending_line):
+            elif route.pending_watcher_delivery or push_email_ref(
+                replace(args, manager_file=route.manager_file, manager_target=route.manager_target), pending_line
+            ):
                 unaccepted_pending_uids.discard(uid)
                 unaccepted_changed = True
                 if mark_seen_after_human_intake(client, uid, args, msg):

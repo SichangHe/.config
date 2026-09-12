@@ -137,6 +137,20 @@ class CodexStartTests(unittest.TestCase):
         values.update(changes)
         return self.args(root, **values)
 
+    def test_worker_rotation_prompt_includes_exact_post_command_email_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "worker.md"
+            task.write_text("worker task\n", encoding="utf-8")
+            mail = root / "manager_mail" / "1746.txt"
+            mail.parent.mkdir()
+            mail.write_bytes(b"Subject: Re: [cfg:2] work\n\nReplace this agent.\r\nExact reason\r\n-- Human")
+            args = self.args(root, session_id="", prompt_file=task, rotate_worker=True, replacement_email_file=mail)
+
+            text = prompt_text(args, False)
+
+            self.assertIn("<replacement_reason>.\r\nExact reason\r\n-- Human</replacement_reason>", text)
+
     def legacy_rotation_args(self, root: Path, **changes: object) -> Args:
         values: dict[str, object] = {
             "assert_legacy_missing_session_id": True,

@@ -4,6 +4,7 @@ import shlex
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,6 +27,7 @@ from omo_manager.omo_manager_rotate import (
     is_codex_launch_argv,
     option_values,
     preflight,
+    replacement_context,
     read_reservation,
     reject_or_clear_stale_reservation,
     resolve_exact_pane,
@@ -46,6 +48,44 @@ def process(pid: int, ppid: int, *argv: str, state: str = "S") -> ProcessInfo:
 
 
 class ManagerRotateTests(unittest.TestCase):
+    def test_replacement_context_preserves_exact_suffix_and_enters_fresh_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "1751.txt"
+            mail.parent.mkdir()
+            mail.write_bytes(b"Subject: Re: test\n\nReplace this agent.\r\nExact reason\r\n-- Human")
+            self.assertEqual(".\r\nExact reason\r\n-- Human", replacement_context(root, mail))
+
+            args = replace(self.args(root, root / "state"), replacement_email_file=mail)
+            (root / "MANAGER.md").write_text("manager instructions\n", encoding="utf-8")
+            with (
+                patch("omo_manager.omo_manager_rotate.resolve_exact_pane", return_value=self.pane(root)),
+                patch("omo_manager.omo_manager_rotate.read_processes", return_value={100: process(100, 1, "bunx", "@openai/codex@latest", "--model", "gpt-5.6-terra", "--config", 'model_reasoning_effort="xhigh"')}),
+                patch("omo_manager.omo_manager_rotate.invocation_is_target", return_value=False),
+                patch("omo_manager.omo_manager_rotate.shutil.which", return_value="/bin/bunx"),
+                patch("omo_manager.omo_manager_rotate.readable_text", side_effect=lambda path, label: "worker defaults\n" if label == "worker defaults" else "manager instructions\n"),
+                patch("omo_manager.omo_manager_rotate.capture_pane", return_value="old output\n"),
+            ):
+                prepared = preflight(args)
+            self.assertIn("<replacement_reason>.\r\nExact reason\r\n-- Human</replacement_reason>", prepared.prompt)
+
+    def test_self_path_forwards_replacement_email_to_coordinator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "1751.txt"
+            mail.parent.mkdir()
+            mail.write_text("Subject: Re: [wl:1] work\n\nReplace this agent. why", encoding="utf-8")
+            prepared = replace(self.prepared(root, root / "state"), args=replace(self.args(root, root / "state"), replacement_email_file=mail))
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], *, timeout: float = 10, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return completed(command, stdout="%77\n")
+
+            with patch("omo_manager.omo_manager_rotate.run", side_effect=fake_run):
+                spawn_coordinator(prepared, "a" * 32)
+
+            self.assertIn(f"--replacement-email-file {shlex.quote(str(mail))}", calls[0][-1])
     def test_codex_launch_recognizes_latest_and_legacy_packages(self) -> None:
         self.assertTrue(is_codex_launch_argv(("bunx", "@openai/codex@latest", "--model", "gpt-5.6-terra")))
         self.assertTrue(is_codex_launch_argv(("bunx", "@openai/codex", "--model", "gpt-5.6-terra")))

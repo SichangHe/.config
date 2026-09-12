@@ -1,15 +1,13 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
-import shlex
 from pathlib import Path
 from unittest.mock import patch
 
 from omo_manager import email_idle_watcher as watcher
 from omo_manager import omo_pending_watch as pending_watcher
-from omo_manager import omo_record_pending
-from omo_manager import omo_task_edit
 from omo_manager.omo_agent_status import parse_task_metadata
 
 
@@ -19,11 +17,12 @@ def task_text(
     managerat: str,
     is_manager: bool = False,
     pending_items: tuple[str, ...] = (),
+    status: str = "running",
 ) -> str:
     lines = [
         "---",
         "version: v1.0.0",
-        "status: running",
+        f"status: {status}",
         f"runat: {runat}",
         "tool: codex",
         f"managerat: {managerat}",
@@ -69,6 +68,124 @@ class AgentLifecycleCommandParserTests(unittest.TestCase):
                 self.assertIsNotNone(command)
                 assert command is not None
                 self.assertIs(expected, command.action)
+
+    def test_replacement_preserves_everything_after_the_matched_instruction_as_context(self) -> None:
+        command = watcher.agent_lifecycle_command("Replace this agent. Previous agent ignored the queue.\n-- Human")
+        self.assertIsNotNone(command)
+        assert command is not None
+        self.assertEqual(". Previous agent ignored the queue.\n-- Human", command.replacement_context)
+
+        termination = watcher.agent_lifecycle_command("Terminate this agent because the work is obsolete")
+        self.assertIsNotNone(termination)
+        assert termination is not None
+        self.assertEqual("", termination.replacement_context)
+
+        crlf = watcher.agent_lifecycle_command("Replace this agent.\r\nExact Windows-style reason\r\n-- Human")
+        self.assertIsNotNone(crlf)
+        assert crlf is not None
+        self.assertEqual(".\r\nExact Windows-style reason\r\n-- Human", crlf.replacement_context)
+
+    def test_lifecycle_guidance_delivers_context_and_ordered_queue_as_text(self) -> None:
+        binding = watcher.AgentLifecycleBinding(
+            Path("worker.md"),
+            "worker:2",
+            "mgr:1",
+            Path("manager.md"),
+            "running",
+            False,
+            "0" * 64,
+            ("first task", "second task"),
+        )
+        replacement = watcher.lifecycle_action_guidance(
+            watcher.AgentLifecycleCommand(
+                watcher.AgentLifecycleAction.REPLACE,
+                replacement_context="\nThe previous agent ignored the requested tests.",
+            ),
+            binding,
+            main_manager=False,
+        )
+        termination = watcher.lifecycle_action_guidance(
+            watcher.AgentLifecycleCommand(watcher.AgentLifecycleAction.TERMINATE),
+            binding,
+            main_manager=False,
+        )
+
+        self.assertIn(
+            'decision: after replacement, deliver this exact JSON-decoded text to the replacement agent: "\\nThe previous agent ignored the requested tests."',
+            replacement,
+        )
+        self.assertIn(
+            'decision: ordered queued task message text (do not record in manager pending_task_items): ["first task","second task"]',
+            termination,
+        )
+
+    def test_long_lifecycle_custody_payload_is_not_truncated(self) -> None:
+        context = "reason-" + ("x" * pending_watcher.LIFECYCLE_DELIVERY_CHAR_LIMIT)
+        items = tuple(f"task-{index}-" + ("y" * 500) for index in range(12))
+        binding = watcher.AgentLifecycleBinding(
+            Path("worker.md"),
+            "worker:2",
+            "mgr:1",
+            Path("manager.md"),
+            "running",
+            False,
+            "0" * 64,
+            items,
+        )
+        termination_marker = pending_watcher.Marker(
+            file=Path("worker.md"),
+            line=1,
+            digest="0" * 64,
+            origin="human",
+            source="manager_mail/42.txt",
+            delegate_source="manager_mail/42.txt",
+            pending_tail="",
+            block_text="\n".join(
+                (
+                    pending_watcher.LIFECYCLE_EXPLANATION,
+                    "requested_action: terminate",
+                    *watcher.lifecycle_action_guidance(
+                        watcher.AgentLifecycleCommand(watcher.AgentLifecycleAction.TERMINATE),
+                        binding,
+                        main_manager=False,
+                    ),
+                )
+            ),
+            file_lines=1,
+            blocked_reason="",
+        )
+        replacement_marker = pending_watcher.Marker(
+            file=Path("worker.md"),
+            line=1,
+            digest="0" * 64,
+            origin="human",
+            source="manager_mail/42.txt",
+            delegate_source="manager_mail/42.txt",
+            pending_tail="",
+            block_text="\n".join(
+                (
+                    pending_watcher.LIFECYCLE_EXPLANATION,
+                    "requested_action: replace",
+                    *watcher.lifecycle_action_guidance(
+                        watcher.AgentLifecycleCommand(
+                            watcher.AgentLifecycleAction.REPLACE,
+                            replacement_context=context,
+                        ),
+                        binding,
+                        main_manager=False,
+                    ),
+                )
+            ),
+            file_lines=1,
+            blocked_reason="",
+        )
+
+        termination_delivery = pending_watcher.lifecycle_marker_delivery_text(termination_marker, ())
+        replacement_delivery = pending_watcher.lifecycle_marker_delivery_text(replacement_marker, ())
+        self.assertIn(json.dumps(list(items), ensure_ascii=False, separators=(",", ":")), termination_delivery)
+        self.assertIn(json.dumps(context, ensure_ascii=False), replacement_delivery)
+        self.assertNotIn("…", termination_delivery)
+        self.assertNotIn("…", replacement_delivery)
 
     def test_rejects_please_synonyms_nonleading_and_incomplete_phrases(self) -> None:
         for body in (
@@ -133,22 +250,27 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
         delivery = pending_watcher.marker_delivery_text(marker, attachments, manager_only=True)
         self.assertEqual("mgr:1", pending_watcher.marker_for_manager_target(self._pending_args(), marker))
         self.assertTrue(pending_watcher.marker_is_for_manager(marker, attachments))
-        self.assertIn("omo_queue_transfer.py", delivery)
-        self.assertIn('pending_task_items_ordered_json: ["first task","second task"]', delivery)
+        self.assertIn(
+            'decision: ordered queued task message text (do not record in manager pending_task_items): ["first task","second task"]',
+            marker.block_text,
+        )
+        self.assertIn("A Human lifecycle request requires manager review.", delivery)
+        self.assertIn("addressed_task: worker.md", delivery)
+        self.assertNotIn("omo_queue_transfer.py", delivery)
+        self.assertIn('decision: ordered queued task message text (do not record in manager pending_task_items): ["first task","second task"]', delivery)
         self.assertIn("Terminate this agent and preserve the queue.", delivery)
-        self.assertIn("generated by the watcher, not Human text", delivery)
+        self.assertIn("Authenticated transport:", delivery)
         self.assertNotIn("<human_instruction>", delivery)
 
-        consume_line = next(line for line in marker.block_text.splitlines() if line.startswith("consume_command: "))
-        consume_args = omo_record_pending.parse_args(shlex.split(consume_line.removeprefix("consume_command: "))[1:])
-        with patch.object(omo_record_pending, "send_human_ack"):
-            self.assertEqual(0, omo_record_pending.run(consume_args))
         consumed_worker = parse_task_metadata(self.worker_task.read_text(encoding="utf-8"), self.root)
         responsible_manager = parse_task_metadata(self.manager_task.read_text(encoding="utf-8"), self.root)
         assert consumed_worker is not None and responsible_manager is not None
         self.assertEqual(("first task", "second task"), consumed_worker.pending_task_items)
-        self.assertIn("🧑 Handle the Human lifecycle request from `manager_mail/42.txt`.", responsible_manager.pending_task_items)
-        self.assertNotIn("(pending)", self.worker_task.read_text(encoding="utf-8"))
+        self.assertEqual((), responsible_manager.pending_task_items)
+        self.assertIn("(pending)", self.worker_task.read_text(encoding="utf-8"))
+        event = pending_watcher.lifecycle_delivery_event(self._pending_args(), marker, "delivery-key", 1.0)
+        self.assertEqual(self.root, event.clear_root)
+        self.assertEqual(marker, event.clear_marker)
 
     def test_main_managed_worker_routes_action_to_main_log(self) -> None:
         self.worker_task.write_text(
@@ -167,11 +289,74 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
         self.assertIn("requested_action: terminate", text)
         self.assertIn("responsible_manager_task: work_manager_today.md", text)
         self.assertIn('pending_task_items_ordered_json: ["preserve me"]', text)
-        self._consume_main_manager_marker(self.worker_task)
         consumed = parse_task_metadata(self.worker_task.read_text(encoding="utf-8"), self.root)
         assert consumed is not None
         self.assertEqual(("preserve me",), consumed.pending_task_items)
-        self.assertNotIn("(pending)", self.worker_task.read_text(encoding="utf-8"))
+        self.assertIn("delivery_rule:", self.worker_task.read_text(encoding="utf-8"))
+
+    def test_replacement_routes_trailing_email_text_for_delivery_to_successor(self) -> None:
+        command = watcher.agent_lifecycle_command("Replace this agent\nThe previous agent ignored the requested tests.")
+        assert command is not None
+        self.mail.write_text(
+            "Subject: Re: work\n\nReplace this agent\nThe previous agent ignored the requested tests.\n",
+            encoding="utf-8",
+        )
+        watcher.append_agent_lifecycle_pending(self.args, self.mail, "Re: [worker:2] work", command)
+        marker = pending_watcher.find_markers(self.root, [self.worker_task])[0]
+        delivery = pending_watcher.marker_delivery_text(
+            marker,
+            [pending_watcher.source_attachment(self.root, marker.delegate_source)],
+            manager_only=True,
+        )
+
+        self.assertIn(
+            'decision: after replacement, deliver this exact JSON-decoded text to the replacement agent: "\\nThe previous agent ignored the requested tests."',
+            delivery,
+        )
+
+    def test_manager_review_delivery_is_bounded_and_does_not_expand_referenced_records(self) -> None:
+        manager_body = "manager history that must not be delivered\n" * 833
+        self.main_file.write_text(manager_body, encoding="utf-8")
+        source1717 = self.root / "manager_mail" / "1717.txt"
+        source1717.write_text("unrelated B12 history\n" * 200, encoding="utf-8")
+        self.worker_task.write_text(
+            task_text(
+                runat="dw:0",
+                managerat="main:0",
+                is_manager=True,
+                status="long_running",
+                pending_items=("prior item from manager_mail/1717.txt with unrelated B12 history",),
+            )
+            + ("addressed task history that must not be delivered\n" * 200),
+            encoding="utf-8",
+        )
+        self.mail.write_text("Subject: Re: dw manager\n\nReview this lifecycle request.\n", encoding="utf-8")
+
+        route, _line = watcher.append_agent_lifecycle_pending(
+            self.args,
+            self.mail,
+            "Re: [dw:0] work",
+            watcher.AgentLifecycleCommand(watcher.AgentLifecycleAction.REVIEW, "the wording requires review"),
+        )
+        marker = pending_watcher.find_markers(self.root, [self.worker_task])[0]
+        attachments = pending_watcher.marker_attachments(self._pending_args(), marker)
+        delivery = pending_watcher.marker_delivery_text(marker, attachments, manager_only=True)
+
+        self.assertEqual("main:0", route.manager_target)
+        self.assertEqual(["manager_mail/42.txt"], [attachment.source for attachment in attachments])
+        self.assertLessEqual(len(delivery), pending_watcher.LIFECYCLE_DELIVERY_CHAR_LIMIT)
+        self.assertIn("requested_action: review", delivery)
+        self.assertIn("addressed_task: worker.md", delivery)
+        self.assertIn("addressed_target: dw:0", delivery)
+        self.assertIn("responsible_manager_target: main:0", delivery)
+        self.assertIn("task_status: long_running", delivery)
+        self.assertIn("Review this lifecycle request.", delivery)
+        self.assertNotIn("pending_task_items_ordered_json", delivery)
+        self.assertNotIn("task_sha256_before_transport", delivery)
+        self.assertNotIn("consume_command", delivery)
+        self.assertNotIn("unrelated B12 history", delivery)
+        self.assertNotIn("addressed task history", delivery)
+        self.assertNotIn("manager history", delivery)
 
     def test_main_manager_termination_is_review_only(self) -> None:
         route, _line = watcher.append_agent_lifecycle_pending(
@@ -211,18 +396,89 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
         self.assertEqual("main manager log\n", self.main_file.read_text(encoding="utf-8"))
 
     def test_main_manager_replacement_uses_manager_rotation(self) -> None:
+        self.mail.write_bytes(
+            b"Subject: Re: [wl:1] DeepWiki root ownership restored\n\n"
+            b"Replace this agent.\r\nPrevious main manager failed to follow the replacement request."
+        )
+        command = watcher.agent_lifecycle_command(
+            "Replace this agent.\r\nPrevious main manager failed to follow the replacement request."
+        )
+        assert command is not None
+        live_args = watcher.replace(self.args, manager_target="wl:1")
         route, _line = watcher.append_agent_lifecycle_pending(
-            self.args,
+            live_args,
             self.mail,
-            "Re: [main] work",
-            watcher.AgentLifecycleCommand(watcher.AgentLifecycleAction.REPLACE),
+            "Re: [wl:1] DeepWiki root ownership restored",
+            command,
         )
         self.assertEqual(self.main_file.resolve(), route.manager_file)
         text = self.main_file.read_text(encoding="utf-8")
         self.assertIn("requested_action: replace", text)
         self.assertIn("supported_tool: omo_manager_rotate.py", text)
-        self._consume_main_manager_marker(self.main_file)
+        self.assertIn("supported_command: omo_manager_rotate.py --target wl:1", text)
+        self.assertIn("--replacement-email-file", text)
+        self.assertIn('".\\r\\nPrevious main manager failed to follow the replacement request."', text)
+        self.assertIn("delivery_rule:", self.main_file.read_text(encoding="utf-8"))
+
+    def test_live_wl1_replacement_invokes_rotation_instead_of_forwarding_to_old_agent(self) -> None:
+        live_args = watcher.replace(self.args, manager_target="wl:1")
+        raw_message = (
+            b"From: Human <human@example.test>\r\n"
+            b"Subject: Re: [wl:1] DeepWiki root ownership restored\r\n"
+            b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+            b"Replace this agent.\r\nPrevious main manager failed to follow the replacement request.\r\n"
+        )
+
+        class Client:
+            def uid(self, command: str, *arguments: object) -> tuple[str, list[object]]:
+                if command == "fetch" and arguments == ("1751", "(BODY.PEEK[])"):
+                    return "OK", [(b"RFC822", raw_message)]
+                raise AssertionError((command, arguments))
+
+        with (
+            patch.object(watcher, "search_sender_uids", return_value={b"1751"}),
+            patch.object(watcher, "exact_human_sender", return_value=True),
+            patch.object(watcher, "execute_main_manager_replacement", return_value="audit_record: /private/rotation.json") as rotate,
+            patch.object(watcher, "push_email_ref") as direct_push,
+            patch.object(watcher, "mark_seen_after_human_intake", return_value=True),
+            patch.object(watcher, "maybe_handle_manager_mail_thresholds", return_value=False),
+        ):
+            self.assertTrue(watcher.handle_unseen(Client(), live_args))  # type: ignore[arg-type]
+
+        rotate.assert_called_once()
+        replacement_mail = rotate.call_args.args[1]
+        self.assertEqual("manager_mail/1751.txt", str(replacement_mail.relative_to(self.root)))
+        direct_push.assert_not_called()
         self.assertNotIn("(pending)", self.main_file.read_text(encoding="utf-8"))
+        self.assertIn("authenticated main-manager replacement completed", self.main_file.read_text(encoding="utf-8"))
+
+    def test_main_replacement_runner_is_exact_and_success_receipt_prevents_replay(self) -> None:
+        live_args = watcher.replace(self.args, manager_target="wl:1")
+        self.mail.write_bytes(b"Subject: Re: [wl:1] work\n\nReplace this agent. exact reason")
+        audit = self.root / "state" / "rotation.json"
+        audit.write_text(
+            json.dumps({"outcome": "succeeded", "target": "wl:1.0", "replacement_email_file": str(self.mail)}) + "\n",
+            encoding="utf-8",
+        )
+        completed = watcher.subprocess.CompletedProcess([], 0, f"audit_record: {audit}\n", "")
+        with patch.object(watcher.subprocess, "run", return_value=completed) as run:
+            first = watcher.execute_main_manager_replacement(live_args, self.mail)
+            second = watcher.execute_main_manager_replacement(live_args, self.mail)
+
+        self.assertEqual(first, second)
+        run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertEqual(str(Path(watcher.__file__).with_name("omo_manager_rotate.py")), command[0])
+        self.assertEqual("wl:1", command[command.index("--target") + 1])
+        self.assertEqual(str(self.mail), command[command.index("--replacement-email-file") + 1])
+
+    def test_main_replacement_runner_rejects_handoff_or_failed_audit(self) -> None:
+        live_args = watcher.replace(self.args, manager_target="wl:1")
+        self.mail.write_bytes(b"Subject: Re: [wl:1] work\n\nReplace this agent. exact reason")
+        handoff = watcher.subprocess.CompletedProcess([], 0, "coordinator_log: /private/handoff.log\n", "")
+        with patch.object(watcher.subprocess, "run", return_value=handoff):
+            with self.assertRaisesRegex(RuntimeError, "did not complete"):
+                watcher.execute_main_manager_replacement(live_args, self.mail)
 
     def test_new_tagged_message_is_not_reply_bound(self) -> None:
         self.assertFalse(watcher.lifecycle_reply_candidate("[worker:2] work"))
@@ -314,26 +570,22 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
         self.assertNotIn("(pending)", self.worker_task.read_text(encoding="utf-8"))
         self.assertNotIn("(pending)", duplicate.read_text(encoding="utf-8"))
 
-    def test_consumed_lifecycle_transport_is_replay_idempotent(self) -> None:
+    def test_lifecycle_transport_replay_is_idempotent(self) -> None:
         command = watcher.AgentLifecycleCommand(watcher.AgentLifecycleAction.TERMINATE)
         _route, first_line = watcher.append_agent_lifecycle_pending(
             self.args, self.mail, "Re: [worker:2] work", command
         )
         marker = pending_watcher.find_markers(self.root, [self.worker_task])[0]
-        consume_line = next(line for line in marker.block_text.splitlines() if line.startswith("consume_command: "))
-        consume_args = omo_record_pending.parse_args(shlex.split(consume_line.removeprefix("consume_command: "))[1:])
-        with patch.object(omo_record_pending, "send_human_ack"):
-            self.assertEqual(0, omo_record_pending.run(consume_args))
-        after_consumption = self.worker_task.read_bytes()
+        after_first = self.worker_task.read_bytes()
 
         _route, replay_line = watcher.append_agent_lifecycle_pending(
             self.args, self.mail, "Re: [worker:2] work", command
         )
 
-        self.assertEqual(after_consumption, self.worker_task.read_bytes())
+        self.assertEqual(after_first, self.worker_task.read_bytes())
         self.assertGreater(first_line, 0)
         self.assertGreater(replay_line, 0)
-        self.assertEqual([], pending_watcher.find_markers(self.root, [self.worker_task]))
+        self.assertEqual(1, len(pending_watcher.find_markers(self.root, [self.worker_task])))
 
     def _pending_args(self) -> pending_watcher.Args:
         return pending_watcher.Args(
@@ -348,19 +600,6 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
             dry_run=True,
             manager_target="main:0",
         )
-
-    def _consume_main_manager_marker(self, task_file: Path) -> None:
-        marker = pending_watcher.find_markers(self.root, [task_file])[0]
-        attachments = [pending_watcher.source_attachment(self.root, marker.delegate_source)]
-        delivery = pending_watcher.marker_delivery_text(marker, attachments, manager_only=True)
-        self.assertTrue(pending_watcher.marker_is_for_manager(marker, attachments))
-        self.assertEqual("main:0", pending_watcher.marker_for_manager_target(self._pending_args(), marker))
-        self.assertIn("consume_override:", delivery)
-        consume_line = next(line for line in marker.block_text.splitlines() if line.startswith("consume_command: "))
-        consume_args = omo_task_edit.parse_args(shlex.split(consume_line.removeprefix("consume_command: "))[1:])
-        with patch.object(omo_task_edit, "send_marker_clear_ack"):
-            self.assertEqual(0, omo_task_edit.run(consume_args))
-
 
 if __name__ == "__main__":
     unittest.main()

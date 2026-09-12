@@ -54,6 +54,8 @@ class Args:
     startup_timeout_s: float
     poll_interval_s: float
     coordinator_token: str | None = None
+    replacement_email_file: Path | None = None
+    skip_watcher_refresh: bool = False
 
 
 @dataclass(frozen=True)
@@ -121,6 +123,8 @@ class ParsedArgs(argparse.Namespace):
     startup_timeout_s: float = 45.0
     poll_interval_s: float = 0.5
     coordinator_token: str | None = None
+    replacement_email_file: Path | None = None
+    skip_watcher_refresh: bool = False
 
 
 def default_state_dir() -> Path:
@@ -137,6 +141,8 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--startup-timeout-s", type=float, default=45.0)
     _ = parser.add_argument("--poll-interval-s", type=float, default=0.5)
     _ = parser.add_argument("--_coordinator-token", dest="coordinator_token", help=argparse.SUPPRESS)
+    _ = parser.add_argument("--replacement-email-file", type=Path, help="Stored lifecycle-command email whose exact post-command text is delivered to the replacement manager.")
+    _ = parser.add_argument("--skip-watcher-refresh", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if not parsed.target:
         parser.error("--target is required when OMO_MANAGER_TMUX_TARGET is unset.")
@@ -153,6 +159,7 @@ def parse_args(argv: list[str]) -> Args:
     if parsed.coordinator_token is not None and (parsed.model is None or parsed.reasoning_effort is None):
         parser.error("internal coordinator requires explicit --model and --reasoning-effort.")
     assert parsed.root is not None and parsed.state_dir is not None
+    replacement_email_file = parsed.replacement_email_file.expanduser().resolve() if parsed.replacement_email_file is not None else None
     return Args(
         parsed.target,
         parsed.root.expanduser().resolve(),
@@ -162,7 +169,28 @@ def parse_args(argv: list[str]) -> Args:
         parsed.startup_timeout_s,
         parsed.poll_interval_s,
         parsed.coordinator_token,
+        replacement_email_file,
+        parsed.skip_watcher_refresh,
     )
+
+
+def replacement_context(root: Path, path: Path | None) -> str:
+    if path is None:
+        return ""
+    mail_dir = (root / "manager_mail").resolve()
+    if not path.is_relative_to(mail_dir) or not path.is_file():
+        raise RotationError("replacement email must be a stored file under ROOT/manager_mail")
+    try:
+        text = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise RotationError(f"cannot read replacement email: {exc}") from exc
+    _headers, separator, body = text.partition("\n\n")
+    if not separator:
+        raise RotationError("replacement email has no header/body separator")
+    match = re.match(r"\A[ \t]*replace[ \t]+this[ \t]+agent\b", body, re.IGNORECASE)
+    if match is None:
+        raise RotationError("replacement email body does not start with the exact replacement command")
+    return body[match.end() :]
 
 
 def run(command: list[str], *, timeout: float = 10, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -389,6 +417,9 @@ def preflight(args: Args) -> Preflight:
     worker_defaults = readable_text(WORKER_DEFAULTS, "worker defaults")
     manager_instructions = readable_text(args.root / "MANAGER.md", "manager instructions")
     prompt = f"{worker_defaults.rstrip()}\n\n{manager_instructions.rstrip()}\n"
+    if args.replacement_email_file is not None:
+        context = replacement_context(args.root, args.replacement_email_file)
+        prompt = f"{prompt.rstrip()}\n\n<replacement_reason>{context}</replacement_reason>\n"
     pane_output = capture_pane(pane.pane_id)
     if resolve_exact_pane(args.target) != pane:
         raise RotationError("target pane identity or launch context changed during preflight")
@@ -604,6 +635,7 @@ def audit_payload(prepared: Preflight, prompt_path: Path, command: str, outcome:
         "target": prepared.pane.canonical_target,
         "pane": asdict(prepared.pane) | {"working_directory": str(prepared.pane.working_directory)},
         "root": str(prepared.args.root),
+        "replacement_email_file": str(prepared.args.replacement_email_file) if prepared.args.replacement_email_file is not None else "",
         "prompt_path": str(prompt_path),
         "launch": asdict(prepared.metadata) | {"launch_argv": list(prepared.metadata.launch_argv)},
         "fresh_command": command,
@@ -640,6 +672,10 @@ def coordinator_command(prepared: Preflight, token: str, log_path: Path) -> str:
         "--_coordinator-token",
         token,
     ]
+    if prepared.args.replacement_email_file is not None:
+        command.extend(("--replacement-email-file", str(prepared.args.replacement_email_file)))
+    if prepared.args.skip_watcher_refresh:
+        command.append("--skip-watcher-refresh")
     helper_command = shlex.join(command)
     return f'{{ tmux set-option -p -t "$TMUX_PANE" remain-on-exit off && {helper_command}; }} >> {shlex.quote(str(log_path))} 2>&1'
 
@@ -763,13 +799,14 @@ def execute_rotation(prepared: Preflight) -> Path:
         verify_same_pane(prepared.pane, prepared.args.target)
         classification = wait_for_startup(prepared)
         verify_same_pane(prepared.pane, prepared.args.target)
-        watcher_env = os.environ.copy()
-        watcher_env["OMO_WORK_LOGS_ROOT"] = str(prepared.args.root)
-        watcher_env["OMO_MANAGER_TMUX_TARGET"] = prepared.pane.canonical_target
-        watcher_env["OMO_MANAGER_STATE_DIR"] = str(prepared.args.state_dir)
-        watcher = run([str(WATCHER_HELPER)], timeout=60, env=watcher_env)
-        if watcher.returncode != 0:
-            raise RotationError(f"watcher setup failed after fresh Codex startup: {watcher.stderr.strip()}")
+        if not prepared.args.skip_watcher_refresh:
+            watcher_env = os.environ.copy()
+            watcher_env["OMO_WORK_LOGS_ROOT"] = str(prepared.args.root)
+            watcher_env["OMO_MANAGER_TMUX_TARGET"] = prepared.pane.canonical_target
+            watcher_env["OMO_MANAGER_STATE_DIR"] = str(prepared.args.state_dir)
+            watcher = run([str(WATCHER_HELPER)], timeout=60, env=watcher_env)
+            if watcher.returncode != 0:
+                raise RotationError(f"watcher setup failed after fresh Codex startup: {watcher.stderr.strip()}")
     except Exception as exc:
         write_audit(audit_path, audit_payload(prepared, prompt_path, command, "failed", error=str(exc)), replace=True)
         raise

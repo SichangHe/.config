@@ -216,6 +216,7 @@ class Args:
     assert_legacy_missing_session_id: bool = False
     stop_unverified_replacement: bool = False
     expected_blocker: str | None = None
+    replacement_email_file: Path | None = None
     reconcile_rotation_audit: bool = False
     rotation_audit: Path | None = None
     expected_rotation_audit_sha256: str = ""
@@ -398,6 +399,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--expected-pending-item", action="append", default=[], help="Exact pending item in order; repeat for the full preserved queue with --rotate-worker.")
     _ = parser.add_argument("--protected-target", action="append", default=[], help="Target that this rotation must not touch; repeat the authoritative protected set with --rotate-worker.")
     _ = parser.add_argument("--audit-output", type=Path, help="New owner-private audit file; required with --rotate-worker.")
+    _ = parser.add_argument("--replacement-email-file", type=Path, help="Stored lifecycle-command email whose exact post-command text is appended to the replacement worker prompt.")
     _ = parser.add_argument(
         "--assert-legacy-missing-session-id",
         action="store_true",
@@ -606,6 +608,8 @@ def parse_args(argv: list[str]) -> Args:
         )
     ):
         parser.error("rotation assertions are only valid with --rotate-worker.")
+    if parsed.replacement_email_file is not None and not parsed.rotate_worker:
+        parser.error("--replacement-email-file requires --rotate-worker.")
     if parsed.recover_non_codex and parsed.session_id:
         parser.error("--recover-non-codex launches a fresh session and does not accept --session-id.")
     if parsed.recover_non_codex and not parsed.prompt_file:
@@ -686,6 +690,7 @@ def parse_args(argv: list[str]) -> Args:
         assert_legacy_missing_session_id=parsed.assert_legacy_missing_session_id,
         stop_unverified_replacement=parsed.stop_unverified_replacement,
         expected_blocker=parsed.expected_blocker,
+        replacement_email_file=parsed.replacement_email_file.expanduser().resolve() if parsed.replacement_email_file else None,
         reconcile_rotation_audit=parsed.reconcile_rotation_audit,
         rotation_audit=Path(os.path.abspath(parsed.rotation_audit.expanduser())) if parsed.rotation_audit else None,
         expected_rotation_audit_sha256=parsed.expected_rotation_audit_sha256 or "",
@@ -1226,7 +1231,15 @@ def prompt_text(args: Args, is_manager: bool) -> str:
     for source in sources:
         if not source.is_file():
             raise StartError(f"required prompt source is not readable: {source}")
-    return "\n\n".join(source.read_text(encoding="utf-8").rstrip() for source in sources) + "\n"
+    text = "\n\n".join(source.read_text(encoding="utf-8").rstrip() for source in sources) + "\n"
+    if args.rotate_worker and args.replacement_email_file is not None:
+        try:
+            from omo_manager.omo_manager_rotate import replacement_context
+        except ModuleNotFoundError:
+            from omo_manager_rotate import replacement_context
+        context = replacement_context(args.root, args.replacement_email_file)
+        text = f"{text.rstrip()}\n\n<replacement_reason>{context}</replacement_reason>\n"
+    return text
 
 
 def launch_command(
