@@ -21,7 +21,7 @@ from omo_manager.omo_blocking import load_task
 from omo_manager.omo_blocking import replace_item
 from omo_manager.omo_blocking import resolve_item
 from omo_manager.omo_blocking import v2_enabled
-from omo_manager.omo_task_context import current_active_task
+from omo_manager.omo_task_context import current_pending_task
 from omo_manager.omo_task_edit import add_pending_items
 from omo_manager.omo_task_edit import append_comment
 from omo_manager.omo_task_edit import normalized_comment_message
@@ -164,12 +164,12 @@ def human_answer(args: Args) -> tuple[str, str]:
 def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
     if args.no_email and (args.item_id or args.answer_subject_file or args.answer_message_file):
         raise ValueError("--no-email requires legacy --item removal without answer-email options")
-    path = current_active_task(root)
+    path = current_pending_task(root)
     metadata = read_task_metadata(path, root)
     if metadata is None:
         raise TaskFrontmatterError("current work queue metadata is invalid")
     with task_target_lock(root, metadata.runat):
-        if current_active_task(root) != path:
+        if current_pending_task(root) != path:
             raise TaskFrontmatterError("current work queue ownership changed; retry")
         before = path.stat()
         text = path.read_text(encoding="utf-8")
@@ -228,6 +228,7 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
                     human_subject=answer_subject,
                     human_body=answer_body,
                     semantic_key=args.completion_key,
+                    pending_item_owner=True,
                 )
                 if answer_subject and email is None:
                     raise BlockingError("combined human answer is not allowed by this task's reporting policy")
@@ -242,6 +243,7 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
                     human_body=answer_body,
                     owner_may_mutate_after_delivery=True,
                     semantic_key=args.completion_key,
+                    pending_item_owner=True,
                 ):
                     raise BlockingError("responsible-owner completion email requested; retry removal after owner delivery")
                 resolve_item(document, args.item_id, args.outcome, args.evidence)
@@ -283,6 +285,7 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
             human_subject=answer_subject,
             human_body=answer_body,
             semantic_key=args.completion_key,
+            pending_item_owner=True,
         )
         if answer_subject and email is None:
             raise BlockingError("combined human answer is not allowed by this task's reporting policy")
@@ -297,6 +300,7 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
             human_body=answer_body,
             owner_may_mutate_after_delivery=True,
             semantic_key=args.completion_key,
+            pending_item_owner=True,
         ):
             raise BlockingError("responsible-owner completion email requested; retry removal after owner delivery")
         replace_if_unchanged(path, updated, before)

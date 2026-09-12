@@ -567,7 +567,7 @@ pending_task_items: []
     def test_agent_commands_keep_task_path_private(self) -> None:
         output = StringIO()
         with (
-            patch("omo_manager.omo_pending.current_active_task", return_value=self.owner_path),
+            patch("omo_manager.omo_pending.current_pending_task", return_value=self.owner_path),
             patch("omo_manager.omo_pending.blocking_request", return_value={"ok": True}),
             redirect_stdout(output),
         ):

@@ -21,6 +21,7 @@ from omo_manager.omo_blocking import remove_dependency
 from omo_manager.omo_blocking import v2_enabled
 from omo_manager.omo_agent_status import same_tmux_target
 from omo_manager.omo_task_context import infer_active_task
+from omo_manager.omo_task_context import infer_pending_task
 
 
 def _ancestor_pids(pid: int) -> set[int]:
@@ -139,7 +140,7 @@ class BlockingActor:
         if not caller.metadata["is_manager"] or not same_tmux_target(owner.metadata["managerat"], caller.metadata["runat"]):
             raise BlockingError("the current manager does not directly own the edited task")
 
-    def _active_task_for_peer(self, peer_pid: int) -> tuple[Path, str]:
+    def _active_task_for_peer(self, peer_pid: int, *, pending: bool = False) -> tuple[Path, str]:
         """Resolve a socket peer through the watcher's trusted tmux connection."""
 
         environ = Path(f"/proc/{peer_pid}/environ").read_bytes().split(b"\0")
@@ -162,18 +163,21 @@ class BlockingActor:
             raise BlockingError("current work queue requires an identifiable pane process") from exc
         if pane_pid not in _ancestor_pids(peer_pid):
             raise BlockingError("current work queue request does not originate from the claimed pane")
-        return infer_active_task(self.root, target), target
+        infer = infer_pending_task if pending else infer_active_task
+        return infer(self.root, target), target
 
     def _handle(self, payload: object, peer_pid: int) -> dict[str, object]:
         if not isinstance(payload, dict):
             raise BlockingError("actor request must be a mapping")
         operation = payload.get("operation")
-        if operation == "active-task":
-            task, target = self._active_task_for_peer(peer_pid)
+        if operation in {"active-task", "pending-task"}:
+            pending = operation == "pending-task"
+            infer = infer_pending_task if pending else infer_active_task
+            task, target = self._active_task_for_peer(peer_pid, pending=pending)
             task_payload = task.read_bytes()
             todo_payload = (self.root / "TODO.md").read_bytes()
             if (
-                infer_active_task(self.root, target) != task
+                infer(self.root, target) != task
                 or task.read_bytes() != task_payload
                 or (self.root / "TODO.md").read_bytes() != todo_payload
             ):

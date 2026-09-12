@@ -7,6 +7,7 @@ from email.message import EmailMessage
 from pathlib import Path
 from unittest.mock import patch
 
+from omo_manager.omo_agent_status import TaskFrontmatterError
 from omo_manager.omo_completion_email import build_completion_email
 from omo_manager.omo_completion_email import claim_completion_email
 from omo_manager.omo_completion_email import completion_email_is_delivered
@@ -54,6 +55,43 @@ def source1241_task(root: Path, *, body_suffix: str = "", source_text: str = SOU
 
 
 class CompletionEmailTest(unittest.TestCase):
+    def test_pending_item_notice_uses_explicit_queue_owner_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_text()
+            task.write_text(text, encoding="utf-8")
+            with patch(
+                "omo_manager.omo_completion_email.current_active_task",
+                side_effect=TaskFrontmatterError("multiple active work queues match the current agent"),
+            ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task) as pending:
+                plan = plan_completion_email(
+                    root,
+                    task,
+                    text,
+                    "pending item completed",
+                    items=("finish review",),
+                    pending_item_owner=True,
+                )
+
+            self.assertIsNotNone(plan)
+            pending.assert_called_once_with(root)
+
+    def test_task_completion_does_not_use_queue_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_text()
+            task.write_text(text, encoding="utf-8")
+            with patch(
+                "omo_manager.omo_completion_email.current_active_task",
+                side_effect=TaskFrontmatterError("multiple active work queues match the current agent"),
+            ), patch("omo_manager.omo_completion_email.current_pending_task") as pending:
+                plan = plan_completion_email(root, task, text, "task done", items=("completion context",))
+
+            self.assertIsNone(plan)
+            pending.assert_not_called()
+
     def test_ordinary_sent_verification_binds_message_participants_and_content(self) -> None:
         message = EmailMessage()
         message["From"] = "agent@example.test"

@@ -92,7 +92,7 @@ class BidirectionalCompatibilitySimulation(unittest.TestCase):
             commit(root, "TODO.md", "source.md", "owner.md")
 
             legacy_output = StringIO()
-            with patch("omo_manager.omo_pending.current_active_task", return_value=owner_path), redirect_stdout(legacy_output):
+            with patch("omo_manager.omo_pending.current_pending_task", return_value=owner_path), redirect_stdout(legacy_output):
                 self.assertEqual(0, run_pending(PendingArgs("add", ("temporary legacy work",)), root))
                 self.assertEqual(0, run_pending(PendingArgs("list"), root))
                 self.assertEqual(

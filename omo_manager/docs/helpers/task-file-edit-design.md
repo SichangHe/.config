@@ -8,11 +8,16 @@ task path or backing-file details. Workers report with `omo_report.sh`.
 
 ## agent pending queue
 
-`omo_pending.py` infers the exact current tmux pane, resolves one active queue,
-locks its target, rechecks ownership, and fails closed on missing or ambiguous
-ownership. `list` prints item text. `add` and `replace` keep work open. `remove`
+`omo_pending.py` infers the exact current tmux pane and resolves one active queue.
+When preserved blocked records share the target, it prefers the sole `running` or
+`long_running` task; multiple runnable tasks remain ambiguous. It locks the target,
+rechecks ownership, and fails closed on missing or unresolved ownership. `list`
+prints item text. `add` and `replace` keep work open. `remove`
 requires one-line completion or cancellation evidence. Output never includes a
 task filename, `runat`, or `managerat`.
+
+Pending-item completion notices use that same queue-owner selection only when
+strict active-task selection is ambiguous. Whole-task completion remains strict.
 
 If an owner's sandbox inherits `TMUX_PANE` but cannot open the tmux socket,
 the helper asks the existing pending-watcher actor to resolve its Unix-socket

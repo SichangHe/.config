@@ -14,12 +14,13 @@ from omo_manager.omo_pending import Args
 from omo_manager.omo_pending import parse_args
 from omo_manager.omo_pending import run
 from omo_manager.omo_task_context import infer_active_task
+from omo_manager.omo_task_context import infer_pending_task
 from omo_manager.omo_task_metadata import frontmatter_parts
 
 
 def task_text(status: str = "running", items: tuple[str, ...] = ()) -> str:
     pending = "pending_task_items: []" if not items else "pending_task_items:\n" + "\n".join(f"  - {item}" for item in items)
-    blocked_on = "blocked_on: persistent role\n" if status == "long_running" else ""
+    blocked_on = "blocked_on: persistent role\n" if status in {"long_running", "blocked"} else ""
     return (
         "---\n"
         "version: v1.0.0\n"
@@ -81,7 +82,7 @@ class PendingQueueTests(unittest.TestCase):
             root = Path(tmp)
             path = root / "task.md"
             path.write_text(task_text(items=("🧑 old wording",)), encoding="utf-8")
-            with patch("omo_manager.omo_pending.current_active_task", return_value=path):
+            with patch("omo_manager.omo_pending.current_pending_task", return_value=path):
                 self.assertEqual(0, run(Args("replace", old_item="🧑 old wording", new_item="new wording"), root))
             self.assertIn("  - 🧑 new wording\n", path.read_text(encoding="utf-8"))
 
@@ -94,8 +95,8 @@ class PendingQueueTests(unittest.TestCase):
             path.write_text(original, encoding="utf-8")
             args = Args("remove", ("finish review",), evidence="review passed", completion_key="a" * 64)
             with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
-                "omo_manager.omo_pending.current_active_task", return_value=path
-            ), patch("omo_manager.omo_completion_email.current_active_task", return_value=path), patch(
+                "omo_manager.omo_pending.current_pending_task", return_value=path
+            ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=path), patch(
                 "omo_manager.omo_completion_email.subprocess.run", side_effect=OSError("uncertain")
             ) as email:
                 for _ in range(2):
@@ -114,9 +115,9 @@ class PendingQueueTests(unittest.TestCase):
             entrypoint.write_text("#!/bin/sh\n", encoding="utf-8")
             entrypoint.chmod(0o600)
             state = root / "state"
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch("omo_manager.omo_pending.current_active_task", return_value=path), patch(
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch(
                 "omo_manager.omo_completion_email.COMPLETION_ENTRYPOINT", entrypoint
-            ), patch("omo_manager.omo_completion_email.current_active_task", return_value=path), patch(
+            ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=path), patch(
                 "omo_manager.omo_completion_email.EMAIL_HELPER", root / "must-not-run-email-helper"
             ), patch("omo_manager.omo_completion_email.subprocess.run", side_effect=AssertionError("must not email")):
                 with self.assertRaisesRegex(OSError, "not safely executable"):
@@ -143,7 +144,7 @@ class PendingQueueTests(unittest.TestCase):
             state = root / "state"
             path = root / "task.md"
             path.write_text(task_text(items=("finish review",)), encoding="utf-8")
-            with patch("omo_manager.omo_pending.current_active_task", return_value=path), patch(
+            with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch(
                 "omo_manager.omo_pending.plan_completion_email"
             ) as plan, patch("omo_manager.omo_pending.require_owner_completion") as require:
                 self.assertEqual(
@@ -208,7 +209,7 @@ class PendingQueueTests(unittest.TestCase):
             item = "fresh residual review: exact bookkeeping candidate"
             path.write_text(task_text(items=(f"'{item}'", "keep this")), encoding="utf-8")
 
-            with patch("omo_manager.omo_pending.current_active_task", return_value=path), patch(
+            with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch(
                 "omo_manager.omo_pending.plan_completion_email"
             ) as plan, patch("omo_manager.omo_pending.require_owner_completion") as require:
                 self.assertEqual(0, run(Args("remove", (item,), evidence="review passed", no_email=True), root))
@@ -225,7 +226,7 @@ class PendingQueueTests(unittest.TestCase):
             path = root / "task.md"
             original = task_text(items=("finish review",))
             path.write_text(original, encoding="utf-8")
-            with patch("omo_manager.omo_pending.current_active_task", return_value=path), patch(
+            with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch(
                 "omo_manager.omo_pending.plan_completion_email"
             ) as plan, patch("omo_manager.omo_pending.require_owner_completion") as require:
                 with self.assertRaisesRegex(TaskFrontmatterError, "pending task item not found"):
@@ -277,7 +278,7 @@ class PendingQueueTests(unittest.TestCase):
             subject.write_text("Re: Original question\n", encoding="utf-8")
             message.write_text("The concise answer.\n", encoding="utf-8")
             email = object()
-            with patch("omo_manager.omo_pending.current_active_task", return_value=path), patch(
+            with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch(
                 "omo_manager.omo_pending.plan_completion_email", return_value=email
             ) as plan, patch("omo_manager.omo_pending.require_owner_completion", return_value=True) as require:
                 self.assertEqual(
@@ -311,7 +312,7 @@ class PendingQueueTests(unittest.TestCase):
             path.write_text(original, encoding="utf-8")
             subject.write_text("Re: Original question\n", encoding="utf-8")
             message.write_text("The concise answer.\n", encoding="utf-8")
-            with patch("omo_manager.omo_pending.current_active_task", return_value=path), patch(
+            with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch(
                 "omo_manager.omo_pending.plan_completion_email", return_value=None
             ):
                 with self.assertRaisesRegex(BlockingError, "reporting policy"):
@@ -333,7 +334,7 @@ class PendingQueueTests(unittest.TestCase):
             path.write_text(v2_task_text(), encoding="utf-8")
             document = MagicMock(metadata={"resolved_task_items": []})
             email = object()
-            with patch("omo_manager.omo_pending.current_active_task", return_value=path), patch("omo_manager.omo_pending.v2_enabled", return_value=True), patch(
+            with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch("omo_manager.omo_pending.v2_enabled", return_value=True), patch(
                 "omo_manager.omo_pending.load_task", return_value=document
             ), patch("omo_manager.omo_pending.resolve_item") as resolve, patch("omo_manager.omo_pending.blocking_request"), patch(
                 "omo_manager.omo_pending.plan_completion_email", return_value=email
@@ -369,7 +370,7 @@ class PendingQueueTests(unittest.TestCase):
             message.write_text("The concise answer.\n", encoding="utf-8")
             document = MagicMock(metadata={"resolved_task_items": []})
             email = object()
-            with patch("omo_manager.omo_pending.current_active_task", return_value=path), patch("omo_manager.omo_pending.v2_enabled", return_value=True), patch(
+            with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch("omo_manager.omo_pending.v2_enabled", return_value=True), patch(
                 "omo_manager.omo_pending.load_task", return_value=document
             ), patch("omo_manager.omo_pending.resolve_item"), patch("omo_manager.omo_pending.blocking_request"), patch(
                 "omo_manager.omo_pending.plan_completion_email", return_value=email
@@ -402,6 +403,61 @@ class PendingQueueTests(unittest.TestCase):
             with self.assertRaisesRegex(TaskFrontmatterError, "multiple active"):
                 infer_active_task(root, "cfg:2.0")
 
+    def test_pending_inference_prefers_runnable_owner_over_blocked_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\ncurrent.md cfg:2\n\nprevious:\nold.md cfg:2\n", encoding="utf-8")
+            (root / "current.md").write_text(task_text("long_running"), encoding="utf-8")
+            (root / "old.md").write_text(task_text("blocked"), encoding="utf-8")
+
+            self.assertEqual(root / "current.md", infer_pending_task(root, "cfg:2.0"))
+
+    def test_pending_inference_rejects_two_runnable_owners(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\na.md cfg:2\nb.md cfg:2\n\nprevious:\nold.md cfg:2\n", encoding="utf-8")
+            (root / "a.md").write_text(task_text("running"), encoding="utf-8")
+            (root / "b.md").write_text(task_text("long_running"), encoding="utf-8")
+            (root / "old.md").write_text(task_text("blocked"), encoding="utf-8")
+
+            with self.assertRaisesRegex(TaskFrontmatterError, "multiple active"):
+                infer_pending_task(root, "cfg:2")
+
+    def test_pending_inference_rejects_two_blocked_owners(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\na.md cfg:2\n\nprevious:\nb.md cfg:2\n", encoding="utf-8")
+            (root / "a.md").write_text(task_text("blocked"), encoding="utf-8")
+            (root / "b.md").write_text(task_text("blocked"), encoding="utf-8")
+
+            with self.assertRaisesRegex(TaskFrontmatterError, "multiple active"):
+                infer_pending_task(root, "cfg:2")
+
+    def test_human_item_removal_uses_runnable_owner_among_blocked_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "current.md"
+            blocked = root / "old.md"
+            item = "🧑 answer the human"
+            task.write_text(task_text("running", (item,)), encoding="utf-8")
+            blocked.write_text(task_text("blocked"), encoding="utf-8")
+            (root / "TODO.md").write_text("current:\ncurrent.md cfg:2\n\nprevious:\nold.md cfg:2\n", encoding="utf-8")
+
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_task_context.current_tmux_target", return_value="cfg:2.0"
+            ), patch("omo_manager.omo_completion_email.subprocess.run") as email:
+                self.assertEqual(
+                    0,
+                    run(
+                        Args("remove", (item,), evidence="answer delivered", completion_key="a" * 64),
+                        root,
+                    ),
+                )
+
+            self.assertNotIn(item, task.read_text(encoding="utf-8"))
+            email.assert_called_once()
+
     def test_inference_accepts_one_long_running_queue(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -427,7 +483,7 @@ class PendingQueueTests(unittest.TestCase):
             (root / "TODO.md").write_text("current:\nsecret-task.md cfg:2\n", encoding="utf-8")
             path.write_text(task_text("long_running"), encoding="utf-8")
             output = StringIO()
-            with patch("omo_manager.omo_pending.current_active_task", return_value=path), patch(
+            with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch(
                 "omo_manager.omo_task_edit.frontmatter_parts", wraps=frontmatter_parts
             ) as parse_parts, patch("omo_manager.omo_pending.plan_completion_email", return_value=None), patch(
                 "omo_manager.omo_pending.require_owner_completion", return_value=True

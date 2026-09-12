@@ -30,6 +30,7 @@ from omo_manager.omo_agent_status import parse_task_metadata
 from omo_manager.omo_email_config import GMAIL_IMAP_HOST, configured_agent_mail, guest_hees_target
 from omo_manager.omo_email_subject import canonical_tmux_target
 from omo_manager.omo_task_context import current_active_task
+from omo_manager.omo_task_context import current_pending_task
 from omo_manager.omo_task_lock import task_file_lock
 from omo_manager.omo_task_lock import task_file_lock_at_path
 
@@ -426,6 +427,7 @@ def plan_completion_email(
     human_subject: str = "",
     human_body: str = "",
     semantic_key: str = "",
+    pending_item_owner: bool = False,
 ) -> CompletionEmail | None:
     """Return mail only when the caller is the exact task owner and contact is allowed."""
 
@@ -433,7 +435,8 @@ def plan_completion_email(
     if canonical is None:
         return None
     try:
-        caller_path = current_active_task(root).resolve()
+        resolve_owner = current_pending_task if pending_item_owner else current_active_task
+        caller_path = resolve_owner(root).resolve()
     except (OSError, TaskFrontmatterError):
         return None
     if caller_path != task.resolve():
@@ -1289,6 +1292,7 @@ def require_owner_completion(
     human_body: str = "",
     owner_may_mutate_after_delivery: bool = False,
     semantic_key: str = "",
+    pending_item_owner: bool = False,
 ) -> bool:
     """Require exact-owner delivery before a manager-driven mutation proceeds."""
 
@@ -1307,6 +1311,7 @@ def require_owner_completion(
         human_subject=human_subject,
         human_body=human_body,
         semantic_key=canonical.semantic_key if canonical is not None else semantic_key,
+        pending_item_owner=pending_item_owner,
     )
     effective = owner_plan or canonical
     require_completion_entrypoint()
