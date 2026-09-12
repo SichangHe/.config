@@ -106,40 +106,11 @@ MANAGER_TARGET_SUBJECT_RE = re.compile(r"^(?:re:\s*)*(?:(?:\[a\]|\[omo_manager\]
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 PWD_FOOTER_RE = re.compile(r"(?:^|\n)PWD: [^\n]+\n?\Z")
 TMUX_FOOTER_RE = re.compile(r"(?:^|\n)tmux: [^\r\n]+\r?\n?\Z", re.IGNORECASE)
-# 🧑 "certain words to trigger direct in-place replacement or termination ... at the start of the email ... the regex should be more lenient ... and be case-insensitive"
-AGENT_LIFECYCLE_ACTION_RE = re.compile(
-    r"\b(?:(?P<replace>replace|swap\s+out)|(?P<terminate>close(?:\s+(?:down|out))?|terminate|shut\s+down|kill|retire|dismiss|stop|end|remove|fire))\b",
-    re.IGNORECASE,
-)
-AGENT_LIFECYCLE_TARGET_RE = re.compile(
-    r"\b(?:(?:(?:this|that|the)\s+)?(?:(?:current|existing|replying|responding|stuck|failed|failing|broken)\s+)*(?:agent|worker|manager|assistant)|it|them)\b",
-    re.IGNORECASE,
-)
 AGENT_LIFECYCLE_DIRECT_RE = re.compile(
-    r"""
-    \A\s*
-    (?:(?:hi|hello|hey)\b[,.!\s]*)?
-    (?:(?:please|kindly)\b[,.!\s]*)*
-    (?:
-        (?:can|could|would|will)\s+(?:you|we)\s+
-      | i\s+(?:would|'d)\s+like(?:\s+you)?\s+to\s+
-      | i\s+(?:want|need)(?:\s+you)?\s+to\s+
-      | (?:i\s+think\s+)?(?:you|we)\s+should\s+
-      | let(?:'s|\s+us)\s+
-    )?
-    (?:(?:please|just|simply|now|immediately)\s+|go\s+ahead\s+and\s+)*
-    (?P<action>replace|swap\s+out|close(?:\s+(?:down|out))?|terminate|shut\s+down|kill|retire|dismiss|stop|end|remove|fire)
-    \s+(?:(?:(?:this|that|the)\s+)?(?:(?:current|existing|replying|responding|stuck|failed|failing|broken)\s+)*(?:agent|worker|manager|assistant)|it|them)\b
-    """,
-    re.IGNORECASE | re.VERBOSE,
-)
-AGENT_LIFECYCLE_NEGATION_RE = re.compile(r"\b(?:do\s+not|don't|never|not|without)\b", re.IGNORECASE)
-AGENT_LIFECYCLE_COURTESY_TAIL_RE = re.compile(
-    r"\A\s*(?:[.!?,;:]\s*)*(?:(?:please|now|immediately|thanks|thank\s+you)(?:\s+please)?(?:[.!?,;:]\s*)*)*\Z",
+    r"\A[ \t]*(?P<action>replace|terminate)[ \t]+this[ \t]+agent\b",
     re.IGNORECASE,
 )
 AGENT_LIFECYCLE_REPLY_TAG_RE = re.compile(r"^\s*(?:re:\s*)+\[[^\]\r\n]{1,128}\](?:\s+|$)", re.IGNORECASE)
-AGENT_LIFECYCLE_HEAD_MAX_CHARS = 1000
 RECOVERY_SUBJECTS = {"[omo_manager_recover]", "Re: [omo_manager_recover]"}
 ROUTED_PREFIXES = ("(manager handled:",)
 IGNORE_PARTS = {".git", ".venv", "__pycache__", "manager_mail"}
@@ -532,44 +503,13 @@ def message_text(msg: Message) -> str:
     return next((text for value in html if (text := readable_html(value))), "")
 
 
-def leading_human_reply_paragraph(body: str) -> str:
-    """Return only the leading unquoted paragraph where a command may occur."""
-    lines = body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    paragraph: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            if paragraph:
-                break
-            continue
-        if line.lstrip().startswith(">"):
-            break
-        paragraph.append(stripped)
-        if sum(len(value) + 1 for value in paragraph) >= AGENT_LIFECYCLE_HEAD_MAX_CHARS:
-            break
-    return " ".join(paragraph)[:AGENT_LIFECYCLE_HEAD_MAX_CHARS]
-
-
 def agent_lifecycle_command(body: str) -> AgentLifecycleCommand | None:
-    """Recognize one unambiguous lifecycle request at the reply's start."""
-    head = leading_human_reply_paragraph(body)
-    actions = list(AGENT_LIFECYCLE_ACTION_RE.finditer(head))
-    if not actions or AGENT_LIFECYCLE_TARGET_RE.search(head) is None:
-        return None
-    kinds = {
-        AgentLifecycleAction.REPLACE if match.group("replace") else AgentLifecycleAction.TERMINATE
-        for match in actions
-    }
-    if len(kinds) != 1:
-        return AgentLifecycleCommand(AgentLifecycleAction.REVIEW, "replacement and termination wording are mixed")
-    if AGENT_LIFECYCLE_NEGATION_RE.search(head) is not None:
-        return AgentLifecycleCommand(AgentLifecycleAction.REVIEW, "the lifecycle wording is negated")
-    match = AGENT_LIFECYCLE_DIRECT_RE.match(head)
+    """Recognize either exact command phrase at the reply's start."""
+    normalized = body.replace("\r\n", "\n").replace("\r", "\n")
+    match = AGENT_LIFECYCLE_DIRECT_RE.match(normalized)
     if match is None:
-        return AgentLifecycleCommand(AgentLifecycleAction.REVIEW, "the lifecycle wording is not an unambiguous request at the start")
-    if AGENT_LIFECYCLE_COURTESY_TAIL_RE.fullmatch(head[match.end() :]) is None:
-        return AgentLifecycleCommand(AgentLifecycleAction.REVIEW, "the lifecycle request has qualifying or unrelated trailing wording")
-    action = AgentLifecycleAction.REPLACE if re.match(r"(?:replace|swap)", match.group("action"), re.IGNORECASE) else AgentLifecycleAction.TERMINATE
+        return None
+    action = AgentLifecycleAction.REPLACE if match.group("action").casefold() == "replace" else AgentLifecycleAction.TERMINATE
     return AgentLifecycleCommand(action)
 
 

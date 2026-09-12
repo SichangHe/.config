@@ -55,12 +55,13 @@ def args_for(root: Path, manager_file: Path) -> watcher.Args:
 
 
 class AgentLifecycleCommandParserTests(unittest.TestCase):
-    def test_accepts_lenient_case_insensitive_commands_only_in_leading_reply(self) -> None:
+    def test_accepts_exact_case_insensitive_command_prefix_without_please_or_period(self) -> None:
         cases = {
-            "Could you please REPLACE this stuck Agent?": watcher.AgentLifecycleAction.REPLACE,
-            "hello, I think we should shut down the responding worker now": watcher.AgentLifecycleAction.TERMINATE,
-            "Kindly swap out this assistant, please.": watcher.AgentLifecycleAction.REPLACE,
-            "close it please": watcher.AgentLifecycleAction.TERMINATE,
+            "REPLACE this Agent": watcher.AgentLifecycleAction.REPLACE,
+            "terminate this agent": watcher.AgentLifecycleAction.TERMINATE,
+            "Replace this agent.": watcher.AgentLifecycleAction.REPLACE,
+            "Terminate this agent -- because it is stuck\nSteven": watcher.AgentLifecycleAction.TERMINATE,
+            "Replace this agent\nExplanation starts on the next line without a blank line.": watcher.AgentLifecycleAction.REPLACE,
         }
         for body, expected in cases.items():
             with self.subTest(body=body):
@@ -69,22 +70,20 @@ class AgentLifecycleCommandParserTests(unittest.TestCase):
                 assert command is not None
                 self.assertIs(expected, command.action)
 
-        self.assertIsNone(watcher.agent_lifecycle_command("Thanks.\n\n> terminate this agent"))
-
-    def test_ambiguous_or_negated_wording_requires_manager_review(self) -> None:
+    def test_rejects_please_synonyms_nonleading_and_incomplete_phrases(self) -> None:
         for body in (
+            "Please replace this agent.",
+            "Please terminate this agent.",
+            "Could you replace this agent?",
+            "swap out this agent",
+            "close this agent",
             "Do not terminate this agent",
-            "Replace or terminate this worker",
-            "I was thinking about it. Replace this agent",
-            "stop this agent from sending reports",
-            "remove this worker's old task",
-            "close this assistant's issue",
+            "Thanks.\n\nTerminate this agent",
+            "> terminate this agent",
+            "replace this agency",
         ):
             with self.subTest(body=body):
-                command = watcher.agent_lifecycle_command(body)
-                self.assertIsNotNone(command)
-                assert command is not None
-                self.assertIs(watcher.AgentLifecycleAction.REVIEW, command.action)
+                self.assertIsNone(watcher.agent_lifecycle_command(body))
 
 
 class AgentLifecycleRoutingTests(unittest.TestCase):
