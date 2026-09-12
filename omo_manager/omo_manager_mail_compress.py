@@ -76,6 +76,7 @@ REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION = "v1.2.0"
 LEGACY_REPLACEMENT_FREE_REMOVAL_REVIEW_VERSION = "v1.1.0"
 GMAIL_IDENTITY_UID_BATCH = 40
 GMAIL_THREAD_OR_BATCH = 32
+GMAIL_MESSAGE_OR_BATCH = 32
 EXPORT_FULL_FETCH_ATTEMPTS = 2
 IMAP_OPERATION_TIMEOUT_S = 45.0
 TRASH_EXPLICIT_PRE_MOVE_TIMEOUT_S = 300.0
@@ -1174,6 +1175,40 @@ def gmail_message_uids(client: imaplib.IMAP4_SSL, gmail_msgid: str) -> list[str]
     if typ != "OK":
         raise RuntimeError(f"IMAP Gmail message search failed: {typ}")
     return [raw.decode() for raw in data[0].split()] if data and data[0] else []
+
+
+def gmail_msgid_or_query(msgids: list[str]) -> str:
+    """Return one nested IMAP OR search-key of `X-GM-MSGID` keys."""
+    if not msgids or any(not msgid.isdecimal() for msgid in msgids):
+        raise RuntimeError("Gmail message identity was missing or malformed")
+    query = f"X-GM-MSGID {msgids[0]}"
+    for msgid in msgids[1:]:
+        query = f"(OR ({query}) X-GM-MSGID {msgid})"
+    return query
+
+
+def gmail_message_uids_union(client: imaplib.IMAP4_SSL, msgids: list[str]) -> list[str]:
+    """Search the selected mailbox for every listed Gmail message identity."""
+    if not msgids:
+        return []
+    if len(msgids) == 1:
+        return gmail_message_uids(client, msgids[0])
+    typ, data = imap_uid(
+        client,
+        f"gmail-message-or-search n={len(msgids)}",
+        "search",
+        None,
+        gmail_msgid_or_query(msgids),
+    )
+    if typ != "OK":
+        raise RuntimeError(f"IMAP Gmail message search failed: {typ}")
+    raw_uids = data[0] if data else b""
+    if not isinstance(raw_uids, bytes):
+        raise RuntimeError("IMAP Gmail message search returned a malformed response")
+    uids = [raw.decode() for raw in raw_uids.split()]
+    if any(not uid.isdecimal() for uid in uids) or len(uids) != len(set(uids)):
+        raise RuntimeError("IMAP Gmail message search returned malformed or duplicate UIDs")
+    return uids
 
 
 def require_gmail_identities(records: list[MailRecord]) -> None:
@@ -3993,15 +4028,25 @@ def observe_explicit_sources(
 ) -> tuple[list[MailRecord], list[MailRecord]]:
     """Resolve exact bound sources in either INBOX or recoverable Trash."""
     observed: dict[str, list[MailRecord]] = {"INBOX": [], "Trash": []}
+    source_by_msgid = {source.gmail_msgid: source for source in sources}
+    source_ids = list(source_by_msgid)
     for location, mailbox in (("INBOX", "INBOX"), ("Trash", TRASH_MAILBOX)):
         select_mailbox(client, mailbox, readonly=True)
-        for source in sources:
-            matches = gmail_message_uids(client, source.gmail_msgid)
-            if len(matches) > 1:
+        matched_uids: list[str] = []
+        for start in range(0, len(source_ids), GMAIL_MESSAGE_OR_BATCH):
+            chunk = source_ids[start : start + GMAIL_MESSAGE_OR_BATCH]
+            chunk_uids = gmail_message_uids_union(client, chunk)
+            if set(matched_uids).intersection(chunk_uids):
                 raise RuntimeError(f"explicit source is ambiguous in {location}")
-            if not matches:
-                continue
-            record = fetch_record(client, matches[0], with_body=True, with_metadata=True)
+            matched_uids.extend(chunk_uids)
+        records: list[MailRecord] = []
+        for start in range(0, len(matched_uids), GMAIL_IDENTITY_UID_BATCH):
+            records.extend(fetch_full_records(client, matched_uids[start : start + GMAIL_IDENTITY_UID_BATCH]))
+        records_by_msgid: dict[str, MailRecord] = {}
+        for record in records:
+            source = source_by_msgid.get(record.gmail_msgid)
+            if source is None or record.gmail_msgid in records_by_msgid:
+                raise RuntimeError(f"explicit source is ambiguous in {location}")
             if (
                 (location == "INBOX" and record.uid != source.uid)
                 or
@@ -4011,7 +4056,12 @@ def observe_explicit_sources(
                 or read_state_from_flags(record.flags) != source.read_state
             ):
                 raise RuntimeError("explicit source identity, content, or boundary changed")
-            observed[location].append(record)
+            records_by_msgid[record.gmail_msgid] = record
+        observed[location] = [
+            records_by_msgid[source.gmail_msgid]
+            for source in sources
+            if source.gmail_msgid in records_by_msgid
+        ]
     inbox_ids = {record.gmail_msgid for record in observed["INBOX"]}
     trash_ids = {record.gmail_msgid for record in observed["Trash"]}
     expected_ids = {source.gmail_msgid for source in sources}

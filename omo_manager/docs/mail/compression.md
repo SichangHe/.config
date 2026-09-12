@@ -178,6 +178,10 @@ bindings.
     `--recover-partial-move`, optional `--allow-additive-final-context`,
     `--runtime-bundle-sha256`, preparer, and reviewer values, then
     pass the resulting unchanged file as `--independent-review-file`.
+    The helper resolves the complete source set in Inbox and Trash with bounded
+    Gmail-ID OR searches, then fetches matched messages in bounded batches.
+    This preserves exact identity, content, boundary, location, and read-state
+    checks without one network round trip per source.
     The generator writes the documented `kind<TAB>value` v1.2.0 schema,
     binds every applicable execution identity, refuses invalid or
     incomplete bindings, and never accesses or changes the mailbox.

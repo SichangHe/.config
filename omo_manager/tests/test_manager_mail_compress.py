@@ -4301,7 +4301,7 @@ with tempfile.TemporaryDirectory() as tmp:
         with (
             patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
             patch("omo_manager.omo_manager_mail_compress.gmail_message_uids", side_effect=[["7"], []]),
-            patch("omo_manager.omo_manager_mail_compress.fetch_record", return_value=changed),
+            patch("omo_manager.omo_manager_mail_compress.fetch_full_records", return_value=[changed]),
         ):
             with self.assertRaisesRegex(RuntimeError, "identity, content, or boundary changed"):
                 observe_explicit_sources(
@@ -4310,6 +4310,74 @@ with tempfile.TemporaryDirectory() as tmp:
                     "agent@example.test",
                     "human@example.test",
                 )
+
+    def test_observe_explicit_sources_batches_search_and_fetch(self) -> None:
+        raw_a = self.raw_message("[worker:0] source-a", "body-a")
+        raw_b = self.raw_message("[worker:1] source-b", "body-b")
+        query = "(OR (X-GM-MSGID 100) X-GM-MSGID 101)"
+        client = FakeClient(
+            {
+                ("search", None, query): [("OK", [b"7 8"]), ("OK", [b""])],
+                ("fetch", "7,8", FULL_BATCH_FETCH): (
+                    "OK",
+                    [(b"7 (UID 7 BODY[] {1}", raw_a), (b"8 (UID 8 BODY[] {1}", raw_b)],
+                ),
+                ("fetch", "7,8", GMAIL_METADATA_BATCH_FETCH): (
+                    "OK",
+                    [
+                        b"7 (UID 7 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))",
+                        b"8 (UID 8 FLAGS (\\Seen) X-GM-MSGID 101 X-GM-THRID 201 X-GM-LABELS (\\Inbox))",
+                    ],
+                ),
+            }
+        )
+        sources = [
+            parse_explicit_source(f"7:100:200:{hashlib.sha256(raw_a).hexdigest()}:unread"),
+            parse_explicit_source(f"8:101:201:{hashlib.sha256(raw_b).hexdigest()}:read"),
+        ]
+
+        inbox, trash = observe_explicit_sources(client, sources, "agent@example.test", "human@example.test")
+
+        self.assertEqual(["7", "8"], [record.uid for record in inbox])
+        self.assertEqual([], trash)
+        self.assertEqual(2, client.uid_calls.count(("search", None, query)))
+        self.assertIn(("fetch", "7,8", FULL_BATCH_FETCH), client.uid_calls)
+        self.assertFalse(
+            any(
+                call[-2:] in {("X-GM-MSGID", "100"), ("X-GM-MSGID", "101")}
+                for call in client.uid_calls
+            )
+        )
+
+    def test_observe_explicit_sources_batches_partial_move_locations(self) -> None:
+        raw_a = self.raw_message("[worker:0] source-a", "body-a")
+        raw_b = self.raw_message("[worker:1] source-b", "body-b")
+        query = "(OR (X-GM-MSGID 100) X-GM-MSGID 101)"
+        client = FakeClient(
+            {
+                ("search", None, query): [("OK", [b"7"]), ("OK", [b"70"])],
+                ("fetch", "7", FULL_BATCH_FETCH): ("OK", [(b"7 (UID 7 BODY[] {1}", raw_a)]),
+                ("fetch", "7", GMAIL_METADATA_BATCH_FETCH): (
+                    "OK",
+                    [b"7 (UID 7 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+                ),
+                ("fetch", "70", FULL_BATCH_FETCH): ("OK", [(b"70 (UID 70 BODY[] {1}", raw_b)]),
+                ("fetch", "70", GMAIL_METADATA_BATCH_FETCH): (
+                    "OK",
+                    [b"70 (UID 70 FLAGS (\\Seen) X-GM-MSGID 101 X-GM-THRID 201 X-GM-LABELS (\\Trash))"],
+                ),
+            }
+        )
+        sources = [
+            parse_explicit_source(f"7:100:200:{hashlib.sha256(raw_a).hexdigest()}:unread"),
+            parse_explicit_source(f"8:101:201:{hashlib.sha256(raw_b).hexdigest()}:read"),
+        ]
+
+        inbox, trash = observe_explicit_sources(client, sources, "agent@example.test", "human@example.test")
+
+        self.assertEqual(["7"], [record.uid for record in inbox])
+        self.assertEqual(["70"], [record.uid for record in trash])
+        self.assertEqual(2, client.uid_calls.count(("search", None, query)))
 
     def test_strict_fresh_source_location_gate_requires_exact_inbox_set_before_move(self) -> None:
         first = MailRecord("7", "", "Agent", "Human", "source-a", "a", gmail_msgid="100", gmail_thrid="200", raw_sha256="a" * 64)
