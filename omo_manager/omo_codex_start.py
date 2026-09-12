@@ -56,7 +56,8 @@ WORKER_DEFAULTS = HELPER_DIR / "WORKER_DEFAULTS.md"
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
 SUCCESS_STATUSES = {"ready", "running"}
 RESTARTABLE_STATUSES = {"error", "ready", "running", "stuck_input", "waiting_subagent"}
-ROTATION_TASK_STATUSES = {"blocked", "running"}
+# 🧑 "preserve long_running semantics before and after replacement"
+ROTATION_TASK_STATUSES = {"blocked", "long_running", "running"}
 EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 MODEL_RE = re.compile(r"^[A-Za-z0-9._:/-]+$")
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$")

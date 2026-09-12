@@ -986,7 +986,7 @@ class CodexStartTests(unittest.TestCase):
                 "--expected-task-sha256",
                 "a" * 64,
                 "--expected-status",
-                "blocked",
+                "long_running",
                 "--expected-owner-target",
                 "cfg:1",
                 "--expected-pending-item",
@@ -998,6 +998,7 @@ class CodexStartTests(unittest.TestCase):
             ]
         )
         self.assertTrue(args.rotate_worker)
+        self.assertEqual("long_running", args.expected_status)
         self.assertEqual(("preserve exact queue",), args.expected_pending_items)
         self.assertEqual(("protected:9",), args.protected_targets)
         with self.assertRaises(SystemExit):
@@ -1047,10 +1048,10 @@ class CodexStartTests(unittest.TestCase):
                 ]
             )
 
-    def test_rotate_worker_starts_fresh_in_same_pane_and_preserves_task_boundaries(self) -> None:
+    def test_rotate_worker_starts_fresh_in_same_pane_and_preserves_long_running_task(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
-            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            self.write_task(root, status="long_running", pending=["preserve exact queue"])
             task_before = (root / "worker.md").read_bytes()
             initial = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
             rotated_pane = replace(initial, pane_pid=5252)
@@ -1067,7 +1068,7 @@ class CodexStartTests(unittest.TestCase):
                 rotated = True
 
             sessions = iter(((old_session, ""), (new_session, "")))
-            args = self.rotation_args(root)
+            args = self.rotation_args(root, expected_status="long_running")
             with (
                 patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
                 patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
