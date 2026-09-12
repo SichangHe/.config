@@ -31,6 +31,7 @@ from omo_manager.omo_codex_start import (
     Pane,
     RECOVERY_EVENT_DIRNAME,
     RECOVERY_RECEIPT_DIRNAME,
+    SOURCE1717_STALE_HISTORY_AUDIT_SHA256,
     StartError,
     TaskBinding,
     capture_rotation_snapshot,
@@ -1739,6 +1740,182 @@ class CodexStartTests(unittest.TestCase):
             self.assertIn(f"current-todo-sha256: {current_todo_sha256}\n", receipt)
             self.assertIn("todo-authority-scope: exact-bound-task-row-only\n", receipt)
             self.assertIn(f"current-session-id: {new_session}\nfinal-result: success\n", receipt)
+
+    def test_source1717_stale_history_reconciles_exact_visible_status_without_input(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root, 5252)
+            audit = self.write_failed_rotation_audit(root, pane, **{"failure-kind": "post-respawn-stale-unrelated-history"})
+            os.removexattr(audit, "user.omo_rotation_reconciliation_eligible_sha256")
+            audit_sha256 = hashlib.sha256(audit.read_bytes()).hexdigest()
+            original_task_sha256 = hashlib.sha256((root / "worker.md").read_bytes()).hexdigest()
+            with (root / "worker.md").open("a", encoding="utf-8") as task:
+                task.write("\nAdvanced note.\n")
+            args = self.reconciliation_args(
+                root,
+                pane,
+                expected_audit_task_sha256=original_task_sha256,
+                expected_audit_status="blocked",
+                expected_audit_blocker="model capacity",
+                expected_audit_owner_target="cfg:1",
+                expected_audit_pending_items=("preserve exact queue",),
+            )
+            marker = "[omo-codex-start:5000:123456789]"
+            new_session = "119f670b-6a2f-7463-b9be-9aa6ff0cec43"
+            capture = f"""old history
+{marker}
+╭───╮
+│ >_ OpenAI Codex (v0.154.0) │
+│ │
+│ model: gpt-5.6-sol medium /model to change │
+│ directory: {root} │
+│ permissions: YOLO mode │
+╰───╯
+╭───╮
+│ >_ OpenAI Codex │
+│ Directory: {root} │
+│ Session: {new_session} │
+╰───╯
+"""
+            task_before = (root / "worker.md").read_bytes()
+            audit_before = audit.read_bytes()
+            audit_stat = audit.stat()
+            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), self.assertRaisesRegex(StartError, "eligibility evidence"):
+                reconcile_rotation_audit(args)
+            with (
+                patch("omo_manager.omo_codex_start.SOURCE1717_STALE_HISTORY_AUDIT_SHA256", audit_sha256),
+                patch("omo_manager.omo_codex_start.SOURCE1717_STALE_HISTORY_LAUNCH_MARKER", marker),
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.validate_audit_bound_replacement_process"),
+                patch("omo_manager.omo_codex_start.reconciliation_capture", return_value=capture + "[omo-codex-start:5001:123456790]\n"),
+                patch("omo_manager.omo_codex_start.query_reconciliation_session_id") as query,
+                self.assertRaisesRegex(StartError, "another launch marker"),
+            ):
+                reconcile_rotation_audit(args)
+            self.assertFalse((root / "reconciliation.receipt").exists())
+            fragment_capture = f"""{capture}╭───╮
+│ >_ OpenAI Codex │
+│ fragments model: directory: permissions: │
+╰───╯
+"""
+            with (
+                patch("omo_manager.omo_codex_start.SOURCE1717_STALE_HISTORY_AUDIT_SHA256", audit_sha256),
+                patch("omo_manager.omo_codex_start.SOURCE1717_STALE_HISTORY_LAUNCH_MARKER", marker),
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.validate_audit_bound_replacement_process"),
+                patch("omo_manager.omo_codex_start.reconciliation_capture", return_value=fragment_capture),
+                self.assertRaisesRegex(StartError, "malformed or mismatched"),
+            ):
+                reconcile_rotation_audit(args)
+            self.assertFalse((root / "reconciliation.receipt").exists())
+            malformed_capture = f"""{capture}╭───╮
+│ >_ OpenAI Codex │
+│ Directory: {root} │
+╰───╯
+"""
+            with (
+                patch("omo_manager.omo_codex_start.SOURCE1717_STALE_HISTORY_AUDIT_SHA256", audit_sha256),
+                patch("omo_manager.omo_codex_start.SOURCE1717_STALE_HISTORY_LAUNCH_MARKER", marker),
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.validate_audit_bound_replacement_process"),
+                patch("omo_manager.omo_codex_start.reconciliation_capture", return_value=malformed_capture),
+                self.assertRaisesRegex(StartError, "malformed or mismatched"),
+            ):
+                reconcile_rotation_audit(args)
+            self.assertFalse((root / "reconciliation.receipt").exists())
+            race_args = replace(args, reconciliation_receipt=root / "race.receipt")
+            with (
+                patch("omo_manager.omo_codex_start.SOURCE1717_STALE_HISTORY_AUDIT_SHA256", audit_sha256),
+                patch("omo_manager.omo_codex_start.SOURCE1717_STALE_HISTORY_LAUNCH_MARKER", marker),
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch(
+                    "omo_manager.omo_codex_start.validate_audit_bound_replacement_process",
+                    side_effect=[None, None, None, None, StartError("final process identity changed")],
+                ),
+                patch("omo_manager.omo_codex_start.reconciliation_capture", return_value=capture),
+                self.assertRaisesRegex(StartError, "final process identity changed"),
+            ):
+                reconcile_rotation_audit(race_args)
+            self.assertIn("final-result: failed\n", (root / "race.receipt").read_text(encoding="utf-8"))
+            with (
+                patch("omo_manager.omo_codex_start.SOURCE1717_STALE_HISTORY_AUDIT_SHA256", audit_sha256),
+                patch("omo_manager.omo_codex_start.SOURCE1717_STALE_HISTORY_LAUNCH_MARKER", marker),
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.validate_audit_bound_replacement_process") as process_guard,
+                patch("omo_manager.omo_codex_start.reconciliation_capture", return_value=capture) as read_capture,
+                patch("omo_manager.omo_codex_start.query_reconciliation_session_id") as query,
+                patch("omo_manager.omo_codex_start.guarded_reconciliation_tmux") as send,
+            ):
+                self.assertEqual("rotation-audit-reconciled", reconcile_rotation_audit(args))
+            query.assert_not_called()
+            send.assert_not_called()
+            self.assertEqual(2, read_capture.call_count)
+            self.assertEqual(5, process_guard.call_count)
+            self.assertEqual(task_before, (root / "worker.md").read_bytes())
+            self.assertEqual(audit_before, audit.read_bytes())
+            self.assertEqual((audit_stat.st_dev, audit_stat.st_ino, audit_stat.st_size, audit_stat.st_mtime_ns), (audit.stat().st_dev, audit.stat().st_ino, audit.stat().st_size, audit.stat().st_mtime_ns))
+            receipt = (root / "reconciliation.receipt").read_text(encoding="utf-8")
+            self.assertIn("evidence-kind: source1717-visible-status-no-input\n", receipt)
+            self.assertIn(f"visible-status-launch-marker-sha256: {hashlib.sha256(marker.encode()).hexdigest()}\n", receipt)
+            self.assertIn(f"visible-status-capture-sha256: {hashlib.sha256(capture.removeprefix('old history\n').encode()).hexdigest()}\n", receipt)
+            self.assertIn(f"current-session-id: {new_session}\nfinal-result: success\n", receipt)
+
+    def test_source1717_parser_accepts_complete_advanced_task_bindings_only_for_exact_audit(self) -> None:
+        common = [
+            "--task-file", "worker.md", "--target", "cfg:2", "--reconcile-rotation-audit",
+            "--rotation-audit", "/tmp/rotation.audit", "--expected-rotation-audit-sha256", SOURCE1717_STALE_HISTORY_AUDIT_SHA256,
+            "--reconciliation-receipt", "/tmp/reconciliation.receipt", "--expected-task-sha256", "b" * 64,
+            "--expected-status", "blocked", "--expected-blocker", "current blocker", "--expected-owner-target", "cfg:1",
+            "--expected-pending-item", "current item", "--protected-target", "protected:9",
+            "--expected-current-pane-pid", "5252", "--expected-current-command", "bunx",
+            "--expected-audit-task-sha256", "d" * 64, "--expected-audit-status", "blocked",
+            "--expected-audit-blocker", "old blocker", "--expected-audit-owner-target", "cfg:1",
+            "--expected-audit-pending-item", "old item",
+        ]
+        self.assertEqual("d" * 64, parse_args(common).expected_audit_task_sha256)
+        digest_index = common.index("--expected-rotation-audit-sha256") + 1
+        unrelated = [*common]
+        unrelated[digest_index] = "a" * 64
+        with self.assertRaises(SystemExit):
+            parse_args(unrelated)
+
+    def test_source1717_advanced_task_rejects_lifecycle_or_queue_drift(self) -> None:
+        for drift in ("status", "blocker", "queue"):
+            with self.subTest(drift=drift), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                self.write_task(root, status="blocked", pending=["preserve exact queue"])
+                pane = Pane("cfg:2.0", "%2", "@2", "bunx", root, 5252)
+                original_task_sha256 = hashlib.sha256((root / "worker.md").read_bytes()).hexdigest()
+                audit = self.write_failed_rotation_audit(root, pane, **{"failure-kind": "post-respawn-stale-unrelated-history"})
+                if drift == "status":
+                    self.write_task(root, status="running", pending=["preserve exact queue"])
+                    current_status, current_blocker, current_queue = "running", "", ("preserve exact queue",)
+                elif drift == "blocker":
+                    task = root / "worker.md"
+                    task.write_text(task.read_text(encoding="utf-8").replace("model capacity", "provider unavailable"), encoding="utf-8")
+                    current_status, current_blocker, current_queue = "blocked", "provider unavailable", ("preserve exact queue",)
+                else:
+                    self.write_task(root, status="blocked", pending=["changed queue"])
+                    current_status, current_blocker, current_queue = "blocked", "model capacity", ("changed queue",)
+                args = self.reconciliation_args(
+                    root,
+                    pane,
+                    expected_status=current_status,
+                    expected_blocker=current_blocker,
+                    expected_pending_items=current_queue,
+                    expected_audit_task_sha256=original_task_sha256,
+                    expected_audit_status="blocked",
+                    expected_audit_blocker="model capacity",
+                    expected_audit_owner_target="cfg:1",
+                    expected_audit_pending_items=("preserve exact queue",),
+                )
+                with (
+                    patch("omo_manager.omo_codex_start.SOURCE1717_STALE_HISTORY_AUDIT_SHA256", hashlib.sha256(audit.read_bytes()).hexdigest()),
+                    patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                    self.assertRaisesRegex(StartError, "must preserve lifecycle, owner, and ordered queue"),
+                ):
+                    reconciliation_binding(args)
 
     def test_legacy_status_reconciliation_rejects_human_pending_without_query(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:

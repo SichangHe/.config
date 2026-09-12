@@ -114,6 +114,10 @@ SUPPORTED_CODEX_PROCESS_COMMANDS = {"bun", "bunx", "codex"}
 ROTATION_AUDIT_MAX_BYTES = 64 * 1024
 ROLLOUT_METADATA_MAX_BYTES = 256 * 1024
 RECONCILABLE_ROTATION_FAILURE_KIND = "post-respawn-new-session-id-capture-failed"
+# 🧑 "Implement the smallest authenticated reconciliation-only path needed to prove or reject the current replacement without another rotation"
+SOURCE1717_STALE_HISTORY_AUDIT_SHA256 = "6b8049a5d461920d6d7424cb35d20d54a3f9cd8933b2470868cc3821a2b650e7"
+SOURCE1717_STALE_HISTORY_FAILURE_KIND = "post-respawn-stale-unrelated-history"
+SOURCE1717_STALE_HISTORY_LAUNCH_MARKER = "[omo-codex-start:2866800:1789194107283629001]"
 LEGACY_REPLACEMENT_PROCESS_BINDINGS = {
     # The sole pre-schema audit accepted by the rollout-only repair path.  This
     # source-level binding was captured while the exact replacement was live;
@@ -363,6 +367,14 @@ class ReconciliationRolloutBinding:
     cwd: Path
 
 
+@dataclass(frozen=True)
+class ReconciliationVisibleStatusBinding:
+    launch_marker_sha256: str
+    capture_sha256: str
+    session_id: str
+    card_count: int
+
+
 def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     _ = parser.add_argument("--root", type=Path, default=Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs")))
@@ -542,8 +554,8 @@ def parse_args(argv: list[str]) -> Args:
                 parsed.expected_audit_pending_item,
             )
             if any(bool(value) for value in audit_task_values):
-                if parsed.reconciliation_rollout is None:
-                    parser.error("advanced-task reconciliation is supported only with exact process-held rollout evidence.")
+                if parsed.reconciliation_rollout is None and parsed.expected_rotation_audit_sha256 != SOURCE1717_STALE_HISTORY_AUDIT_SHA256:
+                    parser.error("advanced-task reconciliation is supported only with exact process-held rollout or Source-1717 evidence.")
                 if not all((
                     SHA256_RE.fullmatch(parsed.expected_audit_task_sha256 or "") is not None,
                     parsed.expected_audit_status,
@@ -1855,7 +1867,8 @@ def read_failed_rotation_audit(path: Path, expected_sha256: str) -> RotationAudi
     digest = hashlib.sha256(content).hexdigest()
     if SHA256_RE.fullmatch(expected_sha256) is None or digest != expected_sha256:
         raise StartError("rotation audit bytes do not match the expected SHA-256.")
-    if eligibility_commit != digest.encode():
+    source1717_stale_history = digest == SOURCE1717_STALE_HISTORY_AUDIT_SHA256
+    if eligibility_commit != digest.encode() and not source1717_stale_history:
         raise StartError("rotation audit lacks the exact committed reconciliation eligibility evidence.")
     if not content.endswith(b"\n") or b"\r" in content:
         raise StartError("rotation audit must use canonical LF-terminated bytes.")
@@ -1877,7 +1890,10 @@ def read_failed_rotation_audit(path: Path, expected_sha256: str) -> RotationAudi
     if (
         fields["operation"] != "rotate-worker"
         or fields["completion"] != "unknown-until-finalized"
-        or fields["failure-kind"] != RECONCILABLE_ROTATION_FAILURE_KIND
+        or (
+            fields["failure-kind"] != RECONCILABLE_ROTATION_FAILURE_KIND
+            and not (source1717_stale_history and fields["failure-kind"] == SOURCE1717_STALE_HISTORY_FAILURE_KIND)
+        )
         or fields["final-result"] != "failed"
         or SHA256_RE.fullmatch(fields["captured-response-sha256"]) is None
     ):
@@ -1978,6 +1994,18 @@ def reconciliation_binding(args: Args) -> ReconciliationBinding:
     audit_pending_items = args.expected_audit_pending_items if advanced_task else task.pending_task_items
     if audit_blocker is None:
         raise StartError("original audit blocker assertion is missing.")
+    if advanced_task and audit.sha256 == SOURCE1717_STALE_HISTORY_AUDIT_SHA256 and (
+        audit_status,
+        audit_blocker,
+        audit_owner_target,
+        audit_pending_items,
+    ) != (
+        task.status,
+        task.blocked_on,
+        task.managerat,
+        task.pending_task_items,
+    ):
+        raise StartError("Source-1717 advanced task bytes must preserve lifecycle, owner, and ordered queue.")
     queue_sha256 = hashlib.sha256("\0".join(audit_pending_items).encode()).hexdigest()
     protected_sha256 = hashlib.sha256("\0".join(args.protected_targets).encode()).hexdigest()
     if task.is_manager or task.tool != "codex" or task.runat != args.target:
@@ -2430,6 +2458,49 @@ def reconciliation_capture(pane: Pane | ReconciliationBinding, n_lines: int) -> 
     return result.stdout
 
 
+def source1717_visible_status_evidence(binding: ReconciliationBinding) -> ReconciliationVisibleStatusBinding:
+    """Authenticate the exact incident's post-launch status cards without pane input."""
+
+    if binding.audit.sha256 != SOURCE1717_STALE_HISTORY_AUDIT_SHA256:
+        raise StartError("visible-status reconciliation is not authorized for this rotation audit.")
+    validate_audit_bound_replacement_process(binding)
+    capture = reconciliation_capture(binding, 240)
+    lines = capture.splitlines()
+    marker_indices = [index for index, line in enumerate(lines) if line.strip() == SOURCE1717_STALE_HISTORY_LAUNCH_MARKER]
+    if len(marker_indices) != 1:
+        raise StartError("Source-1717 reconciliation did not find its exact single launch marker.")
+    suffix_lines = lines[marker_indices[0] :]
+    if any(re.fullmatch(r"\[omo-codex-start:\d+:\d+\]", line.strip()) for line in suffix_lines[1:]):
+        raise StartError("another launch marker follows the Source-1717 replacement marker.")
+    suffix = "\n".join(suffix_lines) + "\n"
+    session_ids: list[str] = []
+    for card in re.findall(r"╭─+╮\n(?P<body>.*?)\n╰─+╯", suffix, flags=re.DOTALL):
+        if ">_ OpenAI Codex" not in card:
+            continue
+        startup_card = rf"""^│\s*>_ OpenAI Codex \(v\d+\.\d+\.\d+\)\s*│
+│\s*│
+│\s*model:\s+gpt-5\.6-sol medium\s+/model to change\s*│
+│\s*directory:\s+{re.escape(str(binding.workdir))}\s*│
+│\s*permissions:\s+YOLO mode\s*│$"""
+        if re.fullmatch(startup_card, card):
+            continue
+        sessions = re.findall(rf"^│\s*Session:\s*({UUID_RE.pattern[1:-1]})\s*│$", card, flags=re.MULTILINE)
+        directories = re.findall(r"^│\s*Directory:\s*(.*?)\s*│$", card, flags=re.MULTILINE)
+        if len(sessions) != 1 or directories != [str(binding.workdir)]:
+            raise StartError("Source-1717 reconciliation found a malformed or mismatched post-launch status card.")
+        session_ids.extend(sessions)
+    distinct_session_ids = set(session_ids)
+    if len(distinct_session_ids) != 1:
+        raise StartError("Source-1717 reconciliation requires one consistent post-launch status session UUID.")
+    validate_audit_bound_replacement_process(binding)
+    return ReconciliationVisibleStatusBinding(
+        hashlib.sha256(SOURCE1717_STALE_HISTORY_LAUNCH_MARKER.encode()).hexdigest(),
+        hashlib.sha256(suffix.encode()).hexdigest(),
+        next(iter(distinct_session_ids)),
+        len(session_ids),
+    )
+
+
 def query_reconciliation_session_id(pane: Pane | ReconciliationBinding, n_lines: int, wait_s: float) -> str:
     """Run the sole authorized `/status` query with a server-side guard per input."""
 
@@ -2468,9 +2539,10 @@ def reconcile_rotation_audit_locked(args: Args) -> str:
         raise StartError("reconciliation receipt must be distinct from the original audit.")
     fields = initial.audit.fields
     rollout_evidence = process_held_reconciliation_rollout(args, initial) if args.reconciliation_rollout is not None else None
-    if rollout_evidence is None:
+    visible_status_evidence = source1717_visible_status_evidence(initial) if rollout_evidence is None and initial.audit.sha256 == SOURCE1717_STALE_HISTORY_AUDIT_SHA256 else None
+    if rollout_evidence is None and visible_status_evidence is None:
         validate_audit_bound_replacement_process(initial)
-    evidence_kind = "process-held-rollout-no-input" if rollout_evidence is not None else "later-status-reconciliation-only"
+    evidence_kind = "process-held-rollout-no-input" if rollout_evidence is not None else "source1717-visible-status-no-input" if visible_status_evidence is not None else "later-status-reconciliation-only"
     evidence_fields = (
         (
             f"rollout-path: {rollout_evidence.path}",
@@ -2485,6 +2557,12 @@ def reconcile_rotation_audit_locked(args: Args) -> str:
             f"rollout-cwd: {rollout_evidence.cwd}",
         )
         if rollout_evidence is not None
+        else (
+            f"visible-status-launch-marker-sha256: {visible_status_evidence.launch_marker_sha256}",
+            f"visible-status-capture-sha256: {visible_status_evidence.capture_sha256}",
+            f"visible-status-card-count: {visible_status_evidence.card_count}",
+        )
+        if visible_status_evidence is not None
         else ()
     )
     prepared = "\n".join(
@@ -2539,6 +2617,10 @@ def reconcile_rotation_audit_locked(args: Args) -> str:
             if process_held_reconciliation_rollout(args, initial) != rollout_evidence:
                 raise StartError("process-held rollout binding changed after receipt reservation.")
             current_session_id = rollout_evidence.session_id
+        elif visible_status_evidence is not None:
+            if source1717_visible_status_evidence(initial) != visible_status_evidence:
+                raise StartError("Source-1717 visible-status binding changed after receipt reservation.")
+            current_session_id = visible_status_evidence.session_id
         else:
             validate_audit_bound_replacement_process(initial)
             current_session_id = query_reconciliation_session_id(initial, 240, min(10.0, args.startup_timeout_s))
