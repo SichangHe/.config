@@ -6,6 +6,7 @@ import argparse
 import fcntl
 import hashlib
 import imaplib
+import json
 import logging
 import os
 import queue
@@ -18,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from email import policy
@@ -38,8 +40,9 @@ try:
     from .omo_guest_images import GUEST_HEES_ADDRESS as GUEST_IMAGE_SENDER
     from .omo_guest_images import GuestImageError, store_message_images
     from .omo_agent_status import TaskFrontmatterError, parse_task_metadata
+    from .omo_task_status import authoritative_active_target_task_paths, replace_if_unchanged_locked, root_membership_lock
     from .omo_task_metadata import runat_kind
-    from .omo_task_lock import task_file_lock
+    from .omo_task_lock import task_file_lock, task_target_lock
     from .omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_system_to_codex as send_to_codex
 except ImportError:
     try:
@@ -49,8 +52,9 @@ except ImportError:
         from omo_guest_images import GUEST_HEES_ADDRESS as GUEST_IMAGE_SENDER
         from omo_guest_images import GuestImageError, store_message_images
         from omo_agent_status import TaskFrontmatterError, parse_task_metadata
+        from omo_task_status import authoritative_active_target_task_paths, replace_if_unchanged_locked, root_membership_lock
         from omo_task_metadata import runat_kind
-        from omo_task_lock import task_file_lock
+        from omo_task_lock import task_file_lock, task_target_lock
         from omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_system_to_codex as send_to_codex
     except ImportError:
         subject_base = None
@@ -102,6 +106,40 @@ MANAGER_TARGET_SUBJECT_RE = re.compile(r"^(?:re:\s*)*(?:(?:\[a\]|\[omo_manager\]
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 PWD_FOOTER_RE = re.compile(r"(?:^|\n)PWD: [^\n]+\n?\Z")
 TMUX_FOOTER_RE = re.compile(r"(?:^|\n)tmux: [^\r\n]+\r?\n?\Z", re.IGNORECASE)
+# 🧑 "certain words to trigger direct in-place replacement or termination ... at the start of the email ... the regex should be more lenient ... and be case-insensitive"
+AGENT_LIFECYCLE_ACTION_RE = re.compile(
+    r"\b(?:(?P<replace>replace|swap\s+out)|(?P<terminate>close(?:\s+(?:down|out))?|terminate|shut\s+down|kill|retire|dismiss|stop|end|remove|fire))\b",
+    re.IGNORECASE,
+)
+AGENT_LIFECYCLE_TARGET_RE = re.compile(
+    r"\b(?:(?:(?:this|that|the)\s+)?(?:(?:current|existing|replying|responding|stuck|failed|failing|broken)\s+)*(?:agent|worker|manager|assistant)|it|them)\b",
+    re.IGNORECASE,
+)
+AGENT_LIFECYCLE_DIRECT_RE = re.compile(
+    r"""
+    \A\s*
+    (?:(?:hi|hello|hey)\b[,.!\s]*)?
+    (?:(?:please|kindly)\b[,.!\s]*)*
+    (?:
+        (?:can|could|would|will)\s+(?:you|we)\s+
+      | i\s+(?:would|'d)\s+like(?:\s+you)?\s+to\s+
+      | i\s+(?:want|need)(?:\s+you)?\s+to\s+
+      | (?:i\s+think\s+)?(?:you|we)\s+should\s+
+      | let(?:'s|\s+us)\s+
+    )?
+    (?:(?:please|just|simply|now|immediately)\s+|go\s+ahead\s+and\s+)*
+    (?P<action>replace|swap\s+out|close(?:\s+(?:down|out))?|terminate|shut\s+down|kill|retire|dismiss|stop|end|remove|fire)
+    \s+(?:(?:(?:this|that|the)\s+)?(?:(?:current|existing|replying|responding|stuck|failed|failing|broken)\s+)*(?:agent|worker|manager|assistant)|it|them)\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+AGENT_LIFECYCLE_NEGATION_RE = re.compile(r"\b(?:do\s+not|don't|never|not|without)\b", re.IGNORECASE)
+AGENT_LIFECYCLE_COURTESY_TAIL_RE = re.compile(
+    r"\A\s*(?:[.!?,;:]\s*)*(?:(?:please|now|immediately|thanks|thank\s+you)(?:\s+please)?(?:[.!?,;:]\s*)*)*\Z",
+    re.IGNORECASE,
+)
+AGENT_LIFECYCLE_REPLY_TAG_RE = re.compile(r"^\s*(?:re:\s*)+\[[^\]\r\n]{1,128}\](?:\s+|$)", re.IGNORECASE)
+AGENT_LIFECYCLE_HEAD_MAX_CHARS = 1000
 RECOVERY_SUBJECTS = {"[omo_manager_recover]", "Re: [omo_manager_recover]"}
 ROUTED_PREFIXES = ("(manager handled:",)
 IGNORE_PARTS = {".git", ".venv", "__pycache__", "manager_mail"}
@@ -190,6 +228,30 @@ class EmailPush:
     pending_file: Path
     threshold_kind: str = ""
     state_dir: Path | None = None
+
+
+class AgentLifecycleAction(Enum):
+    REPLACE = "replace"
+    TERMINATE = "terminate"
+    REVIEW = "review"
+
+
+@dataclass(frozen=True)
+class AgentLifecycleCommand:
+    action: AgentLifecycleAction
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class AgentLifecycleBinding:
+    task_file: Path
+    target: str
+    manager_target: str
+    manager_task_file: Path
+    status: str
+    is_manager: bool
+    task_sha256: str
+    pending_items: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -468,6 +530,56 @@ def message_text(msg: Message) -> str:
     if text := next((value for value in plain if value.strip()), ""):
         return text
     return next((text for value in html if (text := readable_html(value))), "")
+
+
+def leading_human_reply_paragraph(body: str) -> str:
+    """Return only the leading unquoted paragraph where a command may occur."""
+    lines = body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    paragraph: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if paragraph:
+                break
+            continue
+        if line.lstrip().startswith(">"):
+            break
+        paragraph.append(stripped)
+        if sum(len(value) + 1 for value in paragraph) >= AGENT_LIFECYCLE_HEAD_MAX_CHARS:
+            break
+    return " ".join(paragraph)[:AGENT_LIFECYCLE_HEAD_MAX_CHARS]
+
+
+def agent_lifecycle_command(body: str) -> AgentLifecycleCommand | None:
+    """Recognize one unambiguous lifecycle request at the reply's start."""
+    head = leading_human_reply_paragraph(body)
+    actions = list(AGENT_LIFECYCLE_ACTION_RE.finditer(head))
+    if not actions or AGENT_LIFECYCLE_TARGET_RE.search(head) is None:
+        return None
+    kinds = {
+        AgentLifecycleAction.REPLACE if match.group("replace") else AgentLifecycleAction.TERMINATE
+        for match in actions
+    }
+    if len(kinds) != 1:
+        return AgentLifecycleCommand(AgentLifecycleAction.REVIEW, "replacement and termination wording are mixed")
+    if AGENT_LIFECYCLE_NEGATION_RE.search(head) is not None:
+        return AgentLifecycleCommand(AgentLifecycleAction.REVIEW, "the lifecycle wording is negated")
+    match = AGENT_LIFECYCLE_DIRECT_RE.match(head)
+    if match is None:
+        return AgentLifecycleCommand(AgentLifecycleAction.REVIEW, "the lifecycle wording is not an unambiguous request at the start")
+    if AGENT_LIFECYCLE_COURTESY_TAIL_RE.fullmatch(head[match.end() :]) is None:
+        return AgentLifecycleCommand(AgentLifecycleAction.REVIEW, "the lifecycle request has qualifying or unrelated trailing wording")
+    action = AgentLifecycleAction.REPLACE if re.match(r"(?:replace|swap)", match.group("action"), re.IGNORECASE) else AgentLifecycleAction.TERMINATE
+    return AgentLifecycleCommand(action)
+
+
+def stored_mail_may_contain_lifecycle_command(path: Path) -> bool:
+    """Keep a possible lifecycle replay away from ordinary pending delivery."""
+    try:
+        _headers, separator, body = path.read_text(encoding="utf-8").partition("\n\n")
+    except (OSError, UnicodeError):
+        return True
+    return not separator or agent_lifecycle_command(body) is not None
 
 
 def from_self(sender: str, self_email: str) -> bool:
@@ -855,6 +967,339 @@ def args_for_manager_file(args: Args, manager_file: Path, pending_line: int = 0)
     del pending_line
     manager_target = fallback_manager_target_for_file(args, manager_file, manager_target_for_file(args, manager_file))
     return replace(args, manager_file=manager_file, manager_target=manager_target)
+
+
+def same_agent_target(left: str, right: str) -> bool:
+    if runat_kind(left) != "tmux" or runat_kind(right) != "tmux":
+        return left == right
+    return left.removesuffix(".0") == right.removesuffix(".0")
+
+
+def lifecycle_subject_target(args: Args, subject: str) -> str:
+    if re.match(r"^\s*re:\s*", subject, re.IGNORECASE) is None:
+        return ""
+    target = subject_manager_target(subject)
+    if target:
+        return target
+    if is_manager_subject(subject):
+        return args.manager_target
+    reply_base = re.sub(r"^(?:\s*re:\s*)+", "", subject, flags=re.IGNORECASE)
+    return args.manager_target if amh_subject_agent_id(reply_base) == MAIN_MANAGER_AGENT_ID else ""
+
+
+def lifecycle_reply_candidate(subject: str) -> bool:
+    """Accept lifecycle syntax only in a reply carrying one explicit route tag."""
+    if re.match(r"^\s*re:\s*", subject, re.IGNORECASE) is None:
+        return False
+    return bool(subject_manager_target(subject) or is_manager_subject(subject) or AGENT_LIFECYCLE_REPLY_TAG_RE.match(subject))
+
+
+def lifecycle_binding(root: Path, task_file: Path, expected_target: str) -> AgentLifecycleBinding:
+    try:
+        task_bytes = task_file.read_bytes()
+        task_text = task_bytes.decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeError(f"cannot read the addressed task safely: {exc}") from exc
+    try:
+        metadata = parse_task_metadata(task_text, root)
+    except TaskFrontmatterError as exc:
+        raise RuntimeError(f"the addressed task has invalid metadata: {exc}") from exc
+    if metadata is None:
+        raise RuntimeError("the addressed task has no task metadata")
+    if metadata.status == "done" or not same_agent_target(metadata.runat, expected_target):
+        raise RuntimeError("the addressed task is not the active owner of the requested target")
+    if runat_kind(metadata.runat) != "tmux" or runat_kind(metadata.managerat) != "tmux":
+        raise RuntimeError("the addressed task or its responsible manager lacks a supported tmux target")
+    return AgentLifecycleBinding(
+        task_file.resolve(),
+        metadata.runat,
+        metadata.managerat,
+        Path(),
+        metadata.status,
+        metadata.is_manager,
+        hashlib.sha256(task_bytes).hexdigest(),
+        tuple(metadata.pending_task_items),
+    )
+
+
+def sole_lifecycle_binding(root: Path, target: str) -> AgentLifecycleBinding:
+    try:
+        owners = authoritative_active_target_task_paths(root, target)
+    except (OSError, TaskFrontmatterError) as exc:
+        raise RuntimeError(f"cannot establish authoritative target custody: {exc}") from exc
+    if len(owners) != 1:
+        raise RuntimeError(f"expected exactly one active owner for `{target}`; found {len(owners)}")
+    return lifecycle_binding(root, owners[0], target)
+
+
+def lifecycle_manager_file(args: Args, manager_target: str) -> Path:
+    if same_agent_target(manager_target, args.manager_target):
+        manager_file = current_manager_file(args).resolve()
+        require_main_manager_transport_custody(args, manager_file)
+        return manager_file
+    manager = sole_lifecycle_binding(args.root, manager_target)
+    if not manager.is_manager:
+        raise RuntimeError(f"responsible target `{manager_target}` is not owned by a manager task")
+    return manager.task_file
+
+
+def require_main_manager_transport_custody(args: Args, manager_file: Path) -> None:
+    if runat_kind(args.manager_target) != "tmux" or not manager_file.is_file():
+        raise RuntimeError("main-manager transport custody is unavailable")
+    try:
+        _ = require_sendable_codex_target(args.manager_target)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"main-manager transport custody is unavailable: {exc}") from exc
+
+
+def lifecycle_queue_payload(items: tuple[str, ...]) -> tuple[str, str]:
+    serialized = json.dumps(list(items), ensure_ascii=False, separators=(",", ":"))
+    return serialized, hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def lifecycle_action_guidance(command: AgentLifecycleCommand, binding: AgentLifecycleBinding, *, main_manager: bool) -> list[str]:
+    if command.action is AgentLifecycleAction.REVIEW:
+        return [
+            "decision: do not perform a lifecycle action automatically",
+            f"review_reason: {sanitized_one_line(command.reason or 'the command could not be authenticated unambiguously')}",
+        ]
+    if command.action is AgentLifecycleAction.REPLACE:
+        if main_manager:
+            return [
+                "decision: replace the main manager in place",
+                "supported_tool: omo_manager_rotate.py",
+                "required_invariant: preserve exactly one active main-manager owner",
+            ]
+        if binding.is_manager:
+            return [
+                "decision: replace the addressed submanager in place",
+                "supported_tool_constraint: use the manager lifecycle path; omo_codex_start.py --rotate-worker rejects manager tasks",
+                "required_invariant: preserve exactly one active owner throughout replacement",
+            ]
+        return [
+            "decision: replace the addressed worker in place",
+            "supported_tool: omo_codex_start.py --rotate-worker",
+            "required_invariant: bind the exact task bytes, status, manager, ordered queue, protected targets, pane, and sole ownership",
+        ]
+    return [
+        "decision: terminate the addressed agent only after pending-work custody is complete",
+        "supported_tools: first omo_queue_transfer.py, then manager-owned omo_task_status.py TASK.md done",
+        "required_invariant: transfer or explicitly disposition every ordered pending item before closure",
+        "queue_rule: do not add the Human email itself to the addressed task's pending_task_items",
+    ]
+
+
+def lifecycle_marker_text(
+    args: Args,
+    txt_path: Path,
+    command: AgentLifecycleCommand,
+    binding: AgentLifecycleBinding,
+    *,
+    main_manager: bool,
+    pending_line: int,
+) -> str:
+    queue_json, queue_sha256 = lifecycle_queue_payload(binding.pending_items)
+    task_ref = source_ref(args.root, binding.task_file)
+    lines = [
+        "(email watcher lifecycle-command explanation; generated by the watcher, not Human text)",
+        f"requested_action: {command.action.value}",
+        f"human_mail: {source_ref(args.root, txt_path)} (the stored artifact contains the exact Human words)",
+        f"addressed_task: {task_ref}",
+        f"addressed_target: {binding.target}",
+        f"responsible_manager_target: {binding.manager_target}",
+        f"responsible_manager_task: {source_ref(args.root, binding.manager_task_file)}",
+        f"task_status: {binding.status}",
+        f"task_sha256_before_transport: {binding.task_sha256}",
+        f"pending_task_items_sha256: {queue_sha256}",
+        f"pending_task_items_ordered_json: {queue_json}",
+        "drift_check: the task SHA-256 covers the exact file bytes before this transport block was appended",
+        "consume_rule: never default the lifecycle email into the addressed task",
+        *lifecycle_action_guidance(command, binding, main_manager=main_manager),
+        "(for manager)",
+    ]
+    mail_ref = source_ref(args.root, txt_path)
+    if not main_manager and not same_agent_target(binding.manager_target, args.manager_target):
+        manager_ref = source_ref(args.root, binding.manager_task_file)
+        manager_item = f"Handle the Human lifecycle request from `{mail_ref}`."
+        consume = (
+            "consume_command: omo_record_pending.py "
+            f"--root {shlex.quote(str(args.root))} --pending-file {shlex.quote(str(task_ref))} --line {pending_line} "
+            f"--task-file {shlex.quote(str(manager_ref))} --human --email-file {shlex.quote(str(mail_ref))} "
+            f"--item {shlex.quote(manager_item)} --ack-human"
+        )
+        lines.insert(-2, consume)
+    else:
+        clear_comment = "lifecycle request handled by the main manager without adding it to the addressed task queue"
+        consume = (
+            "consume_command: omo_task_edit.py "
+            f"--root {shlex.quote(str(args.root))} pending-marker-clear {shlex.quote(str(task_ref))} --line {pending_line} "
+            f"--comment {shlex.quote(clear_comment)} --clear-kind report-only --ack-human --email-file {shlex.quote(str(mail_ref))}"
+        )
+        lines.insert(
+            -2,
+            "consume_override: the main-manager log has no pending_task_items; ignore the generic omo_record_pending instruction "
+            "and use the following command when the supported lifecycle flow is ready to clear this transport",
+        )
+        lines.insert(-2, consume)
+    return "\n".join(lines)
+
+
+def next_lifecycle_pending_line(task_file: Path) -> int:
+    text = task_file.read_text(encoding="utf-8") if task_file.exists() else ""
+    return len(text.splitlines()) + 2
+
+
+def append_lifecycle_marker_locked(root: Path, txt_path: Path, task_file: Path, explanation: str, expected_sha256: str) -> int:
+    task_bytes = task_file.read_bytes()
+    if hashlib.sha256(task_bytes).hexdigest() != expected_sha256:
+        raise RuntimeError("lifecycle transport file changed before its marker could be appended")
+    existing_line = existing_source_pending_line(root, txt_path, task_file)
+    if existing_line is not None:
+        lines = task_bytes.decode("utf-8").splitlines(keepends=True)
+        start_idx = existing_line - 1
+        end_idx = next(
+            (idx for idx in range(start_idx + 1, len(lines)) if lines[idx].strip() == "(pending)"),
+            len(lines),
+        )
+        block = "".join(lines[start_idx:end_idx])
+        if (
+            "(email watcher lifecycle-command explanation; generated by the watcher, not Human text)" in block
+            and block.rstrip().endswith("(for manager)")
+        ):
+            return existing_line
+        separator = "" if not block or block.endswith("\n") else "\n"
+        replacement = f"{block}{separator}{explanation}\n"
+        updated = "".join((*lines[:start_idx], replacement, *lines[end_idx:]))
+        before = task_file.stat()
+        replace_if_unchanged_locked(task_file, updated, before)
+        fsync_directory(task_file.parent)
+        return existing_line
+    source_line = existing_source_line(root, txt_path, task_file)
+    if source_line is not None:
+        lines = task_file.read_text(encoding="utf-8").splitlines()
+        block_end = next(
+            (idx for idx in range(source_line, len(lines)) if lines[idx].strip() == "(pending)"),
+            len(lines),
+        )
+        if any(
+            line.strip() == "(email watcher lifecycle-command explanation; generated by the watcher, not Human text)"
+            for line in lines[source_line:block_end]
+        ):
+            return source_line
+    consumed_line = existing_consumed_source_line(root, txt_path, task_file)
+    if consumed_line is not None:
+        return consumed_line
+    before = task_file.stat()
+    text = task_bytes.decode("utf-8")
+    pending_line = len(text.splitlines()) + 2
+    from_line = email_source_lines(root, txt_path)[0]
+    separator = "\n" if not text or text.endswith("\n") else "\n\n"
+    updated = f"{text}{separator}(pending)\n{from_line}\n{explanation}\n"
+    replace_if_unchanged_locked(task_file, updated, before)
+    fsync_directory(task_file.parent)
+    return pending_line
+
+
+def append_main_lifecycle_transport(
+    args: Args,
+    txt_path: Path,
+    command: AgentLifecycleCommand,
+) -> tuple[EmailRoute, int]:
+    manager_file = current_manager_file(args).resolve()
+    require_main_manager_transport_custody(args, manager_file)
+    with root_membership_lock(args.root), task_target_lock(args.root, args.manager_target), task_file_lock(manager_file):
+        require_main_manager_transport_custody(args, manager_file)
+        task_bytes = manager_file.read_bytes()
+        binding = AgentLifecycleBinding(
+            manager_file,
+            args.manager_target,
+            args.manager_target,
+            manager_file,
+            "main-manager",
+            True,
+            hashlib.sha256(task_bytes).hexdigest(),
+            (),
+        )
+        expected_line = existing_source_pending_line(args.root, txt_path, manager_file) or next_lifecycle_pending_line(manager_file)
+        explanation = lifecycle_marker_text(args, txt_path, command, binding, main_manager=True, pending_line=expected_line)
+        pending_line = append_lifecycle_marker_locked(args.root, txt_path, manager_file, explanation, binding.task_sha256)
+    return EmailRoute(manager_file, args.manager_target, pending_watcher_delivery=True), pending_line
+
+
+def append_main_lifecycle_review(
+    args: Args,
+    txt_path: Path,
+    command: AgentLifecycleCommand,
+    requested_target: str,
+) -> tuple[EmailRoute, int]:
+    reason = command.reason or f"no exact active task custody could be established for `{requested_target or 'unspecified target'}`"
+    return append_main_lifecycle_transport(args, txt_path, AgentLifecycleCommand(AgentLifecycleAction.REVIEW, reason))
+
+
+def append_bound_lifecycle_command(
+    args: Args,
+    txt_path: Path,
+    command: AgentLifecycleCommand,
+    requested_target: str,
+) -> tuple[EmailRoute, int]:
+    main_manager = same_agent_target(requested_target, args.manager_target)
+    if main_manager:
+        if command.action is AgentLifecycleAction.TERMINATE:
+            command = AgentLifecycleCommand(AgentLifecycleAction.REVIEW, "the main manager may be replaced but never terminated")
+        return append_main_lifecycle_transport(args, txt_path, command)
+
+    initial = sole_lifecycle_binding(args.root, requested_target)
+    if same_agent_target(initial.target, initial.manager_target):
+        raise RuntimeError("the addressed task claims itself as its responsible manager")
+    initial_manager_file = lifecycle_manager_file(args, initial.manager_target)
+    targets_by_lock = {target.removesuffix(".0"): target for target in (initial.target, initial.manager_target)}
+    target_locks = [targets_by_lock[key] for key in sorted(targets_by_lock)]
+    task_files = sorted({initial.task_file, initial_manager_file}, key=lambda path: str(path.resolve(strict=False)))
+    with root_membership_lock(args.root):
+        with ExitStack() as stack:
+            for target in target_locks:
+                stack.enter_context(task_target_lock(args.root, target))
+            for task_file in task_files:
+                stack.enter_context(task_file_lock(task_file))
+            current = sole_lifecycle_binding(args.root, requested_target)
+            if current.task_file != initial.task_file or not same_agent_target(current.manager_target, initial.manager_target):
+                raise RuntimeError("addressed-task custody changed while routing the lifecycle command")
+            if lifecycle_manager_file(args, current.manager_target) != initial_manager_file:
+                raise RuntimeError("responsible-manager custody changed while routing the lifecycle command")
+            current = replace(current, manager_task_file=initial_manager_file)
+            expected_line = existing_source_pending_line(args.root, txt_path, current.task_file) or next_lifecycle_pending_line(current.task_file)
+            explanation = lifecycle_marker_text(args, txt_path, command, current, main_manager=False, pending_line=expected_line)
+            pending_line = append_lifecycle_marker_locked(args.root, txt_path, current.task_file, explanation, current.task_sha256)
+            preserved = lifecycle_binding(args.root, current.task_file, requested_target)
+            if (
+                preserved.target != current.target
+                or preserved.manager_target != current.manager_target
+                or preserved.status != current.status
+                or preserved.is_manager != current.is_manager
+                or preserved.pending_items != current.pending_items
+            ):
+                raise RuntimeError("task custody changed while appending the lifecycle transport marker")
+            owners = authoritative_active_target_task_paths(args.root, requested_target)
+            if owners != (current.task_file,):
+                raise RuntimeError("the lifecycle transport did not preserve exactly one active owner")
+    return EmailRoute(current.task_file, current.manager_target, pending_watcher_delivery=True), pending_line
+
+
+def append_agent_lifecycle_pending(
+    args: Args,
+    txt_path: Path,
+    subject: str,
+    command: AgentLifecycleCommand,
+) -> tuple[EmailRoute, int]:
+    requested_target = lifecycle_subject_target(args, subject)
+    if not requested_target:
+        return append_main_lifecycle_review(args, txt_path, command, requested_target)
+    try:
+        return append_bound_lifecycle_command(args, txt_path, command, requested_target)
+    except (OSError, RuntimeError, TaskFrontmatterError) as exc:
+        logging.warning("lifecycle command requires main-manager review: target=%s error=%s", requested_target, exc)
+        review = AgentLifecycleCommand(AgentLifecycleAction.REVIEW, str(exc))
+        return append_main_lifecycle_review(args, txt_path, review, requested_target)
 
 
 def is_recovery_subject(subject: str) -> bool:
@@ -3214,6 +3659,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
             continue
         expected_txt_path = args.mail_dir / mail_artifact_name(args, uid)
         expected_source = str(source_ref(args.root, expected_txt_path))
+        possible_lifecycle_replay = not args.guest_hees and stored_mail_may_contain_lifecycle_command(expected_txt_path)
         if args.guest_hees and guest_hees_reply_is_fulfilled(args.state_dir, expected_source):
             unaccepted_pending_uids.discard(uid)
             unaccepted_changed = True
@@ -3235,7 +3681,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
                 handled = True
                 continue
         pending_ref = existing_source_pending_path_line_in_root(args.root, expected_txt_path, manager_file) if uid in unaccepted_pending_uids else None
-        if pending_ref is not None:
+        if pending_ref is not None and not possible_lifecycle_replay:
             pending_file, pending_line = pending_ref
             if args.guest_hees:
                 unaccepted_pending_uids.add(uid)
@@ -3255,7 +3701,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
                 unaccepted_pending_uids.add(uid)
                 unaccepted_changed = True
             continue
-        if not args.guest_hees and uid in unaccepted_pending_uids and (
+        if not possible_lifecycle_replay and uid in unaccepted_pending_uids and (
             existing_source_line_in_root(args.root, expected_txt_path, manager_file) is not None
             or existing_consumed_source_line(args.root, expected_txt_path, manager_file) is not None
         ):
@@ -3278,7 +3724,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
             elif uid in unaccepted_pending_uids:
                 logging.warning("email unaccepted processed uid lacks source; reprocessing: uid=%s root=%s", uid, args.root)
         existing_pending = existing_source_pending_path_line_in_root(args.root, expected_txt_path, manager_file)
-        if existing_pending is not None:
+        if existing_pending is not None and not possible_lifecycle_replay:
             pending_file, existing_pending_line = existing_pending
             if args.guest_hees:
                 unaccepted_pending_uids.add(uid)
@@ -3298,7 +3744,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
                 unaccepted_pending_uids.add(uid)
                 unaccepted_changed = True
             continue
-        if not args.guest_hees and existing_consumed_source_line(args.root, expected_txt_path, manager_file) is not None:
+        if not possible_lifecycle_replay and existing_consumed_source_line(args.root, expected_txt_path, manager_file) is not None:
             logging.info("email uid already has acknowledged or routed source; accepting without duplicate pending: uid=%s root=%s", uid, args.root)
             unaccepted_pending_uids.discard(uid)
             unaccepted_changed = True
@@ -3329,6 +3775,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
             continue
         raw_mime = msg_data[0][1]
         body_text = message_text(msg)
+        lifecycle_command = agent_lifecycle_command(body_text) if not args.guest_hees and lifecycle_reply_candidate(subject) else None
         image_references: tuple[str, ...] = ()
         if args.guest_hees:
             try:
@@ -3350,7 +3797,11 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
             if not body_text.strip() and not image_references:
                 logging.warning("guest email has no readable body or supported image; leaving unread: uid=%s", uid)
                 continue
-        amh_result = AmhRouteDisposition.FALLBACK if args.guest_hees else try_route_amh_message(client, args, uid, msg, raw_mime if isinstance(raw_mime, bytes) else b"")
+        amh_result = (
+            AmhRouteDisposition.FALLBACK
+            if args.guest_hees or lifecycle_command is not None
+            else try_route_amh_message(client, args, uid, msg, raw_mime if isinstance(raw_mime, bytes) else b"")
+        )
         if amh_result is AmhRouteDisposition.HOLD:
             logging.info("email AMH route held for replay: uid=%s subject=%r", uid, subject)
             handled = True
@@ -3387,7 +3838,16 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
                 handled = True
         else:
             try:
-                route = email_route(args, subject, body_text)
+                if lifecycle_command is None:
+                    route = email_route(args, subject, body_text)
+                    pending_line = append_pending(
+                        args.root,
+                        txt_path,
+                        route.manager_file,
+                        allow_prior_consumed_source=args.guest_hees,
+                    )
+                else:
+                    route, pending_line = append_agent_lifecycle_pending(args, txt_path, subject, lifecycle_command)
             except RuntimeError as exc:
                 logging.warning("email route unavailable; leaving unread: uid=%s error=%s", uid, exc)
                 unaccepted_pending_uids.add(uid)
@@ -3395,12 +3855,6 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
                 handled = True
                 continue
             route_args = replace(args, manager_file=route.manager_file, manager_target=route.manager_target)
-            pending_line = append_pending(
-                args.root,
-                txt_path,
-                route.manager_file,
-                allow_prior_consumed_source=args.guest_hees,
-            )
             if args.guest_hees:
                 unaccepted_pending_uids.add(uid)
                 unaccepted_changed = True
