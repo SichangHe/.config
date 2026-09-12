@@ -111,6 +111,8 @@ For one legacy blocked/retired non-manager worker with an empty queue whose sole
 
 `--recover-exited-shell-done --pane-id PANE --session-id SESSION --terminal-evidence TOKEN TASK.md` is the bounded exception for a completed worker whose normal done close recorded that exact pane as `not_codex` after Codex exited to its original shell. It requires an empty task queue, no live pending marker, the exact close-failure text, a strict current TODO row, sole active frontmatter ownership, a fresh unchanged numeric pane, an accepted terminal report before the final interruption, the matching final resume UUID, and no shell activity after exit. It closes only that pane, records the close note, and moves the task to done/previous under the target and file locks. Managers, active Codex, ambiguous or reused shells, mismatched evidence, ownership conflicts, malformed rows, and concurrent changes are rejected without pane input.
 
+The exact watcher-problem 788 legacy `b12_factcheck.md` report may use its immutable report commitment as `--manager-consumed-report-receipt` because its accepted replay predates the watcher-transition ledger row. This compatibility path requires that exact commitment path and digest, complete report allocation/envelope transaction, replay id, done task and previous TODO custody, live `dw3:0` process/session, manager `dw:30`, and unchanged digest-bound `rotate_longrun.md` close delegation. It still uses the ordinary audited no-mail close transaction and accepts no other transitionless report.
+
 For one stopped, blocked stale record with an empty queue and an authoritative live successor on a different target, use the narrow replacement closure:
 
 ```bash

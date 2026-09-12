@@ -140,6 +140,16 @@ DONE_LIVE_CONSUMED_RECEIPT_KEYS = frozenset(
         "worker_report",
     }
 )
+# 🧑 "Its accepted report replay dad52d1f... lacks an exact watcher transition, so do not force-stop or bypass guards; add or use the narrow authenticated recovery path."
+SOURCE788_REPLAY_ID = "dad52d1f838d43ab1ab409839d80570aaa8349a55445d5d49be3f739b00afbf8"
+SOURCE788_COMMITMENT_PATH = Path.home() / ".local/state/omo-manager/report-receipts" / f"{SOURCE788_REPLAY_ID}.commitment"
+SOURCE788_COMMITMENT_SHA256 = "ad5d29992a3381fbe2395248d3795dd8d7d67de30c977532802e1c73e3df0cdc"
+SOURCE788_ENVELOPE_SHA256 = "bd0a37500e98a04c6d2b7bd5e42f487432157d944245da804cd15078e5ff2b70"
+SOURCE788_REPORT_SHA256 = "9f0856a554ab2f6d7f539711e5e4cfe64f49c62eff4090277494e9d73c63f6b9"
+SOURCE788_AUTHORITY_TASK = "rotate_longrun.md"
+SOURCE788_AUTHORITY_SHA256 = "c16c9acc0490f5a4dcd7b62d5889ff5eba729ef28a7d92ad3b914a1aafdb8bbb"
+SOURCE788_PENDING_ITEM = "Recover/authenticate the sole current dw:46 Source-1717 successor and close done b12_factcheck.md/dw3:0 through supported authenticated lifecycle tooling; then verify a fresh independent problems-only watcher scan clears both rows while genuine failures remain visible."
+SOURCE788_CLOSE_DIRECTIVE = "2. Close the already-done b12_factcheck.md pane at dw3:0 through supported lifecycle tooling. Its accepted report replay dad52d1f838d43ab1ab409839d80570aaa8349a55445d5d49be3f739b00afbf8 lacks an exact watcher transition, so do not force-stop or bypass guards; add or use the narrow authenticated recovery path."
 MAX_AUTHORITY_BYTES = 1_000_000
 SOURCE1503_DWPLAN_AUTHORITY = "manager_mail/85c5dff58359-1503.txt:1-3"
 SOURCE1503_SHA256 = "0eb6cfde4d5ef1160806e36b7077ad49f06c5e17f17248fdfec012f89d1a13eb"
@@ -5557,6 +5567,54 @@ def validate_report_transaction_evidence(record: object, *, expected_task: Path,
     return message
 
 
+def source788_consumed_commitment(args: Args, path: Path, payload: bytes, loaded: object) -> bool:
+    """Authenticate the exact pre-transition fact-check report and close delegation."""
+
+    receipt_path = args.manager_consumed_report_receipt
+    authority_path = args.root / SOURCE788_AUTHORITY_TASK
+    if (
+        receipt_path != SOURCE788_COMMITMENT_PATH
+        or args.manager_consumed_report_receipt_sha256 != SOURCE788_COMMITMENT_SHA256
+        or path != args.root / "b12_factcheck.md"
+        or args.active_target != "dw3:0"
+        or args.manager_target != "dw:30"
+        or args.terminal_evidence != SOURCE788_REPLAY_ID
+        or not isinstance(loaded, dict)
+        or loaded.get("schema") != "omo-report-transaction-commitment/v2"
+        or loaded.get("replay_id") != SOURCE788_REPLAY_ID
+        or payload != (json.dumps(loaded, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    ):
+        return False
+    preflight = loaded.get("preflight")
+    records = preflight.get("records") if isinstance(preflight, dict) else None
+    allocation = loaded.get("allocation")
+    if not isinstance(records, dict) or not isinstance(allocation, dict):
+        raise TaskFrontmatterError("Source-788 report commitment lacks its exact transaction paths.")
+    transaction = {
+        "commitment": str(receipt_path),
+        "commitment_sha256": SOURCE788_COMMITMENT_SHA256,
+        "envelope": str(records.get("private_envelope", "")),
+        "envelope_sha256": SOURCE788_ENVELOPE_SHA256,
+        "report": str(allocation.get("file", "")),
+        "report_sha256": SOURCE788_REPORT_SHA256,
+    }
+    _ = validate_report_transaction_evidence(transaction, expected_task=path, expected_target=args.active_target)
+    authority_text = owned_regular_text_beneath(args.root, authority_path, "Source-788 close authority")
+    authority = parse_task_metadata(authority_text, args.root)
+    if (
+        hashlib.sha256(authority_text.encode()).hexdigest() != SOURCE788_AUTHORITY_SHA256
+        or authority is None
+        or authority.status != "running"
+        or authority.runat != "dw7:0"
+        or authority.managerat != "dw:30"
+        or authority.is_manager
+        or authority.pending_task_items != (SOURCE788_PENDING_ITEM,)
+        or authority_text.count(SOURCE788_CLOSE_DIRECTIVE) != 1
+    ):
+        raise TaskFrontmatterError("Source-788 close delegation changed or is not the exact active authority.")
+    return True
+
+
 def validate_manager_consumed_report(
     args: Args,
     path: Path,
@@ -5573,6 +5631,8 @@ def validate_manager_consumed_report(
         loaded: object = json.loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise TaskFrontmatterError("manager-consumed report receipt is not canonical JSON.") from exc
+    if source788_consumed_commitment(args, path, payload, loaded):
+        return True
     if isinstance(loaded, dict) and loaded.get("schema") == "omo-report-consumed-export/v1":
         if archived_task_payload is not None and prevalidated_attestation is None:
             raise TaskFrontmatterError("manager-consumed report recovery lacks its prevalidated attestation.")
@@ -5908,6 +5968,9 @@ def prevalidate_manager_consumed_export(
         loaded: object = json.loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise TaskFrontmatterError("manager-consumed report receipt is not canonical JSON.") from exc
+    source788_args = replace(args, terminal_evidence=SOURCE788_REPLAY_ID) if infer_terminal_evidence else args
+    if source788_consumed_commitment(source788_args, path, payload, loaded):
+        return None, args.root / SOURCE788_AUTHORITY_TASK
     if not isinstance(loaded, dict) or loaded.get("schema") != "omo-report-consumed-export/v1":
         return None, None
     try:
@@ -6032,11 +6095,15 @@ def describe_done_live_no_mail(args: Args, path: Path, text: str, before: os.sta
         path,
         infer_terminal_evidence=True,
     )
-    if prevalidated_attestation is None or manager_path is None:
+    source788_evidence = (
+        receipt_path == SOURCE788_COMMITMENT_PATH
+        and args.manager_consumed_report_receipt_sha256 == SOURCE788_COMMITMENT_SHA256
+    )
+    if manager_path is None or prevalidated_attestation is None and not source788_evidence:
         raise TaskFrontmatterError("done-live evidence requires one exported consumed-closure attestation.")
-    custody = prevalidated_attestation.get("archive_custody")
+    custody = prevalidated_attestation.get("archive_custody") if prevalidated_attestation is not None else None
     monthly_archive = isinstance(custody, dict) and custody.get("schema") == "omo-report-archived-task-custody/v1"
-    terminal_evidence = bound_json_id(prevalidated_attestation, "attestation_id")
+    terminal_evidence = SOURCE788_REPLAY_ID if source788_evidence else bound_json_id(prevalidated_attestation, "attestation_id")  # type: ignore[arg-type]
     with root_membership_lock(args.root), task_target_lock(args.root, args.active_target):
         with ExitStack() as locks:
             for locked_path in sorted({path, todo, manager_path}, key=str):
@@ -6222,7 +6289,10 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                 loaded: object = json.loads(payload)
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise TaskFrontmatterError("manager-consumed report recovery receipt is not canonical JSON.") from exc
-            if (
+            source788_evidence = source788_consumed_commitment(args, path, payload, loaded)
+            if source788_evidence:
+                manager_path = args.root / SOURCE788_AUTHORITY_TASK
+            elif (
                 not isinstance(loaded, dict)
                 or loaded.get("schema") != "omo-report-consumed-export/v1"
                 or payload != (json.dumps(loaded, sort_keys=True, separators=(",", ":")) + "\n").encode()
@@ -6230,10 +6300,11 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                 or not isinstance(loaded["attestation"].get("archive_custody"), dict)
             ):
                 raise TaskFrontmatterError("manager-consumed report recovery receipt is invalid.")
-            prevalidated_attestation = loaded["attestation"]
-            assert isinstance(prevalidated_attestation, dict)
-            manager_path = consumed_attestation_manager_path(args.root, prevalidated_attestation)
-            archived_task_payload = original_text.encode()
+            else:
+                prevalidated_attestation = loaded["attestation"]
+                assert isinstance(prevalidated_attestation, dict)
+                manager_path = consumed_attestation_manager_path(args.root, prevalidated_attestation)
+                archived_task_payload = original_text.encode()
     if prevalidated_attestation is None:
         prevalidated_attestation, manager_path = prevalidate_manager_consumed_export(args, path)
     archived = prevalidated_attestation is not None and prevalidated_attestation.get("archive_custody") is not None

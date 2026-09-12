@@ -62,6 +62,7 @@ from omo_manager.omo_task_status import stop_done_agent
 from omo_manager.omo_task_status import tracked_dirty_state
 from omo_manager.omo_task_status import update_frontmatter_status
 from omo_manager.omo_task_status import validate_manager_consumed_report
+from omo_manager.omo_task_status import source788_consumed_commitment
 from omo_manager.omo_task_status import validate_consumed_closure_attestation
 from omo_manager.omo_task_status import validate_done_live_todo
 from omo_manager.omo_task_status import Args as StatusArgs
@@ -2278,6 +2279,166 @@ class TaskStatusTests(unittest.TestCase):
             manager_consumed_report_receipt=receipt_path,
             manager_consumed_report_receipt_sha256=hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
         )
+
+    def test_source788_transitionless_commitment_requires_exact_report_and_active_close_delegation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            task = root / "b12_factcheck.md"
+            task_text = task_frontmatter(status="done", runat="dw3:0", managerat="dw:30") + "done\n"
+            task.write_text(task_text, encoding="utf-8")
+            todo_text = "current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\nb12_factcheck.md dw3:0\n"
+            (root / "TODO.md").write_text(todo_text, encoding="utf-8")
+            pending_item = "recover successor and close factcheck"
+            directive = "close exact legacy fact-check pane"
+            authority = root / "rotate_longrun.md"
+            authority_text = task_frontmatter(
+                status="running",
+                runat="dw7:0",
+                managerat="dw:30",
+                pending_items=(pending_item,),
+            ) + directive + "\n"
+            authority.write_text(authority_text, encoding="utf-8")
+            transaction = self.write_report_transaction(private, task, "dw3:0", b"terminal fact-check report\n", "source788")
+            commitment = Path(transaction["commitment"])
+            replay_id = commitment.stem
+            args = StatusArgs(
+                root,
+                Path("b12_factcheck.md"),
+                "done",
+                "",
+                close_done_live_no_mail=True,
+                active_target="dw3:0",
+                manager_target="dw:30",
+                expected_task_sha256=hashlib.sha256(task_text.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                expected_pane_id="%42",
+                expected_pane_pid=4242,
+                expected_pane_start_ticks=73,
+                expected_session_id="019e9ed9-6262-71c0-b4b3-72ffd4182e98",
+                terminal_evidence=replay_id,
+                audit_output=(private / "close.json").resolve(),
+                manager_consumed_report_receipt=commitment,
+                manager_consumed_report_receipt_sha256=transaction["commitment_sha256"],
+            )
+            with (
+                patch("omo_manager.omo_task_status.SOURCE788_REPLAY_ID", replay_id),
+                patch("omo_manager.omo_task_status.SOURCE788_COMMITMENT_PATH", commitment),
+                patch("omo_manager.omo_task_status.SOURCE788_COMMITMENT_SHA256", transaction["commitment_sha256"]),
+                patch("omo_manager.omo_task_status.SOURCE788_ENVELOPE_SHA256", transaction["envelope_sha256"]),
+                patch("omo_manager.omo_task_status.SOURCE788_REPORT_SHA256", transaction["report_sha256"]),
+                patch("omo_manager.omo_task_status.SOURCE788_AUTHORITY_SHA256", hashlib.sha256(authority_text.encode()).hexdigest()),
+                patch("omo_manager.omo_task_status.SOURCE788_PENDING_ITEM", pending_item),
+                patch("omo_manager.omo_task_status.SOURCE788_CLOSE_DIRECTIVE", directive),
+            ):
+                payload = commitment.read_bytes()
+                loaded = json.loads(payload)
+                self.assertTrue(source788_consumed_commitment(args, task, payload, loaded))
+                self.assertTrue(validate_manager_consumed_report(args, task))
+
+                described = replace(
+                    args,
+                    status="",
+                    close_done_live_no_mail=False,
+                    describe_done_live_no_mail=True,
+                    expected_task_sha256="",
+                    expected_todo_sha256="",
+                    expected_pane_id="",
+                    expected_pane_pid=0,
+                    expected_pane_start_ticks=0,
+                    expected_session_id="",
+                    terminal_evidence="",
+                    audit_output=None,
+                )
+                with (
+                    patch("omo_manager.omo_task_status.park_target_pane_id", return_value="%42"),
+                    patch("omo_manager.omo_task_status.pane_id", return_value="%42"),
+                    patch("omo_manager.omo_task_status.bound_guarded_read", return_value="%42\t4242\n"),
+                    patch("omo_manager.omo_task_status.process_start_ticks", return_value=73),
+                    patch(
+                        "omo_manager.omo_task_status.guarded_capture",
+                        return_value="› Ask Codex to do anything\n\n  gpt-5.5 xhigh · ~/.config · 71.7M used\n\n\n",
+                    ),
+                    patch(
+                        "omo_manager.omo_task_status.query_status_session_id",
+                        return_value=(args.expected_session_id, "status"),
+                    ),
+                ):
+                    evidence = describe_done_live_no_mail(described, task, task_text, task.stat())
+                self.assertEqual(replay_id, evidence["terminal_evidence"])
+
+                state = {"live": True}
+                capture_sha256 = "c" * 64
+
+                def target_pane(_target: str) -> str:
+                    return "%42" if state["live"] else ""
+
+                def start_ticks(_pid: int) -> int | None:
+                    return 73 if state["live"] else None
+
+                def terminalize(*values: object) -> ExitedCodexShell:
+                    callback = values[6]
+                    assert callable(callback)
+                    callback()
+                    return ExitedCodexShell(args.expected_session_id, capture_sha256)
+
+                def close(*values: object) -> None:
+                    pre_close = values[10]
+                    assert callable(pre_close)
+                    pre_close()
+                    proof = Path(str(values[4]))
+                    audit = Path(str(values[5]))
+                    write_done_live_close_started(
+                        proof,
+                        audit,
+                        str(values[6]),
+                        str(values[7]),
+                        str(values[12]),
+                        args.active_target,
+                        args.expected_pane_id,
+                        args.expected_pane_pid,
+                        args.expected_pane_start_ticks,
+                    )
+                    state["live"] = False
+                    with (
+                        patch("omo_manager.omo_codex_stop.pane_id", return_value=""),
+                        patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=None),
+                    ):
+                        promote_done_live_close_started(
+                            proof,
+                            audit,
+                            str(values[7]),
+                            str(values[12]),
+                            args.active_target,
+                            args.expected_pane_id,
+                            args.expected_pane_pid,
+                            args.expected_pane_start_ticks,
+                        )
+
+                with (
+                    patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=target_pane),
+                    patch("omo_manager.omo_task_status.pane_id", side_effect=target_pane),
+                    patch("omo_manager.omo_task_status.process_start_ticks", side_effect=start_ticks),
+                    patch(
+                        "omo_manager.omo_task_status.terminalize_bound_codex_to_shell_with_consumed_report",
+                        side_effect=terminalize,
+                    ) as terminalize_call,
+                    patch(
+                        "omo_manager.omo_task_status.validate_exited_codex_shell_with_consumed_report",
+                        return_value=capture_sha256,
+                    ),
+                    patch("omo_manager.omo_task_status.close_bound_tmux_target", side_effect=close) as close_call,
+                ):
+                    self.assertEqual((args.active_target, args.expected_session_id), close_done_live_no_mail(args, task, task_text, task.stat()))
+                    closed_text = task.read_text(encoding="utf-8")
+                    self.assertEqual((args.active_target, args.expected_session_id), close_done_live_no_mail(args, task, closed_text, task.stat()))
+                terminalize_call.assert_called_once()
+                close_call.assert_called_once()
+                self.assertEqual("complete", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+                authority.write_text(authority_text + "drift\n", encoding="utf-8")
+                with self.assertRaisesRegex(TaskFrontmatterError, "delegation changed"):
+                    validate_manager_consumed_report(args, task)
 
     def write_consumed_attestation(
         self,
