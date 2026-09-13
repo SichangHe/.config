@@ -21,6 +21,7 @@ from omo_manager.omo_codex_stop import (
     close_authorized_human_pane,
     close_note,
     close_exited_codex_shell,
+    close_exited_codex_shell_with_completion_evidence,
     close_exited_codex_shell_with_task_receipt,
     close_tmux_target,
     codex_status,
@@ -45,6 +46,7 @@ from omo_manager.omo_codex_stop import (
     submitted_status_response,
     validate_exited_codex_shell,
     validate_exited_codex_shell_with_consumed_report,
+    validate_interrupted_completion_shell,
 )
 
 TEST_COMPLETION_COMMAND = "/opt/omo_completion_email.py --task /tmp/task.md --outcome 'task done'"
@@ -366,6 +368,27 @@ class CodexStopTests(unittest.TestCase):
             observed = validate_exited_codex_shell_with_consumed_report("cfg:1", "%42", session_id, "specific-token")
         self.assertEqual(hashlib.sha256(transcript.encode()).hexdigest(), observed)
 
+    def test_interrupted_completion_shell_uses_only_the_exact_final_exit(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f"""■ Conversation interrupted - earlier abort
+To continue this session, run codex resume aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+continued work
+■ Conversation interrupted - final close
+To continue this session, run codex resume {session_id}
+$ """
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.pane_target", return_value="cfg:1.0"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="zsh"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["$ "])),
+            patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "terminal report evidence is absent"):
+                validate_exited_codex_shell_with_consumed_report("cfg:1", "%42", session_id, "a" * 64)
+            observed = validate_interrupted_completion_shell("cfg:1", "%42", session_id, "a" * 64)
+        self.assertEqual(hashlib.sha256(transcript.encode()).hexdigest(), observed)
+
     def test_close_exited_codex_shell_matches_frozen_helper_contract_and_preserves_order(self) -> None:
         helper_source = subprocess.run(
             ["git", "show", f"{FROZEN_SOURCE1290_HELPER_COMMIT}:{FROZEN_SOURCE1290_HELPER_PATH}"],
@@ -490,6 +513,70 @@ class CodexStopTests(unittest.TestCase):
 
         close.assert_not_called()
         remaining.assert_not_called()
+
+    def test_close_exited_shell_with_completion_evidence_preserves_guard_order(self) -> None:
+        events: list[tuple[str, object]] = []
+
+        def validate(*args: object) -> str:
+            events.append(("validate", args))
+            return "a" * 64
+
+        def evidence_is_current() -> bool:
+            events.append(("evidence", True))
+            return True
+
+        def close(target: str) -> None:
+            events.append(("close", target))
+
+        def remaining(target: str) -> str:
+            events.append(("remaining", target))
+            return ""
+
+        with (
+            patch("omo_manager.omo_codex_stop.validate_interrupted_completion_shell", side_effect=validate),
+            patch("omo_manager.omo_codex_stop.close_tmux_target", side_effect=close),
+            patch("omo_manager.omo_codex_stop.pane_id", side_effect=remaining),
+        ):
+            close_exited_codex_shell_with_completion_evidence(
+                "cfg:1",
+                "%42",
+                "11111111-2222-3333-4444-555555555555",
+                "a" * 64,
+                73,
+                evidence_is_current=evidence_is_current,
+            )
+
+        self.assertEqual(["validate", "evidence", "validate", "close", "remaining"], [event[0] for event in events])
+
+    def test_close_exited_shell_with_completion_evidence_rejects_late_drift(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.validate_interrupted_completion_shell", return_value="a" * 64),
+            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+            self.assertRaisesRegex(RuntimeError, "lifecycle evidence changed"),
+        ):
+            close_exited_codex_shell_with_completion_evidence(
+                "cfg:1",
+                "%42",
+                "11111111-2222-3333-4444-555555555555",
+                "a" * 64,
+                evidence_is_current=lambda: False,
+            )
+        close.assert_not_called()
+
+    def test_close_exited_shell_with_completion_evidence_rejects_shell_drift_during_evidence_check(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.validate_interrupted_completion_shell", side_effect=("a" * 64, "b" * 64)),
+            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+            self.assertRaisesRegex(RuntimeError, "shell capture changed"),
+        ):
+            close_exited_codex_shell_with_completion_evidence(
+                "cfg:1",
+                "%42",
+                "11111111-2222-3333-4444-555555555555",
+                "a" * 64,
+                evidence_is_current=lambda: True,
+            )
+        close.assert_not_called()
 
     def test_validate_exited_codex_shell_rejects_exact_pane_mismatch_before_shell_access(self) -> None:
         with (

@@ -2170,6 +2170,7 @@ def _validate_exited_codex_shell(
     n_lines: int = 2000,
     *,
     accepted_terminal_report: bool = False,
+    allow_prior_interruptions: bool = False,
 ) -> str:
     """Authenticate one unchanged shell pane and return its exact capture digest."""
 
@@ -2195,13 +2196,16 @@ def _validate_exited_codex_shell(
     before = capture(expected_pane_id, n_lines)
     interrupted_at = before.rfind("Conversation interrupted")
     marker_count = before.count("Conversation interrupted")
-    if marker_count > 1:
+    marker_line_start = before.rfind("\n", 0, interrupted_at) + 1
+    if marker_count > 1 and not allow_prior_interruptions:
         raise RuntimeError("terminal report evidence is absent before the final Codex exit marker")
-    exit_text = before[interrupted_at:] if marker_count == 1 else before
+    if allow_prior_interruptions and (marker_count < 1 or before[marker_line_start:interrupted_at] != "■ "):
+        raise RuntimeError("interrupted completion lacks one exact final Codex exit marker")
+    exit_text = before[interrupted_at:] if marker_count >= 1 else before
     resume_matches = list(EXIT_RESUME_RE.finditer(exit_text))
     if len(resume_matches) != 1 or resume_matches[0].group(1) != session_id or extract_resume_id(exit_text) != session_id:
         raise RuntimeError("captured terminal Codex session does not match the supplied session id")
-    exit_at = interrupted_at if marker_count == 1 else resume_matches[0].start()
+    exit_at = interrupted_at if marker_count >= 1 else resume_matches[0].start()
     compact_report = re.sub(r"\s+", "", before[:exit_at])
     accepted_at = compact_report.rfind('"accepted":true')
     if not accepted_terminal_report and (accepted_at < 0 or evidence not in compact_report[accepted_at:]):
@@ -2277,6 +2281,26 @@ def validate_exited_codex_shell_with_consumed_report(
     )
 
 
+def validate_interrupted_completion_shell(
+    target: str,
+    expected_pane_id: str,
+    session_id: str,
+    completion_key: str,
+    n_lines: int = 2000,
+) -> str:
+    """Authenticate the final exit when session evidence disambiguates prior interruptions."""
+
+    return _validate_exited_codex_shell(
+        target,
+        expected_pane_id,
+        session_id,
+        completion_key,
+        n_lines,
+        accepted_terminal_report=True,
+        allow_prior_interruptions=True,
+    )
+
+
 def close_exited_codex_shell(
     target: str,
     expected_pane_id: str,
@@ -2294,6 +2318,27 @@ def close_exited_codex_shell(
         raise RuntimeError("terminal shell capture changed after its durable close intent")
     if evidence_is_current is not None and not evidence_is_current():
         raise RuntimeError("bound lifecycle evidence changed before exited-shell close")
+    close_tmux_target(expected_pane_id)
+    if pane_id(expected_pane_id):
+        raise RuntimeError(f"exact stale shell pane remained live after close: {expected_pane_id}")
+
+
+def close_exited_codex_shell_with_completion_evidence(
+    target: str,
+    expected_pane_id: str,
+    session_id: str,
+    completion_key: str,
+    n_lines: int = 2000,
+    *,
+    evidence_is_current: Callable[[], bool],
+) -> None:
+    """Close one exited shell after separately authenticated completion evidence."""
+
+    capture_sha256 = validate_interrupted_completion_shell(target, expected_pane_id, session_id, completion_key, n_lines)
+    if not evidence_is_current():
+        raise RuntimeError("bound lifecycle evidence changed before exited-shell close")
+    if validate_interrupted_completion_shell(target, expected_pane_id, session_id, completion_key, n_lines) != capture_sha256:
+        raise RuntimeError("terminal shell capture changed while completion evidence was checked")
     close_tmux_target(expected_pane_id)
     if pane_id(expected_pane_id):
         raise RuntimeError(f"exact stale shell pane remained live after close: {expected_pane_id}")

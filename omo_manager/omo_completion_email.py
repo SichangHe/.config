@@ -919,6 +919,72 @@ def completion_email_is_delivered(plan: CompletionEmail) -> bool:
     return reconciled_completion_is_delivered(plan)
 
 
+def validate_completion_notice_delivery(plan: CompletionEmail) -> str:
+    """Authenticate a delivered semantic notice without creating completion state."""
+
+    if SHA256_RE.fullmatch(plan.semantic_key) is None:
+        raise OSError("completion delivery recovery requires a semantic completion key")
+    state = completion_email_state_dir().resolve()
+    require_private_directory(state, "completion state")
+    notice_directory = state / "completion-notice-delivered"
+    delivery_directory = state / "completion-email-delivered"
+    authorization_directory = state / "completion-email-authorizations"
+    used_directory = state / "completion-email-authorization-used"
+    for directory, label in (
+        (notice_directory, "completion notice delivery directory"),
+        (delivery_directory, "completion delivery directory"),
+        (authorization_directory, "completion email authorization directory"),
+        (used_directory, "completion authorization use directory"),
+    ):
+        require_private_directory(directory, label)
+    notice = owned_private_file(notice_directory / plan.notice_key, "completion notice delivery", 4096).decode()
+    try:
+        key, target, task_name, task_sha256 = notice.rstrip("\n").split("\t")
+    except ValueError as exc:
+        raise OSError("completion notice delivery is malformed") from exc
+    if (
+        SHA256_RE.fullmatch(key) is None
+        or SHA256_RE.fullmatch(task_sha256) is None
+        or canonical_tmux_target(target) != canonical_tmux_target(plan.target)
+        or task_name != plan.task.name
+    ):
+        raise OSError("completion notice delivery does not match the recovery task")
+    claims = owned_private_file(state / "completion-email-claims.tsv", "completion claims ledger", 8_000_000).decode().splitlines()
+    rows = [line.split("\t") for line in claims]
+    if any(len(row) not in {3, 5, 6, 7} for row in rows):
+        raise OSError("completion claims ledger is malformed")
+    expected_claim = [key, target, task_name, plan.manager_target, task_sha256, plan.notice_key, plan.semantic_key]
+    if (
+        [row for row in rows if row[0] == key] != [expected_claim]
+        or [row for row in rows if len(row) >= 6 and row[5] == plan.notice_key] != [expected_claim]
+        or [row for row in rows if len(row) == 7 and row[6] == plan.semantic_key] != [expected_claim]
+    ):
+        raise OSError("completion notice delivery lacks one exact semantic claim")
+    authorization_payload = owned_private_file(authorization_directory / key, "completion email authorization", 4096).decode()
+    try:
+        authorization = dict(line.split("=", 1) for line in authorization_payload.splitlines())
+    except ValueError as exc:
+        raise OSError("completion email authorization is malformed") from exc
+    expected_authorization = {
+        "version": "1",
+        "target": target,
+        "root": str(plan.root.resolve()),
+        "task": plan.task.resolve().relative_to(plan.root.resolve()).as_posix(),
+        "task_sha256": task_sha256,
+        "notice_key": plan.notice_key,
+        "semantic_key": plan.semantic_key,
+        "subject_sha256": hashlib.sha256(plan.subject.encode()).hexdigest(),
+        "body_sha256": hashlib.sha256(plan.body.encode()).hexdigest(),
+    }
+    if len(authorization) != len(authorization_payload.splitlines()) or authorization != expected_authorization:
+        raise OSError("completion email authorization does not match the recovery task")
+    delivered = owned_private_file(delivery_directory / key, "completion delivery", 4096).decode()
+    used = owned_private_file(used_directory / key, "completion authorization use", 4096).decode()
+    if delivered != f"{target}\t{task_name}\t{task_sha256}\n" or used != f"{target}\t{task_name}\n":
+        raise OSError("completion delivery or authorization use does not match the recovery task")
+    return task_sha256
+
+
 def completion_email_request_is_queued(plan: CompletionEmail) -> bool:
     return (completion_email_state_dir() / "completion-email-requests" / plan.key).is_file()
 

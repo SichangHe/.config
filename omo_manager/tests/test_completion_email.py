@@ -21,6 +21,7 @@ from omo_manager.omo_completion_email import main
 from omo_manager.omo_completion_email import mark_completion_email_delivered
 from omo_manager.omo_completion_email import mark_completion_email_request_queued
 from omo_manager.omo_completion_email import send_completion_email
+from omo_manager.omo_completion_email import validate_completion_notice_delivery
 from omo_manager.omo_completion_email import verify_ordinary_completion_in_sent
 from omo_manager.omo_completion_email import SOURCE1241_ENVELOPE
 from omo_manager.omo_completion_email import SOURCE1241_CONTEXT
@@ -151,6 +152,56 @@ class CompletionEmailTest(unittest.TestCase):
             mark_completion_email_delivered(plan)
         receipt = state / "completion-email-delivered" / plan.key
         return receipt, hashlib.sha256(receipt.read_bytes()).hexdigest()
+
+    def test_recovery_validates_existing_semantic_delivery_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            original = task_text()
+            task.write_text(original, encoding="utf-8")
+            semantic_key = "a" * 64
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
+                original_plan = build_completion_email(root, task, original, "task done", semantic_key=semantic_key)
+                assert original_plan is not None
+                self.assertTrue(claim_completion_email(original_plan))
+                used = state / "completion-email-authorization-used"
+                used.mkdir(mode=0o700)
+                used_marker = used / original_plan.key
+                used_marker.write_text(f"{original_plan.target}\t{task.name}\n", encoding="utf-8")
+                used_marker.chmod(0o600)
+                mark_completion_email_delivered(original_plan)
+                changed = f"""{original.replace("status: running", "status: blocked\nblocked_on: done_close_in_progress: manager is closing the agent before marking done")}manager note
+"""
+                task.write_text(changed, encoding="utf-8")
+                recovery_plan = build_completion_email(root, task, changed, "task done", semantic_key=semantic_key)
+                assert recovery_plan is not None
+                before = {path: path.read_bytes() for path in state.rglob("*") if path.is_file()}
+                self.assertEqual(hashlib.sha256(original.encode()).hexdigest(), validate_completion_notice_delivery(recovery_plan))
+                self.assertEqual(before, {path: path.read_bytes() for path in state.rglob("*") if path.is_file()})
+
+    def test_recovery_rejects_delivery_bound_to_another_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            original = task_text()
+            task.write_text(original, encoding="utf-8")
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
+                plan = build_completion_email(root, task, original, "task done", semantic_key="b" * 64)
+                assert plan is not None
+                self.assertTrue(claim_completion_email(plan))
+                used = state / "completion-email-authorization-used"
+                used.mkdir(mode=0o700)
+                used_marker = used / plan.key
+                used_marker.write_text(f"{plan.target}\t{task.name}\n", encoding="utf-8")
+                used_marker.chmod(0o600)
+                mark_completion_email_delivered(plan)
+                other = original.replace("runat: cfg:2", "runat: cfg:3")
+                other_plan = build_completion_email(root, task, other, "task done", semantic_key="b" * 64)
+                assert other_plan is not None
+                with self.assertRaises(OSError):
+                    validate_completion_notice_delivery(other_plan)
 
     def test_legacy_no_email_removal_can_reconcile_exact_ordinary_sent_message(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

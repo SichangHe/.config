@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import unittest
 import yaml
+from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import nullcontext
 from contextlib import contextmanager
@@ -24,6 +25,7 @@ from omo_manager.omo_task_status import ACTIVE_TASK_TREE_AUTHORITY_TEXT
 from omo_manager.omo_task_status import ACTIVE_TASK_TREE_BLOCKER
 from omo_manager.omo_task_status import ACTIVE_TASK_TREE_NO_MAIL_INTENT
 from omo_manager.omo_task_status import DONE_REMINDER
+from omo_manager.omo_task_status import DONE_CLOSE_IN_PROGRESS
 from omo_manager.omo_task_status import DoneLiveCloseAudit
 from omo_manager.omo_task_status import active_task_tree_todo_replacement
 from omo_manager.omo_task_status import ensure_repository_closure_custody
@@ -72,6 +74,9 @@ from omo_manager.omo_codex_stop import write_bound_close_proof
 from omo_manager.omo_codex_stop import write_done_live_close_started
 from omo_manager.omo_codex_stop import promote_done_live_close_started
 from omo_manager.omo_codex_stop import close_note
+from omo_manager.omo_completion_email import build_completion_email
+from omo_manager.omo_completion_email import claim_completion_email
+from omo_manager.omo_completion_email import mark_completion_email_delivered
 from omo_manager.omo_report_receipt import ReceiptError
 from omo_manager.omo_task_metadata import frontmatter_parts
 from omo_manager.omo_blocking import ENABLE_FILE, load_yaml_mapping, render_task, split_task_text, sync_generated_blocker
@@ -106,6 +111,7 @@ def task_frontmatter(
     runat: str = "wl:2",
     managerat: str = "wl:1",
     is_manager: bool = False,
+    session_id: str = "",
 ) -> str:
     lines = [
         "---",
@@ -127,6 +133,8 @@ def task_frontmatter(
         lines.extend(f"  - {item}" for item in pending_items)
     else:
         lines.append("pending_task_items: []")
+    if session_id:
+        lines.append(f"session_id: {session_id}")
     lines.append("---")
     return "\n".join(lines) + "\n"
 
@@ -7409,6 +7417,123 @@ resolved_task_items: []
             self.assertIn(f"session_id: `{session_id}`", text)
             self.assertEqual("current:\n\nprevious:\ntask.md cfg:1\nother.md\n", todo.read_text(encoding="utf-8"))
 
+    def test_cli_recovers_only_the_cross_bound_interrupted_completion_session(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        completion_key = "a" * 64
+        for final_task, expected_code in (("task.md", 0), ("other.md", 2)):
+            with self.subTest(final_task=final_task), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                state = root / "state"
+                codex_home = root / "codex"
+                helper = Path(__file__).parents[1] / "omo_task_status.py"
+                helper_bin = root / "bin"
+                helper_bin.mkdir()
+                (helper_bin / "omo_task_status.py").symlink_to(helper)
+                path = root / "task.md"
+                original = f"""{task_frontmatter(runat="cfg:1", session_id=session_id)}body
+"""
+                path.write_text(original, encoding="utf-8")
+                todo = root / "TODO.md"
+                todo_original = "current:\ntask.md cfg:1\n\nprevious:\nother.md\n"
+                todo.write_text(todo_original, encoding="utf-8")
+                environment = {
+                    "OMO_MANAGER_STATE_DIR": str(state),
+                    "CODEX_HOME": str(codex_home),
+                    "PATH": f"{helper_bin}{os.pathsep}{os.environ['PATH']}",
+                }
+                with patch.dict("os.environ", environment):
+                    plan = build_completion_email(root, path, original, "task done", semantic_key=completion_key)
+                    assert plan is not None
+                    self.assertTrue(claim_completion_email(plan))
+                    used = state / "completion-email-authorization-used"
+                    used.mkdir(mode=0o700)
+                    used_marker = used / plan.key
+                    used_marker.write_text(f"{plan.target}\t{path.name}\n", encoding="utf-8")
+                    used_marker.chmod(0o600)
+                    mark_completion_email_delivered(plan)
+                    blocked = f"""{task_frontmatter(status="blocked", blocked_on=DONE_CLOSE_IN_PROGRESS, runat="cfg:1", session_id=session_id)}body
+manager note
+"""
+                    path.write_text(blocked, encoding="utf-8")
+                    session_path = codex_home / "sessions/2026/09/13" / f"rollout-test-{session_id}.jsonl"
+                    session_path.parent.mkdir(parents=True)
+                    delivery_output = """Emailed the human
+Message-ID: <123.456@example.test>
+omo_task_status.py: responsible-owner completion email requested; retry after owner delivery
+"""
+                    delivery_command = f"timeout 90s python3 {helper} --root {root} --completion-key {completion_key} task.md done"
+                    final_command = f"timeout 60s omo_task_status.py --root {root} {final_task} done --completion-key {completion_key}"
+                    records = (
+                        {"type": "session_meta", "payload": {"id": session_id}},
+                        {
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "item_completed",
+                                "item": {
+                                    "type": "CommandExecution",
+                                    "command": ["/usr/bin/zsh", "-lc", delivery_command],
+                                    "status": "failed",
+                                    "exit_code": 2,
+                                    "stdout": delivery_output,
+                                    "stderr": "",
+                                    "aggregated_output": delivery_output,
+                                    "formatted_output": delivery_output,
+                                },
+                            },
+                        },
+                        {
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "item_completed",
+                                "item": {
+                                    "type": "CommandExecution",
+                                    "command": ["/usr/bin/zsh", "-lc", final_command],
+                                    "status": "failed",
+                                    "exit_code": -1,
+                                    "stdout": "",
+                                    "stderr": "",
+                                    "aggregated_output": "",
+                                    "formatted_output": "",
+                                },
+                            },
+                        },
+                    )
+                    session_payload = "".join(f"{json.dumps(record)}\n" for record in records)
+                    session_path.write_text(session_payload, encoding="utf-8")
+                    session_path.chmod(0o644)
+                    args = StatusArgs(
+                        root,
+                        Path("task.md"),
+                        "done",
+                        "",
+                        session_id=session_id,
+                        recover_exited_shell_done=True,
+                        pane_id="%42",
+                        session_transcript=session_path,
+                        session_transcript_sha256=hashlib.sha256(session_payload.encode()).hexdigest(),
+                        completion_key=completion_key,
+                    )
+
+                    def close_shell(_target: str, _pane: str, _session: str, _key: str, *, evidence_is_current: Callable[[], bool]) -> None:
+                        self.assertTrue(evidence_is_current())
+
+                    stderr = io.StringIO()
+                    with (
+                        patch("omo_manager.omo_task_status.exact_pane_id", return_value="%42"),
+                        patch("omo_manager.omo_task_status.close_exited_codex_shell_with_completion_evidence", side_effect=close_shell) as close,
+                        redirect_stdout(io.StringIO()),
+                        redirect_stderr(stderr),
+                    ):
+                        self.assertEqual(expected_code, run(args), stderr.getvalue())
+                if expected_code == 0:
+                    close.assert_called_once()
+                    self.assertIn("status: done\nrunat: cfg:1", path.read_text(encoding="utf-8"))
+                    self.assertEqual("current:\n\nprevious:\ntask.md cfg:1\nother.md\n", todo.read_text(encoding="utf-8"))
+                else:
+                    close.assert_not_called()
+                    self.assertEqual(blocked, path.read_text(encoding="utf-8"))
+                    self.assertEqual(todo_original, todo.read_text(encoding="utf-8"))
+
     def test_cli_recover_exited_shell_done_rejects_unsafe_task_or_index(self) -> None:
         pane = "%42"
         session_id = "11111111-2222-3333-4444-555555555555"
@@ -7497,6 +7622,42 @@ resolved_task_items: []
         )
         self.assertTrue(args.recover_exited_shell_done)
         self.assertEqual("%42", args.pane_id)
+
+        transcript = "/tmp/codex/sessions/rollout-test-11111111-2222-3333-4444-555555555555.jsonl"
+        interrupted = parse_args(
+            [
+                "--root",
+                "/tmp/work",
+                "--recover-exited-shell-done",
+                "--pane-id",
+                "%42",
+                "--session-id",
+                "11111111-2222-3333-4444-555555555555",
+                "--completion-key",
+                "a" * 64,
+                "--session-transcript",
+                transcript,
+                "--session-transcript-sha256",
+                "b" * 64,
+                "task.md",
+            ]
+        )
+        self.assertEqual(Path(transcript), interrupted.session_transcript)
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args(
+                [
+                    "--recover-exited-shell-done",
+                    "--pane-id",
+                    "%42",
+                    "--session-id",
+                    "11111111-2222-3333-4444-555555555555",
+                    "--terminal-evidence",
+                    "accepted-report-token",
+                    "--completion-key",
+                    "a" * 64,
+                    "task.md",
+                ]
+            )
 
     def test_normal_done_requires_valid_completion_key_at_parse_boundary(self) -> None:
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):

@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -46,6 +47,7 @@ from omo_manager.omo_codex_stop import capture
 from omo_manager.omo_codex_stop import close_bound_tmux_target
 from omo_manager.omo_codex_stop import close_note
 from omo_manager.omo_codex_stop import close_exited_codex_shell
+from omo_manager.omo_codex_stop import close_exited_codex_shell_with_completion_evidence
 from omo_manager.omo_codex_stop import done_live_close_started_path
 from omo_manager.omo_codex_stop import guarded_capture
 from omo_manager.omo_codex_stop import has_close_note
@@ -78,7 +80,9 @@ from omo_manager.omo_task_metadata import TARGET_RE
 from omo_manager.omo_task_metadata import UniqueKeyLoader
 from omo_manager.omo_task_metadata import runat_kind
 from omo_manager.omo_blocking_actor import request as blocking_request
+from omo_manager.omo_completion_email import build_completion_email
 from omo_manager.omo_completion_email import require_owner_completion
+from omo_manager.omo_completion_email import validate_completion_notice_delivery
 from omo_manager.omo_report_receipt import ReceiptError
 from omo_manager.omo_report_receipt import REPORT_ONLY_DISPOSITION_RE
 from omo_manager.omo_report_receipt import validate_consumed_closure_export_file
@@ -153,6 +157,7 @@ SOURCE788_AUTHORITY_SHA256 = "c16c9acc0490f5a4dcd7b62d5889ff5eba729ef28a7d92ad3b
 SOURCE788_PENDING_ITEM = "Recover/authenticate the sole current dw:46 Source-1717 successor and close done b12_factcheck.md/dw3:0 through supported authenticated lifecycle tooling; then verify a fresh independent problems-only watcher scan clears both rows while genuine failures remain visible."
 SOURCE788_CLOSE_DIRECTIVE = "2. Close the already-done b12_factcheck.md pane at dw3:0 through supported lifecycle tooling. Its accepted report replay dad52d1f838d43ab1ab409839d80570aaa8349a55445d5d49be3f739b00afbf8 lacks an exact watcher transition, so do not force-stop or bypass guards; add or use the narrow authenticated recovery path."
 MAX_AUTHORITY_BYTES = 1_000_000
+MAX_SESSION_TRANSCRIPT_BYTES = 16_000_000
 SOURCE1503_DWPLAN_AUTHORITY = "manager_mail/85c5dff58359-1503.txt:1-3"
 SOURCE1503_SHA256 = "0eb6cfde4d5ef1160806e36b7077ad49f06c5e17f17248fdfec012f89d1a13eb"
 SOURCE1503_EXCERPT = "Subject: Re: Close obsolete DeepWiki planner?\n\nClose them all\n"
@@ -205,6 +210,8 @@ class Args:
     recover_exited_shell_done: bool = False
     pane_id: str = ""
     terminal_evidence: str = ""
+    session_transcript: Path | None = None
+    session_transcript_sha256: str = ""
     retire_blocked_target: bool = False
     reconcile_long_running_human_index: bool = False
     reconcile_blocked_index: bool = False
@@ -279,6 +286,8 @@ class ParsedArgs(argparse.Namespace):
     recover_exited_shell_done: bool = False
     pane_id: str = ""
     terminal_evidence: str = ""
+    session_transcript: Path | None = None
+    session_transcript_sha256: str = ""
     retire_blocked_target: bool = False
     reconcile_long_running_human_index: bool = False
     reconcile_blocked_index: bool = False
@@ -416,7 +425,9 @@ shutdown.""",
     _ = parser.add_argument("--replacement-pane-evidence", default="", help="Exact text currently visible in the replacement pane; required with --finish-replaced-done.")
     _ = parser.add_argument("--audit-output", type=Path, help="New owner-private audit file; required with --finish-replaced-done.")
     _ = parser.add_argument("--pane-id", default="", help="Exact numeric pane id captured by the failed close; required with --recover-exited-shell-done.")
-    _ = parser.add_argument("--terminal-evidence", default="", help="Specific accepted terminal-report token visible before Codex exited; required with --recover-exited-shell-done.")
+    _ = parser.add_argument("--terminal-evidence", default="", help="Specific accepted terminal-report token visible before Codex exited; the legacy evidence bundle for --recover-exited-shell-done.")
+    _ = parser.add_argument("--session-transcript", type=Path, help="Exact Codex JSONL transcript for an interrupted normal done close; valid only with --recover-exited-shell-done.")
+    _ = parser.add_argument("--session-transcript-sha256", default="", help="Lowercase SHA-256 of --session-transcript.")
     _ = parser.add_argument("--closure-repository", type=Path, help="Owned Git repository whose clean or explicitly handed-off tracked state gates done closure.")
     _ = parser.add_argument("--dirty-path-handoff", type=Path, help="Reviewed custody receipt required when --closure-repository has tracked changes.")
     _ = parser.add_argument("--restore-terminal-target", action="store_true", help="Restore one historically proven target on an unchanged done/retired record without pane or TODO action.")
@@ -479,6 +490,15 @@ shutdown.""",
     )
     if any(consumed_receipt) and (not all(consumed_receipt) or not (parsed.close_done_live_no_mail or parsed.describe_done_live_no_mail)):
         parser.error("manager-consumed report evidence requires both receipt arguments with a done-live no-mail operation.")
+    session_transcript = (parsed.session_transcript, parsed.session_transcript_sha256.strip())
+    if any(session_transcript) and (not all(session_transcript) or not parsed.recover_exited_shell_done):
+        parser.error("session transcript evidence requires both arguments with --recover-exited-shell-done.")
+    if parsed.session_transcript is not None and (
+        not parsed.session_transcript.is_absolute()
+        or parsed.session_transcript.resolve(strict=False) != parsed.session_transcript
+        or SHA256_RE.fullmatch(parsed.session_transcript_sha256.strip()) is None
+    ):
+        parser.error("session transcript evidence requires a canonical absolute path and lowercase SHA-256 digest.")
     human_close_authority = (
         parsed.human_close_authorization_source.strip(),
         parsed.human_close_authorization_sha256.strip(),
@@ -1423,8 +1443,17 @@ shutdown.""",
     if parsed.recover_exited_shell_done:
         if parsed.status not in {None, "", "done"}:
             parser.error("--recover-exited-shell-done only supports status `done`.")
-        if not parsed.session_id.strip() or not parsed.pane_id.strip() or not parsed.terminal_evidence.strip():
-            parser.error("--recover-exited-shell-done requires --session-id, --pane-id, and --terminal-evidence.")
+        legacy_evidence = bool(parsed.terminal_evidence.strip())
+        interrupted_values = (parsed.completion_key.strip(), *session_transcript)
+        if any(interrupted_values) and not all(interrupted_values):
+            parser.error("interrupted completion recovery requires --completion-key and both session transcript arguments.")
+        interrupted_evidence = all(interrupted_values)
+        if not parsed.session_id.strip() or not parsed.pane_id.strip() or legacy_evidence == interrupted_evidence:
+            parser.error(
+                "--recover-exited-shell-done requires --session-id and --pane-id plus exactly one evidence bundle: --terminal-evidence, or --completion-key with both session transcript arguments."
+            )
+        if interrupted_evidence and SHA256_RE.fullmatch(parsed.completion_key.strip()) is None:
+            parser.error("interrupted completion recovery requires a lowercase SHA-256 --completion-key.")
         if any(
             (
                 parsed.replacement_task,
@@ -1449,6 +1478,9 @@ shutdown.""",
             recover_exited_shell_done=True,
             pane_id=parsed.pane_id.strip(),
             terminal_evidence=parsed.terminal_evidence.strip(),
+            session_transcript=parsed.session_transcript.resolve() if parsed.session_transcript is not None else None,
+            session_transcript_sha256=parsed.session_transcript_sha256.strip(),
+            completion_key=parsed.completion_key.strip(),
         )
     if parsed.finish_replaced_done:
         if parsed.status not in {None, "", "done"}:
@@ -6739,6 +6771,171 @@ def finish_closed_done(args: Args, path: Path, text: str, before: os.stat_result
     return metadata.runat, close_session_id
 
 
+# 🧑 "add the narrow supported identity- and evidence-preserving recovery path for this exact class; fail closed for unrelated exited shells"
+def interrupted_done_command_matches(command: object, args: Args, path: Path) -> bool:
+    """Recognize only a normal done invocation for this task and completion key."""
+
+    if not isinstance(command, list) or command[:2] != ["/usr/bin/zsh", "-lc"] or len(command) != 3 or not isinstance(command[2], str):
+        return False
+    try:
+        tokens = shlex.split(command[2])
+    except ValueError:
+        return False
+    if tokens and Path(tokens[0]).name == "timeout":
+        if len(tokens) < 3 or re.fullmatch(r"[1-9][0-9]*(?:\.[0-9]+)?[smhd]?", tokens[1]) is None:
+            return False
+        tokens = tokens[2:]
+    if tokens and Path(tokens[0]).name in {"python", "python3"}:
+        tokens = tokens[1:]
+    if not tokens:
+        return False
+    helper = tokens.pop(0)
+    helper_path = Path(helper).expanduser() if "/" in helper else Path(shutil.which(helper) or "")
+    try:
+        if helper_path.resolve() != Path(__file__).resolve():
+            return False
+    except OSError:
+        return False
+    root = DEFAULT_ROOT.resolve()
+    root_seen = False
+    completion_key = ""
+    positionals: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in {"--root", "--completion-key"}:
+            if index + 1 >= len(tokens):
+                return False
+            value = tokens[index + 1]
+            if token == "--root":
+                if root_seen:
+                    return False
+                root = Path(value).expanduser().resolve(strict=False)
+                root_seen = True
+            else:
+                if completion_key:
+                    return False
+                completion_key = value
+            index += 2
+            continue
+        positionals.append(token)
+        index += 1
+    if completion_key != args.completion_key or root != args.root or len(positionals) != 2 or positionals[1] != "done":
+        return False
+    try:
+        return task_path(root, Path(positionals[0])) == path
+    except (OSError, TaskFrontmatterError):
+        return False
+
+
+def interrupted_done_session_payload(args: Args, path: Path) -> bytes:
+    """Read one immutable Codex transcript beneath the configured session root."""
+
+    transcript = args.session_transcript
+    if transcript is None or not transcript.is_absolute() or SHA256_RE.fullmatch(args.session_transcript_sha256) is None:
+        raise TaskFrontmatterError("interrupted completion recovery requires exact session transcript evidence.")
+    session_root = (Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).resolve() / "sessions").resolve()
+    try:
+        transcript.relative_to(session_root)
+    except ValueError as exc:
+        raise TaskFrontmatterError("interrupted completion transcript is outside the configured Codex session root.") from exc
+    if re.fullmatch(rf"rollout-.+-{re.escape(args.session_id)}\.jsonl", transcript.name) is None:
+        raise TaskFrontmatterError("interrupted completion transcript filename does not bind the session id.")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(transcript, flags)
+    except OSError as exc:
+        raise TaskFrontmatterError(f"interrupted completion transcript is unavailable: {exc}") from exc
+    try:
+        before = os.fstat(fd)
+        payload = b""
+        while chunk := os.read(fd, min(65_536, MAX_SESSION_TRANSCRIPT_BYTES + 1 - len(payload))):
+            payload += chunk
+            if len(payload) > MAX_SESSION_TRANSCRIPT_BYTES:
+                break
+        after = os.fstat(fd)
+    finally:
+        os.close(fd)
+    try:
+        bound = transcript.lstat()
+    except OSError as exc:
+        raise TaskFrontmatterError(f"interrupted completion transcript identity is unavailable: {exc}") from exc
+    identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+    if (
+        identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        or (bound.st_dev, bound.st_ino) != (before.st_dev, before.st_ino)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or before.st_mode & 0o022
+        or before.st_nlink != 1
+        or len(payload) != before.st_size
+        or len(payload) > MAX_SESSION_TRANSCRIPT_BYTES
+        or hashlib.sha256(payload).hexdigest() != args.session_transcript_sha256
+    ):
+        raise TaskFrontmatterError("interrupted completion transcript changed or is not exact owner-controlled evidence.")
+    return payload
+
+
+def validate_interrupted_done_session(args: Args, path: Path, payload: bytes) -> None:
+    """Bind delivery and the final killed command to one Codex session."""
+
+    try:
+        records = [json.loads(line) for line in payload.decode().splitlines()]
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TaskFrontmatterError("interrupted completion transcript is not valid UTF-8 JSONL.") from exc
+    if not records or any(not isinstance(record, dict) for record in records):
+        raise TaskFrontmatterError("interrupted completion transcript contains a non-object record.")
+    session_metadata = [record.get("payload") for record in records if record.get("type") == "session_meta"]
+    if len(session_metadata) != 1 or not isinstance(session_metadata[0], dict) or session_metadata[0].get("id") != args.session_id:
+        raise TaskFrontmatterError("interrupted completion transcript does not bind one exact session id.")
+    executions: list[tuple[int, dict[str, object]]] = []
+    for index, record in enumerate(records):
+        event = record.get("payload")
+        if record.get("type") != "event_msg" or not isinstance(event, dict) or event.get("type") != "item_completed":
+            continue
+        item = event.get("item")
+        if isinstance(item, dict) and item.get("type") == "CommandExecution":
+            executions.append((index, item))
+    delivery_output = re.compile(r"Emailed the human\nMessage-ID: <[^<>\s]+>\nomo_task_status\.py: responsible-owner completion email requested; retry after owner delivery\n\Z")
+    delivered = [
+        index
+        for index, item in executions
+        if interrupted_done_command_matches(item.get("command"), args, path)
+        and item.get("status") == "failed"
+        and item.get("exit_code") == 2
+        and isinstance(item.get("stdout"), str)
+        and delivery_output.fullmatch(str(item["stdout"])) is not None
+        and item.get("stderr") == ""
+        and item.get("aggregated_output") == item.get("stdout")
+        and item.get("formatted_output") == item.get("stdout")
+    ]
+    interrupted = [
+        index
+        for index, item in executions
+        if interrupted_done_command_matches(item.get("command"), args, path)
+        and item.get("status") == "failed"
+        and item.get("exit_code") == -1
+        and all(item.get(field) == "" for field in ("stdout", "stderr", "aggregated_output", "formatted_output"))
+    ]
+    if len(delivered) != 1 or not interrupted or interrupted[-1] != len(records) - 1 or delivered[0] >= interrupted[-1]:
+        raise TaskFrontmatterError("interrupted completion transcript lacks one delivery followed by the final killed normal done invocation.")
+
+
+def validate_interrupted_done_evidence(args: Args, path: Path, text: str, metadata: TaskMetadata) -> None:
+    """Authenticate existing mail and session evidence for an in-progress close."""
+
+    if metadata.tool != "codex" or metadata.session_id != args.session_id or not args.completion_key or args.terminal_evidence:
+        raise TaskFrontmatterError("interrupted completion recovery evidence does not match the task session or mode.")
+    plan = build_completion_email(args.root, path, text, "task done", semantic_key=args.completion_key)
+    if plan is None or plan.target != metadata.runat or plan.manager_target != metadata.managerat:
+        raise TaskFrontmatterError("interrupted completion delivery does not resolve to the blocked task owner.")
+    try:
+        _ = validate_completion_notice_delivery(plan)
+    except OSError as exc:
+        raise TaskFrontmatterError(f"interrupted completion delivery evidence is invalid: {exc}") from exc
+    validate_interrupted_done_session(args, path, interrupted_done_session_payload(args, path))
+
+
 def recover_exited_shell_done(args: Args, path: Path, text: str, before: os.stat_result) -> tuple[str, str]:
     """Close one proven exited worker shell and finish its done bookkeeping."""
 
@@ -6759,8 +6956,15 @@ def recover_exited_shell_done(args: Args, path: Path, text: str, before: os.stat
                 raise TaskFrontmatterError("task changed while exited-shell recovery was being prepared; retry after rereading it.")
             if metadata.is_manager:
                 raise TaskFrontmatterError("--recover-exited-shell-done supports non-manager tasks only.")
-            if metadata.status != "blocked" or metadata.blocked_on != (f"{CLOSE_FAILED_PREFIX}: target is not a supported live Codex pane: {args.pane_id} status=not_codex"):
-                raise TaskFrontmatterError("task does not have the exact exited-shell done-close failure for the supplied pane id.")
+            legacy_blocker = f"{CLOSE_FAILED_PREFIX}: target is not a supported live Codex pane: {args.pane_id} status=not_codex"
+            legacy_recovery = metadata.blocked_on == legacy_blocker and bool(args.terminal_evidence) and not any((args.completion_key, args.session_transcript, args.session_transcript_sha256))
+            interrupted_recovery = (
+                metadata.blocked_on == DONE_CLOSE_IN_PROGRESS
+                and not args.terminal_evidence
+                and bool(args.completion_key and args.session_transcript and args.session_transcript_sha256)
+            )
+            if metadata.status != "blocked" or legacy_recovery == interrupted_recovery:
+                raise TaskFrontmatterError("task does not have an exact supported exited-shell done-close state for the supplied evidence.")
             _ = update_frontmatter_status(current_text, "done", "", args.root)
             owners = authoritative_active_target_task_paths(args.root, metadata.runat)
             if owners != (path,):
@@ -6771,7 +6975,32 @@ def recover_exited_shell_done(args: Args, path: Path, text: str, before: os.stat
             updated_todo = reconcile_todo_text(args.root, path, todo_text, metadata.runat, "previous", ("current",))
             if exact_pane_id(metadata.runat) != args.pane_id:
                 raise TaskFrontmatterError("task target no longer resolves to the supplied exact pane id.")
-            close_exited_codex_shell(metadata.runat, args.pane_id, args.session_id, args.terminal_evidence)
+            if interrupted_recovery:
+                validate_interrupted_done_evidence(args, path, current_text, metadata)
+
+                def evidence_is_current() -> bool:
+                    try:
+                        if (
+                            not same_file_state(current_before, path.stat())
+                            or path.read_text(encoding="utf-8") != current_text
+                            or not same_file_state(todo_before, todo.stat())
+                            or todo.read_text(encoding="utf-8") != todo_text
+                        ):
+                            return False
+                        validate_interrupted_done_evidence(args, path, current_text, metadata)
+                    except (OSError, TaskFrontmatterError, UnicodeDecodeError, ValueError):
+                        return False
+                    return True
+
+                close_exited_codex_shell_with_completion_evidence(
+                    metadata.runat,
+                    args.pane_id,
+                    args.session_id,
+                    args.completion_key,
+                    evidence_is_current=evidence_is_current,
+                )
+            else:
+                close_exited_codex_shell(metadata.runat, args.pane_id, args.session_id, args.terminal_evidence)
             closed_text = current_text.rstrip("\n") + close_note(metadata.runat, args.session_id)
             done_text = update_frontmatter_status(closed_text, "done", "", args.root)
             moved_todo_before: os.stat_result | None = None
