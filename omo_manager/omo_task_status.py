@@ -100,6 +100,7 @@ TODO_ROW_RE = re.compile(r"\s*`?([A-Za-z0-9_./-]+\.md)`?(?:\s+(.*?))?\s*")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 GIT_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 CODEX_SESSION_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+SOURCE1804_HUMAN_APPROVAL_BLOCKER = "Human approval of the exact Source-1804 cross-agent instruction draft"
 CUSTODY_RECEIPT_VERSION = "v1.0.0"
 RE_ATTESTED_CUSTODY_RECEIPT_VERSION = "v2.0.0"
 SEMANTIC_CUSTODY_RECEIPT_VERSION = "v3.0.0"
@@ -409,7 +410,7 @@ shutdown.""",
     _ = parser.add_argument(
         "--reconcile-blocked-index",
         action="store_true",
-        help="Move one digest-bound v1 blocked worker with an open queue from TODO previous or low priority to human pending without changing task or pane state.",
+        help="Move one digest-bound v1 blocked worker with an open queue from TODO previous or low priority, or the exact Source-1804 Human-approval worker from current, to human pending without changing task or pane state.",
     )
     _ = parser.add_argument(
         "--reconcile-dependency-blocked-current",
@@ -1417,7 +1418,6 @@ shutdown.""",
     if parsed.reconcile_blocked_index:
         unrelated = (
             parsed.status,
-            parsed.blocked_on,
             parsed.session_id,
             parsed.replacement_task,
             parsed.stale_target,
@@ -1441,8 +1441,8 @@ shutdown.""",
             parsed.manager_target,
         )
         if any(unrelated) or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None:
-            parser.error("--reconcile-blocked-index requires only lowercase --source-sha256 for one exact blocked source task.")
-        return Args(parsed.root.resolve(), parsed.task_file, "", "", reconcile_blocked_index=True, source_sha256=parsed.source_sha256.strip())
+            parser.error("--reconcile-blocked-index requires lowercase --source-sha256 and only an optional exact --blocked-on assertion.")
+        return Args(parsed.root.resolve(), parsed.task_file, "", parsed.blocked_on.strip(), reconcile_blocked_index=True, source_sha256=parsed.source_sha256.strip())
     if parsed.recover_exited_shell_done:
         if parsed.status not in {None, "", "done"}:
             parser.error("--recover-exited-shell-done only supports status `done`.")
@@ -4926,9 +4926,13 @@ def reconcile_previous_blocked_index(args: Args, path: Path, text: str, before: 
         for locked_path in sorted({path, todo}, key=lambda candidate: str(candidate)):
             locks.enter_context(task_file_lock(locked_path))
         current_before = path.stat()
-        current_text = path.read_text(encoding="utf-8")
+        current_bytes = path.read_bytes()
+        try:
+            current_text = current_bytes.decode()
+        except UnicodeDecodeError as exc:
+            raise TaskFrontmatterError("blocked index source is not UTF-8 text.") from exc
         metadata = parse_task_metadata(current_text, args.root)
-        if not same_file_state(before, current_before) or current_text != text or hashlib.sha256(current_text.encode()).hexdigest() != args.source_sha256:
+        if not same_file_state(before, current_before) or hashlib.sha256(current_bytes).hexdigest() != args.source_sha256:
             raise TaskFrontmatterError("blocked index source bytes changed or do not match --source-sha256.")
         if metadata is None or metadata.version == V2_VERSION or metadata.status != "blocked" or metadata.is_manager:
             raise TaskFrontmatterError("blocked index reconciliation requires one unchanged v1 blocked worker.")
@@ -4939,7 +4943,11 @@ def reconcile_previous_blocked_index(args: Args, path: Path, text: str, before: 
         if TARGET_RE.fullmatch(metadata.runat) is None or metadata.runat.partition(":")[0].startswith("h"):
             raise TaskFrontmatterError("blocked index reconciliation requires a non-human live worker target.")
         todo_before = todo.stat()
-        todo_text = todo.read_text(encoding="utf-8")
+        todo_bytes = todo.read_bytes()
+        try:
+            todo_text = todo_bytes.decode()
+        except UnicodeDecodeError as exc:
+            raise TaskFrontmatterError("blocked index TODO is not UTF-8 text.") from exc
         headers = {"current": 0, "human pending": 0, "low priority": 0, "previous": 0}
         invalid_headers = 0
         section = ""
@@ -4959,9 +4967,16 @@ def reconcile_previous_blocked_index(args: Args, path: Path, text: str, before: 
             raise TaskFrontmatterError(
                 "blocked index reconciliation requires one canonical current, human pending, and previous TODO section, plus one canonical low priority section when it contains the source row."
             )
-        updated_todo = reconcile_todo_text(args.root, path, todo_text, metadata.runat, "human pending", ("previous", "low priority"))
+        current_source = task_sections == ["current"]
+        asserted_human_wait = args.blocked_on == metadata.blocked_on == SOURCE1804_HUMAN_APPROVAL_BLOCKER
+        if current_source and not asserted_human_wait:
+            raise TaskFrontmatterError("blocked current-index reconciliation requires --blocked-on to match the exact Source-1804 Human-approval blocker.")
+        if not current_source and args.blocked_on:
+            raise TaskFrontmatterError("--blocked-on is valid only when blocked index reconciliation moves a current Human-waiting worker.")
+        source_sections = ("current",) if current_source else ("previous", "low priority")
+        updated_todo = reconcile_todo_text(args.root, path, todo_text, metadata.runat, "human pending", source_sections)
         if updated_todo == todo_text:
-            raise TaskFrontmatterError("blocked index reconciliation requires the sole TODO row to move from previous or low priority to human pending.")
+            raise TaskFrontmatterError("blocked index reconciliation requires the sole TODO row to move to human pending.")
         replace_if_unchanged_locked(todo, updated_todo, todo_before)
 
 

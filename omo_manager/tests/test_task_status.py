@@ -6408,6 +6408,138 @@ resolved_task_items: []
             )
             stop_agent.assert_not_called()
 
+    def test_cli_blocked_reconciliation_moves_human_waiting_current_row_without_changing_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "email_agent_cmds.md"
+            blocker = "Human approval of the exact Source-1804 cross-agent instruction draft"
+            task_text = (
+                task_frontmatter(
+                    status="blocked",
+                    blocked_on=blocker,
+                    runat="config:25",
+                    managerat="config:27",
+                    pending_items=(
+                        "Source-1804 Human request",
+                        "Add the supported blocked-current reconciliation",
+                    ),
+                )
+                + "Reviewed draft email Message-ID and one concrete approval action.\n"
+            )
+            path.write_text(task_text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = (
+                "preamble stays\n"
+                "current:\n"
+                "email_agent_cmds.md config:25\n"
+                "other.md config:26 unchanged\n\n"
+                "human pending:\n"
+                "waiting.md config:24 unchanged\n\n"
+                "low priority:\n"
+                "slow.md config:23 unchanged\n\n"
+                "previous:\n"
+                "old.md config:22 unchanged\n"
+            )
+            todo.write_text(todo_text, encoding="utf-8")
+            args = StatusArgs(root, Path("email_agent_cmds.md"), "", blocker, reconcile_blocked_index=True, source_sha256=hashlib.sha256(task_text.encode()).hexdigest())
+
+            with (
+                patch("omo_manager.omo_task_status.stop") as stop_agent,
+                patch("omo_manager.omo_task_status.blocking_request") as blocking_request,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(0, run(args))
+
+            self.assertEqual(task_text, path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                todo_text.replace(
+                    "current:\nemail_agent_cmds.md config:25\nother.md config:26 unchanged\n",
+                    "current:\nother.md config:26 unchanged\n",
+                ).replace(
+                    "human pending:\nwaiting.md config:24 unchanged\n",
+                    "human pending:\nemail_agent_cmds.md config:25\nwaiting.md config:24 unchanged\n",
+                ),
+                todo.read_text(encoding="utf-8"),
+            )
+            stop_agent.assert_not_called()
+            blocking_request.assert_not_called()
+
+    def test_cli_blocked_reconciliation_requires_exact_current_human_wait_assertion(self) -> None:
+        for blocker in (
+            "dependency.md",
+            "Human approval has already been received; resume work",
+            "No human approval is needed; continue",
+            "waiting for human approval is no longer necessary",
+            "Human approval for release was denied",
+            "Human approval of the exact release was denied",
+            "Human approval of the exact release remains optional",
+            "Human approval of the exact release may be skipped",
+        ):
+            for assertion in ("", f"{blocker} mismatch", blocker):
+                with self.subTest(blocker=blocker, assertion=assertion), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    path = root / "task.md"
+                    task_text = task_frontmatter(status="blocked", blocked_on=blocker, pending_items=("preserve this item",)) + "body\n"
+                    path.write_text(task_text, encoding="utf-8")
+                    todo = root / "TODO.md"
+                    todo_text = "current:\ntask.md wl:2\n\nhuman pending:\n\nprevious:\n"
+                    todo.write_text(todo_text, encoding="utf-8")
+                    args = StatusArgs(root, Path("task.md"), "", assertion, reconcile_blocked_index=True, source_sha256=hashlib.sha256(task_text.encode()).hexdigest())
+                    stderr = io.StringIO()
+
+                    with patch("omo_manager.omo_task_status.stop") as stop_agent, redirect_stderr(stderr):
+                        self.assertEqual(2, run(args))
+
+                    self.assertIn("requires --blocked-on to match the exact Source-1804", stderr.getvalue())
+                    self.assertEqual(task_text, path.read_text(encoding="utf-8"))
+                    self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+                    stop_agent.assert_not_called()
+
+    def test_cli_blocked_reconciliation_hashes_and_preserves_raw_crlf_task_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            task_bytes = (
+                (
+                    task_frontmatter(
+                        status="blocked",
+                        blocked_on="Human approval of the exact Source-1804 cross-agent instruction draft",
+                        pending_items=("preserve this item",),
+                    )
+                    + "body\n"
+                )
+                .replace("\n", "\r\n")
+                .encode()
+            )
+            path.write_bytes(task_bytes)
+            todo = root / "TODO.md"
+            todo_bytes = b"preamble stays\r\ncurrent:\r\ntask.md wl:2\r\nother.md wl:4 unchanged\r\n\r\nhuman pending:\r\nwaiting.md wl:3 unchanged\r\n\r\nprevious:\r\n"
+            todo.write_bytes(todo_bytes)
+            args = StatusArgs(
+                root,
+                Path("task.md"),
+                "",
+                "Human approval of the exact Source-1804 cross-agent instruction draft",
+                reconcile_blocked_index=True,
+                source_sha256=hashlib.sha256(task_bytes).hexdigest(),
+            )
+
+            with patch("omo_manager.omo_task_status.stop") as stop_agent, redirect_stdout(io.StringIO()):
+                self.assertEqual(0, run(args))
+
+            self.assertEqual(task_bytes, path.read_bytes())
+            self.assertEqual(
+                todo_bytes.replace(
+                    b"current:\r\ntask.md wl:2\r\nother.md wl:4 unchanged\r\n",
+                    b"current:\r\nother.md wl:4 unchanged\r\n",
+                ).replace(
+                    b"human pending:\r\nwaiting.md wl:3 unchanged\r\n",
+                    b"human pending:\r\ntask.md wl:2\r\nwaiting.md wl:3 unchanged\r\n",
+                ),
+                todo.read_bytes(),
+            )
+            stop_agent.assert_not_called()
+
     def test_cli_blocked_reconciliation_moves_low_priority_row_without_changing_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -7725,6 +7857,13 @@ omo_task_status.py: responsible-owner completion email requested; retry after ow
         args = parse_args(["--reconcile-long-running-human-index", "task.md"])
         self.assertTrue(args.reconcile_long_running_human_index)
         self.assertEqual("", args.completion_key)
+
+    def test_blocked_current_reconciliation_parses_exact_blocker_assertion(self) -> None:
+        blocker = "Human approval of the exact Source-1804 cross-agent instruction draft"
+        args = parse_args(["--reconcile-blocked-index", "--source-sha256", "a" * 64, "--blocked-on", blocker, "task.md"])
+
+        self.assertTrue(args.reconcile_blocked_index)
+        self.assertEqual(blocker, args.blocked_on)
 
     def test_cli_finish_closed_done_failure_stays_blocked_retryable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
