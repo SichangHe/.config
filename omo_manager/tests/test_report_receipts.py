@@ -280,6 +280,134 @@ def archive_uncommitted_report_task(case: ReportFixture, *, committed_body: str 
     return archived
 
 
+def registered_cleanup_fixture(
+    root: Path,
+    *,
+    replay_id: str,
+) -> tuple[
+    Path,
+    bytes,
+    tuple[dict[str, object], ...],
+    omo_report_receipt.RegisteredRootRetainedCleanup,
+]:
+    """Create one synthetic, transcript-bound post-report task cleanup."""
+
+    task = root / "worker.md"
+    suffix = b"\nremove this exact post-report line\n"
+    current = frontmatter(runat="cfg:7", managerat="vl:2").replace(
+        "status: running", "status: done", 1
+    ).encode() + b"task body\n"
+    pre_cleanup_done = current + suffix
+    intermediate = current + b"\n"
+    committed_running = current.replace(b"status: done", b"status: running", 1) + suffix
+    task.write_bytes(current)
+    todo = root / "TODO.md"
+    todo.write_text("current:\n\nprevious:\nworker.md cfg:7\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "--", "TODO.md", "worker.md"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "record cleanup"], check=True)
+
+    session_id = "00000000-0000-0000-0000-000000000001"
+    session = {
+        "ordinal": 0,
+        "type": "session_meta",
+        "payload": {
+            "id": session_id,
+            "session_id": session_id,
+            "cwd": str(root.parent),
+            "originator": "codex-tui",
+            "source": "cli",
+            "thread_source": "user",
+        },
+    }
+    transitions = (
+        (hashlib.sha256(pre_cleanup_done).hexdigest(), hashlib.sha256(intermediate).hexdigest(), 12),
+        (hashlib.sha256(intermediate).hexdigest(), hashlib.sha256(current).hexdigest(), 11),
+    )
+    records: list[dict[str, object]] = [session]
+    for ordinal, (before, after, line_number) in enumerate(transitions, 1):
+        stdout = (
+            f"BEFORE_SHA={before}\n"
+            f"EXPECTED_AFTER_SHA={after}\n"
+            f"removed exact trailing body line from worker.md:{line_number}\n"
+        )
+        command = [
+            "/usr/bin/zsh",
+            "-lc",
+            "omo_task_edit.py trailing-body-line-remove worker.md",
+        ]
+        records.append(
+            {
+                "ordinal": ordinal,
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "CommandExecution",
+                        "command": command,
+                        "cwd": f"file://{root.parent}",
+                        "source": "unified_exec_startup",
+                        "status": "completed",
+                        "stdout": stdout,
+                        "stderr": "",
+                        "aggregated_output": stdout,
+                        "formatted_output": stdout,
+                        "exit_code": 0,
+                    },
+                },
+            }
+        )
+    transcript = root.parent / f"rollout-test-{session_id}.jsonl"
+    transcript_payload = b"".join(canonical_json(record) for record in records)
+    transcript.write_bytes(transcript_payload)
+    transcript.chmod(0o600)
+    command_records = records[1:]
+    command_stdout = [record["payload"]["item"]["stdout"] for record in command_records]  # type: ignore[index]
+    registration = omo_report_receipt.RegisteredRootRetainedCleanup(
+        task_ref="worker.md",
+        replay_id=replay_id,
+        manager_target="vl:2",
+        committed_running_sha256=hashlib.sha256(committed_running).hexdigest(),
+        committed_running_size_bytes=len(committed_running),
+        current_done_sha256=hashlib.sha256(current).hexdigest(),
+        current_done_size_bytes=len(current),
+        pre_cleanup_done_sha256=hashlib.sha256(pre_cleanup_done).hexdigest(),
+        intermediate_done_sha256=hashlib.sha256(intermediate).hexdigest(),
+        removed_suffix=suffix,
+        transcript=transcript,
+        transcript_prefix_sha256=hashlib.sha256(transcript_payload).hexdigest(),
+        transcript_prefix_size_bytes=len(transcript_payload),
+        transcript_prefix_line_count=len(records),
+        session_id=session_id,
+        session_cwd=root.parent,
+        command_record_lines=(2, 3),
+        command_record_sha256=tuple(
+            hashlib.sha256(canonical_json(record)).hexdigest() for record in command_records
+        ),
+        command_stdout_sha256=tuple(
+            hashlib.sha256(str(stdout).encode()).hexdigest() for stdout in command_stdout
+        ),
+        cleanup_line_numbers=(12, 11),
+    )
+    route_evidence = (
+        {
+            "exists": True,
+            "path": str(task),
+            "sha256": hashlib.sha256(committed_running).hexdigest(),
+            "size_bytes": len(committed_running),
+        },
+        {
+            "exists": True,
+            "path": str(todo),
+            "sha256": hashlib.sha256(todo.read_bytes()).hexdigest(),
+            "size_bytes": len(todo.read_bytes()),
+        },
+    )
+    return task, current, route_evidence, registration
+
+
 def export_archived_report(
     case: ReportFixture,
     envelope: Path,
@@ -4178,6 +4306,107 @@ return 75
             self.assertEqual(str(task), custody["task"])
             self.assertEqual(1, custody["todo_reference_count"])
             self.assertEqual(0, validate_export_from(case, exported).returncode)
+
+    def test_registered_root_retained_cleanup_authenticates_exact_committed_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            replay_id = "1" * 64
+            task, _current, route_evidence, registration = registered_cleanup_fixture(
+                root,
+                replay_id=replay_id,
+            )
+
+            with patch.object(
+                omo_report_receipt,
+                "REGISTERED_ROOT_RETAINED_CLEANUPS",
+                (registration,),
+            ):
+                inferred, provenance = omo_report_receipt.infer_archived_task_path(
+                    root,
+                    task,
+                    route_evidence,
+                    replay_id,
+                    "vl:2",
+                )
+                custody = omo_report_receipt.archived_task_custody(
+                    SimpleNamespace(
+                        archived_task=task,
+                        root=root,
+                        task=task,
+                        route_evidence=route_evidence,
+                        replay_id=replay_id,
+                        root_retained_evidence=None,
+                        routing={
+                            "requested_manager_target": "vl:2",
+                            "producer_target": "cfg:7",
+                        },
+                    )
+                )
+                unrelated = root / "unrelated"
+                unrelated.write_text("later\n", encoding="utf-8")
+                subprocess.run(["git", "-C", str(root), "add", "--", "unrelated"], check=True)
+                subprocess.run(["git", "-C", str(root), "commit", "-qm", "unrelated commit"], check=True)
+                with registration.transcript.open("ab") as stream:
+                    stream.write(canonical_json({"ordinal": 3, "type": "event_msg", "payload": {}}))
+                _same_task, after_unrelated_commit = omo_report_receipt.infer_archived_task_path(
+                    root,
+                    task,
+                    route_evidence,
+                    replay_id,
+                    "vl:2",
+                )
+
+            self.assertEqual(task, inferred)
+            self.assertEqual("omo-report-terminal-task-transition/v1", provenance["schema"])
+            binding = provenance["commitment_binding"]
+            self.assertEqual("registered-exact-post-report-cleanup", binding["kind"])
+            self.assertEqual(replay_id, binding["replay_id"])
+            self.assertEqual(provenance, after_unrelated_commit)
+            self.assertEqual("omo-report-terminal-task-custody/v1", custody["schema"])
+            self.assertEqual(provenance, custody["git_provenance"])
+
+    def test_registered_root_retained_cleanup_rejects_dirty_or_mismatched_custody(self) -> None:
+        defects = ("dirty task", "wrong manager", "wrong TODO section", "changed transcript")
+        for defect in defects:
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "logs"
+                root.mkdir()
+                replay_id = "2" * 64
+                task, current, route_evidence, registration = registered_cleanup_fixture(
+                    root,
+                    replay_id=replay_id,
+                )
+                manager_target = "vl:2"
+                if defect == "dirty task":
+                    task.write_bytes(current + b"drift\n")
+                elif defect == "wrong manager":
+                    manager_target = "vl:3"
+                elif defect == "wrong TODO section":
+                    (root / "TODO.md").write_text(
+                        "current:\nworker.md cfg:7\n\nprevious:\n",
+                        encoding="utf-8",
+                    )
+                else:
+                    registration.transcript.write_bytes(
+                        registration.transcript.read_bytes().replace(b'"exit_code":0', b'"exit_code":1', 1)
+                    )
+
+                with patch.object(
+                    omo_report_receipt,
+                    "REGISTERED_ROOT_RETAINED_CLEANUPS",
+                    (registration,),
+                ), self.assertRaisesRegex(
+                    ReceiptError,
+                    "registered root-retained cleanup|session transcript prefix",
+                ):
+                    omo_report_receipt.infer_archived_task_path(
+                        root,
+                        task,
+                        route_evidence,
+                        replay_id,
+                        manager_target,
+                    )
 
     def test_root_retained_export_preserves_configured_main_manager_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

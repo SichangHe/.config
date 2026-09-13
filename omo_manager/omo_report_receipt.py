@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import io
 import json
 import math
 import os
@@ -45,6 +46,7 @@ MAX_RECEIPT_BYTES = 4 * 1024 * 1024
 MAX_ROUTE_FILE_BYTES = 64 * 1024 * 1024
 MAX_ACK_STATE_BYTES = 4 * 1024 * 1024
 MAX_SESSION_PREFIX_BYTES = 64 * 1024 * 1024
+MAX_REGISTERED_CLEANUP_PREFIX_BYTES = 128 * 1024 * 1024
 DEFAULT_ACK_TIMEOUT_S = 3.0
 AGENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 SAFE_VALUE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -118,6 +120,65 @@ class RootRetainedNoMailEvidence:
     transcript: Path
     transcript_prefix_sha256: str
     transcript_prefix_size_bytes: int
+
+
+@dataclass(frozen=True)
+class RegisteredRootRetainedCleanup:
+    task_ref: str
+    replay_id: str
+    manager_target: str
+    committed_running_sha256: str
+    committed_running_size_bytes: int
+    current_done_sha256: str
+    current_done_size_bytes: int
+    pre_cleanup_done_sha256: str
+    intermediate_done_sha256: str
+    removed_suffix: bytes
+    transcript: Path
+    transcript_prefix_sha256: str
+    transcript_prefix_size_bytes: int
+    transcript_prefix_line_count: int
+    session_id: str
+    session_cwd: Path
+    command_record_lines: tuple[int, int]
+    command_record_sha256: tuple[str, str]
+    command_stdout_sha256: tuple[str, str]
+    cleanup_line_numbers: tuple[int, int]
+
+
+REGISTERED_ROOT_RETAINED_CLEANUPS = (
+    RegisteredRootRetainedCleanup(
+        task_ref="book_ocr_tts.md",
+        replay_id="709d2cffd37910479e92fe2c18822f19e63fc4566e8d8620c10c777641b1585a",
+        manager_target="pb:1",
+        committed_running_sha256="0af65cf4bb628e6536524d3df6e91f6fddf6149a0559e2ae004c9044d6c4022d",
+        committed_running_size_bytes=2568,
+        current_done_sha256="bd3e4a994377e04be42d7557b06083919ef6998e684b0f6e360c8fd927a4eb00",
+        current_done_size_bytes=2509,
+        pre_cleanup_done_sha256="71311204f47268500bee647eb39639d6e52f171abf6e4e452cf0cb751577e033",
+        intermediate_done_sha256="340a17cd8499d52fa847311cdc676c31b7be5d2e313757fe964e85b7084ff683",
+        removed_suffix=b"\nThe publishing is internal. Confirm rights and publish\n",
+        transcript=Path(
+            "/home/sichanghe/.codex/sessions/2026/09/12/"
+            "rollout-2026-09-12T09-02-30-01a0965b-2237-72c3-8a7b-fcdc647503b7.jsonl"
+        ),
+        transcript_prefix_sha256="6430742f0fa05bba56f6a235366611165230771d5e02f961a5783afdb90ec8b3",
+        transcript_prefix_size_bytes=84064977,
+        transcript_prefix_line_count=16599,
+        session_id="01a0965b-2237-72c3-8a7b-fcdc647503b7",
+        session_cwd=Path("/home/sichangheagent/.config"),
+        command_record_lines=(16500, 16599),
+        command_record_sha256=(
+            "8246c3152d0de3d167c9683cd8c3f978e56017447b759705f76c6a80defba61a",
+            "48dec7911f4a32608d3f74242d6a52316209ef19ca4bbd3256cd935956239a6b",
+        ),
+        command_stdout_sha256=(
+            "0cd50c2d46e290c40cf8cf8faba3fbcd72ffde96cdd0ef1a5267c641a0c8f66e",
+            "03a7be304239da5422ba3844e5ae98e7445513c920121ddbff056ada5c438c75",
+        ),
+        cleanup_line_numbers=(36, 35),
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -5249,6 +5310,7 @@ def read_append_only_session_prefix(
     evidence: RootRetainedEvidence | RootRetainedNoMailEvidence,
     *,
     lifecycle: bool = False,
+    maximum: int = MAX_SESSION_PREFIX_BYTES,
 ) -> bytes:
     """Read an exact immutable prefix while permitting later session appends."""
 
@@ -5271,7 +5333,7 @@ def read_append_only_session_prefix(
         or path != path.absolute()
         or resolved_path != path
         or HASH_RE.fullmatch(expected_sha256) is None
-        or not 0 < expected_size <= MAX_SESSION_PREFIX_BYTES
+        or not 0 < expected_size <= maximum
     ):
         raise ReceiptError("root-retained session prefix identity is invalid")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -7049,6 +7111,244 @@ def session_root_retained_provenance(
     }
 
 
+def registered_cleanup_transcript_binding(
+    cleanup: RegisteredRootRetainedCleanup,
+) -> dict[str, object]:
+    """Bind registered exact-CAS task cleanups to their immutable session prefix."""
+
+    evidence = RootRetainedNoMailEvidence(
+        cleanup.transcript,
+        cleanup.transcript_prefix_sha256,
+        cleanup.transcript_prefix_size_bytes,
+    )
+    prefix = read_append_only_session_prefix(
+        evidence,
+        maximum=MAX_REGISTERED_CLEANUP_PREFIX_BYTES,
+    )
+    wanted_lines = {1, *cleanup.command_record_lines}
+    selected: dict[int, dict[str, object]] = {}
+    line_count = 0
+    for line_count, raw_line in enumerate(io.BytesIO(prefix), 1):
+        if line_count not in wanted_lines:
+            continue
+        try:
+            record = json.loads(raw_line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ReceiptError("registered cleanup transcript is not valid JSONL") from exc
+        if not isinstance(record, dict):
+            raise ReceiptError("registered cleanup transcript contains a non-object record")
+        selected[line_count] = record
+    if line_count != cleanup.transcript_prefix_line_count or set(selected) != wanted_lines:
+        raise ReceiptError("registered cleanup transcript prefix record layout changed")
+
+    session = selected[1]
+    session_payload = session.get("payload")
+    if (
+        session.get("type") != "session_meta"
+        or session.get("ordinal") != 0
+        or not isinstance(session_payload, dict)
+        or session_payload.get("id") != cleanup.session_id
+        or session_payload.get("session_id") != cleanup.session_id
+        or session_payload.get("cwd") != str(cleanup.session_cwd)
+        or session_payload.get("originator") != "codex-tui"
+        or session_payload.get("source") != "cli"
+        or session_payload.get("thread_source") not in {None, "user"}
+        or any(key in session_payload for key in ("forked_from_id", "parent_thread_id"))
+        or not cleanup.transcript.name.endswith(f"-{cleanup.session_id}.jsonl")
+    ):
+        raise ReceiptError("registered cleanup transcript is not one top-level Codex session")
+
+    command_bindings: list[dict[str, object]] = []
+    for position, line_number in enumerate(cleanup.command_record_lines):
+        record = selected[line_number]
+        record_payload = record.get("payload")
+        item = record_payload.get("item") if isinstance(record_payload, dict) else None
+        stdout = item.get("stdout") if isinstance(item, dict) else None
+        command = item.get("command") if isinstance(item, dict) else None
+        expected_before = (
+            cleanup.pre_cleanup_done_sha256,
+            cleanup.intermediate_done_sha256,
+        )[position]
+        expected_after = (
+            cleanup.intermediate_done_sha256,
+            cleanup.current_done_sha256,
+        )[position]
+        command_text = "\0".join(command) if isinstance(command, list) else ""
+        if (
+            record.get("type") != "event_msg"
+            or not isinstance(record_payload, dict)
+            or record_payload.get("type") != "item_completed"
+            or not isinstance(item, dict)
+            or item.get("type") != "CommandExecution"
+            or item.get("status") != "completed"
+            or item.get("exit_code") != 0
+            or item.get("stderr") != ""
+            or item.get("cwd") != f"file://{cleanup.session_cwd}"
+            or item.get("source") != "unified_exec_startup"
+            or not isinstance(stdout, str)
+            or item.get("aggregated_output") != stdout
+            or item.get("formatted_output") != stdout
+            or not isinstance(command, list)
+            or not command
+            or not all(isinstance(part, str) for part in command)
+            or hashlib.sha256(canonical_json(record)).hexdigest()
+            != cleanup.command_record_sha256[position]
+            or hashlib.sha256(stdout.encode()).hexdigest()
+            != cleanup.command_stdout_sha256[position]
+            or stdout.count(f"BEFORE_SHA={expected_before}\n") != 1
+            or stdout.count(f"EXPECTED_AFTER_SHA={expected_after}\n") != 1
+            or stdout.count(
+                "removed exact trailing body line from "
+                f"{cleanup.task_ref}:{cleanup.cleanup_line_numbers[position]}\n"
+            )
+            != 1
+            or "trailing-body-line-remove" not in command_text
+            or cleanup.task_ref not in command_text
+        ):
+            raise ReceiptError("registered cleanup command execution evidence changed")
+        command_bindings.append(
+            {
+                "line": line_number,
+                "record_sha256": cleanup.command_record_sha256[position],
+                "stdout_sha256": cleanup.command_stdout_sha256[position],
+            }
+        )
+    return {
+        "transcript": str(cleanup.transcript),
+        "transcript_prefix_sha256": cleanup.transcript_prefix_sha256,
+        "transcript_prefix_size_bytes": cleanup.transcript_prefix_size_bytes,
+        "session_id": cleanup.session_id,
+        "command_executions": command_bindings,
+    }
+
+
+def registered_root_retained_cleanup_provenance(
+    root: Path,
+    original_task: Path,
+    original_ref: str,
+    current_payload: bytes,
+    restored_running: bytes,
+    replacements: int,
+    todo_path: Path,
+    todo_payload: bytes,
+    expected_row: str,
+    previous_headers: int,
+    matching_rows: list[tuple[str, str]],
+    source_sha256: str,
+    source_size: int,
+    replay_id: str,
+    manager_target: str,
+    root_retained_evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | None,
+) -> dict[str, object] | None:
+    """Authenticate one registered post-report cleanup against Git custody."""
+
+    matches = [
+        cleanup
+        for cleanup in REGISTERED_ROOT_RETAINED_CLEANUPS
+        if cleanup.task_ref == original_ref and cleanup.replay_id == replay_id
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ReceiptError("registered root-retained cleanup provenance is ambiguous")
+    cleanup = matches[0]
+    current_sha256 = hashlib.sha256(current_payload).hexdigest()
+    reconstructed = restored_running + cleanup.removed_suffix
+    pre_cleanup_done = current_payload + cleanup.removed_suffix
+    removed_line = cleanup.removed_suffix[1:]
+    first_cleanup_result = pre_cleanup_done[: -len(removed_line)] if removed_line else b""
+    second_cleanup_result = first_cleanup_result[:-1] if first_cleanup_result.endswith(b"\n") else b""
+    snapshot = frontmatter_snapshot(current_payload)
+    if root_retained_evidence is not None:
+        raise ReceiptError("root-retained session evidence is unnecessary for a registered exact cleanup")
+    if (
+        Path(original_ref).parent != Path(".")
+        or manager_target != cleanup.manager_target
+        or source_sha256 != cleanup.committed_running_sha256
+        or source_size != cleanup.committed_running_size_bytes
+        or current_sha256 != cleanup.current_done_sha256
+        or len(current_payload) != cleanup.current_done_size_bytes
+        or hashlib.sha256(pre_cleanup_done).hexdigest() != cleanup.pre_cleanup_done_sha256
+        or not cleanup.removed_suffix.startswith(b"\n")
+        or cleanup.removed_suffix.count(b"\n") != 2
+        or not removed_line.endswith(b"\n")
+        or hashlib.sha256(first_cleanup_result).hexdigest() != cleanup.intermediate_done_sha256
+        or second_cleanup_result != current_payload
+        or replacements != 1
+        or snapshot is None
+        or snapshot[0].get("status") != "done"
+        or frontmatter_top_level_key_count(current_payload, "status") != 1
+        or len(reconstructed) != source_size
+        or hashlib.sha256(reconstructed).hexdigest() != source_sha256
+        or previous_headers != 1
+        or matching_rows != [("previous", expected_row)]
+    ):
+        raise ReceiptError("registered root-retained cleanup does not match the exact terminal task transition")
+
+    transcript_binding = registered_cleanup_transcript_binding(cleanup)
+
+    def git(*arguments: str, text: bool = False) -> bytes | str:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(root), *arguments],
+                capture_output=True,
+                timeout=30,
+                check=True,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ReceiptError("registered root-retained cleanup Git custody is unavailable") from exc
+        if text:
+            try:
+                return result.stdout.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ReceiptError("registered root-retained cleanup Git custody is invalid") from exc
+        return result.stdout
+
+    git_object_re = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+    repository = str(git("rev-parse", "--show-toplevel", text=True)).strip()
+    head_before = str(git("rev-parse", "--verify", "HEAD", text=True)).strip()
+    head_blob = str(git("rev-parse", f"HEAD:{original_ref}", text=True)).strip()
+    tracked_payload = git("cat-file", "blob", head_blob)
+    task_status = str(
+        git("status", "--porcelain=v1", "--untracked-files=all", "--", original_ref, text=True)
+    )
+    head_after = str(git("rev-parse", "--verify", "HEAD", text=True)).strip()
+    if (
+        Path(repository).resolve(strict=True) != root.resolve(strict=True)
+        or git_object_re.fullmatch(head_before) is None
+        or git_object_re.fullmatch(head_blob) is None
+        or head_after != head_before
+        or not isinstance(tracked_payload, bytes)
+        or tracked_payload != current_payload
+        or task_status
+        or regular_file_bytes(
+            original_task,
+            maximum=MAX_ROUTE_FILE_BYTES,
+            field="completed task",
+        )
+        != current_payload
+        or regular_file_bytes(todo_path, maximum=MAX_ROUTE_FILE_BYTES, field="TODO") != todo_payload
+    ):
+        raise ReceiptError("registered root-retained cleanup Git custody changed or is not clean")
+    return {
+        "schema": "omo-report-terminal-task-transition/v1",
+        "task_ref": original_ref,
+        "committed_running_sha256": source_sha256,
+        "committed_running_size_bytes": source_size,
+        "current_done_sha256": current_sha256,
+        "current_done_size_bytes": len(current_payload),
+        "todo_previous_row": expected_row,
+        "commitment_binding": {
+            "kind": "registered-exact-post-report-cleanup",
+            "replay_id": replay_id,
+            "removed_suffix_sha256": hashlib.sha256(cleanup.removed_suffix).hexdigest(),
+            "removed_suffix_size_bytes": len(cleanup.removed_suffix),
+            "head_blob": head_blob,
+            "cleanup_transcript": transcript_binding,
+        },
+    }
+
+
 def infer_archived_task_path(
     root: Path,
     original_task: Path,
@@ -7131,6 +7431,26 @@ def infer_archived_task_path(
                 "current_done_size_bytes": len(current_payload),
                 "todo_previous_row": expected_row,
             }
+        registered_cleanup = registered_root_retained_cleanup_provenance(
+            root,
+            original_task,
+            original_ref,
+            current_payload,
+            restored_running,
+            replacements,
+            todo_path,
+            todo_payload,
+            expected_row,
+            previous_headers,
+            matching_rows,
+            str(source_sha256),
+            source_size,
+            replay_id,
+            manager_target,
+            root_retained_evidence,
+        )
+        if registered_cleanup is not None:
+            return original_task, registered_cleanup
         if root_retained_evidence is not None:
             if (
                 Path(original_ref).parent != Path(".")
