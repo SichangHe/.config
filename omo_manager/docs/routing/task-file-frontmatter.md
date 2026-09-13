@@ -138,7 +138,7 @@ omo_task_status.py --root ROOT --finish-replaced-done \
 
 `omo_task_edit.py comment-add TASK.md --message TEXT` appends `TEXT` as a parenthesized task-file comment after validating the task frontmatter.
 
-`omo_task_edit.py trailing-body-line-remove TASK.md --line LINE --exact-line TEXT --expected-task-sha256 DIGEST` removes one unique final physical body line from a completed, queue-empty task. The helper requires the exact complete-file digest, verifies the line is outside frontmatter and is the last physical line, holds the task lock, preserves all metadata and every unrelated byte, and fails closed on task drift, duplicate text, live intake, or lifecycle mismatch.
+`omo_task_edit.py trailing-body-line-remove TASK.md --line LINE --exact-line TEXT --expected-task-sha256 DIGEST` removes one exact final physical body line from a completed, queue-empty task. Pass an empty `--exact-line` value for a final blank line; the digest and line number still bind that removal. The helper requires the exact complete-file digest, verifies the line is outside frontmatter and is the last physical line, holds the task lock, preserves all metadata and every unrelated byte, and fails closed on task drift, duplicate nonempty text, live intake, or lifecycle mismatch.
 
 `omo_agent_status.py` only reads from frontmatter.
 

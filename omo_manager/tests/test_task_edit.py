@@ -142,6 +142,30 @@ class TaskEditTests(unittest.TestCase):
 
         self.assertEqual(task_frontmatter(status="done").replace("\n", "\r\n") + "evidence\r\n", updated)
 
+    def test_trailing_body_line_remove_supports_digest_bound_blank_eof_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            prefix = task_frontmatter(status="done") + "completion evidence\n"
+            original = (prefix + "\n").encode()
+            task.write_bytes(original)
+
+            self.assertEqual(
+                0,
+                run(
+                    Args(
+                        root,
+                        Path("task.md"),
+                        "trailing-body-line-remove",
+                        line=len(original.splitlines()),
+                        expected_task_sha256=hashlib.sha256(original).hexdigest(),
+                        exact_line="",
+                    )
+                ),
+            )
+
+            self.assertEqual(prefix.encode(), task.read_bytes())
+
     def test_source_pointer_disposition_cleanup_removes_one_exact_registered_pointer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

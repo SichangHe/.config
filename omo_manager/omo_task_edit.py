@@ -243,7 +243,7 @@ def parse_args(argv: list[str]) -> Args:
     trailing_line_parser.set_defaults(command="trailing-body-line-remove")
     _ = trailing_line_parser.add_argument("task_file", type=Path)
     _ = trailing_line_parser.add_argument("--line", type=int, required=True, help="One-based line number of the final body line.")
-    _ = trailing_line_parser.add_argument("--exact-line", required=True, help="Exact line text, without its line ending.")
+    _ = trailing_line_parser.add_argument("--exact-line", required=True, help="Exact line text without its line ending; use an empty value for a blank line.")
     _ = trailing_line_parser.add_argument("--expected-task-sha256", required=True, help="SHA-256 of the complete task bytes before removal.")
 
     envelope_parser = subparsers.add_parser(
@@ -396,8 +396,8 @@ def parse_args(argv: list[str]) -> Args:
         if command == "trailing-body-line-remove":
             if parsed.line < 1:
                 parser.error("--line must be positive.")
-            if not parsed.exact_line or "\n" in parsed.exact_line or "\r" in parsed.exact_line:
-                parser.error("--exact-line must be one nonempty physical line without a line ending.")
+            if "\n" in parsed.exact_line or "\r" in parsed.exact_line:
+                parser.error("--exact-line must be one physical line without a line ending.")
             if re.fullmatch(r"[0-9a-f]{64}", parsed.expected_task_sha256) is None:
                 parser.error("--expected-task-sha256 must be a lowercase SHA-256 digest.")
             return Args(
@@ -993,7 +993,7 @@ def remove_exact_trailing_body_line(text: str, line_number: int, exact_line: str
 
     if physical_line(lines[-1]) != exact_line:
         raise TaskFrontmatterError("final task body line does not match --exact-line.")
-    if sum(physical_line(line) == exact_line for line in lines) != 1:
+    if exact_line and sum(physical_line(line) == exact_line for line in lines) != 1:
         raise TaskFrontmatterError("--exact-line must occur exactly once in the task.")
     updated = "".join(lines[:-1])
     if require_metadata(updated, root) != metadata:
