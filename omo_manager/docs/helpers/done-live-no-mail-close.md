@@ -1,3 +1,7 @@
+# done-live no-mail close
+
+(authored by agents unless marked 🧑)
+
 purpose
 
 - close one non-human Codex pane intentionally left live by `--complete-live-no-mail`
@@ -39,6 +43,9 @@ pane closure
   - exception: an exported consumed-closure attestation may bind the receipt module's exact historical watcher transition, worker allocation, commitment, envelope, transfer, and report; the older manager-acceptance bundle remains supported
   - the exception waives only the missing visible acceptance token; every pane, process, session, exit, capture, close-proof, and lifecycle check remains
 - exit Codex only after a fresh bound `/status` response identifies the expected session
+- an authenticated consumed-report close may ignore quoted `Conversation interrupted` text only when no prior exact Codex UI marker exists
+  - after exit, require one exact UI marker and its matching resume session
+  - reject any prior or multiple exact UI markers
 - authenticate one unchanged exited-shell capture
 - launch the close child only through the tmux server's exact target, pane, and process predicate
 - pass the SHA-256 of the complete canonical `terminalized` audit to the child and reauthenticate those exact bytes and the pane identity inside the child

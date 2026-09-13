@@ -63,6 +63,9 @@ HUMAN_REPLACE_CANDIDATE_RE = re.compile(r"(?m)^Replace the failed PCODX manager\
 UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 RESUME_RE = re.compile(rf"(?i)\bcodex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
 EXIT_RESUME_RE = re.compile(rf"(?i)\bTo\s+(?:resume|continue this session),\s+run:?\s+codex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
+# 🧑 “Implement the narrow identity- and evidence-preserving recovery for this
+# exact class while keeping unrelated ambiguous transcripts rejected.”
+EXACT_INTERRUPTION_MARKER_RE = re.compile(r"(?m)^■ Conversation interrupted(?:[ \t]|$)")
 EXIT_SELECTOR_RE = re.compile(r"(?m)^Or run codex resume and select [^\r\n]+\.$")
 EXIT_IDLE_MARKER = "⏎"
 EXIT_IDLE_CURSOR_X = 2
@@ -317,6 +320,12 @@ def capture_styled(target: str, n_lines: int) -> str:
 def extract_resume_id(text: str) -> str:
     matches = RESUME_RE.findall(text)
     return matches[-1] if matches else ""
+
+
+def exact_interruption_marker_offsets(text: str) -> tuple[int, ...]:
+    """Return offsets of actual Codex interruption UI markers."""
+
+    return tuple(match.start() + len("■ ") for match in EXACT_INTERRUPTION_MARKER_RE.finditer(text))
 
 
 def extract_exit_resume_id(before: str, after: str) -> str:
@@ -2009,6 +2018,7 @@ def _terminalize_bound_codex_to_shell(
     evidence_is_current: Callable[[], None],
     *,
     accepted_terminal_report: bool = False,
+    recover_ambiguous_interruption_text: bool = False,
     wait_s: float = 10.0,
     n_lines: int = 2000,
 ) -> ExitedCodexShell:
@@ -2061,9 +2071,14 @@ def _terminalize_bound_codex_to_shell(
     if report.status not in STOPPABLE_CODEX_STATUSES:
         raise RuntimeError(f"target is not a supported live Codex pane: {target} status={report.status}")
     marker_count = initial_capture.count("Conversation interrupted")
+    marker_at = initial_capture.rfind("Conversation interrupted")
+    if recover_ambiguous_interruption_text:
+        if exact_interruption_marker_offsets(initial_capture):
+            raise RuntimeError("bound Codex pane contains a prior exact interruption marker")
+        marker_count = 0
+        marker_at = -1
     if marker_count > 1:
         raise RuntimeError("bound Codex pane has ambiguous interruption markers")
-    marker_at = initial_capture.rfind("Conversation interrupted")
     if marker_count == 1 and EXIT_RESUME_RE.search(initial_capture[marker_at:]):
         raise RuntimeError("bound Codex pane contains a completed prior exit marker")
     evidence_region = initial_capture if marker_count == 0 else initial_capture[:marker_at]
@@ -2098,6 +2113,8 @@ def _terminalize_bound_codex_to_shell(
         evidence,
         n_lines,
         accepted_terminal_report=accepted_terminal_report,
+        recover_ambiguous_interruption_text=recover_ambiguous_interruption_text,
+        require_exact_interruption_marker=recover_ambiguous_interruption_text,
     )
     if not identity_is_current():
         raise RuntimeError("tmux pane identity changed during shell authentication")
@@ -2157,6 +2174,7 @@ def terminalize_bound_codex_to_shell_with_consumed_report(
         terminal_evidence,
         evidence_is_current,
         accepted_terminal_report=True,
+        recover_ambiguous_interruption_text=True,
         wait_s=wait_s,
         n_lines=n_lines,
     )
@@ -2171,6 +2189,8 @@ def _validate_exited_codex_shell(
     *,
     accepted_terminal_report: bool = False,
     allow_prior_interruptions: bool = False,
+    recover_ambiguous_interruption_text: bool = False,
+    require_exact_interruption_marker: bool = False,
 ) -> str:
     """Authenticate one unchanged shell pane and return its exact capture digest."""
 
@@ -2196,6 +2216,14 @@ def _validate_exited_codex_shell(
     before = capture(expected_pane_id, n_lines)
     interrupted_at = before.rfind("Conversation interrupted")
     marker_count = before.count("Conversation interrupted")
+    if require_exact_interruption_marker or (recover_ambiguous_interruption_text and marker_count > 0):
+        exact_markers = exact_interruption_marker_offsets(before)
+        if len(exact_markers) > 1:
+            raise RuntimeError("terminal report evidence is absent before the final Codex exit marker")
+        if not exact_markers:
+            raise RuntimeError("terminal transcript lacks one unambiguous exact Codex exit marker")
+        interrupted_at = exact_markers[0]
+        marker_count = 1
     marker_line_start = before.rfind("\n", 0, interrupted_at) + 1
     if marker_count > 1 and not allow_prior_interruptions:
         raise RuntimeError("terminal report evidence is absent before the final Codex exit marker")
@@ -2278,6 +2306,7 @@ def validate_exited_codex_shell_with_consumed_report(
         terminal_evidence,
         n_lines,
         accepted_terminal_report=True,
+        recover_ambiguous_interruption_text=True,
     )
 
 

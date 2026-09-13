@@ -368,6 +368,146 @@ class CodexStopTests(unittest.TestCase):
             observed = validate_exited_codex_shell_with_consumed_report("cfg:1", "%42", session_id, "specific-token")
         self.assertEqual(hashlib.sha256(transcript.encode()).hexdigest(), observed)
 
+    def test_consumed_report_shell_rejects_quoted_marker_without_exact_exit(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f"""    fixture = "Conversation interrupted"
+To continue this session, run codex resume {session_id}
+$ """
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.pane_target", return_value="cfg:1.0"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="zsh"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["$ "])),
+            patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
+            self.assertRaisesRegex(RuntimeError, "one unambiguous exact Codex exit marker"),
+        ):
+            validate_exited_codex_shell_with_consumed_report("cfg:1", "%42", session_id, "specific-token")
+
+    def test_consumed_report_terminalization_ignores_only_quoted_interruption_text(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        live_transcript = """    marker_count = capture.count("Conversation interrupted")
+    fixture = "■ Conversation interrupted - quoted test data"
+    resume = "To continue this session, run codex resume aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+› Ask Codex to do anything
+"""
+        exited_transcript = f"""{live_transcript}■ Conversation interrupted - terminal close
+To continue this session, run codex resume {session_id}
+$ """
+        evidence_checks = 0
+
+        def evidence_is_current() -> None:
+            nonlocal evidence_checks
+            evidence_checks += 1
+
+        def guarded_read(_symbolic: str, _pane: str, command: list[str], _pid: int) -> str:
+            if command[-1] == "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}":
+                return "%42\tcfg:1.0\n"
+            return "cfg:1.0\n"
+
+        def query(*args: object, **kwargs: object) -> tuple[str, str]:
+            identity_is_current = args[3]
+            pre_input_check = kwargs["pre_input_check"]
+            assert callable(identity_is_current)
+            assert callable(pre_input_check)
+            self.assertTrue(identity_is_current())
+            pre_input_check()
+            return session_id, f"Session: {session_id}"
+
+        def send_exit(_target: str, identity_is_current: object, _guard: object, _pid: int, pre_input_check: object) -> None:
+            assert callable(identity_is_current)
+            assert callable(pre_input_check)
+            self.assertTrue(identity_is_current())
+            pre_input_check()
+
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=999),
+            patch("omo_manager.omo_codex_stop.bound_guarded_read", side_effect=guarded_read),
+            patch("omo_manager.omo_codex_stop.guarded_capture", return_value=live_transcript),
+            patch("omo_manager.omo_codex_stop.report_from_lines", return_value=Report("ready", [])),
+            patch("omo_manager.omo_codex_stop.query_status_session_id", side_effect=query) as status_query,
+            patch("omo_manager.omo_codex_stop.send_exit_keys", side_effect=send_exit) as interrupt,
+            patch("omo_manager.omo_codex_stop.wait_shell", return_value=True),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["$ "])),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="zsh"),
+            patch("omo_manager.omo_codex_stop.capture", return_value=exited_transcript),
+        ):
+            result = codex_stop.terminalize_bound_codex_to_shell_with_consumed_report(
+                "cfg:1",
+                "%42",
+                4242,
+                999,
+                session_id,
+                "specific-token",
+                evidence_is_current,
+                wait_s=0.0,
+            )
+
+        self.assertEqual(session_id, result.session_id)
+        self.assertEqual(hashlib.sha256(exited_transcript.encode()).hexdigest(), result.capture_sha256)
+        status_query.assert_called_once()
+        interrupt.assert_called_once()
+        self.assertGreaterEqual(evidence_checks, 4)
+
+    def test_visible_report_terminalization_still_rejects_quoted_interruption_text(self) -> None:
+        transcript = """    marker_count = capture.count("Conversation interrupted")
+    fixture = "■ Conversation interrupted - quoted test data"
+› ready
+"""
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=999),
+            patch("omo_manager.omo_codex_stop.bound_guarded_read", return_value="cfg:1.0\n"),
+            patch("omo_manager.omo_codex_stop.guarded_capture", return_value=transcript),
+            patch("omo_manager.omo_codex_stop.report_from_lines", return_value=Report("ready", [])),
+            patch("omo_manager.omo_codex_stop.query_status_session_id") as status_query,
+            patch("omo_manager.omo_codex_stop.send_exit_keys") as interrupt,
+            self.assertRaisesRegex(RuntimeError, "ambiguous interruption markers"),
+        ):
+            codex_stop.terminalize_bound_codex_to_shell(
+                "cfg:1",
+                "%42",
+                4242,
+                999,
+                "11111111-2222-3333-4444-555555555555",
+                "specific-token",
+                lambda: None,
+                wait_s=0.0,
+            )
+        status_query.assert_not_called()
+        interrupt.assert_not_called()
+
+    def test_consumed_report_terminalization_rejects_one_prior_exact_interruption_marker(self) -> None:
+        transcript = """■ Conversation interrupted - prior
+› ready
+"""
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=999),
+            patch("omo_manager.omo_codex_stop.bound_guarded_read", return_value="cfg:1.0\n"),
+            patch("omo_manager.omo_codex_stop.guarded_capture", return_value=transcript),
+            patch("omo_manager.omo_codex_stop.report_from_lines", return_value=Report("ready", [])),
+            patch("omo_manager.omo_codex_stop.query_status_session_id") as status_query,
+            patch("omo_manager.omo_codex_stop.send_exit_keys") as interrupt,
+            self.assertRaisesRegex(RuntimeError, "a prior exact interruption marker"),
+        ):
+            codex_stop.terminalize_bound_codex_to_shell_with_consumed_report(
+                "cfg:1",
+                "%42",
+                4242,
+                999,
+                "11111111-2222-3333-4444-555555555555",
+                "specific-token",
+                lambda: None,
+                wait_s=0.0,
+            )
+        status_query.assert_not_called()
+        interrupt.assert_not_called()
+
     def test_interrupted_completion_shell_uses_only_the_exact_final_exit(self) -> None:
         session_id = "11111111-2222-3333-4444-555555555555"
         transcript = f"""■ Conversation interrupted - earlier abort
