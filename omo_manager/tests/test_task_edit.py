@@ -17,6 +17,8 @@ from omo_manager.omo_task_edit import SOURCE1503_SHA256
 from omo_manager.omo_task_edit import SOURCE1506_SHA256
 from omo_manager.omo_task_edit import SOURCE1528_DISPOSITION_RECORDS
 from omo_manager.omo_task_edit import SOURCE1528_SHA256
+from omo_manager.omo_task_edit import SOURCE1788_DISPOSITION_RECORD
+from omo_manager.omo_task_edit import SOURCE1788_SHA256
 from omo_manager.omo_task_edit import Args
 from omo_manager.omo_task_edit import normalize_duplicate_frontmatter
 from omo_manager.omo_task_edit import parse_args
@@ -54,6 +56,7 @@ class TaskEditTests(unittest.TestCase):
         b"> agent should receive Calvin Ardi\xe2\x80\x99s earlier invite request? No agent will\r\n"
         b"> edit the event without that ownership or explicit authorization.\r\n>\r\n"
     )
+    SOURCE1788_BYTES = "Subject: Re: Mailbox limit blocked — mail_cleanup_t.md\n\nStale\r\n".encode()
 
     def source1528_fixture(self, root: Path, *, pointer_count: int = 1, dispositions: tuple[str, ...] = SOURCE1528_DISPOSITION_RECORDS) -> tuple[Path, str]:
         mail = root / "manager_mail"
@@ -67,6 +70,22 @@ class TaskEditTests(unittest.TestCase):
         text = header + pointers + "\n".join(dispositions) + "\n"
         task.write_text(text, encoding="utf-8")
         return task, text
+
+    def source1788_fixture(self, root: Path, *, disposition: str = SOURCE1788_DISPOSITION_RECORD) -> tuple[Path, str, Path, str]:
+        mail = root / "manager_mail"
+        mail.mkdir(mode=0o700)
+        source = mail / "85c5dff58359-1788.txt"
+        source.write_bytes(self.SOURCE1788_BYTES)
+        source.chmod(0o600)
+        task = root / "pb_news_mgr.md"
+        header = task_frontmatter(status="long_running", is_manager=True).replace("runat: wl:2", "runat: pb:1")
+        text = header + "preserved body\n\n(record and delegate manager_mail/85c5dff58359-1788.txt)\n"
+        task.write_text(text, encoding="utf-8")
+        disposition_task = root / "mail_cleanup_t.md"
+        disposition_header = task_frontmatter(status="done").replace("runat: wl:2", "runat: wl:119").replace("managerat: wl:1", "managerat: pb:1")
+        disposition_text = disposition_header + disposition + "\n"
+        disposition_task.write_text(disposition_text, encoding="utf-8")
+        return task, text, disposition_task, disposition_text
 
     def test_trailing_body_line_remove_preserves_every_other_byte(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -239,6 +258,74 @@ class TaskEditTests(unittest.TestCase):
             with self.subTest(flag=flag), self.assertRaises(SystemExit):
                 index = common.index(flag)
                 parse_args(common[:index] + common[index + 2 :])
+
+    def test_source1788_pointer_cleanup_removes_only_the_registered_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, _, disposition_text = self.source1788_fixture(root)
+            args = Args(
+                root,
+                Path("pb_news_mgr.md"),
+                "source-pointer-disposition-cleanup",
+                source_ref="manager_mail/85c5dff58359-1788.txt",
+                expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                expected_source_sha256=SOURCE1788_SHA256,
+                expected_disposition_task_sha256=hashlib.sha256(disposition_text.encode()).hexdigest(),
+            )
+
+            self.assertEqual(0, run(args))
+
+            self.assertEqual(text.replace("(record and delegate manager_mail/85c5dff58359-1788.txt)\n", ""), task.read_text(encoding="utf-8"))
+
+    def test_source1788_pointer_cleanup_requires_exact_external_disposition(self) -> None:
+        for case in (
+            "missing digest",
+            "wrong digest",
+            "missing record",
+            "open disposition task",
+            "wrong disposition target",
+            "wrong disposition manager",
+            "manager disposition task",
+        ):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, disposition_task, disposition_text = self.source1788_fixture(root, disposition="other record" if case == "missing record" else SOURCE1788_DISPOSITION_RECORD)
+                if case == "open disposition task":
+                    disposition_text = disposition_text.replace("status: done", "status: running")
+                    disposition_task.write_text(disposition_text, encoding="utf-8")
+                if case == "wrong disposition target":
+                    disposition_text = disposition_text.replace("runat: wl:119", "runat: wl:120")
+                    disposition_task.write_text(disposition_text, encoding="utf-8")
+                if case == "wrong disposition manager":
+                    disposition_text = disposition_text.replace("managerat: pb:1", "managerat: pb:2")
+                    disposition_task.write_text(disposition_text, encoding="utf-8")
+                if case == "manager disposition task":
+                    disposition_text = disposition_text.replace("is_manager: false", "is_manager: true")
+                    disposition_task.write_text(disposition_text, encoding="utf-8")
+                disposition_sha256 = hashlib.sha256(disposition_text.encode()).hexdigest()
+                args = Args(
+                    root,
+                    Path("pb_news_mgr.md"),
+                    "source-pointer-disposition-cleanup",
+                    source_ref="manager_mail/85c5dff58359-1788.txt",
+                    expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                    expected_source_sha256=SOURCE1788_SHA256,
+                    expected_disposition_task_sha256=("" if case == "missing digest" else "0" * 64 if case == "wrong digest" else disposition_sha256),
+                )
+                stderr = io.StringIO()
+                with redirect_stderr(stderr):
+                    self.assertEqual(2, run(args))
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+
+    def test_source1788_pointer_cleanup_parser_validates_disposition_digest(self) -> None:
+        common = [
+            "--root", "/tmp/work_logs", "source-pointer-disposition-cleanup", "pb_news_mgr.md",
+            "--source-ref", "manager_mail/85c5dff58359-1788.txt", "--expected-task-sha256", "a" * 64,
+            "--expected-source-sha256", SOURCE1788_SHA256, "--expected-disposition-task-sha256", "b" * 64,
+        ]
+        self.assertEqual("b" * 64, parse_args(common).expected_disposition_task_sha256)
+        with self.assertRaises(SystemExit):
+            parse_args(common[:-1] + ["invalid"])
 
     def test_human_envelope_record_binds_exact_source_and_active_closure_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
