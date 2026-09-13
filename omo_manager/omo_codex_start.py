@@ -402,7 +402,15 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--expected-pending-item", action="append", default=[], help="Exact pending item in order; repeat for the full preserved queue with --rotate-worker.")
     _ = parser.add_argument("--protected-target", action="append", default=[], help="Target that this rotation must not touch; repeat the authoritative protected set with --rotate-worker.")
     _ = parser.add_argument("--audit-output", type=Path, help="New owner-private audit file; required with --rotate-worker.")
-    _ = parser.add_argument("--replacement-email-file", type=Path, help="Stored lifecycle-command email whose exact post-command text is appended to the replacement worker prompt.")
+    # 🧑 "The helper should not require an email. Managers should be free to replace agents."
+    _ = parser.add_argument(
+        "--replacement-email-file",
+        type=Path,
+        help=(
+            "Optional stored Human lifecycle-command email whose exact post-command text is appended to the replacement worker prompt. "
+            "Omit this option for a manager-authorized rotation."
+        ),
+    )
     _ = parser.add_argument(
         "--assert-legacy-missing-session-id",
         action="store_true",

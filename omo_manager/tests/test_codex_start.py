@@ -81,6 +81,7 @@ from omo_manager.omo_codex_start import (
     wait_resume_cwd_recovery,
 )
 from omo_manager.omo_manager_rotation_contain import ContainmentError, ProcessIdentity
+from omo_manager.omo_manager_rotate import RotationError
 from omo_manager.omo_codex_status import Report
 from omo_manager.omo_pending_watch import record_terminal_delivery_failure, terminal_delivery_failure
 from omo_manager.omo_pending_watch import PrePasteRejected, try_send_delivery_text
@@ -144,7 +145,19 @@ class CodexStartTests(unittest.TestCase):
         values.update(changes)
         return self.args(root, **values)
 
-    def test_worker_rotation_prompt_includes_exact_post_command_email_text(self) -> None:
+    def test_manager_authorized_worker_rotation_needs_no_email_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "worker.md"
+            task.write_text("worker task\n", encoding="utf-8")
+            args = self.args(root, session_id="", prompt_file=task, rotate_worker=True)
+
+            text = prompt_text(args, "$ /test/getagentsmd\nagent instructions")
+
+            self.assertEqual("$ /test/getagentsmd\nagent instructions\n\nworker task\n", text)
+            self.assertNotIn("<replacement_reason>", text)
+
+    def test_optional_replacement_email_preserves_exact_context_and_strict_parser(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task = root / "worker.md"
@@ -157,6 +170,10 @@ class CodexStartTests(unittest.TestCase):
             text = prompt_text(args, "$ /test/getagentsmd\nagent instructions")
 
             self.assertIn("<replacement_reason>.\r\nExact reason\r\n-- Human</replacement_reason>", text)
+
+            mail.write_bytes(b"Subject: Re: [cfg:2] work\n\nFor a manager, replace the worker")
+            with self.assertRaisesRegex(RotationError, "does not start with the exact replacement command"):
+                prompt_text(args, "$ /test/getagentsmd\nagent instructions")
 
     def legacy_rotation_args(self, root: Path, **changes: object) -> Args:
         values: dict[str, object] = {
