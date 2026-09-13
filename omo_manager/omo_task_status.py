@@ -83,6 +83,7 @@ from omo_manager.omo_report_receipt import ReceiptError
 from omo_manager.omo_report_receipt import validate_consumed_closure_export_file
 
 PENDING_MARKER = "(pending)"
+WORKING_STATUSES = {"running", "long_running"}
 DONE_REMINDER = "Status set to done."
 BOOKKEEPING_FAILED_PREFIX = "done_close_bookkeeping_failed"
 CLOSE_FAILED_PREFIX = "done_close_failed"
@@ -4767,8 +4768,8 @@ def cancel_shared_target_done(args: Args, path: Path, text: str, before: os.stat
     return args.shared_target
 
 
-def reconcile_running_index(root: Path, path: Path, text: str, before: os.stat_result) -> None:
-    """Move an already-running task's sole inactive TODO row into `current`."""
+def reconcile_working_index(root: Path, path: Path, text: str, before: os.stat_result) -> None:
+    """Move an already-working task's sole inactive TODO row into `current`."""
     todo = root / "TODO.md"
     if not todo.is_file():
         raise TaskFrontmatterError("TODO.md is not a regular file.")
@@ -4778,8 +4779,8 @@ def reconcile_running_index(root: Path, path: Path, text: str, before: os.stat_r
         current_before = path.stat()
         current_text = path.read_text(encoding="utf-8")
         current_metadata = parse_task_metadata(current_text, root)
-        if not same_file_state(before, current_before) or current_text != text or current_metadata is None or current_metadata.status != "running":
-            raise TaskFrontmatterError("task changed while running index reconciliation was being prepared; retry after rereading it.")
+        if not same_file_state(before, current_before) or current_text != text or current_metadata is None or current_metadata.status not in WORKING_STATUSES:
+            raise TaskFrontmatterError("task changed while working index reconciliation was being prepared; retry after rereading it.")
         todo_before = todo.stat()
         todo_text = todo.read_text(encoding="utf-8")
         updated_todo = reconcile_running_todo_text(root, path, todo_text, current_metadata.runat)
@@ -4787,16 +4788,22 @@ def reconcile_running_index(root: Path, path: Path, text: str, before: os.stat_r
             replace_if_unchanged_locked(todo, updated_todo, todo_before)
 
 
-def transition_running_index(root: Path, path: Path, text: str, updated: str, before: os.stat_result) -> None:
-    """Move one inactive TODO row before committing the task's `running` status."""
+def transition_working_index(root: Path, path: Path, text: str, updated: str, before: os.stat_result) -> None:
+    """Move one inactive TODO row before committing a working status."""
 
     todo = root / "TODO.md"
     if not todo.is_file():
         raise TaskFrontmatterError("TODO.md is not a regular file.")
     metadata = parse_task_metadata(text, root)
     updated_metadata = parse_task_metadata(updated, root)
-    if metadata is None or updated_metadata is None or metadata.status == "running" or updated_metadata.status != "running" or metadata.runat != updated_metadata.runat:
-        raise TaskFrontmatterError("running transition requires one unchanged non-running task and run target.")
+    if (
+        metadata is None
+        or updated_metadata is None
+        or metadata.status == updated_metadata.status
+        or updated_metadata.status not in WORKING_STATUSES
+        or metadata.runat != updated_metadata.runat
+    ):
+        raise TaskFrontmatterError("working transition requires one unchanged task, a new working status, and the same run target.")
     with task_target_lock(root, metadata.runat):
         with ExitStack() as locks:
             for locked_path in sorted({path, todo}, key=lambda candidate: str(candidate)):
@@ -6973,11 +6980,12 @@ def run(args: Args) -> int:
                 updated_metadata = parse_task_metadata(updated, args.root)
                 if args.status == "blocked" and initial_metadata is not None and initial_metadata.status == "blocked" and updated_metadata is not None and updated_metadata.status == "blocked":
                     reconcile_blocked_index(args.root, path, text, updated, before)
-                elif args.status == "running" and updated_metadata is not None and updated_metadata.status == "running":
-                    if initial_metadata is not None and initial_metadata.status == "running":
-                        reconcile_running_index(args.root, path, text, before)
+                # 🧑 "You have current tasks in \"previous\" in TODO.md ... Act to prevent that in the future"
+                elif args.status in WORKING_STATUSES and updated_metadata is not None and updated_metadata.status == args.status:
+                    if initial_metadata is not None and initial_metadata.status == args.status:
+                        reconcile_working_index(args.root, path, text, before)
                     else:
-                        transition_running_index(args.root, path, text, updated, before)
+                        transition_working_index(args.root, path, text, updated, before)
                 else:
                     replace_if_unchanged(path, updated, before)
             elif close_args is not None:

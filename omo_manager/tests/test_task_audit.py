@@ -51,6 +51,28 @@ class TaskAuditTests(unittest.TestCase):
                 self.assertEqual(0, main())
             self.assertEqual("", output.getvalue())
 
+    def test_bare_command_rejects_new_active_task_in_previous(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\n\nprevious:\na.md wl:2\n")
+            task_path = root / "a.md"
+            task_path.write_text(task("done", "wl:2"))
+            for command in (
+                ["git", "init", "-q"],
+                ["git", "config", "user.name", "Audit Test"],
+                ["git", "config", "user.email", "audit@example.test"],
+                ["git", "add", "TODO.md", "a.md"],
+                ["git", "commit", "-qm", "baseline"],
+            ):
+                subprocess.run(command, cwd=root, check=True)
+            task_path.write_text(task("long_running", "wl:2"))
+            output = StringIO()
+
+            with patch("omo_manager.omo_task_audit.DEFAULT_ROOT", root), patch("sys.argv", ["omo_task_audit.py"]), redirect_stdout(output):
+                self.assertEqual(1, main())
+
+            self.assertIn("active_in_previous", output.getvalue())
+
     def test_root_defaults_to_configured_work_logs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -210,6 +232,29 @@ blocked_on:
                 Finding("done_pending_items", "a.md", ("a.md",), "items=1", "owner_reconciliation"),
                 findings,
             )
+
+    def test_active_task_in_previous_requires_reconciliation(self) -> None:
+        for status in ("running", "long_running"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "TODO.md").write_text("current:\n\nprevious:\na.md wl:2\n")
+                (root / "a.md").write_text(task(status, "wl:2"))
+
+                findings = audit(root)
+
+                self.assertIn(
+                    Finding("active_in_previous", "a.md", ("a.md",), f"status={status} rows=1", "owner_reconciliation"),
+                    findings,
+                )
+
+    def test_terminal_task_in_previous_is_not_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\n\nprevious:\ndone.md wl:2\nblocked.md wl:3\n")
+            (root / "done.md").write_text(task("done", "wl:2"))
+            (root / "blocked.md").write_text(task("blocked", "wl:3", "human"))
+
+            self.assertNotIn("active_in_previous", {finding.kind for finding in audit(root)})
 
     def test_monthly_index_makes_line_only_archives_historical(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

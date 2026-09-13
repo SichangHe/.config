@@ -29,6 +29,7 @@ from omo_manager.omo_task_metadata import RETIRED_RUNAT, TaskBlocker, TaskFrontm
 TERMINAL_DISPOSITION_VERSION = "v1.0.0"
 TERMINAL_DISPOSITIONS = {"supported_closure", "owner_disposition_required", "archived_dependency"}
 ARCHIVE_MONTH_RE = re.compile(r"^20[0-9]{2}(?:0[1-9]|1[0-2])$")
+ACTIVE_STATUSES = {"running", "long_running"}
 TerminalDispositionMap: TypeAlias = dict[str, str]
 FileSnapshot: TypeAlias = tuple[int, int, int, int, bytes]
 
@@ -231,6 +232,18 @@ def audit(root: Path, *, include_terminal: bool = False, terminal_dispositions: 
                     "owner_reconciliation",
                 )
             )
+        previous_rows = sum(section == "todo:previous" for section, _target in rows)
+        # 🧑 "You have current tasks in \"previous\" in TODO.md ... Act to prevent that in the future"
+        if metadata.status in ACTIVE_STATUSES and previous_rows:
+            findings.append(
+                Finding(
+                    "active_in_previous",
+                    relative,
+                    (relative,),
+                    f"status={metadata.status} rows={previous_rows}",
+                    "owner_reconciliation",
+                )
+            )
         if len(rows) > 1:
             sections = ",".join(sorted(section for section, _target in rows))
             findings.append(Finding("duplicate_todo", relative, (relative,), f"rows={len(rows)} sections={sections}", "owner_reconciliation"))
@@ -272,7 +285,9 @@ def audit(root: Path, *, include_terminal: bool = False, terminal_dispositions: 
                 )
             )
         live_indexed = any(section in {"todo:current", "todo:human pending", "todo:low priority"} for section, _target in rows)
-        if metadata.status != "done" and metadata.runat != RETIRED_RUNAT and (live_indexed or (not rows and not archived)):
+        if metadata.status != "done" and metadata.runat != RETIRED_RUNAT and (
+            live_indexed or (metadata.status in ACTIVE_STATUSES and previous_rows) or (not rows and not archived)
+        ):
             active_targets[canonical_target(metadata.runat)].append(path)
 
     if terminal_tasks and not include_terminal:

@@ -48,7 +48,7 @@ from omo_manager.omo_task_status import parse_args
 from omo_manager.omo_task_status import reconcile_blocked_index
 from omo_manager.omo_task_status import reconcile_dependency_blocked_current
 from omo_manager.omo_task_status import reconcile_done_index
-from omo_manager.omo_task_status import reconcile_running_index
+from omo_manager.omo_task_status import reconcile_working_index
 from omo_manager.omo_task_status import reconcile_long_running_human_index
 from omo_manager.omo_task_status import reconcile_missing_target
 from omo_manager.omo_task_status import read_park_authority_envelope
@@ -6304,6 +6304,36 @@ resolved_task_items: []
             self.assertEqual("current:\ntask.md wl:2\nother.md wl:2\n\nprevious:\n", todo.read_text(encoding="utf-8"))
             stop_done_agent.assert_not_called()
 
+    def test_cli_long_running_transition_moves_previous_row_to_current(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text(task_frontmatter(status="blocked", blocked_on="waiting") + "body\n", encoding="utf-8")
+            todo = root / "TODO.md"
+            todo.write_text("current:\nother.md wl:2\n\nprevious:\ntask.md wl:2\n", encoding="utf-8")
+
+            with patch("omo_manager.omo_task_status.stop_done_agent") as stop_done_agent, redirect_stdout(io.StringIO()):
+                self.assertEqual(0, run(StatusArgs(root, Path("task.md"), "long_running", "")))
+
+            self.assertIn("status: long_running", path.read_text(encoding="utf-8"))
+            self.assertEqual("current:\ntask.md wl:2\nother.md wl:2\n\nprevious:\n", todo.read_text(encoding="utf-8"))
+            stop_done_agent.assert_not_called()
+
+    def test_cli_long_running_repairs_previous_row_without_task_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            original = task_frontmatter(status="long_running") + "body\n"
+            path.write_text(original, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo.write_text("current:\nother.md wl:3\n\nprevious:\ntask.md wl:2\n", encoding="utf-8")
+
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(0, run(StatusArgs(root, Path("task.md"), "long_running", "")))
+
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+            self.assertEqual("current:\ntask.md wl:2\nother.md wl:3\n\nprevious:\n", todo.read_text(encoding="utf-8"))
+
     def test_running_index_reconciliation_rechecks_the_task_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -6316,8 +6346,8 @@ resolved_task_items: []
             todo.write_text(todo_text, encoding="utf-8")
             path.write_text(task_frontmatter(status="blocked", blocked_on="waiting") + "body\n", encoding="utf-8")
 
-            with self.assertRaisesRegex(TaskFrontmatterError, "task changed while running index reconciliation"):
-                reconcile_running_index(root, path, original_task, before)
+            with self.assertRaisesRegex(TaskFrontmatterError, "task changed while working index reconciliation"):
+                reconcile_working_index(root, path, original_task, before)
 
             self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
 
@@ -6328,7 +6358,7 @@ resolved_task_items: []
             todo.write_text(task_frontmatter() + "current:\n\nprevious:\nTODO.md wl:2\n", encoding="utf-8")
             text = todo.read_text(encoding="utf-8")
 
-            reconcile_running_index(root, todo, text, todo.stat())
+            reconcile_working_index(root, todo, text, todo.stat())
 
             self.assertIn("current:\n\nTODO.md wl:2\n", todo.read_text(encoding="utf-8"))
 
