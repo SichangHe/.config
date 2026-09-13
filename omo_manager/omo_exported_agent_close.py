@@ -210,7 +210,7 @@ def closed_todo(root: Path, task: Path, text: str, mode: str, target: str) -> st
             if mode == "absent-manager-current"
             else {"current"}
             if mode == "live-manager-exported-park"
-            else {"current", "human pending"}
+            else {"current", "human pending", "previous"}
             if mode == "shared-live-worker"
             else {"current"}
         )
@@ -219,6 +219,10 @@ def closed_todo(root: Path, task: Path, text: str, mode: str, target: str) -> st
         index, _ = rows[0]
         if lines[index].strip() != f"{ref} {target}":
             raise TaskFrontmatterError("closure requires one canonical targetful TODO row.")
+        if mode == "shared-live-worker" and rows[0][1] == "previous":
+            line_ending = lines[index][len(lines[index].rstrip("\r\n")) :]
+            lines[index] = ref + line_ending
+            return "".join(lines)
         lines.pop(index)
     destination = "low priority" if mode == "live-manager-exported-park" else "previous"
     destination_index = next(index for index, line in enumerate(lines) if line.rstrip("\r\n") == f"{destination}:")
@@ -536,8 +540,16 @@ def prepare(ns: argparse.Namespace) -> None:
         authority_relative = ns.authority.resolve(strict=True).relative_to(root)
     except ValueError as exc:
         raise TaskFrontmatterError("task and authority must stay inside the task root.") from exc
-    if len(authority_relative.parts) != 2 or authority_relative.parts[0] != "manager_mail":
-        raise TaskFrontmatterError("authority must be one direct manager_mail file.")
+    authority_parts = authority_relative.parts
+    direct_authority = len(authority_parts) == 2 and authority_parts[0] == "manager_mail"
+    # 🧑 "Keep work_logs clean and committed ... Close this BS and make it go away"
+    archived_authority = (
+        len(authority_parts) == 3
+        and re.fullmatch(r"[0-9]{4}(?:0[1-9]|1[0-2])", authority_parts[0]) is not None
+        and authority_parts[1] == "manager_mail"
+    )
+    if not (direct_authority or archived_authority):
+        raise TaskFrontmatterError("authority must be one direct or YYYYMM-archived manager_mail file.")
     todo = root / "TODO.md"
     envelope = (root / ns.authority_envelope).resolve(strict=True)
     lock_paths = {task, todo, ns.export.resolve(strict=True), ns.authority.resolve(strict=True), envelope}

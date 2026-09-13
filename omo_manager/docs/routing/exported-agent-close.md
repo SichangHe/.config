@@ -6,7 +6,7 @@
   - absent `long_running` manager indexed in `current`
   - absent `long_running` manager indexed in `previous`
   - absent blocked worker with no TODO row
-  - blocked worker indexed in `current` or `human pending`, sharing a live target with one exact protected sibling
+  - blocked worker indexed in `current`, `human pending`, or `previous`, sharing a live target with one exact protected sibling
   - blocked manager sharing an absent target name with one exact protected active sibling
   - blocked queue-empty live manager whose exact bound children are all terminal
     - requires an independent authenticated recovery record, its exact failed asynchronous sender metadata/status, and a freshly unchanged fatal-error state
@@ -14,7 +14,8 @@
     - authenticates the exact Source-1402 document-all-work and close-all-agents instruction
     - gracefully closes only the bound pane and parks the unchanged queue as blocked, targetless low-priority custody
 - prepare
-  - binds exact task, TODO, export, Human-authority envelope, target, queue, sibling, pane, file, and ancestor state
+  - binds exact task, TODO, export, direct or `YYYYMM`-archived Human-authority mail, Human-authority envelope, target, queue, sibling, pane, file, and ancestor state
+  - accepts a pre-archive source locator only from an envelope co-archived in the authority's exact month; the locator is historical metadata, while the explicitly selected archived mail remains the only authority file read and bound
   - binds the live-manager stop evidence and terminal sender files
   - writes one owner-private immutable packet without changing lifecycle state
   - never signals a live manager during preparation or review

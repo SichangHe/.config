@@ -131,6 +131,47 @@ class ExportedAgentCloseTests(unittest.TestCase):
             packet=self.packet,
         )
 
+    def test_prepare_accepts_archived_human_authority(self) -> None:
+        args = self.write_case("absent-worker-unindexed")
+        archived_dir = self.root / "202608" / "manager_mail"
+        archived_dir.mkdir(parents=True, mode=0o700)
+        archived_dir.parent.chmod(0o700)
+        archived = archived_dir / self.authority.name
+        archived.write_bytes(self.authority.read_bytes())
+        archived.chmod(0o600)
+        archived_envelope = archived_dir.parent / self.envelope.name
+        archived_envelope.write_text(
+            '<human_instruction authoritative="true" source="manager_mail/source1398.txt:1-1">\n'
+            f"{archived.read_text()}</human_instruction>\n"
+        )
+        args.authority = archived
+        args.authority_sha256 = digest(archived.read_text())
+        args.authority_envelope = archived_envelope.relative_to(self.root)
+        args.authority_envelope_sha256 = digest(archived_envelope.read_text())
+
+        prepare(args)
+
+        self.assertTrue(self.packet.is_file())
+
+    def test_prepare_rejects_unarchived_envelope_for_archived_authority(self) -> None:
+        args = self.write_case("absent-worker-unindexed")
+        archived_dir = self.root / "202608" / "manager_mail"
+        archived_dir.mkdir(parents=True, mode=0o700)
+        archived_dir.parent.chmod(0o700)
+        archived = archived_dir / self.authority.name
+        archived.write_bytes(self.authority.read_bytes())
+        archived.chmod(0o600)
+        self.envelope.write_text(
+            '<human_instruction authoritative="true" source="manager_mail/source1398.txt:1-1">\n'
+            f"{archived.read_text()}</human_instruction>\n"
+        )
+        args.authority = archived
+        args.authority_sha256 = digest(archived.read_text())
+        args.authority_envelope_sha256 = digest(self.envelope.read_text())
+
+        with self.assertRaisesRegex(TaskFrontmatterError, "authority envelope"):
+            prepare(args)
+
     def write_live_manager_case(self) -> Namespace:
         args = self.write_case("live-manager-terminal-children", target="live:1", queue=())
         task = self.root / "task.md"
@@ -422,6 +463,26 @@ class ExportedAgentCloseTests(unittest.TestCase):
         owners.return_value = (self.root / "task.md", sibling)
         prepare(args)
         self.assertTrue(self.packet.is_file())
+
+    @patch("omo_manager.omo_exported_agent_close.authoritative_active_target_task_paths")
+    @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="%9")
+    def test_prepare_shared_live_accepts_previous_row(self, _pane: object, owners: object) -> None:
+        args = self.write_case("shared-live-worker", target="shared:1")
+        todo = (self.root / "TODO.md").read_text().replace("current:\ntask.md shared:1", "current:").replace("previous:\n", "previous:\nolder.md old:1\ntask.md shared:1\noldest.md old:2\n")
+        (self.root / "TODO.md").write_text(todo)
+        args.todo_sha256 = digest(todo)
+        sibling = self.root / "sibling.md"
+        sibling.write_text(task_text("running", "shared:1", "mgr:1", False, ("preserve",)))
+        args.protected_task = Path("sibling.md")
+        args.protected_sha256 = digest(sibling.read_text())
+        args.pane_id = "%9"
+        owners.return_value = (self.root / "task.md", sibling)
+
+        prepare(args)
+
+        packet = json.loads(self.packet.read_text())
+        after = base64.b64decode(packet["todo_after_base64"]).decode()
+        self.assertEqual(todo.replace("task.md shared:1", "task.md"), after)
 
     @patch("omo_manager.omo_exported_agent_close.authoritative_active_target_task_paths")
     @patch("omo_manager.omo_exported_agent_close.park_target_pane_id", return_value="")

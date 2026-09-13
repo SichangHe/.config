@@ -2951,6 +2951,19 @@ def read_park_authority_envelope(args: Args, excerpt: str, locator: str) -> str:
     matches = AUTHORITATIVE_HUMAN_ENVELOPE_RE.findall(envelope)
     normalized_matches = [(match_locator, match_excerpt.replace("\r\n", "\n")) for match_locator, match_excerpt in matches]
     expected_match = (locator, excerpt.replace("\r\n", "\n"))
+    authority_ref, separator, line_range = locator.rpartition(":")
+    archived_parts = Path(authority_ref).parts
+    # 🧑 "Keep work_logs clean and committed"
+    historical_archive_match = (
+        len(archived_parts) == 3
+        and separator == ":"
+        and re.fullmatch(r"[0-9]{4}(?:0[1-9]|1[0-2])", archived_parts[0]) is not None
+        and archived_parts[1] == "manager_mail"
+        and len(relative.parts) >= 2
+        and relative.parts[0] == archived_parts[0]
+        and normalized_matches
+        == [(f"{archived_parts[1]}/{archived_parts[2]}:{line_range}", expected_match[1])]
+    )
     source1503_matches = (
         relative == Path("dw_rotate_exec.md")
         and locator == SOURCE1503_DWPLAN_AUTHORITY
@@ -2965,7 +2978,7 @@ def read_park_authority_envelope(args: Args, excerpt: str, locator: str) -> str:
         and tuple(match_locator for match_locator, _match_excerpt in normalized_matches[:2]) == SOURCE1506_ENVELOPE_LOCATORS
         and normalized_matches[2] == expected_match
     )
-    if normalized_matches != [expected_match] and not source1503_matches and not source1506_matches:
+    if normalized_matches != [expected_match] and not historical_archive_match and not source1503_matches and not source1506_matches:
         raise TaskFrontmatterError("park-unlinked authority envelope must contain exactly the selected authoritative human text.")
     return relative.as_posix()
 
