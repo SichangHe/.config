@@ -26,6 +26,7 @@ from omo_manager.omo_task_status import ACTIVE_TASK_TREE_BLOCKER
 from omo_manager.omo_task_status import ACTIVE_TASK_TREE_NO_MAIL_INTENT
 from omo_manager.omo_task_status import DONE_REMINDER
 from omo_manager.omo_task_status import DONE_CLOSE_IN_PROGRESS
+from omo_manager.omo_task_status import DONE_LIVE_EXITED_SHELL_BLOCKER
 from omo_manager.omo_task_status import DoneLiveCloseAudit
 from omo_manager.omo_task_status import active_task_tree_todo_replacement
 from omo_manager.omo_task_status import ensure_repository_closure_custody
@@ -7532,6 +7533,51 @@ omo_task_status.py: responsible-owner completion email requested; retry after ow
                 else:
                     close.assert_not_called()
                     self.assertEqual(blocked, path.read_text(encoding="utf-8"))
+                    self.assertEqual(todo_original, todo.read_text(encoding="utf-8"))
+
+    def test_cli_recovers_only_exact_done_live_post_interrupt_state(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        for blocker, recorded_session, expected_code in (
+            (DONE_LIVE_EXITED_SHELL_BLOCKER, session_id, 0),
+            (DONE_LIVE_EXITED_SHELL_BLOCKER, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", 2),
+            (f"{DONE_LIVE_EXITED_SHELL_BLOCKER}.", session_id, 2),
+        ):
+            with self.subTest(blocker=blocker, recorded_session=recorded_session), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / "task.md"
+                original = f"""{task_frontmatter(status="blocked", blocked_on=blocker, runat="cfg:1", session_id=recorded_session)}body
+"""
+                path.write_text(original, encoding="utf-8")
+                previous = "".join(f"previous-{index}.md cfg:{index}\n" for index in range(1, 20))
+                todo = root / "TODO.md"
+                todo_original = f"current:\ntask.md cfg:1\n\nprevious:\n{previous}"
+                todo.write_text(todo_original, encoding="utf-8")
+                args = StatusArgs(
+                    root,
+                    Path("task.md"),
+                    "done",
+                    "",
+                    session_id=session_id,
+                    recover_exited_shell_done=True,
+                    pane_id="%42",
+                    terminal_evidence="accepted-report-token",
+                )
+                with (
+                    patch("omo_manager.omo_task_status.exact_pane_id", return_value="%42"),
+                    patch("omo_manager.omo_task_status.close_done_live_post_interrupt_shell") as close,
+                    redirect_stdout(io.StringIO()),
+                    redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(expected_code, run(args))
+                if expected_code == 0:
+                    close.assert_called_once_with("cfg:1", "%42", session_id, "accepted-report-token")
+                    self.assertIn("status: done\nrunat: cfg:1", path.read_text(encoding="utf-8"))
+                    todo_text = todo.read_text(encoding="utf-8")
+                    self.assertEqual(20, len(todo_text.partition("previous:\n")[2].splitlines()))
+                    self.assertIn("previous:\ntask.md cfg:1\n", todo_text)
+                else:
+                    close.assert_not_called()
+                    self.assertEqual(original, path.read_text(encoding="utf-8"))
                     self.assertEqual(todo_original, todo.read_text(encoding="utf-8"))
 
     def test_cli_recover_exited_shell_done_rejects_unsafe_task_or_index(self) -> None:

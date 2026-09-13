@@ -66,6 +66,8 @@ EXIT_RESUME_RE = re.compile(rf"(?i)\bTo\s+(?:resume|continue this session),\s+ru
 # 🧑 “Implement the narrow identity- and evidence-preserving recovery for this
 # exact class while keeping unrelated ambiguous transcripts rejected.”
 EXACT_INTERRUPTION_MARKER_RE = re.compile(r"(?m)^■ Conversation interrupted(?:[ \t]|$)")
+# 🧑 "add the narrow identity- and evidence-preserving recovery for this exact post-interrupt state while keeping unrelated shells rejected"
+EXACT_CLEAN_EXIT_RESUME_RE = re.compile(rf"(?m)^To continue this session, run:\r?\n  codex resume ({UUID_RE})\r?$")
 EXIT_SELECTOR_RE = re.compile(r"(?m)^Or run codex resume and select [^\r\n]+\.$")
 EXIT_IDLE_MARKER = "⏎"
 EXIT_IDLE_CURSOR_X = 2
@@ -2114,7 +2116,7 @@ def _terminalize_bound_codex_to_shell(
         n_lines,
         accepted_terminal_report=accepted_terminal_report,
         recover_ambiguous_interruption_text=recover_ambiguous_interruption_text,
-        require_exact_interruption_marker=recover_ambiguous_interruption_text,
+        require_exact_exit_marker=recover_ambiguous_interruption_text,
     )
     if not identity_is_current():
         raise RuntimeError("tmux pane identity changed during shell authentication")
@@ -2190,7 +2192,7 @@ def _validate_exited_codex_shell(
     accepted_terminal_report: bool = False,
     allow_prior_interruptions: bool = False,
     recover_ambiguous_interruption_text: bool = False,
-    require_exact_interruption_marker: bool = False,
+    require_exact_exit_marker: bool = False,
 ) -> str:
     """Authenticate one unchanged shell pane and return its exact capture digest."""
 
@@ -2216,24 +2218,31 @@ def _validate_exited_codex_shell(
     before = capture(expected_pane_id, n_lines)
     interrupted_at = before.rfind("Conversation interrupted")
     marker_count = before.count("Conversation interrupted")
-    if require_exact_interruption_marker or (recover_ambiguous_interruption_text and marker_count > 0):
+    clean_exit_at: int | None = None
+    if require_exact_exit_marker or (recover_ambiguous_interruption_text and marker_count > 0):
         exact_markers = exact_interruption_marker_offsets(before)
         if len(exact_markers) > 1:
             raise RuntimeError("terminal report evidence is absent before the final Codex exit marker")
-        if not exact_markers:
-            raise RuntimeError("terminal transcript lacks one unambiguous exact Codex exit marker")
-        interrupted_at = exact_markers[0]
-        marker_count = 1
+        if exact_markers:
+            interrupted_at = exact_markers[0]
+            marker_count = 1
+        else:
+            clean_exits = list(EXACT_CLEAN_EXIT_RESUME_RE.finditer(before))
+            if len(clean_exits) != 1 or clean_exits[0].group(1) != session_id:
+                raise RuntimeError("terminal transcript lacks one unambiguous exact Codex exit marker")
+            clean_exit_at = clean_exits[0].start()
+            interrupted_at = -1
+            marker_count = 0
     marker_line_start = before.rfind("\n", 0, interrupted_at) + 1
     if marker_count > 1 and not allow_prior_interruptions:
         raise RuntimeError("terminal report evidence is absent before the final Codex exit marker")
     if allow_prior_interruptions and (marker_count < 1 or before[marker_line_start:interrupted_at] != "■ "):
         raise RuntimeError("interrupted completion lacks one exact final Codex exit marker")
-    exit_text = before[interrupted_at:] if marker_count >= 1 else before
+    exit_text = before[interrupted_at:] if marker_count >= 1 else before[clean_exit_at or 0 :]
     resume_matches = list(EXIT_RESUME_RE.finditer(exit_text))
     if len(resume_matches) != 1 or resume_matches[0].group(1) != session_id or extract_resume_id(exit_text) != session_id:
         raise RuntimeError("captured terminal Codex session does not match the supplied session id")
-    exit_at = interrupted_at if marker_count >= 1 else resume_matches[0].start()
+    exit_at = interrupted_at if marker_count >= 1 else (clean_exit_at if clean_exit_at is not None else resume_matches[0].start())
     compact_report = re.sub(r"\s+", "", before[:exit_at])
     accepted_at = compact_report.rfind('"accepted":true')
     if not accepted_terminal_report and (accepted_at < 0 or evidence not in compact_report[accepted_at:]):
@@ -2347,6 +2356,29 @@ def close_exited_codex_shell(
         raise RuntimeError("terminal shell capture changed after its durable close intent")
     if evidence_is_current is not None and not evidence_is_current():
         raise RuntimeError("bound lifecycle evidence changed before exited-shell close")
+    close_tmux_target(expected_pane_id)
+    if pane_id(expected_pane_id):
+        raise RuntimeError(f"exact stale shell pane remained live after close: {expected_pane_id}")
+
+
+def close_done_live_post_interrupt_shell(
+    target: str,
+    expected_pane_id: str,
+    session_id: str,
+    terminal_evidence: str,
+    n_lines: int = 2000,
+) -> None:
+    """Close one exact clean-exit shell after the recorded done-live marker failure."""
+
+    _ = _validate_exited_codex_shell(
+        target,
+        expected_pane_id,
+        session_id,
+        terminal_evidence,
+        n_lines,
+        recover_ambiguous_interruption_text=True,
+        require_exact_exit_marker=True,
+    )
     close_tmux_target(expected_pane_id)
     if pane_id(expected_pane_id):
         raise RuntimeError(f"exact stale shell pane remained live after close: {expected_pane_id}")

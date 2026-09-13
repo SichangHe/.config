@@ -19,6 +19,7 @@ from omo_manager.omo_codex_stop import (
     Args,
     LOCAL_ENV_PATH,
     close_authorized_human_pane,
+    close_done_live_post_interrupt_shell,
     close_note,
     close_exited_codex_shell,
     close_exited_codex_shell_with_completion_evidence,
@@ -383,6 +384,74 @@ $ """
             self.assertRaisesRegex(RuntimeError, "one unambiguous exact Codex exit marker"),
         ):
             validate_exited_codex_shell_with_consumed_report("cfg:1", "%42", session_id, "specific-token")
+
+    def test_consumed_report_shell_accepts_exact_clean_exit_after_quoted_interruption_text(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f'''{{"accepted":true,"receipt":"specific-token"}}
+    fixture = "Conversation interrupted"
+    transcript = f"""■ Conversation interrupted - quoted test data"""
+To continue this session, run:
+  codex resume {session_id}
+Or run codex resume and select Apply clear writing principles.
+⏎
+❯                              host worktree'''
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.pane_target", return_value="cfg:1.0"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="fish"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["❯ host worktree"])),
+            patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
+            patch("omo_manager.omo_codex_stop.capture_styled", return_value=styled_fish_tail()),
+            patch("omo_manager.omo_codex_stop.pane_prompt_identity", return_value=(2, "fish", "host", "worktree")),
+        ):
+            observed = validate_exited_codex_shell_with_consumed_report("cfg:1", "%42", session_id, "specific-token")
+        self.assertEqual(hashlib.sha256(transcript.encode()).hexdigest(), observed)
+
+    def test_post_interrupt_close_requires_visible_accepted_evidence(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        exit_tail = f'''    fixture = "Conversation interrupted"
+To continue this session, run:
+  codex resume {session_id}
+Or run codex resume and select Apply clear writing principles.
+⏎
+❯                              host worktree'''
+        accepted = '{"accepted":true,"receipt":"specific-token"}\n'
+        loose_exit_tail = f"To continue this session, run codex resume {session_id}\n❯ host worktree"
+        cases = (
+            (accepted, exit_tail, "", True),
+            ("", exit_tail, "terminal report evidence is absent", False),
+            (accepted, loose_exit_tail, "one unambiguous exact Codex exit marker", False),
+        )
+        for report_prefix, observed_tail, expected_error, closes in cases:
+            with self.subTest(expected_error=expected_error):
+                closed = False
+
+                def resolve_pane(_target: str) -> str:
+                    return "" if closed else "%42"
+
+                def close(_target: str) -> None:
+                    nonlocal closed
+                    closed = True
+
+                with (
+                    patch("omo_manager.omo_codex_stop.pane_id", side_effect=resolve_pane),
+                    patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+                    patch("omo_manager.omo_codex_stop.pane_target", return_value="cfg:1.0"),
+                    patch("omo_manager.omo_codex_stop.current_command", return_value="fish"),
+                    patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["❯ host worktree"])),
+                    patch("omo_manager.omo_codex_stop.capture", return_value=report_prefix + observed_tail),
+                    patch("omo_manager.omo_codex_stop.capture_styled", return_value=styled_fish_tail()),
+                    patch("omo_manager.omo_codex_stop.pane_prompt_identity", return_value=(2, "fish", "host", "worktree")),
+                    patch("omo_manager.omo_codex_stop.close_tmux_target", side_effect=close) as close_target,
+                ):
+                    if closes:
+                        close_done_live_post_interrupt_shell("cfg:1", "%42", session_id, "specific-token")
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, expected_error):
+                            close_done_live_post_interrupt_shell("cfg:1", "%42", session_id, "specific-token")
+                self.assertEqual(closes, closed)
+                self.assertEqual(int(closes), close_target.call_count)
 
     def test_consumed_report_terminalization_ignores_only_quoted_interruption_text(self) -> None:
         session_id = "11111111-2222-3333-4444-555555555555"

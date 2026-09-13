@@ -47,6 +47,7 @@ from omo_manager.omo_codex_stop import capture
 from omo_manager.omo_codex_stop import close_bound_tmux_target
 from omo_manager.omo_codex_stop import close_note
 from omo_manager.omo_codex_stop import close_exited_codex_shell
+from omo_manager.omo_codex_stop import close_done_live_post_interrupt_shell
 from omo_manager.omo_codex_stop import close_exited_codex_shell_with_completion_evidence
 from omo_manager.omo_codex_stop import done_live_close_started_path
 from omo_manager.omo_codex_stop import guarded_capture
@@ -93,6 +94,8 @@ DONE_REMINDER = "Status set to done."
 BOOKKEEPING_FAILED_PREFIX = "done_close_bookkeeping_failed"
 CLOSE_FAILED_PREFIX = "done_close_failed"
 DONE_CLOSE_IN_PROGRESS = "done_close_in_progress: manager is closing the agent before marking done"
+# 🧑 "add the narrow identity- and evidence-preserving recovery for this exact post-interrupt state while keeping unrelated shells rejected"
+DONE_LIVE_EXITED_SHELL_BLOCKER = "guarded close interrupted Codex, then exited-shell recovery rejected the descriptor evidence"
 TODO_ROW_RE = re.compile(r"\s*`?([A-Za-z0-9_./-]+\.md)`?(?:\s+(.*?))?\s*")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 GIT_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
@@ -6963,7 +6966,14 @@ def recover_exited_shell_done(args: Args, path: Path, text: str, before: os.stat
                 and not args.terminal_evidence
                 and bool(args.completion_key and args.session_transcript and args.session_transcript_sha256)
             )
-            if metadata.status != "blocked" or legacy_recovery == interrupted_recovery:
+            post_interrupt_recovery = (
+                metadata.blocked_on == DONE_LIVE_EXITED_SHELL_BLOCKER
+                and metadata.tool == "codex"
+                and metadata.session_id == args.session_id
+                and bool(args.terminal_evidence)
+                and not any((args.completion_key, args.session_transcript, args.session_transcript_sha256))
+            )
+            if metadata.status != "blocked" or sum((legacy_recovery, interrupted_recovery, post_interrupt_recovery)) != 1:
                 raise TaskFrontmatterError("task does not have an exact supported exited-shell done-close state for the supplied evidence.")
             _ = update_frontmatter_status(current_text, "done", "", args.root)
             owners = authoritative_active_target_task_paths(args.root, metadata.runat)
@@ -6998,6 +7008,13 @@ def recover_exited_shell_done(args: Args, path: Path, text: str, before: os.stat
                     args.session_id,
                     args.completion_key,
                     evidence_is_current=evidence_is_current,
+                )
+            elif post_interrupt_recovery:
+                close_done_live_post_interrupt_shell(
+                    metadata.runat,
+                    args.pane_id,
+                    args.session_id,
+                    args.terminal_evidence,
                 )
             else:
                 close_exited_codex_shell(metadata.runat, args.pane_id, args.session_id, args.terminal_evidence)

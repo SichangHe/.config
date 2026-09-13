@@ -44,8 +44,8 @@ pane closure
   - the exception waives only the missing visible acceptance token; every pane, process, session, exit, capture, close-proof, and lifecycle check remains
 - exit Codex only after a fresh bound `/status` response identifies the expected session
 - an authenticated consumed-report close may ignore quoted `Conversation interrupted` text only when no prior exact Codex UI marker exists
-  - after exit, require one exact UI marker and its matching resume session
-  - reject any prior or multiple exact UI markers
+  - after exit, require either one exact interruption UI marker or one exact two-line clean-exit resume block with the matching session
+  - reject prior, multiple, loose, or mismatched exit markers
 - authenticate one unchanged exited-shell capture
 - launch the close child only through the tmux server's exact target, pane, and process predicate
 - pass the SHA-256 of the complete canonical `terminalized` audit to the child and reauthenticate those exact bytes and the pane identity inside the child
@@ -65,6 +65,7 @@ recovery
 - `note-prepared` binds the only task suffix the helper may append
 - `complete` requires that exact note, unchanged TODO custody, durable proof, and continued pane/process absence
 - retry the identical invocation and audit path after interruption
+- if the guarded close reached an unchanged idle shell but marker authentication failed, `--recover-exited-shell-done` accepts only the exact recorded post-interrupt blocker, task session, numeric pane, and visible accepted-report token
 - reject missing, forged, replayed, wrong-task, or drifted report evidence; mismatched marker evidence; rebound identity; changed audit bytes or capture; changed task or TODO; competing ownership; malformed audit; or an out-of-order task suffix
 
 boundaries
