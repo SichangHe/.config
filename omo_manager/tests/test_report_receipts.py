@@ -27,6 +27,7 @@ from omo_manager.omo_task_metadata import render_v1_pending_scalar
 
 OMO_DIR = Path(__file__).resolve().parents[1]
 REPORT = OMO_DIR / "omo_report.sh"
+TASK_EDIT = OMO_DIR / "omo_task_edit.py"
 
 
 @dataclass(frozen=True)
@@ -5663,6 +5664,94 @@ return 75
                     commitment.write_text("{}\n", encoding="utf-8")
                 rejected = validate_export_from(case, exported)
                 self.assertEqual(2, rejected.returncode)
+
+    def test_consumed_closure_accepts_exact_report_only_disposition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, owner = active_manager_fixture(tmp_path)
+            draft = allocate_report_draft(case, b"manager-dispositioned report\n")
+            description = json.loads(run_report_from(case, draft, describe=True, status="done").stdout)
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            pending = run_report_from(case, draft, status="done")
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+            transfer = json.loads(pending.stdout)["transfer_receipt"]
+            pointer = transfer["queue_item"]["pointer"]
+            manager.write_bytes(owner + b"\n(pending)\n" + pointer.encode() + b"\n")
+            pending_line = manager.read_text(encoding="utf-8").splitlines().index("(pending)") + 1
+            cleared = subprocess.run(
+                [
+                    str(TASK_EDIT),
+                    "pending-marker-clear",
+                    str(manager),
+                    "--line",
+                    str(pending_line),
+                    "--comment",
+                    "(completed manager disposition)",
+                    "--clear-kind",
+                    "report-only",
+                ],
+                cwd=case.root.parent,
+                env=case.env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(0, cleared.returncode, cleared.stderr)
+            disposed_manager = manager.read_text(encoding="utf-8")
+            exported = tmp_path / "manager-dispositioned.json"
+
+            verified = run_report_from(
+                case,
+                draft,
+                verify_consumed=True,
+                status="done",
+                consumed_attestation_output=exported,
+            )
+
+            self.assertEqual(0, verified.returncode, verified.stderr)
+            attestation = json.loads(verified.stdout)
+            self.assertFalse(attestation["accepted"])
+            self.assertEqual("report-only", attestation["manager_disposition"]["clear_kind"])
+            self.assertEqual(pending_line, attestation["manager_disposition"]["line_number"])
+            self.assertFalse(Path(str(description["files"]["private_receipt"])).exists())
+            self.assertFalse(Path(str(description["files"]["receipt_publication"])).exists())
+            validated = validate_export_from(case, exported)
+            self.assertEqual(0, validated.returncode, validated.stderr)
+
+            manager.write_text(
+                disposed_manager.replace(
+                    "report-only: (completed manager disposition))",
+                    "report-only: completed manager disposition)",
+                ),
+                encoding="utf-8",
+            )
+            forged = validate_export_from(case, exported)
+            self.assertEqual(2, forged.returncode)
+            self.assertIn("pointer is still active", forged.stderr)
+
+            manager.write_text(
+                disposed_manager.replace(
+                    "completed manager disposition",
+                    "completed\rmanager disposition",
+                ),
+                encoding="utf-8",
+            )
+            noncanonical = validate_export_from(case, exported)
+            self.assertEqual(2, noncanonical.returncode)
+            self.assertIn("pointer is still active", noncanonical.stderr)
+
+            manager.write_text(
+                disposed_manager.replace(
+                    f"pending marker cleared line={pending_line}",
+                    f"pending marker cleared line={pending_line + 1}",
+                ),
+                encoding="utf-8",
+            )
+            rejected = validate_export_from(case, exported)
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("pointer is still active", rejected.stderr)
 
     def test_consumed_closure_accepts_authenticated_pointer_removal_after_manager_growth(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

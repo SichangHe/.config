@@ -72,6 +72,9 @@ SESSION_ID_RE = re.compile(
     r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"
 )
 MESSAGE_ID_RE = re.compile(r"^<[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+>$")
+REPORT_ONLY_DISPOSITION_RE = re.compile(
+    r"^\(pending marker cleared line=([1-9][0-9]*): report-only: (\([^\r\n]+\))\)\n$"
+)
 
 
 class ReceiptError(RuntimeError):
@@ -1663,6 +1666,41 @@ def manager_transaction_state(payload: bytes, binding: OwnerPrefixBinding, point
         return "restored"
     suffix = b"\n" * binding.separator_bytes + b"(pending)\n" + pointer.encode("utf-8") + b"\n"
     return "active" if payload == owner + suffix else "invalid"
+
+
+# 🧑 "Implement the narrow supported recovery for this exact watcher-consumed, manager-dispositioned report state."
+def manager_report_only_disposition(
+    plan: Plan,
+    payload: bytes,
+) -> dict[str, object] | None:
+    """Bind one requeued pointer to its exact manager-recorded disposition."""
+
+    owner = payload[: plan.owner_prefix.size_bytes]
+    pointer = plan.pointer.encode()
+    prefix = owner + b"\n" * plan.owner_prefix.separator_bytes + pointer + b"\n"
+    if (
+        not manager_preserves_owner_prefix(plan.manager, payload, plan.owner_prefix)
+        or pointer in owner
+        or payload.count(pointer) != 1
+        or not payload.startswith(prefix)
+    ):
+        return None
+    try:
+        record = payload[len(prefix) :].decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    match = REPORT_ONLY_DISPOSITION_RE.fullmatch(record)
+    pointer_line = prefix[: -len(pointer) - 1].count(b"\n") + 1
+    if match is None or int(match.group(1)) != pointer_line:
+        return None
+    return {
+        "clear_kind": "report-only",
+        "line_number": pointer_line,
+        "manager_sha256": hashlib.sha256(payload).hexdigest(),
+        "manager_size_bytes": len(payload),
+        "record_sha256": hashlib.sha256(record.encode()).hexdigest(),
+        "schema": "omo-report-manager-disposition/v1",
+    }
 
 
 def bind_owner_prefix(
@@ -4408,9 +4446,13 @@ def consumed_closure_attestation(plan: Plan, *, archived: bool = False) -> dict[
         )
     if acknowledgment is None:
         raise ReceiptError("consumed report has no exact watcher transition")
-    if plan.pointer.encode() in manager_bytes(plan.manager):
-        raise ReceiptError("consumed report pointer is still active")
     acceptance = validate_historical_acceptance_pair(plan, commitment)
+    manager_payload = manager_bytes(plan.manager)
+    disposition = None
+    if plan.pointer.encode() in manager_payload:
+        disposition = manager_report_only_disposition(plan, manager_payload)
+        if disposition is None or acceptance is not None:
+            raise ReceiptError("consumed report pointer is still active")
     recovery_residue = [
         {
             "path": str(path),
@@ -4438,6 +4480,8 @@ def consumed_closure_attestation(plan: Plan, *, archived: bool = False) -> dict[
     }
     if acceptance is not None:
         record["acceptance"] = acceptance
+    if disposition is not None:
+        record["manager_disposition"] = disposition
     if archived:
         record["archive_custody"] = archived_task_custody(plan)
     return {**record, "attestation_id": bound_receipt_id(record)}
