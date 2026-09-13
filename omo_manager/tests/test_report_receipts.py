@@ -5719,6 +5719,20 @@ return 75
             self.assertFalse(Path(str(description["files"]["receipt_publication"])).exists())
             validated = validate_export_from(case, exported)
             self.assertEqual(0, validated.returncode, validated.stderr)
+            routing = description["routing"]
+            close_args = TaskStatusArgs(
+                case.root,
+                Path("worker.md"),
+                "done",
+                "",
+                close_done_live_no_mail=True,
+                active_target=str(routing["producer_target"]),
+                manager_target=str(routing["resolved_manager_target"]),
+                terminal_evidence=str(attestation["attestation_id"]),
+                manager_consumed_report_receipt=exported,
+                manager_consumed_report_receipt_sha256=hashlib.sha256(exported.read_bytes()).hexdigest(),
+            )
+            self.assertTrue(validate_manager_consumed_report(close_args, case.root / "worker.md"))
 
             manager.write_text(
                 disposed_manager.replace(

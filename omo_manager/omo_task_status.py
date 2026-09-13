@@ -80,6 +80,7 @@ from omo_manager.omo_task_metadata import runat_kind
 from omo_manager.omo_blocking_actor import request as blocking_request
 from omo_manager.omo_completion_email import require_owner_completion
 from omo_manager.omo_report_receipt import ReceiptError
+from omo_manager.omo_report_receipt import REPORT_ONLY_DISPOSITION_RE
 from omo_manager.omo_report_receipt import validate_consumed_closure_export_file
 
 PENDING_MARKER = "(pending)"
@@ -5949,13 +5950,64 @@ def validate_consumed_closure_attestation(
         and manager_metadata.runat == args.manager_target
     )
     configured_main_manager_route_valid = configured_main_manager_route and manager_metadata is None
+    disposition = attestation.get("manager_disposition")
+    pointer_disposition_valid = manager_report_only_disposition_matches(
+        attestation,
+        manager_text,
+        pointer,
+    )
     if (
         not isinstance(pointer, str)
         or not pointer
-        or pointer in manager_text
+        or (pointer in manager_text) != pointer_disposition_valid
+        or (disposition is not None and not pointer_disposition_valid)
         or not (direct_route_valid or fallback_route or configured_main_manager_route_valid)
     ):
         raise TaskFrontmatterError("manager-consumed report attestation transaction is inconsistent.")
+
+
+# 🧑 "Diagnose and correct only this supported transaction mismatch."
+def manager_report_only_disposition_matches(
+    attestation: dict[str, object],
+    manager_text: str,
+    pointer: object,
+) -> bool:
+    """Match an exported disposition to the exact current manager bytes."""
+
+    disposition = attestation.get("manager_disposition")
+    if not isinstance(disposition, dict) or not isinstance(pointer, str):
+        return False
+    expected_keys = {
+        "clear_kind",
+        "line_number",
+        "manager_sha256",
+        "manager_size_bytes",
+        "record_sha256",
+        "schema",
+    }
+    manager_payload = manager_text.encode()
+    line_number = disposition.get("line_number")
+    lines = manager_payload.splitlines(keepends=True)
+    if not isinstance(line_number, int) or line_number < 1 or line_number >= len(lines):
+        return False
+    record = lines[line_number]
+    try:
+        match = REPORT_ONLY_DISPOSITION_RE.fullmatch(record.decode("utf-8"))
+    except UnicodeDecodeError:
+        return False
+    return (
+        set(disposition) == expected_keys
+        and attestation.get("accepted") is False
+        and disposition.get("clear_kind") == "report-only"
+        and disposition.get("schema") == "omo-report-manager-disposition/v1"
+        and disposition.get("manager_sha256") == hashlib.sha256(manager_payload).hexdigest()
+        and disposition.get("manager_size_bytes") == len(manager_payload)
+        and disposition.get("record_sha256") == hashlib.sha256(record).hexdigest()
+        and manager_text.count(pointer) == 1
+        and lines[line_number - 1] == f"{pointer}\n".encode()
+        and match is not None
+        and int(match.group(1)) == line_number
+    )
 
 
 def consumed_attestation_manager_path(root: Path, attestation: dict[str, object]) -> Path:
