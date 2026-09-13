@@ -11,6 +11,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from omo_manager.omo_agent_status import parse_task_metadata
 from omo_manager.omo_task_edit import REMOVE_REMINDER
 from omo_manager.omo_task_edit import SOURCE1503_SHA256
 from omo_manager.omo_task_edit import SOURCE1506_SHA256
@@ -19,6 +20,7 @@ from omo_manager.omo_task_edit import SOURCE1528_SHA256
 from omo_manager.omo_task_edit import Args
 from omo_manager.omo_task_edit import normalize_duplicate_frontmatter
 from omo_manager.omo_task_edit import parse_args
+from omo_manager.omo_task_edit import remove_exact_trailing_body_line
 from omo_manager.omo_task_edit import run
 
 
@@ -65,6 +67,80 @@ class TaskEditTests(unittest.TestCase):
         text = header + pointers + "\n".join(dispositions) + "\n"
         task.write_text(text, encoding="utf-8")
         return task, text
+
+    def test_trailing_body_line_remove_preserves_every_other_byte(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "book_ocr_tts.md"
+            line = "The publishing is internal. Confirm rights and publish"
+            prefix = task_frontmatter(status="done") + "completion evidence\n\n"
+            original = (prefix + line + "\n").encode()
+            task.write_bytes(original)
+            args = Args(
+                root,
+                Path("book_ocr_tts.md"),
+                "trailing-body-line-remove",
+                line=len(original.splitlines()),
+                expected_task_sha256=hashlib.sha256(original).hexdigest(),
+                exact_line=line,
+            )
+
+            self.assertEqual(0, run(args))
+
+            self.assertEqual(prefix.encode(), task.read_bytes())
+            self.assertEqual("done", parse_task_metadata(task.read_text(), root).status)
+
+    def test_trailing_body_line_remove_fails_closed_on_unsafe_state(self) -> None:
+        line = "The publishing is internal. Confirm rights and publish"
+        cases = ("wrong digest", "not done", "open queue", "not trailing", "wrong line", "duplicate")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                status = "running" if case == "not done" else "done"
+                pending_items = ("still open",) if case == "open queue" else ()
+                body = f"body\n{line}\n"
+                if case == "not trailing":
+                    body += "later\n"
+                if case == "duplicate":
+                    body = f"{line}\n{line}\n"
+                original = (task_frontmatter(status=status, pending_items=pending_items) + body).encode()
+                task = root / "task.md"
+                task.write_bytes(original)
+                args = Args(
+                    root,
+                    Path("task.md"),
+                    "trailing-body-line-remove",
+                    line=len(original.splitlines()) - (1 if case == "wrong line" else 0),
+                    expected_task_sha256="0" * 64 if case == "wrong digest" else hashlib.sha256(original).hexdigest(),
+                    exact_line=line,
+                )
+
+                self.assertEqual(2, run(args))
+                self.assertEqual(original, task.read_bytes())
+
+    def test_trailing_body_line_remove_parser_requires_exact_cas_inputs(self) -> None:
+        common = [
+            "--root", "/tmp/work_logs", "trailing-body-line-remove", "task.md", "--line", "10",
+            "--exact-line", "remove me", "--expected-task-sha256", "a" * 64,
+        ]
+        args = parse_args(common)
+        self.assertEqual("trailing-body-line-remove", args.command)
+        self.assertEqual("remove me", args.exact_line)
+        for flag in ("--line", "--exact-line", "--expected-task-sha256"):
+            with self.subTest(flag=flag), self.assertRaises(SystemExit):
+                index = common.index(flag)
+                parse_args(common[:index] + common[index + 2 :])
+
+        with self.assertRaises(SystemExit):
+            parse_args([*common[: common.index("remove me")], "two\nlines", *common[common.index("remove me") + 1 :]])
+
+    def test_remove_exact_trailing_body_line_preserves_crlf(self) -> None:
+        line = "remove me"
+        text = task_frontmatter(status="done").replace("\n", "\r\n") + f"evidence\r\n{line}\r\n"
+
+        updated = remove_exact_trailing_body_line(text, len(text.splitlines()), line, Path("/tmp"))
+
+        self.assertEqual(task_frontmatter(status="done").replace("\n", "\r\n") + "evidence\r\n", updated)
 
     def test_source_pointer_disposition_cleanup_removes_one_exact_registered_pointer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

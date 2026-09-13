@@ -138,6 +138,8 @@ omo_task_status.py --root ROOT --finish-replaced-done \
 
 `omo_task_edit.py comment-add TASK.md --message TEXT` appends `TEXT` as a parenthesized task-file comment after validating the task frontmatter.
 
+`omo_task_edit.py trailing-body-line-remove TASK.md --line LINE --exact-line TEXT --expected-task-sha256 DIGEST` removes one unique final physical body line from a completed, queue-empty task. The helper requires the exact complete-file digest, verifies the line is outside frontmatter and is the last physical line, holds the task lock, preserves all metadata and every unrelated byte, and fails closed on task drift, duplicate text, live intake, or lifecycle mismatch.
+
 `omo_agent_status.py` only reads from frontmatter.
 
 `omo_pending_watch.py` scans for `(pending)` markers. Ordinary task-file messages go directly to that task's `runat`, send no manager copy, and clear the consumed marker only after verified delivery when the original block is unchanged or bounded by a later `(pending)`. `for manager` at the beginning or end of active unquoted pending-block or its structurally adjacent stored email routes to `managerat`; matching ignores case, surrounding punctuation, and edge whitespace. Literal `DM` and `DM only` text has no routing meaning. The receiving agent maintains its own pending queue through `omo_pending.py`.

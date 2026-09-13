@@ -106,6 +106,7 @@ class Args:
     authority_sha256: str = ""
     completion_key: str = ""
     expected_source_sha256: str = ""
+    exact_line: str = ""
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,7 @@ class ParsedArgs(argparse.Namespace):
     preserve_live_source: bool = False
     completion_key: str = ""
     expected_source_sha256: str = ""
+    exact_line: str = ""
     item_origin: str
 
 
@@ -232,6 +234,17 @@ def parse_args(argv: list[str]) -> Args:
     _ = source_disposition_parser.add_argument("--source-ref", required=True)
     _ = source_disposition_parser.add_argument("--expected-task-sha256", required=True)
     _ = source_disposition_parser.add_argument("--expected-source-sha256", required=True)
+
+    trailing_line_parser = subparsers.add_parser(
+        "trailing-body-line-remove",
+        help="Remove one exact final body line from a completed task under a task-byte CAS guard.",
+        description="Removes only the named final physical body line from a done, queue-empty task while preserving every other byte.",
+    )
+    trailing_line_parser.set_defaults(command="trailing-body-line-remove")
+    _ = trailing_line_parser.add_argument("task_file", type=Path)
+    _ = trailing_line_parser.add_argument("--line", type=int, required=True, help="One-based line number of the final body line.")
+    _ = trailing_line_parser.add_argument("--exact-line", required=True, help="Exact line text, without its line ending.")
+    _ = trailing_line_parser.add_argument("--expected-task-sha256", required=True, help="SHA-256 of the complete task bytes before removal.")
 
     envelope_parser = subparsers.add_parser(
         "human-envelope-record",
@@ -379,6 +392,21 @@ def parse_args(argv: list[str]) -> Args:
                 source_ref=normalized_source_ref(parsed.source_ref),
                 expected_task_sha256=parsed.expected_task_sha256,
                 expected_source_sha256=parsed.expected_source_sha256,
+            )
+        if command == "trailing-body-line-remove":
+            if parsed.line < 1:
+                parser.error("--line must be positive.")
+            if not parsed.exact_line or "\n" in parsed.exact_line or "\r" in parsed.exact_line:
+                parser.error("--exact-line must be one nonempty physical line without a line ending.")
+            if re.fullmatch(r"[0-9a-f]{64}", parsed.expected_task_sha256) is None:
+                parser.error("--expected-task-sha256 must be a lowercase SHA-256 digest.")
+            return Args(
+                root,
+                parsed.task_file,
+                command,
+                line=parsed.line,
+                expected_task_sha256=parsed.expected_task_sha256,
+                exact_line=parsed.exact_line,
             )
         if command == "human-envelope-record":
             if re.fullmatch(r"[0-9a-f]{64}", parsed.expected_task_sha256) is None or re.fullmatch(r"[0-9a-f]{64}", parsed.authority_sha256) is None:
@@ -950,6 +978,29 @@ def dispositioned_source_pointer_cleanup(args: Args, path: Path, text: str) -> s
     return append_comment_line(updated, record)
 
 
+def remove_exact_trailing_body_line(text: str, line_number: int, exact_line: str, root: Path) -> str:
+    """Remove one unique final body line from a completed queue-empty task."""
+
+    metadata = require_metadata(text, root)
+    if metadata.status != "done" or metadata.pending_task_items or has_live_pending_marker(text):
+        raise TaskFrontmatterError("trailing body-line cleanup requires a done, queue-empty task with no live `(pending)` marker.")
+    lines = text.splitlines(keepends=True)
+    if line_number != len(lines) or line_number - 1 <= frontmatter_closing_idx(lines):
+        raise TaskFrontmatterError("--line must identify the final physical line in the task body.")
+
+    def physical_line(line: str) -> str:
+        return line.removesuffix("\n").removesuffix("\r")
+
+    if physical_line(lines[-1]) != exact_line:
+        raise TaskFrontmatterError("final task body line does not match --exact-line.")
+    if sum(physical_line(line) == exact_line for line in lines) != 1:
+        raise TaskFrontmatterError("--exact-line must occur exactly once in the task.")
+    updated = "".join(lines[:-1])
+    if require_metadata(updated, root) != metadata:
+        raise TaskFrontmatterError("trailing body-line cleanup would change task metadata.")
+    return updated
+
+
 def pending_block_lines(text: str, line_number: int) -> list[str]:
     lines = text.splitlines()
     if line_number < 1 or line_number > len(lines):
@@ -1290,6 +1341,22 @@ def run(args: Args) -> int:
                 updated = dispositioned_source_pointer_cleanup(args, path, current_text)
                 replace_if_unchanged_locked(path, updated, current_before)
             print(f"removed one dispositioned bare source pointer for {args.source_ref} from {path.name}")
+            return 0
+        if command == "trailing-body-line-remove":
+            with task_file_lock(path):
+                current_before = path.stat()
+                current_bytes = path.read_bytes()
+                if not same_file_state(before, current_before):
+                    raise TaskFrontmatterError("task changed before trailing body-line cleanup.")
+                if hashlib.sha256(current_bytes).hexdigest() != args.expected_task_sha256:
+                    raise TaskFrontmatterError("raw task bytes do not match --expected-task-sha256.")
+                try:
+                    current_text = current_bytes.decode("utf-8")
+                except UnicodeError as error:
+                    raise TaskFrontmatterError(f"task is not valid UTF-8: {error}") from error
+                updated = remove_exact_trailing_body_line(current_text, args.line, args.exact_line, args.root)
+                replace_if_unchanged_locked(path, updated, current_before)
+            print(f"removed exact trailing body line from {path.name}:{args.line}")
             return 0
         if command == "human-envelope-record":
             spec = human_envelope_spec(args, path)
