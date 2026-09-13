@@ -1152,16 +1152,31 @@ def consume_completion_authorization(key: str, values: dict[str, str]) -> None:
     used_state = used_directory.lstat()
     if not stat.S_ISDIR(used_state.st_mode) or used_state.st_uid != os.getuid() or stat.S_IMODE(used_state.st_mode) != 0o700:
         raise ValueError("completion authorization use directory is not owner-private")
-    used = used_directory / key
-    try:
-        fd = os.open(used, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    except FileExistsError as exc:
-        raise ValueError("completion email authorization was already used") from exc
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        _ = handle.write(f"{values['target']}\t{values['task']}\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    fsync_directory(used_directory)
+    lock_path = state_dir / "completion-email-claims.lock"
+    lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(lock_fd, "r+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        claims = read_owner_private_file(state_dir / "completion-email-claims.tsv", "completion claims ledger", 8_000_000)
+        expected = (key, values["target"], Path(values["task"]).name, values["task_sha256"], values["notice_key"], values["semantic_key"])
+        matching = []
+        for line in claims.decode().splitlines():
+            fields = line.split("\t")
+            if len(fields) == 7 and (
+                fields[0], fields[1], fields[2], fields[4], fields[5], fields[6]
+            ) == expected:
+                matching.append(fields)
+        if len(matching) != 1:
+            raise ValueError("completion email authorization has no current durable claim")
+        used = used_directory / key
+        try:
+            fd = os.open(used, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except FileExistsError as exc:
+            raise ValueError("completion email authorization was already used") from exc
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            _ = handle.write(f"{values['target']}\t{values['task']}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        fsync_directory(used_directory)
 
 
 def release_completion_authorization(key: str, values: dict[str, str]) -> None:

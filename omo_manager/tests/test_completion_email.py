@@ -14,6 +14,7 @@ from omo_manager.omo_completion_email import completion_email_is_delivered
 from omo_manager.omo_completion_email import plan_completion_email
 from omo_manager.omo_completion_email import reconcile_delivered_completion
 from omo_manager.omo_completion_email import reconcile_ordinary_sent_completion
+from omo_manager.omo_completion_email import refresh_unattempted_completion_claim
 from omo_manager.omo_completion_email import require_completion_entrypoint
 from omo_manager.omo_completion_email import require_owner_completion
 from omo_manager.omo_completion_email import main
@@ -1171,6 +1172,136 @@ work
                 self.assertFalse(send_completion_email(second))
 
             run.assert_called_once()
+
+    def test_exact_unattempted_claim_can_refresh_after_task_bytes_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            initial = task_text()
+            task.write_text(initial, encoding="utf-8")
+            semantic_key = "a" * 64
+            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
+                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
+            ):
+                old = plan_completion_email(root, task, initial, "task done", semantic_key=semantic_key)
+                assert old is not None
+                self.assertTrue(claim_completion_email(old))
+                changed = initial + "(reviewed result)\n"
+                task.write_text(changed, encoding="utf-8")
+                current = plan_completion_email(
+                    root,
+                    task,
+                    changed,
+                    "task done",
+                    human_subject="Task result",
+                    human_body="The task is complete.",
+                    semantic_key=semantic_key,
+                )
+                assert current is not None
+
+                refresh_unattempted_completion_claim(current, old.key)
+
+                rows = (state / "completion-email-claims.tsv").read_text(encoding="utf-8").splitlines()
+                self.assertEqual(1, len(rows))
+                self.assertEqual(current.key, rows[0].split("\t")[0])
+                self.assertTrue((state / "completion-email-authorizations" / old.key).is_file())
+                self.assertTrue((state / "completion-email-authorizations" / current.key).is_file())
+                self.assertTrue(claim_completion_email(current, recover_existing=True))
+
+    def test_claim_refresh_rejects_any_outbound_boundary_evidence(self) -> None:
+        for relative in (
+            "completion-email-authorization-used/{key}",
+            "completion-email-delivered/{key}",
+            "completion-email-reconciled/{key}",
+            "completion-email-requests/{key}",
+            "completion-notice-delivered/{notice}",
+            "ordinary-completion-by-notice/{notice}",
+        ):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                state = root / "state"
+                task = root / "task.md"
+                initial = task_text()
+                task.write_text(initial, encoding="utf-8")
+                with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
+                    old = build_completion_email(root, task, initial, "task done", semantic_key="a" * 64)
+                    assert old is not None
+                    self.assertTrue(claim_completion_email(old))
+                    changed = initial + "(reviewed result)\n"
+                    task.write_text(changed, encoding="utf-8")
+                    current = build_completion_email(root, task, changed, "task done", semantic_key="a" * 64)
+                    assert current is not None
+                    evidence = state / relative.format(key=old.key, notice=old.notice_key)
+                    evidence.parent.mkdir(mode=0o700, exist_ok=True)
+                    evidence.write_text("evidence\n", encoding="utf-8")
+                    evidence.chmod(0o600)
+
+                    with self.assertRaisesRegex(OSError, "may have been used"):
+                        refresh_unattempted_completion_claim(current, old.key)
+
+                self.assertFalse((state / "completion-email-authorizations" / current.key).exists())
+
+    def test_claim_refresh_rejects_a_different_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            initial = task_text()
+            task.write_text(initial, encoding="utf-8")
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
+                old = build_completion_email(root, task, initial, "task done", semantic_key="a" * 64)
+                assert old is not None
+                self.assertTrue(claim_completion_email(old))
+                changed = initial.replace("runat: cfg:2", "runat: cfg:3")
+                task.write_text(changed, encoding="utf-8")
+                current = build_completion_email(root, task, changed, "task done", semantic_key="a" * 64)
+                assert current is not None
+
+                with self.assertRaisesRegex(OSError, "missing or ambiguous"):
+                    refresh_unattempted_completion_claim(current, old.key)
+
+    def test_completion_entrypoint_refreshes_then_sends_combined_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            subject = root / "subject.txt"
+            message = root / "message.md"
+            initial = task_text()
+            task.write_text(initial, encoding="utf-8")
+            subject.write_text("Task result\n", encoding="utf-8")
+            message.write_text("The task is complete.\n", encoding="utf-8")
+            semantic_key = "a" * 64
+            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
+                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
+            ), patch("omo_manager.omo_completion_email.subprocess.run") as send:
+                old = plan_completion_email(root, task, initial, "task done", semantic_key=semantic_key)
+                assert old is not None
+                self.assertTrue(claim_completion_email(old))
+                task.write_text(initial + "(reviewed result)\n", encoding="utf-8")
+
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task",
+                        str(task),
+                        "--outcome",
+                        "task done",
+                        "--semantic-key",
+                        semantic_key,
+                        "--answer-subject-file",
+                        str(subject),
+                        "--answer-message-file",
+                        str(message),
+                        "--refresh-unattempted-claim",
+                        old.key,
+                    ]
+                )
+
+            self.assertEqual(0, result)
+            send.assert_called_once()
 
     def test_exact_and_notice_claims_are_one_atomic_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

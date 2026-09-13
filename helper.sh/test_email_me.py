@@ -2480,7 +2480,19 @@ class EmailMeTests(unittest.TestCase):
             body = Path(tmp) / "body.md"
             body.write_text("done\n", encoding="utf-8")
             key = "a" * 64
-            values = {"target": "wl:1", "task": "task.md"}
+            values = {
+                "target": "wl:1",
+                "task": "task.md",
+                "task_sha256": "b" * 64,
+                "notice_key": "c" * 64,
+                "semantic_key": "d" * 64,
+            }
+            claims = state_dir / "completion-email-claims.tsv"
+            claims.write_text(
+                f"{key}\twl:1\ttask.md\twl:0\t{values['task_sha256']}\t{values['notice_key']}\t{values['semantic_key']}\n",
+                encoding="utf-8",
+            )
+            claims.chmod(0o600)
             settings = type(
                 "Settings",
                 (),
@@ -2512,6 +2524,32 @@ class EmailMeTests(unittest.TestCase):
             ):
                 self.assertEqual(0, email_me.main(argv))
             self.assertTrue((state_dir / "completion-email-authorization-used" / key).is_file())
+
+    def test_superseded_completion_authorization_cannot_cross_outbound_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            state_dir.mkdir(mode=0o700)
+            key = "a" * 64
+            values = {
+                "target": "wl:1",
+                "task": "task.md",
+                "task_sha256": "b" * 64,
+                "notice_key": "c" * 64,
+                "semantic_key": "d" * 64,
+            }
+            claims = state_dir / "completion-email-claims.tsv"
+            claims.write_text(
+                f"{'e' * 64}\twl:1\ttask.md\twl:0\t{'f' * 64}\t{values['notice_key']}\t{values['semantic_key']}\n",
+                encoding="utf-8",
+            )
+            claims.chmod(0o600)
+
+            with patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(state_dir)}), self.assertRaisesRegex(
+                ValueError, "no current durable claim"
+            ):
+                email_me.consume_completion_authorization(key, values)
+
+            self.assertFalse((state_dir / "completion-email-authorization-used" / key).exists())
 
     def test_manager_human_mode_rejects_missing_tmux_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

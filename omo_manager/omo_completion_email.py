@@ -1164,6 +1164,122 @@ def mark_completion_email_delivered(plan: CompletionEmail, receipt_key: str | No
             raise OSError("completion delivery does not match the task")
 
 
+def completion_authorization_payload(plan: CompletionEmail) -> str:
+    relative_task = plan.task.resolve().relative_to(plan.root.resolve()).as_posix()
+    return (
+        f"version=1\n"
+        f"target={plan.target}\n"
+        f"root={plan.root.resolve()}\n"
+        f"task={relative_task}\n"
+        f"task_sha256={plan.task_sha256}\n"
+        f"notice_key={plan.notice_key}\n"
+        f"semantic_key={plan.semantic_key}\n"
+        f"subject_sha256={hashlib.sha256(plan.subject.encode()).hexdigest()}\n"
+        f"body_sha256={hashlib.sha256(plan.body.encode()).hexdigest()}\n"
+    )
+
+
+# 🧑 "Continue until each item is complete or cancelled."
+def refresh_unattempted_completion_claim(plan: CompletionEmail, previous_key: str) -> None:
+    """Replace one same-owner claim only when it provably never reached SMTP."""
+
+    if SHA256_RE.fullmatch(previous_key) is None:
+        raise ValueError("previous completion claim key must be a lowercase SHA-256 digest")
+    if previous_key == plan.key:
+        raise ValueError("previous completion claim is already current")
+    state_dir = completion_email_state_dir()
+    authorization_dir = state_dir / "completion-email-authorizations"
+    require_private_directory(state_dir, "completion state directory")
+    require_private_directory(authorization_dir, "completion authorization directory")
+    ledger = state_dir / "completion-email-claims.tsv"
+    lock_path = state_dir / "completion-email-claims.lock"
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "r+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        previous = owned_private_file(ledger, "completion claims ledger", 8_000_000).decode()
+        rows = [line.split("\t") for line in previous.splitlines()]
+        if any(len(row) not in {3, 5, 6, 7} for row in rows):
+            raise OSError("completion claims ledger is malformed")
+        keyed = [row for row in rows if row[0] == previous_key]
+        notices = [row for row in rows if len(row) == 7 and row[5] == plan.notice_key]
+        semantic = [row for row in rows if len(row) == 7 and row[6] == plan.semantic_key]
+        if len(keyed) != 1 or keyed != notices or keyed != semantic or len(keyed[0]) != 7:
+            raise OSError("previous completion claim is missing or ambiguous")
+        old = keyed[0]
+        if (
+            canonical_tmux_target(old[1]) != canonical_tmux_target(plan.target)
+            or old[2] != plan.task.name
+            or canonical_tmux_target(old[3]) != canonical_tmux_target(plan.manager_target)
+            or SHA256_RE.fullmatch(old[4]) is None
+        ):
+            raise OSError("previous completion claim belongs to a different task or owner")
+        old_authorization = authorization_dir / previous_key
+        payload = owned_private_file(old_authorization, "previous completion authorization", 4096).decode()
+        try:
+            values = dict(line.split("=", 1) for line in payload.splitlines())
+        except ValueError as exc:
+            raise OSError("previous completion authorization is malformed") from exc
+        expected_fields = {
+            "version",
+            "target",
+            "root",
+            "task",
+            "task_sha256",
+            "notice_key",
+            "semantic_key",
+            "subject_sha256",
+            "body_sha256",
+        }
+        relative_task = plan.task.resolve().relative_to(plan.root.resolve()).as_posix()
+        if (
+            len(values) != len(payload.splitlines())
+            or set(values) != expected_fields
+            or values["version"] != "1"
+            or canonical_tmux_target(values["target"]) != canonical_tmux_target(plan.target)
+            or values["root"] != str(plan.root.resolve())
+            or values["task"] != relative_task
+            or values["task_sha256"] != old[4]
+            or values["notice_key"] != plan.notice_key
+            or values["semantic_key"] != plan.semantic_key
+            or SHA256_RE.fullmatch(values["subject_sha256"]) is None
+            or SHA256_RE.fullmatch(values["body_sha256"]) is None
+        ):
+            raise OSError("previous completion authorization does not match its claim")
+        forbidden = (
+            state_dir / "completion-email-authorization-used" / previous_key,
+            state_dir / "completion-email-delivered" / previous_key,
+            state_dir / "completion-email-reconciled" / previous_key,
+            state_dir / "completion-email-requests" / previous_key,
+            state_dir / "completion-notice-delivered" / plan.notice_key,
+            state_dir / "ordinary-completion-by-notice" / plan.notice_key,
+        )
+        if any(path.exists() for path in forbidden):
+            raise OSError("previous completion claim may have been used, delivered, reconciled, or queued")
+        current_authorization = authorization_dir / plan.key
+        current_payload = completion_authorization_payload(plan)
+        try:
+            recorded = owned_private_file(current_authorization, "current completion authorization", 4096).decode()
+        except FileNotFoundError:
+            exclusive_record(current_authorization, current_payload)
+        else:
+            if recorded != current_payload:
+                raise OSError("current completion authorization is ambiguous")
+        replacement = [plan.key, plan.target, plan.task.name, plan.manager_target, plan.task_sha256, plan.notice_key, plan.semantic_key]
+        updated_rows = [replacement if row == old else row for row in rows]
+        updated = "".join("\t".join(row) + "\n" for row in updated_rows)
+        temporary = ledger.with_name(f".{ledger.name}.{os.getpid()}.tmp")
+        try:
+            temporary_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(temporary_fd, "w", encoding="utf-8") as handle:
+                _ = handle.write(updated)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, ledger)
+            fsync_directory(state_dir)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
 def claim_completion_email(plan: CompletionEmail, *, recover_existing: bool = False) -> bool:
     """Prepare the exact capability before reserving its Human notice."""
 
@@ -1175,18 +1291,7 @@ def claim_completion_email(plan: CompletionEmail, *, recover_existing: bool = Fa
     authorization_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     require_private_directory(authorization_directory, "completion email authorization directory")
     authorization = authorization_directory / plan.key
-    relative_task = plan.task.resolve().relative_to(plan.root.resolve()).as_posix()
-    authorization_payload = (
-        f"version=1\n"
-        f"target={plan.target}\n"
-        f"root={plan.root.resolve()}\n"
-        f"task={relative_task}\n"
-        f"task_sha256={plan.task_sha256}\n"
-        f"notice_key={plan.notice_key}\n"
-        f"semantic_key={plan.semantic_key}\n"
-        f"subject_sha256={hashlib.sha256(plan.subject.encode()).hexdigest()}\n"
-        f"body_sha256={hashlib.sha256(plan.body.encode()).hexdigest()}\n"
-    )
+    authorization_payload = completion_authorization_payload(plan)
     lock_path = state_dir / "completion-email-claims.lock"
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     with os.fdopen(fd, "r+", encoding="utf-8") as lock:
@@ -1366,15 +1471,27 @@ def main(argv: list[str] | None = None) -> int:
     _ = parser.add_argument("--message-id", default="", help="Exact RFC Message-ID required by --reconcile-ordinary-sent.")
     _ = parser.add_argument("--sent-subject-sha256", default="", help="Exact decoded Sent-Mail subject digest.")
     _ = parser.add_argument("--sent-body-sha256", default="", help="Exact decoded plain-text Sent-Mail body digest.")
+    _ = parser.add_argument("--answer-subject-file", type=Path, help="One-line subject for a combined Human answer.")
+    _ = parser.add_argument("--answer-message-file", type=Path, help="Body for a combined Human answer.")
+    _ = parser.add_argument(
+        "--refresh-unattempted-claim",
+        default="",
+        help="Exact prior claim key to replace after proving its authorization never reached SMTP.",
+    )
     parsed = parser.parse_args(argv)
     root = parsed.root.resolve()
     task = parsed.task if parsed.task.is_absolute() else root / parsed.task
     try:
         reconciliation_values = (parsed.owner, parsed.task_sha256, parsed.receipt, parsed.receipt_sha256)
+        answer_values = (parsed.answer_subject_file, parsed.answer_message_file)
+        if bool(answer_values[0]) != bool(answer_values[1]):
+            parser.error("a combined Human answer requires both answer files.")
         if not parsed.semantic_key:
             parser.error("--semantic-key is required for a completion notice.")
         if parsed.reconcile_delivered and parsed.reconcile_ordinary_sent:
             parser.error("completion reconciliation modes are mutually exclusive.")
+        if (parsed.reconcile_delivered or parsed.reconcile_ordinary_sent) and (any(answer_values) or parsed.refresh_unattempted_claim):
+            parser.error("claim refresh and Human answer options cannot be combined with reconciliation.")
         ordinary_values = (parsed.message_id, parsed.sent_subject_sha256, parsed.sent_body_sha256)
         if parsed.reconcile_delivered:
             if not all(reconciliation_values):
@@ -1417,6 +1534,8 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("owner, task digest, and receipt options require --reconcile-delivered.")
         if any(ordinary_values):
             parser.error("Message-ID and Sent-Mail digests require --reconcile-ordinary-sent.")
+        answer_subject = parsed.answer_subject_file.read_text(encoding="utf-8").rstrip("\n") if parsed.answer_subject_file else ""
+        answer_body = parsed.answer_message_file.read_text(encoding="utf-8") if parsed.answer_message_file else ""
         text = task.read_text(encoding="utf-8")
         plan = plan_completion_email(
             root,
@@ -1425,6 +1544,8 @@ def main(argv: list[str] | None = None) -> int:
             parsed.outcome,
             items=tuple(parsed.item),
             evidence=parsed.evidence,
+            human_subject=answer_subject,
+            human_body=answer_body,
             semantic_key=parsed.semantic_key,
         )
     except (OSError, TaskFrontmatterError, ValueError) as exc:
@@ -1433,6 +1554,12 @@ def main(argv: list[str] | None = None) -> int:
     if plan is None:
         print("omo_completion_email.py: caller is not the exact owner or reporting is suppressed", file=sys.stderr)
         return 2
+    if parsed.refresh_unattempted_claim:
+        try:
+            refresh_unattempted_completion_claim(plan, parsed.refresh_unattempted_claim)
+        except (OSError, ValueError) as exc:
+            print(f"omo_completion_email.py: {exc}", file=sys.stderr)
+            return 2
     if completion_email_is_delivered(plan):
         return 0
     return 0 if send_completion_email(plan) else 2
