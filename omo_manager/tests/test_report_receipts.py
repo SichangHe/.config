@@ -4307,6 +4307,140 @@ return 75
             self.assertEqual(1, custody["todo_reference_count"])
             self.assertEqual(0, validate_export_from(case, exported).returncode)
 
+    def test_registered_interim_acknowledgment_accepts_only_exact_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "logs"
+            root.mkdir()
+            task = root / "worker.md"
+            manager = root / "manager.md"
+            envelope = tmp_path / "agent_done_fixture.md"
+            state = tmp_path / "pending-watch-consumed-reports.tsv"
+            source = OMO_DIR / "omo_task_lock.py"
+            input_sha256 = "1" * 64
+            replay_id = "2" * 64
+            commitment_id = "3" * 64
+            manager_target = "vl:2"
+            producer_target = "cfg:7"
+            pointer = f"(from agent cfg:7 {envelope})"
+            owner = b"manager owner\n"
+            manager.write_bytes(owner)
+            task.write_bytes(b"task\n")
+            interim_key = omo_report_receipt.interim_digest_acknowledgment_key(
+                root,
+                envelope,
+                input_sha256,
+            )
+            interim_lock = state.parent / "pending-watch-authority" / (
+                f"{hashlib.sha256(interim_key.encode()).hexdigest()}.lock"
+            )
+            source_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+            owner_binding = OwnerPrefixBinding(
+                hashlib.sha256(str(manager).encode()).hexdigest(),
+                hashlib.sha256(owner).hexdigest(),
+                len(owner),
+                1,
+            )
+            before_size = len(owner) + 1 + len(b"(pending)\n") + len(pointer.encode()) + 1
+            fields = [
+                "1234.500000",
+                interim_key,
+                "watcher-locked-pointer-transition-v1",
+                hashlib.sha256(str(manager).encode()).hexdigest(),
+                hashlib.sha256(pointer.encode()).hexdigest(),
+                "4" * 64,
+                str(before_size),
+                hashlib.sha256(owner).hexdigest(),
+                str(len(owner)),
+                "watcher-consumption-authority-v1",
+                "bounded-watcher-lease",
+                "123",
+                "456",
+                hashlib.sha256(str(interim_lock).encode()).hexdigest(),
+                "7",
+                "8",
+                str(source),
+                source_sha256,
+                "5" * 64,
+            ]
+            entry = "\t".join(fields)
+            state.write_text(entry + "\n", encoding="utf-8")
+            state.chmod(0o600)
+
+            @dataclass(frozen=True)
+            class AcknowledgmentPlan:
+                root: Path
+                task: Path
+                manager: Path
+                envelope_final: Path
+                input_info: dict[str, object]
+                replay_id: str
+                routing: dict[str, object]
+                acknowledgment_state: Path
+                acknowledgment_key: str
+                acknowledgment_authority_lock: Path
+                helper: dict[str, object]
+                pointer: str
+                owner_prefix: OwnerPrefixBinding
+
+            canonical_key = omo_report_receipt.manager_acknowledgment_key(root, envelope, input_sha256)
+            canonical_lock = state.parent / "pending-watch-authority" / (
+                f"{hashlib.sha256(canonical_key.encode()).hexdigest()}.lock"
+            )
+            plan = AcknowledgmentPlan(
+                root=root,
+                task=task,
+                manager=manager,
+                envelope_final=envelope,
+                input_info={"sha256": input_sha256},
+                replay_id=replay_id,
+                routing={
+                    "requested_manager_target": manager_target,
+                    "producer_target": producer_target,
+                },
+                acknowledgment_state=state,
+                acknowledgment_key=canonical_key,
+                acknowledgment_authority_lock=canonical_lock,
+                helper={"dependencies": {"omo_task_lock": {"sha256": source_sha256}}},
+                pointer=pointer,
+                owner_prefix=owner_binding,
+            )
+            registration = omo_report_receipt.RegisteredInterimAcknowledgment(
+                task_ref=task.name,
+                manager_ref=manager.name,
+                replay_id=replay_id,
+                commitment_id=commitment_id,
+                manager_target=manager_target,
+                producer_target=producer_target,
+                envelope_name=envelope.name,
+                input_sha256=input_sha256,
+                key_sha256=interim_key.rpartition(":")[2],
+                entry_sha256=hashlib.sha256(entry.encode()).hexdigest(),
+            )
+
+            with patch.object(
+                omo_report_receipt,
+                "REGISTERED_INTERIM_ACKNOWLEDGMENTS",
+                (registration,),
+            ):
+                acknowledgment = omo_report_receipt.registered_interim_acknowledgment(
+                    plan,
+                    commitment_id,
+                )
+                self.assertIsNotNone(acknowledgment)
+                assert acknowledgment is not None
+                self.assertEqual(interim_key, acknowledgment["key"])
+                fields[5] = "6" * 64
+                state.write_text("\t".join(fields) + "\n", encoding="utf-8")
+                with self.assertRaisesRegex(ReceiptError, "registered interim manager acknowledgment changed"):
+                    omo_report_receipt.registered_interim_acknowledgment(plan, commitment_id)
+                self.assertIsNone(
+                    omo_report_receipt.registered_interim_acknowledgment(
+                        replace(plan, replay_id="9" * 64),
+                        commitment_id,
+                    )
+                )
+
     def test_registered_root_retained_cleanup_authenticates_exact_committed_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "logs"

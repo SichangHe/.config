@@ -1865,8 +1865,12 @@ def agent_report_seen_key(args: Args, marker: Marker, attachments: Sequence[Sour
 
     source = agent_report_source(marker, attachments)
     artifact = authenticated_agent_report(adjacent_source_metadata(marker.block_text.splitlines()))
-    payload = artifact.message_sha256 if artifact is not None else readable_attachment_payload(attachments)
-    identity = f"{source}\0{payload}" if source else direct_message_text(marker, attachments)
+    if source and artifact is not None:
+        hash_line = f"[message-sha256: {artifact.message_sha256}]"
+        identity = f"{source}\0{source}\0{hash_line}"
+    else:
+        payload = readable_attachment_payload(attachments)
+        identity = f"{source}\0{payload}" if source else direct_message_text(marker, attachments)
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
     return f"{args.root}:agent-report:{digest}"
 

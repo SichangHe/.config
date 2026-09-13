@@ -108,6 +108,26 @@ class PendingReportDeliveryTests(unittest.TestCase):
 
             self.assertEqual(first_key, watcher.agent_report_seen_key(args, marker, watcher.marker_attachments(args, marker)))
 
+    def test_report_identity_matches_receipt_acknowledgment_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = valid_report(self, "worker_done_receipt_key", "stable body\n")
+            task = root / "worker.md"
+            write_report_pointer(task, report)
+            args = args_for(root)
+            marker = watcher.find_markers(root, [task])[0]
+            artifact = watcher.authenticated_agent_report(marker.block_text.splitlines()[1])
+            self.assertIsNotNone(artifact)
+            assert artifact is not None
+            hash_line = f"[message-sha256: {artifact.message_sha256}]"
+            identity = f"{report}\0{report}\0{hash_line}"
+            expected = f"{root}:agent-report:{hashlib.sha256(identity.encode()).hexdigest()}"
+
+            self.assertEqual(
+                expected,
+                watcher.agent_report_seen_key(args, marker, watcher.marker_attachments(args, marker)),
+            )
+
     def test_report_identity_distinguishes_message_updates(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

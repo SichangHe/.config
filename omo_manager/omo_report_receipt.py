@@ -146,6 +146,20 @@ class RegisteredRootRetainedCleanup:
     cleanup_line_numbers: tuple[int, int]
 
 
+@dataclass(frozen=True)
+class RegisteredInterimAcknowledgment:
+    task_ref: str
+    manager_ref: str
+    replay_id: str
+    commitment_id: str
+    manager_target: str
+    producer_target: str
+    envelope_name: str
+    input_sha256: str
+    key_sha256: str
+    entry_sha256: str
+
+
 REGISTERED_ROOT_RETAINED_CLEANUPS = (
     RegisteredRootRetainedCleanup(
         task_ref="book_ocr_tts.md",
@@ -177,6 +191,21 @@ REGISTERED_ROOT_RETAINED_CLEANUPS = (
             "03a7be304239da5422ba3844e5ae98e7445513c920121ddbff056ada5c438c75",
         ),
         cleanup_line_numbers=(36, 35),
+    ),
+)
+
+REGISTERED_INTERIM_ACKNOWLEDGMENTS = (
+    RegisteredInterimAcknowledgment(
+        task_ref="book_ocr_tts.md",
+        manager_ref="pb_news_mgr.md",
+        replay_id="709d2cffd37910479e92fe2c18822f19e63fc4566e8d8620c10c777641b1585a",
+        commitment_id="62d906113a4def8d259e20660347bba3ed73220b354f7f267ed18b121c6e004c",
+        manager_target="pb:1",
+        producer_target="book:0",
+        envelope_name="agent_done_e69aa15a3da6f444cac4078ed152d8b88c4f86fddf61b73de83570a0d0e29d0a.md",
+        input_sha256="2919f5b4c7ade172154ccb0e3321d4d7c062b1449be11cbea430916a00878637",
+        key_sha256="1e8a7c19cb9bdc73e9619f7b0bbc472c56fa937cf47f0c47bdb87c500e7300c9",
+        entry_sha256="b515f78df56225a0cd16b06f35c0f9cf74699c3591c2c70a0c1cfec6f62b5b9e",
     ),
 )
 
@@ -1251,6 +1280,67 @@ def manager_acknowledgment_key(root: Path, envelope: Path, input_sha256: str) ->
     source = str(envelope)
     identity = f"{source}\0{source}\0{hash_line}"
     return f"{root}:agent-report:{hashlib.sha256(identity.encode()).hexdigest()}"
+
+
+# 🧑 "Continue until each item is complete or cancelled."
+def interim_digest_acknowledgment_key(root: Path, envelope: Path, input_sha256: str) -> str:
+    """Rebuild the short-lived watcher key used before canonical identity was restored."""
+
+    identity = f"{envelope}\0{input_sha256}"
+    return f"{root}:agent-report:{hashlib.sha256(identity.encode()).hexdigest()}"
+
+
+def registered_interim_acknowledgment(
+    plan: Plan,
+    commitment_id: str,
+) -> dict[str, object] | None:
+    """Authenticate one exact transition written with the interim watcher key."""
+
+    try:
+        task_ref = plan.task.relative_to(plan.root).as_posix()
+        manager_ref = plan.manager.relative_to(plan.root).as_posix()
+    except ValueError:
+        return None
+    matches = [
+        registration
+        for registration in REGISTERED_INTERIM_ACKNOWLEDGMENTS
+        if (
+            registration.task_ref == task_ref
+            and registration.manager_ref == manager_ref
+            and registration.replay_id == plan.replay_id
+            and registration.commitment_id == commitment_id
+            and registration.manager_target == plan.routing["requested_manager_target"]
+            and registration.producer_target == plan.routing["producer_target"]
+            and registration.envelope_name == plan.envelope_final.name
+            and registration.input_sha256 == plan.input_info["sha256"]
+        )
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ReceiptError("registered interim manager acknowledgment is ambiguous")
+    registration = matches[0]
+    interim_key = interim_digest_acknowledgment_key(
+        plan.root,
+        plan.envelope_final,
+        str(plan.input_info["sha256"]),
+    )
+    if interim_key.rpartition(":")[2] != registration.key_sha256:
+        raise ReceiptError("registered interim manager acknowledgment key changed")
+    interim_lock = plan.acknowledgment_authority_lock.parent / (
+        f"{hashlib.sha256(interim_key.encode()).hexdigest()}.lock"
+    )
+    acknowledgment = read_manager_acknowledgment(
+        replace(
+            plan,
+            acknowledgment_key=interim_key,
+            acknowledgment_authority_lock=interim_lock,
+        ),
+        require_live_authority=False,
+    )
+    if acknowledgment is None or acknowledgment.get("entry_sha256") != registration.entry_sha256:
+        raise ReceiptError("registered interim manager acknowledgment changed")
+    return acknowledgment
 
 
 def parse_route_evidence(
@@ -4288,6 +4378,11 @@ def consumed_closure_attestation(plan: Plan, *, archived: bool = False) -> dict[
     if commitment is None:
         raise ReceiptError("consumed report has no immutable transaction commitment")
     acknowledgment = read_manager_acknowledgment(plan, require_live_authority=False)
+    if acknowledgment is None:
+        acknowledgment = registered_interim_acknowledgment(
+            plan,
+            str(commitment["commitment_id"]),
+        )
     if acknowledgment is None:
         raise ReceiptError("consumed report has no exact watcher transition")
     if plan.pointer.encode() in manager_bytes(plan.manager):
