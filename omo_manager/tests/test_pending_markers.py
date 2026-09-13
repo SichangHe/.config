@@ -2611,16 +2611,17 @@ with exclusive_watcher_root(root):
 
         captured: list[watcher.Args] = []
 
-        def handle(_client: object, args: watcher.Args) -> bool:
+        def collect(_client: object, args: watcher.Args) -> watcher.ManagerMailCounts:
             captured.append(args)
-            return True
+            return watcher.ManagerMailCounts(0, 0, 86400, 0, True)
 
         with (
             tempfile.TemporaryDirectory() as tmp,
             patch.object(watcher, "human_config_path", return_value=Path(tmp) / "human.toml"),
             patch.object(watcher, "parse_env_config", return_value={"host": "imap.example", "user": "human@example.test", "password": "human-secret"}),
             patch.object(watcher.imaplib, "IMAP4_SSL", return_value=Client()),
-            patch.object(watcher, "handle_manager_mail_thresholds", side_effect=handle),
+            patch.object(watcher, "collect_manager_mail_counts", side_effect=collect),
+            patch.object(watcher, "apply_manager_mail_thresholds", return_value=True),
         ):
             args = watcher.Args(Path(tmp), "", Path(tmp), Path(tmp), None, True, "human@example.test", 0, Path("/bin/false"))
             self.assertTrue(watcher.handle_split_manager_mail_thresholds(args, Settings()))  # type: ignore[arg-type]

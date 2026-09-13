@@ -2,13 +2,281 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
+import time
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
 from omo_manager import email_idle_watcher as watcher
 from omo_manager import omo_pending_watch as pending_watcher
 from omo_manager.omo_agent_status import parse_task_metadata
+
+
+class EmailRetentionScheduleTests(unittest.TestCase):
+    def test_human_inbox_retention_default_is_five_minutes(self) -> None:
+        self.assertEqual(300, watcher.DEFAULT_MANAGER_MAIL_THRESHOLD_INTERVAL_S)
+
+    def test_slow_human_inbox_retention_does_not_block_idle_intake(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        args = watcher.Args(
+            Path("/tmp/logs"),
+            "",
+            Path("/tmp/mail"),
+            Path("/tmp/state"),
+            None,
+            False,
+            "human@example.test",
+            0,
+            Path("/bin/false"),
+        )
+
+        def threshold_check() -> watcher.ManagerMailThresholdSnapshot:
+            started.set()
+            _ = release.wait(timeout=2)
+            return watcher.ManagerMailThresholdSnapshot(args, watcher.ManagerMailCounts(0, 0, 86400, 0, True))
+
+        check = watcher.BackgroundThresholdCheck(threshold_check)
+        try:
+            started_s = time.monotonic()
+            self.assertFalse(check())
+            self.assertLess(time.monotonic() - started_s, 0.5)
+            self.assertTrue(started.wait(timeout=1))
+            self.assertFalse(check())
+        finally:
+            release.set()
+
+    def test_human_inbox_retention_runs_only_after_five_minutes(self) -> None:
+        args = watcher.Args(
+            Path("/tmp/logs"),
+            "",
+            Path("/tmp/mail"),
+            Path("/tmp/state"),
+            None,
+            False,
+            "human@example.test",
+            0,
+            Path("/bin/false"),
+        )
+        now_s = 0.0
+        completed = threading.Event()
+        calls = 0
+
+        def collect() -> watcher.ManagerMailThresholdSnapshot:
+            nonlocal calls
+            calls += 1
+            completed.set()
+            return watcher.ManagerMailThresholdSnapshot(args, watcher.ManagerMailCounts(0, 0, 86400, 0, True))
+
+        check = watcher.BackgroundThresholdCheck(collect, clock=lambda: now_s)
+        with patch.object(watcher, "apply_manager_mail_thresholds", return_value=False) as apply:
+            self.assertFalse(check())
+            self.assertTrue(completed.wait(timeout=1))
+            now_s = 60
+            deadline_s = time.monotonic() + 1
+            while apply.call_count == 0 and time.monotonic() < deadline_s:
+                self.assertFalse(check())
+                time.sleep(0.001)
+            self.assertEqual(1, apply.call_count)
+            self.assertEqual(1, calls)
+            now_s = 299
+            self.assertFalse(check())
+            self.assertEqual(1, calls)
+            completed.clear()
+            now_s = 300
+            self.assertFalse(check())
+            self.assertTrue(completed.wait(timeout=1))
+            self.assertEqual(2, calls)
+
+    def test_overlong_retention_collection_does_not_overlap(self) -> None:
+        args = watcher.Args(Path("/tmp/logs"), "", Path("/tmp/mail"), Path("/tmp/state"), None, False, "human@example.test", 0, Path("/bin/false"))
+        now_s = 0.0
+        started = threading.Event()
+        release = threading.Event()
+        calls = 0
+
+        def collect() -> watcher.ManagerMailThresholdSnapshot:
+            nonlocal calls
+            calls += 1
+            started.set()
+            _ = release.wait(timeout=2)
+            return watcher.ManagerMailThresholdSnapshot(args, watcher.ManagerMailCounts(0, 0, 86400, 0, True))
+
+        check = watcher.BackgroundThresholdCheck(collect, clock=lambda: now_s)
+        try:
+            self.assertFalse(check())
+            self.assertTrue(started.wait(timeout=1))
+            now_s = 600
+            self.assertFalse(check())
+            self.assertFalse(check())
+            self.assertEqual(1, calls)
+        finally:
+            release.set()
+
+    def test_retention_apply_failure_does_not_escape_intake(self) -> None:
+        args = watcher.Args(Path("/tmp/logs"), "", Path("/tmp/mail"), Path("/tmp/state"), None, False, "human@example.test", 0, Path("/bin/false"))
+        completed = threading.Event()
+
+        def collect() -> watcher.ManagerMailThresholdSnapshot:
+            completed.set()
+            return watcher.ManagerMailThresholdSnapshot(args, watcher.ManagerMailCounts(0, 0, 86400, 0, True))
+
+        check = watcher.BackgroundThresholdCheck(collect)
+        with patch.object(watcher, "apply_manager_mail_thresholds", side_effect=OSError("state unavailable")), self.assertLogs(level="WARNING") as logs:
+            self.assertFalse(check())
+            self.assertTrue(completed.wait(timeout=1))
+            deadline_s = time.monotonic() + 1
+            while "threshold apply failed" not in "\n".join(logs.output) and time.monotonic() < deadline_s:
+                self.assertFalse(check())
+                time.sleep(0.001)
+        self.assertIn("threshold apply failed", "\n".join(logs.output))
+
+    def test_retention_task_changes_run_on_intake_thread(self) -> None:
+        args = watcher.Args(
+            Path("/tmp/logs"),
+            "",
+            Path("/tmp/mail"),
+            Path("/tmp/state"),
+            None,
+            False,
+            "human@example.test",
+            0,
+            Path("/bin/false"),
+        )
+        collected = threading.Event()
+        collector_thread = 0
+        apply_thread = 0
+
+        def collect() -> watcher.ManagerMailThresholdSnapshot:
+            nonlocal collector_thread
+            collector_thread = threading.get_ident()
+            collected.set()
+            return watcher.ManagerMailThresholdSnapshot(args, watcher.ManagerMailCounts(0, 0, 86400, 0, True))
+
+        def apply(_args: watcher.Args, _counts: watcher.ManagerMailCounts) -> bool:
+            nonlocal apply_thread
+            apply_thread = threading.get_ident()
+            return False
+
+        check = watcher.BackgroundThresholdCheck(collect)
+        with patch.object(watcher, "apply_manager_mail_thresholds", side_effect=apply):
+            self.assertFalse(check())
+            self.assertTrue(collected.wait(timeout=1))
+            deadline_s = time.monotonic() + 1
+            while apply_thread == 0 and time.monotonic() < deadline_s:
+                self.assertFalse(check())
+                time.sleep(0.001)
+        self.assertEqual(threading.get_ident(), apply_thread)
+        self.assertNotEqual(collector_thread, apply_thread)
+
+    def test_pending_delivery_log_correlates_email_source_and_target(self) -> None:
+        guard = pending_watcher.PendingGuard(
+            Path("/tmp/logs"),
+            Path("task.md"),
+            9,
+            "digest",
+            "(pending)\n(record and delegate manager_mail/85c-source.txt)",
+        )
+        stderr = StringIO()
+        with patch.object(pending_watcher, "verified_send_to_codex"), redirect_stderr(stderr):
+            pending_watcher.run_verified_send(
+                "config:24",
+                "request",
+                pending_watcher.CodexSendOptions(1, 0, False),
+                pending_guard=guard,
+            )
+        output = stderr.getvalue()
+        self.assertIn("source=manager_mail/85c-source.txt", output)
+        self.assertIn("target=config:24", output)
+        self.assertIn("submit_started_at=", output)
+        self.assertIn("submitted_at=", output)
+
+    def test_intake_timing_adds_no_metadata_fetch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail_dir = root / "manager_mail"
+            mail_dir.mkdir()
+            manager = root / "manager.md"
+            manager.write_text("manager log\n", encoding="utf-8")
+            args = watcher.Args(root, "", mail_dir, root / "state", manager, True, "human@example.test", 0, Path("/bin/false"), manager_target="main:0", mail_thresholds=False)
+            raw_message = (
+                b"From: Human <human@example.test>\r\n"
+                b"Date: Sat, 12 Sep 2026 16:47:17 -0700\r\n"
+                b"Subject: Direct work\r\n"
+                b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+                b"Do the work.\r\n"
+            )
+
+            class Client:
+                def __init__(self) -> None:
+                    self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+                def uid(self, command: str, *arguments: object) -> tuple[str, list[object]]:
+                    self.calls.append((command, arguments))
+                    if command == "fetch" and arguments == ("7", "(BODY.PEEK[])"):
+                        return "OK", [(b"RFC822", raw_message)]
+                    raise AssertionError((command, arguments))
+
+            client = Client()
+            with (
+                patch.object(watcher, "search_sender_uids", return_value={b"7"}),
+                patch.object(watcher, "exact_human_sender", return_value=True),
+                patch.object(watcher, "try_route_amh_message", return_value=watcher.AmhRouteDisposition.FALLBACK),
+                patch.object(watcher, "mark_seen_after_human_intake", return_value=True),
+                patch.object(watcher, "maybe_handle_manager_mail_thresholds", return_value=False),
+                self.assertLogs(level="INFO") as logs,
+            ):
+                self.assertTrue(watcher.handle_unseen(client, args, "idle"))  # type: ignore[arg-type]
+
+            self.assertEqual([("fetch", ("7", "(BODY.PEEK[])"))], client.calls)
+            timing = "\n".join(logs.output)
+            self.assertIn("email intake timing:", timing)
+            self.assertIn("trigger=idle", timing)
+            self.assertIn("message_date_to_copy_s=", timing)
+
+    def test_retention_append_cannot_overwrite_human_mail_append(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = root / "manager.md"
+            manager.write_text("task\n", encoding="utf-8")
+            mail = root / "manager_mail" / "source.txt"
+            mail.parent.mkdir()
+            mail.write_text("Subject: request\n\nbody\n", encoding="utf-8")
+            args = watcher.Args(root, "", mail.parent, root / "state", manager, False, "human@example.test", 0, Path("/bin/false"))
+            retention_read = threading.Event()
+            release_retention = threading.Event()
+            original_read_text = Path.read_text
+
+            def read_text(path: Path, *read_args: object, **read_kwargs: object) -> str:
+                text = original_read_text(path, *read_args, **read_kwargs)  # type: ignore[arg-type]
+                if path == manager and threading.current_thread().name == "retention-test" and not retention_read.is_set():
+                    retention_read.set()
+                    _ = release_retention.wait(timeout=2)
+                return text
+
+            retention = threading.Thread(
+                target=watcher.append_manager_mail_threshold_pending,
+                args=(args, "total-cleanup", watcher.ManagerMailCounts(30, 0, 86400, 0, True)),
+                name="retention-test",
+            )
+            human = threading.Thread(target=watcher.append_pending, args=(root, mail, manager), name="human-test")
+            with patch.object(Path, "read_text", read_text):
+                retention.start()
+                self.assertTrue(retention_read.wait(timeout=1))
+                human.start()
+                human.join(timeout=0.05)
+                self.assertTrue(human.is_alive())
+                release_retention.set()
+                retention.join(timeout=2)
+                human.join(timeout=2)
+            self.assertFalse(retention.is_alive())
+            self.assertFalse(human.is_alive())
+            text = manager.read_text(encoding="utf-8")
+            self.assertIn("manager mail 30 exceeds", text)
+            self.assertIn("(record and delegate manager_mail/source.txt)", text)
 
 
 def task_text(
@@ -224,6 +492,7 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
         )
         self.mail = self.root / "manager_mail" / "42.txt"
         self.mail.write_text("Subject: Re: work\n\nTerminate this agent and preserve the queue.\n", encoding="utf-8")
+        self.message_id = "<lifecycle-42@example.test>"
         self.args = args_for(self.root, self.main_file)
         manager_custody = patch.object(watcher, "require_sendable_codex_target", return_value=None)
         manager_custody.start()
@@ -237,6 +506,7 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
             self.mail,
             "Re: [worker:2] work",
             watcher.AgentLifecycleCommand(watcher.AgentLifecycleAction.TERMINATE),
+            self.message_id,
         )
         after = parse_task_metadata(self.worker_task.read_text(encoding="utf-8"), self.root)
         assert after is not None
@@ -258,12 +528,17 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
             marker.block_text,
         )
         self.assertIn("The Human asked to terminate worker:2.", delivery)
+        self.assertIn("managers handle lifecycle only", marker.block_text)
+        self.assertIn("the responsible worker reports directly", marker.block_text)
         self.assertNotIn("addressed_task:", delivery)
         self.assertNotIn("omo_queue_transfer.py", delivery)
         self.assertNotIn("pending_task_items_ordered_json", delivery)
         self.assertIn("Terminate this agent and preserve the queue.", delivery)
         self.assertIn("custody record is stored", delivery)
         self.assertNotIn("<human_instruction>", delivery)
+        for target in ("mgr:1", "worker:2"):
+            guard, payload = watcher.worker_lifecycle_report_guard(self.args.state_dir, target, self.message_id)
+            self.assertEqual(payload, guard.read_bytes())
 
         consumed_worker = parse_task_metadata(self.worker_task.read_text(encoding="utf-8"), self.root)
         responsible_manager = parse_task_metadata(self.manager_task.read_text(encoding="utf-8"), self.root)
@@ -285,6 +560,7 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
             self.mail,
             "Re: [worker:2] work",
             watcher.AgentLifecycleCommand(watcher.AgentLifecycleAction.TERMINATE),
+            self.message_id,
         )
         text = self.worker_task.read_text(encoding="utf-8")
         self.assertEqual(self.worker_task.resolve(), route.manager_file)
@@ -304,7 +580,7 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
             "Subject: Re: work\n\nReplace this agent\nThe previous agent ignored the requested tests.\n",
             encoding="utf-8",
         )
-        watcher.append_agent_lifecycle_pending(self.args, self.mail, "Re: [worker:2] work", command)
+        watcher.append_agent_lifecycle_pending(self.args, self.mail, "Re: [worker:2] work", command, self.message_id)
         marker = pending_watcher.find_markers(self.root, [self.worker_task])[0]
         delivery = pending_watcher.marker_delivery_text(
             marker,
@@ -338,6 +614,7 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
             self.mail,
             "Re: [dw:0] work",
             watcher.AgentLifecycleCommand(watcher.AgentLifecycleAction.REVIEW, "the wording requires review"),
+            self.message_id,
         )
         marker = pending_watcher.find_markers(self.root, [self.worker_task])[0]
         attachments = pending_watcher.marker_attachments(self._pending_args(), marker)
@@ -364,6 +641,7 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
             self.mail,
             "Re: [main] work",
             watcher.AgentLifecycleCommand(watcher.AgentLifecycleAction.TERMINATE),
+            self.message_id,
         )
         text = self.main_file.read_text(encoding="utf-8")
         self.assertEqual(self.main_file.resolve(), route.manager_file)
@@ -379,6 +657,7 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
                 self.mail,
                 "Re: [missing:4] work",
                 watcher.AgentLifecycleCommand(watcher.AgentLifecycleAction.REPLACE),
+                self.message_id,
             )
         self.assertFalse(self.main_file.exists())
 
@@ -392,6 +671,7 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
                 self.mail,
                 "Re: [main] work",
                 watcher.AgentLifecycleCommand(watcher.AgentLifecycleAction.REPLACE),
+                self.message_id,
             )
         self.assertEqual("main manager log\n", self.main_file.read_text(encoding="utf-8"))
 
@@ -410,6 +690,7 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
             self.mail,
             "Re: [wl:1] DeepWiki root ownership restored",
             command,
+            self.message_id,
         )
         self.assertEqual(self.main_file.resolve(), route.manager_file)
         text = self.main_file.read_text(encoding="utf-8")
@@ -491,6 +772,7 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
     def test_unresolved_amh_reply_command_is_intercepted_before_amh(self) -> None:
         raw_message = (
             b"From: Human <human@example.test>\r\n"
+            b"Message-ID: <unresolved-amh@example.test>\r\n"
             b"Subject: Re: [pb] work\r\n"
             b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
             b"Replace this agent\r\n"
@@ -526,6 +808,7 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
         watcher.save_processed_uids(watcher.unaccepted_pending_uids_path(self.args), {"7"})
         raw_message = (
             b"From: Human <human@example.test>\r\n"
+            b"Message-ID: <replay-7@example.test>\r\n"
             b"Subject: Re: [worker:2] work\r\n"
             b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
             b"Terminate this agent\r\n"
@@ -564,6 +847,7 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
             self.mail,
             "Re: [worker:2] work",
             watcher.AgentLifecycleCommand(watcher.AgentLifecycleAction.REPLACE),
+            self.message_id,
         )
         self.assertEqual(self.main_file.resolve(), route.manager_file)
         self.assertIn("found 2", self.main_file.read_text(encoding="utf-8"))
@@ -573,18 +857,50 @@ class AgentLifecycleRoutingTests(unittest.TestCase):
     def test_lifecycle_transport_replay_is_idempotent(self) -> None:
         command = watcher.AgentLifecycleCommand(watcher.AgentLifecycleAction.TERMINATE)
         _route, first_line = watcher.append_agent_lifecycle_pending(
-            self.args, self.mail, "Re: [worker:2] work", command
+            self.args, self.mail, "Re: [worker:2] work", command, self.message_id
         )
         after_first = self.worker_task.read_bytes()
 
         _route, replay_line = watcher.append_agent_lifecycle_pending(
-            self.args, self.mail, "Re: [worker:2] work", command
+            self.args, self.mail, "Re: [worker:2] work", command, self.message_id
         )
 
         self.assertEqual(after_first, self.worker_task.read_bytes())
         self.assertGreater(first_line, 0)
         self.assertGreater(replay_line, 0)
         self.assertEqual(1, len(pending_watcher.find_markers(self.root, [self.worker_task])))
+
+    def test_failed_lifecycle_marker_append_rolls_back_new_guards(self) -> None:
+        command = watcher.AgentLifecycleCommand(watcher.AgentLifecycleAction.TERMINATE)
+        with (
+            patch.object(watcher, "append_lifecycle_marker_locked", side_effect=RuntimeError("append failed")),
+            self.assertRaisesRegex(RuntimeError, "append failed"),
+        ):
+            watcher.append_bound_lifecycle_command(
+                self.args,
+                self.mail,
+                self.message_id,
+                command,
+                "worker:2",
+            )
+        guard_dir = self.args.state_dir / "worker-lifecycle-report-guards"
+        self.assertEqual([], list(guard_dir.iterdir()))
+
+    def test_failed_main_review_append_rolls_back_new_guards(self) -> None:
+        command = watcher.AgentLifecycleCommand(watcher.AgentLifecycleAction.REVIEW, "no active owner")
+        with (
+            patch.object(watcher, "append_lifecycle_marker_locked", side_effect=RuntimeError("append failed")),
+            self.assertRaisesRegex(RuntimeError, "append failed"),
+        ):
+            watcher.append_main_lifecycle_review(
+                self.args,
+                self.mail,
+                self.message_id,
+                command,
+                "worker:2",
+            )
+        guard_dir = self.args.state_dir / "worker-lifecycle-report-guards"
+        self.assertEqual([], list(guard_dir.iterdir()))
 
     def _pending_args(self) -> pending_watcher.Args:
         return pending_watcher.Args(

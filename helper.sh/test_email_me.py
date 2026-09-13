@@ -1582,7 +1582,11 @@ class EmailMeTests(unittest.TestCase):
         )
         headers = omo_email_subject.fetch_recent_headers(client, ["1", "2"])
         self.assertEqual(["[wl:1] First", "[wl:1] Second"], [header.subject for header in headers])
-        client.uid.assert_called_once_with("fetch", "1,2", "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID REFERENCES)])")
+        client.uid.assert_called_once_with(
+            "fetch",
+            "1,2",
+            "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID REFERENCES IN-REPLY-TO)])",
+        )
 
     def test_dry_run_can_omit_pwd_footer(self) -> None:
         with patch.object(sys, "stdin", StringIO("body\n")), patch("sys.stdout", new_callable=StringIO) as stdout:
@@ -2031,6 +2035,257 @@ class EmailMeTests(unittest.TestCase):
                     ),
                 )
             self.assertIn("exact active manager owner", stderr.getvalue())
+
+    def test_manager_cannot_mail_on_worker_lifecycle_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            body = Path(tmp) / "body.md"
+            body.write_text("The lifecycle request was reviewed.\n", encoding="utf-8")
+            guard, payload = omo_email_subject.worker_lifecycle_report_guard(
+                Path(self.state_tmp.name),
+                "wl:1",
+                "<lifecycle@example.test>",
+            )
+            guard.parent.mkdir(mode=0o700)
+            guard.write_bytes(payload)
+            guard.chmod(0o600)
+            with (
+                patch.object(email_me, "validate_non_completion_owner", return_value=True),
+                patch.object(
+                    email_me,
+                    "prepare_subject_and_headers",
+                    return_value=(
+                        "[wl:1] Lifecycle final result",
+                        {
+                            "In-Reply-To": "<lifecycle@example.test>",
+                            "References": "<earlier@example.test> <lifecycle@example.test>",
+                        },
+                    ),
+                ),
+                patch("sys.stderr", new_callable=StringIO) as stderr,
+            ):
+                result = email_me.main(
+                    [
+                        "--manager-human",
+                        "--non-completion",
+                        "--tmux-target",
+                        "wl:1",
+                        "--subject",
+                        "Lifecycle final result",
+                        "--message-file",
+                        str(body),
+                    ],
+                )
+        self.assertEqual(2, result)
+        self.assertIn("disabled on this worker lifecycle thread", stderr.getvalue())
+
+    def test_worker_cannot_bypass_lifecycle_completion_authorization(self) -> None:
+        guard, payload = omo_email_subject.worker_lifecycle_report_guard(
+            Path(self.state_tmp.name),
+            "worker:2",
+            "<lifecycle@example.test>",
+        )
+        guard.parent.mkdir(mode=0o700)
+        guard.write_bytes(payload)
+        guard.chmod(0o600)
+        with self.assertRaisesRegex(ValueError, "owner completion authorization"):
+            email_me.validate_non_completion_thread(
+                "worker:2",
+                {"In-Reply-To": "<lifecycle@example.test>", "References": "<lifecycle@example.test>"},
+            )
+
+    def test_same_subject_different_thread_remains_available(self) -> None:
+        guard, payload = omo_email_subject.worker_lifecycle_report_guard(
+            Path(self.state_tmp.name),
+            "wl:1",
+            "<first-thread@example.test>",
+        )
+        guard.parent.mkdir(mode=0o700)
+        guard.write_bytes(payload)
+        guard.chmod(0o600)
+        email_me.validate_non_completion_thread(
+            "wl:1",
+            {"In-Reply-To": "<second-thread@example.test>", "References": "<second-thread@example.test>"},
+        )
+
+    def test_manager_cannot_start_fresh_non_completion_result_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            body = Path(tmp) / "body.md"
+            body.write_text("The worker result is ready.\n", encoding="utf-8")
+            with (
+                patch.object(email_me, "validate_non_completion_owner", return_value=True),
+                patch.object(
+                    email_me,
+                    "prepare_subject_and_headers",
+                    return_value=("[wl:1] Worker result", {}),
+                ),
+                patch("sys.stderr", new_callable=StringIO) as stderr,
+            ):
+                result = email_me.main(
+                    [
+                        "--manager-human",
+                        "--non-completion",
+                        "--tmux-target",
+                        "wl:1",
+                        "--subject",
+                        "Worker result",
+                        "--message-file",
+                        str(body),
+                    ],
+                )
+        self.assertEqual(2, result)
+        self.assertIn("must reply to one verified Human email thread", stderr.getvalue())
+
+    def test_manager_operational_reply_allows_only_acknowledgment_or_question(self) -> None:
+        headers = {
+            "In-Reply-To": "<human@example.test>",
+            "References": "<earlier@example.test> <human@example.test>",
+        }
+        email_me.validate_manager_operational_reply(headers, "Acknowledged: I accepted this request.\n")
+        email_me.validate_manager_operational_reply(headers, "Question: Which worker should own this?\n")
+        with self.assertRaisesRegex(ValueError, "responsible worker reports"):
+            email_me.validate_manager_operational_reply(headers, "The worker result is complete.\n")
+        for bypass in (
+            "Acknowledged: I accepted this request.\nThe worker result is complete.\n",
+            "Acknowledged: The worker result is complete.\n",
+            "Digest: non-urgent queued items\n",
+            "Question: Which worker owns this?\nThe result is complete.\n",
+            "Acknowledged: I accepted this request.\n> The worker result is complete.\n",
+        ):
+            with self.subTest(bypass=bypass), self.assertRaisesRegex(ValueError, "responsible worker reports"):
+                email_me.validate_manager_operational_reply(headers, bypass)
+
+    def test_digest_authorization_binds_exact_content_and_is_one_use(self) -> None:
+        state = Path(self.state_tmp.name)
+        state.chmod(0o700)
+        authorization_dir = state / "manager-digest-authorizations"
+        authorization_dir.mkdir(mode=0o700)
+        subject = "Non-urgent news digest"
+        body = "Non-urgent digest items queued for afternoon/evening idle delivery:\n"
+        key = "a" * 64
+        path = omo_email_subject.manager_digest_authorization_path(state, key)
+        payload = omo_email_subject.manager_digest_authorization_payload(subject, body)
+        path.write_bytes(payload)
+        path.chmod(0o600)
+        with patch.object(sys, "stdin", StringIO(body)):
+            args = email_me.parse_args(
+                [
+                    "--manager-human",
+                    "--digest-authorization",
+                    key,
+                    "--tmux-target",
+                    "wl:1",
+                    "--subject",
+                    subject,
+                ]
+            )
+
+        authorization = email_me.validate_digest_authorization(args)
+        email_me.consume_digest_authorization(*authorization)
+
+        self.assertFalse(path.exists())
+        with self.assertRaisesRegex(ValueError, "missing or malformed"):
+            email_me.validate_digest_authorization(args)
+
+    def test_digest_authorization_rejects_changed_body(self) -> None:
+        state = Path(self.state_tmp.name)
+        state.chmod(0o700)
+        authorization_dir = state / "manager-digest-authorizations"
+        authorization_dir.mkdir(mode=0o700)
+        subject = "Non-urgent news digest"
+        key = "b" * 64
+        path = omo_email_subject.manager_digest_authorization_path(state, key)
+        path.write_bytes(omo_email_subject.manager_digest_authorization_payload(subject, "authorized\n"))
+        path.chmod(0o600)
+        with patch.object(sys, "stdin", StringIO("changed\n")):
+            args = email_me.parse_args(
+                [
+                    "--manager-human",
+                    "--digest-authorization",
+                    key,
+                    "--tmux-target",
+                    "wl:1",
+                    "--subject",
+                    subject,
+                ]
+            )
+
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            email_me.validate_digest_authorization(args)
+
+    def test_digest_authorization_rejects_task_reply_subject(self) -> None:
+        state = Path(self.state_tmp.name)
+        state.chmod(0o700)
+        authorization_dir = state / "manager-digest-authorizations"
+        authorization_dir.mkdir(mode=0o700)
+        subject = "Re: Worker result"
+        body = "Non-urgent digest items queued for afternoon/evening idle delivery:\n"
+        key = "c" * 64
+        path = omo_email_subject.manager_digest_authorization_path(state, key)
+        path.write_bytes(omo_email_subject.manager_digest_authorization_payload(subject, body))
+        path.chmod(0o600)
+        with patch.object(sys, "stdin", StringIO(body)):
+            args = email_me.parse_args(
+                [
+                    "--manager-human",
+                    "--digest-authorization",
+                    key,
+                    "--tmux-target",
+                    "wl:1",
+                    "--subject",
+                    subject,
+                ]
+            )
+
+        with self.assertRaisesRegex(ValueError, "fresh subject"):
+            email_me.validate_digest_authorization(args)
+
+    def test_digest_authorization_sends_through_exact_once_boundary(self) -> None:
+        state = Path(self.state_tmp.name)
+        state.chmod(0o700)
+        authorization_dir = state / "manager-digest-authorizations"
+        authorization_dir.mkdir(mode=0o700)
+        subject = "Non-urgent news digest"
+        body_text = "Non-urgent digest items queued for afternoon/evening idle delivery:\n"
+        key = "d" * 64
+        authorization = omo_email_subject.manager_digest_authorization_path(state, key)
+        authorization.write_bytes(omo_email_subject.manager_digest_authorization_payload(subject, body_text))
+        authorization.chmod(0o600)
+        with tempfile.TemporaryDirectory() as tmp:
+            body = Path(tmp) / "body.md"
+            sent = Path(tmp) / "sent.txt"
+            body.write_text(body_text, encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {
+                    "EMAIL_ME_FAKE_SEND_LOG": str(sent),
+                    "OMO_AGENT_TMUX_TARGET": "wl:1",
+                    "OMO_MANAGER_STATE_DIR": str(state),
+                },
+                clear=False,
+            ):
+                result = email_me.main(
+                    [
+                        "--manager-human",
+                        "--digest-authorization",
+                        key,
+                        "--subject",
+                        subject,
+                        "--message-file",
+                        str(body),
+                    ]
+                )
+
+            self.assertEqual(0, result)
+            self.assertFalse(authorization.exists())
+            self.assertTrue(sent.read_text(encoding="utf-8").startswith("[wl:1] Non-urgent news digest\n"))
+            self.assertIn(body_text, sent.read_text(encoding="utf-8"))
+
+    def test_fresh_digest_subject_ignores_same_subject_mailbox_history(self) -> None:
+        with patch.object(omo_email_subject, "has_recent_thread", return_value=True) as lookup:
+            subject = omo_email_subject.fresh_manager_subject("Non-urgent news digest", "wl:1")
+
+        self.assertEqual("[wl:1] Non-urgent news digest", subject)
+        lookup.assert_not_called()
 
     def test_non_completion_owner_binding_accepts_active_manager_and_worker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

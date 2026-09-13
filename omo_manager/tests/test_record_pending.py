@@ -51,6 +51,14 @@ resolved_task_items: []
 """
 
 
+def human_email(root: Path, name: str = "source.txt", subject: str = "Fresh Human request") -> Path:
+    relative = Path("manager_mail") / name
+    path = root / relative
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(f"Subject: {subject}\n\nPlease do it.\n", encoding="utf-8")
+    return relative
+
+
 class RecordPendingTests(unittest.TestCase):
     def test_insert_requires_and_encodes_explicit_provenance(self) -> None:
         base = ["--pending-file", "task.md", "--line", "10", "--item", "review request"]
@@ -201,6 +209,7 @@ class RecordPendingTests(unittest.TestCase):
             root = Path(tmp)
             task = root / "task.md"
             task.write_text(task_frontmatter() + "(pending)\nPlease do it.\n", encoding="utf-8")
+            email = human_email(root)
             stdout = io.StringIO()
             commands: list[list[str]] = []
             subjects: list[str] = []
@@ -212,17 +221,28 @@ class RecordPendingTests(unittest.TestCase):
                 bodies.append(Path(command[command.index("--message-file") + 1]).read_text(encoding="utf-8"))
 
             with patch("omo_manager.omo_record_pending.subprocess.run", side_effect=fake_run), redirect_stdout(stdout):
-                exit_code = run(Args(root, Path("task.md"), 10, Path("task.md"), ("finish review",), True))
+                exit_code = run(Args(root, Path("task.md"), 10, Path("task.md"), ("finish review",), True, email))
 
             self.assertEqual(0, exit_code)
             self.assertEqual(1, len(commands))
             self.assertIn("--manager-human", commands[0])
             self.assertIn("--subject-file", commands[0])
             self.assertIn("--message-file", commands[0])
-            self.assertEqual("Request recorded\n", subjects[0])
-            self.assertEqual("Added pending items:\n- finish review\n", bodies[0])
+            self.assertEqual("Re: Fresh Human request\n", subjects[0])
+            self.assertEqual("Acknowledged: I recorded your request.\n", bodies[0])
             self.assertNotIn("task.md", bodies[0])
             self.assertIn("recorded 1 pending item", stdout.getvalue())
+
+    def test_ack_human_requires_email_source_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            original = task_frontmatter() + "(pending)\nPlease do it.\n"
+            task.write_text(original, encoding="utf-8")
+
+            self.assertEqual(2, run(Args(root, Path("task.md"), 10, Path("task.md"), ("finish review",), True)))
+
+            self.assertEqual(original, task.read_text(encoding="utf-8"))
 
     def test_ack_human_uses_email_file_subject(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -244,14 +264,14 @@ class RecordPendingTests(unittest.TestCase):
 
             self.assertEqual(0, exit_code)
             self.assertEqual(["Re: PB review request\n"], subjects)
-            self.assertEqual(["Added pending items:\n- Please do it.\n"], bodies)
+            self.assertEqual(["Acknowledged: I recorded your request.\n"], bodies)
 
     def test_ack_human_retry_succeeds_after_email_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task = root / "task.md"
             task.write_text(task_frontmatter() + "(pending)\nPlease do it.\n", encoding="utf-8")
-            args = Args(root, Path("task.md"), 10, Path("task.md"), ("finish review",), True)
+            args = Args(root, Path("task.md"), 10, Path("task.md"), ("finish review",), True, human_email(root))
 
             def fail_email(command: list[str], check: bool) -> None:
                 raise subprocess.CalledProcessError(1, command)
@@ -280,7 +300,7 @@ class RecordPendingTests(unittest.TestCase):
             root = Path(tmp)
             task = root / "task.md"
             task.write_text(task_frontmatter() + "(pending)\nPlease do it.\n", encoding="utf-8")
-            args = Args(root, Path("task.md"), 10, Path("task.md"), ("finish review",), True)
+            args = Args(root, Path("task.md"), 10, Path("task.md"), ("finish review",), True, human_email(root))
 
             def fail_email(command: list[str], check: bool) -> None:
                 raise subprocess.CalledProcessError(1, command)
@@ -306,13 +326,14 @@ class RecordPendingTests(unittest.TestCase):
             worker = root / "worker.md"
             manager.write_text(task_frontmatter(is_manager=True) + "inserted line\n(pending)\nRoute this.\n", encoding="utf-8")
             worker.write_text(task_frontmatter(pending_items=("new worker item",)) + "body\n", encoding="utf-8")
+            email = human_email(root)
             commands: list[list[str]] = []
 
             def send_email(command: list[str], check: bool) -> None:
                 commands.append(command)
 
             with patch("omo_manager.omo_record_pending.subprocess.run", side_effect=send_email):
-                exit_code = run(Args(root, Path("manager.md"), 10, Path("worker.md"), ("new worker item",), True))
+                exit_code = run(Args(root, Path("manager.md"), 10, Path("worker.md"), ("new worker item",), True, email))
 
             self.assertEqual(2, exit_code)
             self.assertEqual([], commands)
@@ -327,13 +348,14 @@ class RecordPendingTests(unittest.TestCase):
             original = task_frontmatter(is_manager=True) + "(pending)\nNew unrelated request.\n" + recorded_line(10, items) + "\n"
             manager.write_text(original, encoding="utf-8")
             worker.write_text(task_frontmatter(pending_items=items) + "body\n", encoding="utf-8")
+            email = human_email(root)
             commands: list[list[str]] = []
 
             def send_email(command: list[str], check: bool) -> None:
                 commands.append(command)
 
             with patch("omo_manager.omo_record_pending.subprocess.run", side_effect=send_email):
-                exit_code = run(Args(root, Path("manager.md"), 10, Path("worker.md"), items, True))
+                exit_code = run(Args(root, Path("manager.md"), 10, Path("worker.md"), items, True, email))
 
             self.assertEqual(2, exit_code)
             self.assertEqual([], commands)
@@ -344,7 +366,7 @@ class RecordPendingTests(unittest.TestCase):
             root = Path(tmp)
             task = root / "task.md"
             task.write_text(task_frontmatter() + "(pending)\nPlease do it.\n", encoding="utf-8")
-            args = Args(root, Path("task.md"), 10, Path("task.md"), ("finish review",), True)
+            args = Args(root, Path("task.md"), 10, Path("task.md"), ("finish review",), True, human_email(root))
 
             def fail_email(command: list[str], check: bool) -> None:
                 raise OSError("mail helper missing")

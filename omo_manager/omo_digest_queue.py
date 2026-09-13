@@ -7,6 +7,8 @@ import fcntl
 import hashlib
 import os
 import re
+import secrets
+import stat
 import subprocess
 import sys
 import tempfile
@@ -14,6 +16,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from omo_manager.omo_email_subject import manager_digest_authorization_path
+from omo_manager.omo_email_subject import manager_digest_authorization_payload
 
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 DEFAULT_STATE_DIR = Path(os.environ.get("OMO_MANAGER_STATE_DIR", Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omo-manager"))
@@ -36,6 +44,36 @@ def write_private_temp(text: str, suffix: str) -> Path:
         path.unlink(missing_ok=True)
         raise
     return path
+
+
+def private_directory(path: Path) -> None:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    state = path.lstat()
+    if not stat.S_ISDIR(state.st_mode) or state.st_uid != os.getuid() or stat.S_IMODE(state.st_mode) != 0o700:
+        raise OSError(f"digest authorization directory is not owner-private: {path}")
+
+
+def create_digest_authorization(state_dir: Path, subject: str, body: str) -> tuple[str, Path]:
+    """Create one exact owner-private capability for the outbound digest."""
+
+    private_directory(state_dir)
+    authorization_dir = state_dir / "manager-digest-authorizations"
+    private_directory(authorization_dir)
+    payload = manager_digest_authorization_payload(subject, body)
+    key = secrets.token_hex(32)
+    path = manager_digest_authorization_path(state_dir, key)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    directory_fd = os.open(authorization_dir, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    return key, path
 
 
 @dataclass(frozen=True)
@@ -351,11 +389,23 @@ def command_deliver(args: argparse.Namespace) -> int:
             return 0
         subject_file = write_private_temp(args.subject + "\n", ".txt")
         body_file = write_private_temp(body, ".md")
+        authorization_path: Path | None = None
         try:
+            authorization_key, authorization_path = create_digest_authorization(args.state_dir.resolve(), args.subject, body)
             result = subprocess.run(
-                [str(args.send_helper), "--manager-human", "--non-completion", "--subject-file", str(subject_file), "--message-file", str(body_file)],
+                [
+                    str(args.send_helper),
+                    "--manager-human",
+                    "--digest-authorization",
+                    authorization_key,
+                    "--subject-file",
+                    str(subject_file),
+                    "--message-file",
+                    str(body_file),
+                ],
                 text=True,
                 check=False,
+                env={**os.environ, "OMO_MANAGER_STATE_DIR": str(args.state_dir.resolve())},
             )
             if result.returncode != 0:
                 return result.returncode
@@ -363,6 +413,8 @@ def command_deliver(args: argparse.Namespace) -> int:
             print(f"delivered {len(queued)} digest item(s)")
             return 0
         finally:
+            if authorization_path is not None:
+                authorization_path.unlink(missing_ok=True)
             subject_file.unlink(missing_ok=True)
             body_file.unlink(missing_ok=True)
 

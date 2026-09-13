@@ -331,6 +331,8 @@ def parse_args(argv: list[str]) -> Args:
                 parser.error("--line must be positive.")
             if parsed.ack_human and not parsed.clear_kind:
                 parser.error("--clear-kind is required with --ack-human.")
+            if parsed.ack_human and parsed.clear_kind not in {"duplicate", "existing-owner-item"} and parsed.email_file is None:
+                parser.error("--ack-human requires --email-file so the acknowledgement stays on its verified Human thread.")
             if parsed.clear_kind == "existing-owner-item":
                 if parsed.owner_task_file is None or not parsed.owner_item:
                     parser.error("--clear-kind existing-owner-item requires --owner-task-file and --owner-item.")
@@ -574,23 +576,21 @@ def subject_from_email_file(path: Path) -> str:
     raise TaskFrontmatterError("email file has no nonempty `Subject:` header.")
 
 
-def marker_clear_ack_subject(email_path: Path | None) -> str:
-    if email_path is not None:
-        return subject_from_email_file(email_path)
-    return "Request acknowledged"
+def marker_clear_ack_subject(email_path: Path) -> str:
+    subject = subject_from_email_file(email_path)
+    return subject if subject.lstrip().casefold().startswith("re:") else f"Re: {subject}"
 
 
-def marker_clear_ack_body(comment: str, clear_kind: str = "") -> str:
-    classification = f"Classification: {clear_kind}\n" if clear_kind else ""
-    return f"No pending item was added.\n{classification}Reason: {comment}\n"
+def marker_clear_ack_body() -> str:
+    return "Acknowledged: I handled your request without adding a pending item.\n"
 
 
-def send_marker_clear_ack(comment: str, email_path: Path | None, clear_kind: str = "") -> None:
+def send_marker_clear_ack(email_path: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="omo-task-edit-") as tmp:
         subject_path = Path(tmp) / "subject.txt"
         body_path = Path(tmp) / "body.md"
         subject_path.write_text(marker_clear_ack_subject(email_path) + "\n", encoding="utf-8")
-        body_path.write_text(marker_clear_ack_body(comment, clear_kind), encoding="utf-8")
+        body_path.write_text(marker_clear_ack_body(), encoding="utf-8")
         subprocess.run(
             [str(EMAIL_HELPER), "--manager-human", "--non-completion", "--subject-file", str(subject_path), "--message-file", str(body_path)],
             check=True,
@@ -1060,10 +1060,12 @@ def send_marker_clear_ack_once(path: Path, args: Args, email_path: Path | None) 
     current_text = path.read_text(encoding="utf-8")
     if marker_clear_ack_sent(current_text, args.line, args.comment, args.clear_kind):
         return
+    if email_path is None:
+        raise TaskFrontmatterError("--ack-human requires --email-file so the acknowledgement stays on its verified Human thread.")
     updated = append_marker_clear_ack_sent(current_text, args.line, args.comment, args.clear_kind)
     write_if_changed(path, current_text, updated, current_before)
     try:
-        send_marker_clear_ack(args.comment, email_path, args.clear_kind)
+        send_marker_clear_ack(email_path)
     except (OSError, subprocess.CalledProcessError):
         rollback_before = path.stat()
         rollback_text = path.read_text(encoding="utf-8")
@@ -1244,6 +1246,8 @@ def run(args: Args) -> int:
                 print(f"already removed `(pending)` from {path.name}:{args.line}; no pending item added")
                 return 0
             validate_marker_clear_semantics(args, text)
+            if should_ack_human and email_path is None:
+                raise TaskFrontmatterError("--ack-human requires --email-file so the acknowledgement stays on its verified Human thread.")
             updated, changed = clear_pending_marker(text, args.line, args.comment, args.clear_kind)
             write_if_changed(path, text, updated, before)
             if should_ack_human:

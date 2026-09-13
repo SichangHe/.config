@@ -87,6 +87,8 @@ paths out of worker prompts.""",
         parser.error("at least one --item is required; use omo_task_edit.py pending-marker-clear for no-item acknowledgements or omo_task_edit.py pending-replace/pending-remove for existing-item edits.")
     if parsed.ack_human and parsed.item_origin != "human":
         parser.error("--ack-human requires --human-authored.")
+    if parsed.ack_human and parsed.email_file is None:
+        parser.error("--ack-human requires --email-file so the acknowledgement stays on its verified Human thread.")
     return Args(parsed.root.resolve(), parsed.pending_file, parsed.line, parsed.task_file or parsed.pending_file, items, parsed.ack_human, parsed.email_file)
 
 
@@ -263,23 +265,21 @@ def subject_from_email_file(path: Path) -> str:
     raise TaskFrontmatterError("email file has no nonempty `Subject:` header.")
 
 
-def ack_subject(email_path: Path | None) -> str:
-    if email_path is not None:
-        return subject_from_email_file(email_path)
-    return "Request recorded"
+def ack_subject(email_path: Path) -> str:
+    subject = subject_from_email_file(email_path)
+    return subject if subject.lstrip().casefold().startswith("re:") else f"Re: {subject}"
 
 
-def ack_body(items: tuple[str, ...]) -> str:
-    item_text = "\n".join(f"- {item}" for item in items)
-    return f"Added pending items:\n{item_text}\n"
+def ack_body() -> str:
+    return "Acknowledged: I recorded your request.\n"
 
 
-def send_human_ack(items: tuple[str, ...], email_path: Path | None) -> None:
+def send_human_ack(email_path: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="omo-record-pending-") as tmp:
         subject_path = Path(tmp) / "subject.txt"
         body_path = Path(tmp) / "body.md"
         subject_path.write_text(ack_subject(email_path) + "\n", encoding="utf-8")
-        body_path.write_text(ack_body(items), encoding="utf-8")
+        body_path.write_text(ack_body(), encoding="utf-8")
         subprocess.run(
             [str(EMAIL_HELPER), "--manager-human", "--non-completion", "--subject-file", str(subject_path), "--message-file", str(body_path)],
             check=True,
@@ -287,6 +287,8 @@ def send_human_ack(items: tuple[str, ...], email_path: Path | None) -> None:
 
 
 def send_human_ack_once(pending_path: Path, args: Args, email_path: Path | None) -> None:
+    if email_path is None:
+        raise TaskFrontmatterError("--ack-human requires --email-file so the acknowledgement stays on its verified Human thread.")
     before = pending_path.stat()
     text = pending_path.read_text(encoding="utf-8")
     marker = ack_sent_line(args.line, args.items)
@@ -297,7 +299,7 @@ def send_human_ack_once(pending_path: Path, args: Args, email_path: Path | None)
     updated = append_line_once(text, marker)
     replace_if_unchanged(pending_path, updated, before)
     try:
-        send_human_ack(args.items, email_path)
+        send_human_ack(email_path)
     except (OSError, subprocess.CalledProcessError):
         rollback_before = pending_path.stat()
         rollback_text = pending_path.read_text(encoding="utf-8")
@@ -307,6 +309,8 @@ def send_human_ack_once(pending_path: Path, args: Args, email_path: Path | None)
 
 def run(args: Args) -> int:
     try:
+        if args.ack_human and args.email_file is None:
+            raise TaskFrontmatterError("--ack-human requires --email-file so the acknowledgement stays on its verified Human thread.")
         pending_path = task_path(args.root, args.pending_file)
         target_path = task_path(args.root, args.task_file)
         email_path = task_path(args.root, args.email_file) if args.email_file is not None else None

@@ -904,6 +904,9 @@ def run_verified_send(
 ) -> None:
     """Verify the pending marker immediately before the tmux paste."""
 
+    submit_started_at = datetime.now(timezone.utc)
+    submit_started_s = time.monotonic()
+
     def before_paste() -> None:
         if pending_guard is not None and not pending_marker_present(
             pending_guard.root,
@@ -935,6 +938,16 @@ def run_verified_send(
         if definitely_rejected_before_paste(exc) and not isinstance(exc, PrePasteRejected):
             raise PrePasteRejected(str(exc)) from exc
         raise
+    if pending_guard is not None:
+        source = delegate_source(pending_guard.pending_text.splitlines())
+        if source.startswith("manager_mail/"):
+            # 🧑 "Does the push actually work? Compare start of copying and email send time"
+            print(
+                "omo_pending_watch: email delivery timing: "
+                f"source={source} target={target} submit_started_at={submit_started_at.isoformat()} "
+                f"submitted_at={datetime.now(timezone.utc).isoformat()} submit_s={time.monotonic() - submit_started_s:.3f}",
+                file=sys.stderr,
+            )
 
 
 def log_send_result(

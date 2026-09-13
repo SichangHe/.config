@@ -275,7 +275,8 @@ class DigestQueueTests(unittest.TestCase):
                 f"#!/usr/bin/env bash\n"
                 "while [ \"$#\" -gt 0 ]; do\n"
                 "  case \"$1\" in\n"
-                "    --manager-human|--non-completion) shift ;;\n"
+                "    --manager-human) shift ;;\n"
+                "    --digest-authorization) authorization=\"$2\"; shift 2 ;;\n"
                 "    --subject-file) subject_file=\"$2\"; shift 2 ;;\n"
                 "    --message-file) message_file=\"$2\"; shift 2 ;;\n"
                 "    *) echo \"bad arg: $1\" >&2; exit 2 ;;\n"
@@ -304,6 +305,7 @@ class DigestQueueTests(unittest.TestCase):
             sent_text = (root / "fake-send.log").read_text(encoding="utf-8")
             self.assertIn("Non-urgent news digest", sent_text)
             self.assertIn("Queued item", sent_text)
+            self.assertEqual([], list((state / "manager-digest-authorizations").iterdir()))
             queue_text = (root / "MANAGER_DIGEST_QUEUE.md").read_text(encoding="utf-8")
             self.assertIn("status: sent", queue_text)
             self.assertIn("sent-at:", queue_text)

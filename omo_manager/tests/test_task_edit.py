@@ -728,7 +728,7 @@ class TaskEditTests(unittest.TestCase):
             mail_dir = root / "manager_mail"
             mail_dir.mkdir()
             email = mail_dir / "7.txt"
-            email.write_text("Subject: Re: Existing thread\n\nbody\n", encoding="utf-8")
+            email.write_text("Subject: Fresh request\n\nbody\n", encoding="utf-8")
             pending_line = text.splitlines().index("(pending)") + 1
             calls: list[tuple[str, str]] = []
 
@@ -758,7 +758,7 @@ class TaskEditTests(unittest.TestCase):
                 + "body\nrequest that needs no new item\n(pending marker cleared line=11: report-only: handled in existing item)\n(human ack sent for pending marker clear line=11: report-only: handled in existing item)\n"
             )
             self.assertEqual(expected_text, task.read_text(encoding="utf-8"))
-            self.assertEqual([("Re: Existing thread\n", "No pending item was added.\nClassification: report-only\nReason: handled in existing item\n")], calls)
+            self.assertEqual([("Re: Fresh request\n", "Acknowledged: I handled your request without adding a pending item.\n")], calls)
 
             with patch("omo_manager.omo_task_edit.subprocess.run", side_effect=fake_run):
                 retry_code = run(
@@ -776,7 +776,7 @@ class TaskEditTests(unittest.TestCase):
 
             self.assertEqual(0, retry_code)
             self.assertEqual(expected_text, task.read_text(encoding="utf-8"))
-            self.assertEqual([("Re: Existing thread\n", "No pending item was added.\nClassification: report-only\nReason: handled in existing item\n")], calls)
+            self.assertEqual([("Re: Fresh request\n", "Acknowledged: I handled your request without adding a pending item.\n")], calls)
 
     def test_pending_marker_clear_human_ack_retry_succeeds_after_email_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -784,8 +784,20 @@ class TaskEditTests(unittest.TestCase):
             task = root / "task.md"
             text = task_frontmatter() + "(pending)\nFYI only\n"
             task.write_text(text, encoding="utf-8")
+            mail = root / "manager_mail"
+            mail.mkdir()
+            (mail / "7.txt").write_text("Subject: Re: Existing thread\n\nFYI only\n", encoding="utf-8")
             pending_line = text.splitlines().index("(pending)") + 1
-            args = Args(root, Path("task.md"), "pending-marker-clear", comment="FYI only", line=pending_line, ack_human=True, clear_kind="report-only")
+            args = Args(
+                root,
+                Path("task.md"),
+                "pending-marker-clear",
+                comment="FYI only",
+                line=pending_line,
+                ack_human=True,
+                email_file=Path("manager_mail/7.txt"),
+                clear_kind="report-only",
+            )
 
             def fail_email(command: list[str], check: bool) -> None:
                 raise subprocess.CalledProcessError(1, command)
@@ -868,6 +880,9 @@ class TaskEditTests(unittest.TestCase):
             task = root / "task.md"
             text = task_frontmatter() + "body\n(pending)\nnew request\n(pending marker cleared line=11: report-only: old request)\n"
             task.write_text(text, encoding="utf-8")
+            mail = root / "manager_mail"
+            mail.mkdir()
+            (mail / "7.txt").write_text("Subject: Re: Existing thread\n\nold request\n", encoding="utf-8")
             pending_line = text.splitlines().index("(pending)") + 1
             calls: list[list[str]] = []
             stderr = io.StringIO()
@@ -876,12 +891,38 @@ class TaskEditTests(unittest.TestCase):
                 calls.append(command)
 
             with patch("omo_manager.omo_task_edit.subprocess.run", side_effect=fake_run), redirect_stderr(stderr):
-                exit_code = run(Args(root, Path("task.md"), "pending-marker-clear", comment="old request", line=pending_line, ack_human=True, clear_kind="report-only"))
+                exit_code = run(
+                    Args(
+                        root,
+                        Path("task.md"),
+                        "pending-marker-clear",
+                        comment="old request",
+                        line=pending_line,
+                        ack_human=True,
+                        email_file=Path("manager_mail/7.txt"),
+                        clear_kind="report-only",
+                    )
+                )
 
             self.assertEqual(2, exit_code)
             self.assertEqual(text, task.read_text(encoding="utf-8"))
             self.assertEqual([], calls)
             self.assertIn("new live `(pending)` marker", stderr.getvalue())
+
+    def test_pending_marker_clear_ack_requires_email_source_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            original = task_frontmatter() + "(pending)\nFYI only\n"
+            task.write_text(original, encoding="utf-8")
+            pending_line = original.splitlines().index("(pending)") + 1
+
+            exit_code = run(
+                Args(root, Path("task.md"), "pending-marker-clear", comment="FYI only", line=pending_line, ack_human=True, clear_kind="report-only")
+            )
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual(original, task.read_text(encoding="utf-8"))
 
     def test_pending_marker_clear_agent_origin_allows_no_clear_kind(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -49,12 +49,16 @@ from omo_email_subject import (  # noqa: E402
     MailRouteProfile,
     SubjectInputError,
     canonical_tmux_target,
+    fresh_manager_subject,
+    manager_digest_authorization_path,
+    manager_digest_authorization_payload,
     normalized_subject_key,
     prepare_latest_thread_for_tmux_target,
     prepare_subject,
     prepare_subject_and_headers,
     reply_headers_for_subject,
     strip_leading_tmux_tags,
+    worker_lifecycle_report_guard,
 )
 from omo_guest_images import GuestImageError, ValidatedImage, reply_attachments  # noqa: E402
 
@@ -88,6 +92,7 @@ class CliArgs:
     guest_image_references: tuple[str, ...]
     non_completion: bool
     completion_authorization: str
+    digest_authorization: str
 
 
 class ParsedArgs(argparse.Namespace):
@@ -105,6 +110,7 @@ class ParsedArgs(argparse.Namespace):
     guest_image_reference: list[str]
     non_completion: bool = False
     completion_authorization: str = ""
+    digest_authorization: str = ""
 
 
 def parse_args(argv: list[str]) -> CliArgs:
@@ -133,6 +139,7 @@ def parse_args(argv: list[str]) -> CliArgs:
     classification = parser.add_mutually_exclusive_group()
     _ = classification.add_argument("--non-completion", action="store_true", help=argparse.SUPPRESS)
     _ = classification.add_argument("--completion-authorization", default="", help=argparse.SUPPRESS)
+    _ = classification.add_argument("--digest-authorization", default="", help=argparse.SUPPRESS)
     _ = parser.add_argument("--guest-hees", action="store_true", help=argparse.SUPPRESS)
     _ = parser.add_argument("--guest-image-reference", action="append", default=[], help=argparse.SUPPRESS)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
@@ -178,10 +185,12 @@ def parse_args(argv: list[str]) -> CliArgs:
         parser.error("--guest-hees requires --manager-human.")
     if guest_hees and not guest_hees_tmux_target(tmux_target):
         parser.error("--guest-hees requires a --tmux-target in the guest_hees session.")
-    if (parsed.non_completion or parsed.completion_authorization) and not parsed.manager_human:
+    if (parsed.non_completion or parsed.completion_authorization or parsed.digest_authorization) and not parsed.manager_human:
         parser.error("mail classification options require --manager-human.")
     if parsed.completion_authorization and re.fullmatch(r"[0-9a-f]{64}", parsed.completion_authorization) is None:
         parser.error("--completion-authorization must be a lowercase SHA-256 digest.")
+    if parsed.digest_authorization and re.fullmatch(r"[0-9a-f]{64}", parsed.digest_authorization) is None:
+        parser.error("--digest-authorization must be a lowercase SHA-256 digest.")
     if any(re.fullmatch(r"<[^<>\s]+>", value) is None for value in parsed.supersedes_message_id):
         parser.error("--supersedes-message-id must be an exact RFC Message-ID enclosed in angle brackets.")
     if len(set(parsed.supersedes_message_id)) != len(parsed.supersedes_message_id):
@@ -198,6 +207,7 @@ def parse_args(argv: list[str]) -> CliArgs:
         guest_image_references=tuple(parsed.guest_image_reference),
         non_completion=parsed.non_completion,
         completion_authorization=parsed.completion_authorization,
+        digest_authorization=parsed.digest_authorization,
     )
 
 
@@ -887,7 +897,7 @@ def fsync_directory(directory: Path) -> None:
         os.close(fd)
 
 
-def validate_non_completion_owner(producer_target: str) -> None:
+def validate_non_completion_owner(producer_target: str) -> bool:
     """Permit operational Human mail from its exact active task owner."""
 
     from omo_agent_status import DEFAULT_ROOT, read_task_metadata
@@ -907,6 +917,50 @@ def validate_non_completion_owner(producer_target: str) -> None:
         or (not metadata.is_manager and not metadata.managerat)
     ):
         raise ValueError("non-completion Human mail requires an exact active task owner")
+    return metadata.is_manager
+
+
+def validate_non_completion_thread(producer_target: str, reply_headers: dict[str, str]) -> None:
+    """Require worker lifecycle replies to use the authenticated completion path."""
+
+    message_ids = set(re.findall(r"<[^<>\s]+>", reply_headers.get("References", "")))
+    message_ids.update(re.findall(r"<[^<>\s]+>", reply_headers.get("In-Reply-To", "")))
+    for message_id in message_ids:
+        path, expected = worker_lifecycle_report_guard(manager_state_dir(), producer_target, message_id)
+        try:
+            guarded = read_owner_private_file(path, "worker lifecycle reporting guard", 4096)
+        except FileNotFoundError:
+            continue
+        if guarded != expected:
+            raise ValueError("worker lifecycle reporting guard is malformed")
+        raise ValueError(
+            "non-completion mail is disabled on this worker lifecycle thread; "
+            "the responsible worker must report through owner completion authorization"
+        )
+
+
+def validate_manager_operational_reply(reply_headers: dict[str, str], content: str) -> None:
+    """Limit manager Human mail to fixed acknowledgments or one question."""
+
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    if not verified_guest_reply_headers(reply_headers):
+        raise ValueError("manager operational mail must reply to one verified Human email thread")
+    if lines in [
+        ["Acknowledged: I accepted this request."],
+        ["Acknowledged: I recorded your request."],
+        ["Acknowledged: I handled your request without adding a pending item."],
+    ]:
+        return
+    if len(lines) == 1 and re.fullmatch(
+        r"Question: (?:what|which|who|whose|where|when|why|how|is|are|was|were|do|does|did|can|could|should|would|will|may|must) [^.!;:\r\n]{1,450}\?",
+        lines[0],
+        re.IGNORECASE,
+    ):
+        return
+    raise ValueError(
+        "manager operational mail must be one fixed acknowledgment or one direct question; "
+        "the responsible worker reports progress and results"
+    )
 
 
 def validate_invoking_owner_target(producer_target: str, purpose: str) -> None:
@@ -1046,6 +1100,44 @@ def validate_completion_authorization(args: CliArgs, producer_target: str) -> di
     if len(matches) != 1:
         raise ValueError("completion email authorization has no unique durable claim")
     return values
+
+
+def validate_digest_authorization(args: CliArgs) -> tuple[Path, bytes]:
+    """Validate one exact capability created by the queued-digest helper."""
+
+    if args.title is None or re.match(r"^\s*re:\s*", args.title, re.IGNORECASE) or args.supersedes_message_ids:
+        raise ValueError("queued digest authorization requires one fresh subject")
+    state_dir = manager_state_dir()
+    authorization_dir = state_dir / "manager-digest-authorizations"
+    for directory, label in ((state_dir, "manager state directory"), (authorization_dir, "digest authorization directory")):
+        try:
+            directory_state = directory.lstat()
+        except FileNotFoundError as exc:
+            raise ValueError(f"{label} is missing") from exc
+        if (
+            not stat.S_ISDIR(directory_state.st_mode)
+            or directory_state.st_uid != os.getuid()
+            or stat.S_IMODE(directory_state.st_mode) != 0o700
+        ):
+            raise ValueError(f"{label} is not owner-private")
+    authorization = manager_digest_authorization_path(state_dir, args.digest_authorization)
+    expected = manager_digest_authorization_payload(args.title or "", args.content)
+    try:
+        payload = read_owner_private_file(authorization, "digest authorization", 4096)
+    except (FileNotFoundError, ValueError) as exc:
+        raise ValueError("digest authorization is missing or malformed") from exc
+    if payload != expected:
+        raise ValueError("digest content does not match its authorization")
+    return authorization, payload
+
+
+def consume_digest_authorization(authorization: Path, payload: bytes) -> None:
+    """Consume a validated queued-digest capability before outbound delivery."""
+
+    if read_owner_private_file(authorization, "digest authorization", 4096) != payload:
+        raise ValueError("digest authorization changed before use")
+    authorization.unlink()
+    fsync_directory(authorization.parent)
 
 
 def consume_completion_authorization(key: str, values: dict[str, str]) -> None:
@@ -1373,6 +1465,8 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     guest_reply_source = ""
     completion_authorization: dict[str, str] = {}
+    digest_authorization: tuple[Path, bytes] | None = None
+    non_completion_manager = False
     try:
         subject_tmux_target = footer_tmux_target(args.tmux_target, args.manager_human)
         if args.manager_human and subject_tmux_target is not None:
@@ -1381,10 +1475,14 @@ def main(argv: list[str]) -> int:
             args = dataclass_replace(args, guest_hees=True)
         if args.manager_human and subject_tmux_target is None:
             raise ValueError("manager-human email requires a tmux target.")
-        if args.manager_human and not args.guest_hees and not (args.non_completion or args.completion_authorization):
-            raise ValueError("primary manager-human mail requires --non-completion or an owner completion authorization")
-        if args.non_completion and fake_send_log_path() is None:
-            validate_non_completion_owner(subject_tmux_target)
+        if args.manager_human and not args.guest_hees and not (
+            args.non_completion or args.completion_authorization or args.digest_authorization
+        ):
+            raise ValueError("primary manager-human mail requires --non-completion or an owner authorization")
+        if (args.non_completion or args.digest_authorization) and fake_send_log_path() is None:
+            non_completion_manager = validate_non_completion_owner(subject_tmux_target)
+        if args.digest_authorization and not non_completion_manager and fake_send_log_path() is None:
+            raise ValueError("digest authorization requires an exact active manager owner")
         if args.guest_image_references and not args.guest_hees:
             raise ValueError("--guest-image-reference requires a guest_hees producer target.")
         try:
@@ -1413,6 +1511,8 @@ def main(argv: list[str]) -> int:
             )
         if args.completion_authorization:
             completion_authorization = validate_completion_authorization(args, subject_tmux_target)
+        if args.digest_authorization:
+            digest_authorization = validate_digest_authorization(args)
         if args.title is None:
             if subject_tmux_target is None:
                 raise ValueError("email without a subject requires an inferred tmux target.")
@@ -1423,6 +1523,9 @@ def main(argv: list[str]) -> int:
             else:
                 subject, reply_headers = prepare_latest_thread_for_tmux_target(subject_tmux_target, route_profile=route_profile)
             title = subject
+        elif args.digest_authorization:
+            subject, reply_headers = fresh_manager_subject(args.title, subject_tmux_target or ""), {}
+            title = args.title
         elif prepare_subject_and_headers is not None:
             if route_profile is None:
                 subject, reply_headers = prepare_subject_and_headers(args.title, subject_tmux_target or "")
@@ -1443,6 +1546,10 @@ def main(argv: list[str]) -> int:
                 # target, rather than rejecting a valid acknowledgement.
                 subject = normalize_subject(subject, subject_tmux_target or "")
                 validate_manager_human_subject(subject)
+        if args.non_completion and fake_send_log_path() is None:
+            validate_non_completion_thread(subject_tmux_target, reply_headers)
+            if non_completion_manager and not args.guest_hees:
+                validate_manager_operational_reply(reply_headers, args.content)
         if args.guest_hees:
             if not substantive_guest_reply(args.content):
                 raise ValueError("guest-hees reply must contain a substantive guest-facing answer")
@@ -1477,12 +1584,18 @@ def main(argv: list[str]) -> int:
     dedupe_subject = normalized_subject_key(title) if args.manager_human and normalized_subject_key is not None else subject
     dedupe_content = args.content + "\0" + "\0".join(args.guest_image_references)
     state_scope = "guest-hees" if args.guest_hees else "human"
-    exact_once = args.manager_human and args.non_completion and not args.guest_hees
+    exact_once = args.manager_human and (args.non_completion or bool(args.digest_authorization)) and not args.guest_hees
     if fake_log := fake_send_log_path():
         if args.guest_hees:
             print("EMAIL_ME_FAKE_SEND_LOG cannot verify a guest reply", file=sys.stderr)
             return 2
         fake_log.parent.mkdir(parents=True, exist_ok=True)
+        if digest_authorization is not None:
+            try:
+                consume_digest_authorization(*digest_authorization)
+            except (OSError, ValueError) as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
         if args.completion_authorization:
             try:
                 consume_completion_authorization(args.completion_authorization, completion_authorization)
@@ -1622,6 +1735,12 @@ def main(argv: list[str]) -> int:
         print(f"Email send failed before SMTP: {exc}", file=sys.stderr)
         return 1
     email_claimed = False
+    if digest_authorization is not None:
+        try:
+            consume_digest_authorization(*digest_authorization)
+        except (OSError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
     if args.completion_authorization:
         try:
             consume_completion_authorization(args.completion_authorization, completion_authorization)

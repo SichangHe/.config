@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import imaplib
 import os
 import re
@@ -132,6 +133,36 @@ def normalized_subject_key(subject: str, *, guest_hees: bool = False) -> str:
             return " ".join(text.split()).casefold()
 
 
+# 🧑 "You should not be involved in tasks at all. The worker should report this"
+def worker_lifecycle_report_guard(state_dir: Path, target: str, message_id: str) -> tuple[Path, bytes]:
+    """Return the private guard record for one target and inbound thread message."""
+
+    target = canonical_tmux_target(target)
+    if not target or re.fullmatch(r"<[^<>\s]+>", message_id) is None:
+        raise SubjectInputError("worker lifecycle reporting guard requires a target and exact Message-ID")
+    payload = f"version=1\ntarget={target}\nmessage_id={message_id}\n".encode()
+    digest = hashlib.sha256(payload).hexdigest()
+    return state_dir / "worker-lifecycle-report-guards" / f"{digest}.txt", payload
+
+
+def manager_digest_authorization_path(state_dir: Path, key: str) -> Path:
+    """Return the private capability path for one queued digest delivery."""
+
+    if re.fullmatch(r"[0-9a-f]{64}", key) is None:
+        raise SubjectInputError("manager digest authorization key must be a lowercase SHA-256 digest")
+    return state_dir / "manager-digest-authorizations" / key
+
+
+def manager_digest_authorization_payload(subject: str, body: str) -> bytes:
+    """Bind one queued digest capability to exact outbound bytes."""
+
+    return (
+        "version=1\n"
+        f"subject_sha256={hashlib.sha256(subject.encode()).hexdigest()}\n"
+        f"body_sha256={hashlib.sha256(body.encode()).hexdigest()}\n"
+    ).encode()
+
+
 def subject_base(subject: str, *, guest_hees: bool = False) -> str:
     text = subject.strip()
     prefix_re = GUEST_REPLY_PREFIX_RE if guest_hees else RE_PREFIX_RE
@@ -211,6 +242,15 @@ def manager_subject_w_target(base: str, tmux_target: str = "", reply: bool = Fal
     if clean_target and TMUX_TARGET_RE.fullmatch(clean_target) and not clean_base.startswith(f"{bracketed_target} "):
         clean_base = f"{bracketed_target} {clean_base}"
     return manager_reply_subject(clean_base) if reply else manager_subject(clean_base)
+
+
+def fresh_manager_subject(subject: str, tmux_target: str = "") -> str:
+    """Build a validated fresh subject without consulting mailbox history."""
+
+    validate_subject(subject)
+    if starts_w_re(subject):
+        raise SubjectInputError("fresh manager subject must not start with `Re:`")
+    return manager_subject_w_target(subject_base(subject), tmux_target)
 
 
 def strip_leading_tmux_tags(subject: str) -> str:
