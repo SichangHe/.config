@@ -179,7 +179,8 @@ DEFAULT_RECOVERY_DEBOUNCE_S = int(os.environ.get("OMO_MANAGER_RECOVERY_DEBOUNCE_
 DEFAULT_IDLE_WAIT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IDLE_WAIT_S", "60"))
 DEFAULT_IDLE_RESPONSE_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IDLE_RESPONSE_TIMEOUT_S", "10"))
 DEFAULT_IMAP_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IMAP_TIMEOUT_S", str(max(90.0, DEFAULT_IDLE_WAIT_S + 30.0))))
-DEFAULT_PULL_INTERVAL_S = float(os.environ.get("OMO_MANAGER_EMAIL_PULL_INTERVAL_S", "600"))
+# 🧑 "Why so slow ... Improve it"
+DEFAULT_PULL_INTERVAL_S = float(os.environ.get("OMO_MANAGER_EMAIL_PULL_INTERVAL_S", "5"))
 DEFAULT_IDLE_EXIT_AFTER_S = float(os.environ.get("OMO_MANAGER_EMAIL_IDLE_EXIT_AFTER_S", "3600"))
 # 🧑 "Improve it ... That's too frequent. Do once every 5min"
 DEFAULT_MANAGER_MAIL_THRESHOLD_INTERVAL_S = float(os.environ.get("OMO_MANAGER_EMAIL_THRESHOLD_INTERVAL_S", "300"))
@@ -2824,6 +2825,26 @@ def maybe_handle_split_manager_mail_thresholds(args: Args, settings: AgentMailSe
         return False
 
 
+class ForegroundThresholdCheck:
+    """Run same-connection retention work no more than once per interval."""
+
+    def __init__(
+        self,
+        interval_s: float = DEFAULT_MANAGER_MAIL_THRESHOLD_INTERVAL_S,
+        clock: Callable[[], float] = time.monotonic,
+    ):
+        self._interval_s = max(interval_s, 1.0)
+        self._clock = clock
+        self._next_start_s = 0.0
+
+    def __call__(self, check: Callable[[], bool]) -> bool:
+        now_s = self._clock()
+        if now_s < self._next_start_s:
+            return False
+        self._next_start_s = now_s + self._interval_s
+        return check()
+
+
 class BackgroundThresholdCheck:
     """Collect Human-inbox counts in the background and apply them on the intake thread."""
 
@@ -4240,10 +4261,11 @@ def main(argv: list[str]) -> int:
     inbox_identity = config["user"] if split_settings is not None else ""
     if args.guest_hees:
         inbox_identity = f"{inbox_identity}\0guest-hees"
-    safe_args = Args(args.root, args.manager_url, args.mail_dir, args.state_dir, args.manager_file, args.once, accepted_human, args.recovery_debounce_s, args.restart_script, args.idle_wait_s, args.manager_target, args.imap_timeout_s, args.pull_interval_s, args.idle_exit_after_s, args.unread_compression_threshold, args.recent_cleanup_threshold, args.recent_cleanup_window_s, mail_thresholds=split_settings is None, inbox_identity=inbox_identity, live_mailbox_approval_only=args.live_mailbox_approval_only, live_mailbox_stage=args.live_mailbox_stage, total_cleanup_threshold=args.total_cleanup_threshold, guest_hees=args.guest_hees)
+    safe_args = Args(args.root, args.manager_url, args.mail_dir, args.state_dir, args.manager_file, args.once, accepted_human, args.recovery_debounce_s, args.restart_script, args.idle_wait_s, args.manager_target, args.imap_timeout_s, args.pull_interval_s, args.idle_exit_after_s, args.unread_compression_threshold, args.recent_cleanup_threshold, args.recent_cleanup_window_s, mail_thresholds=False, inbox_identity=inbox_identity, live_mailbox_approval_only=args.live_mailbox_approval_only, live_mailbox_stage=args.live_mailbox_stage, total_cleanup_threshold=args.total_cleanup_threshold, guest_hees=args.guest_hees)
     logging.info("email watcher starting: root=%s mail_dir=%s state_dir=%s manager_target=%s manager_url=%s idle_wait_s=%s imap_timeout_s=%s pull_interval_s=%s idle_exit_after_s=%s manager_mail_threshold_interval_s=%s total_cleanup_threshold=%s unread_compression_threshold=%s recent_cleanup_threshold=%s recent_cleanup_window_s=%s", safe_args.root, safe_args.mail_dir, safe_args.state_dir, safe_args.manager_target or "unset", safe_args.manager_url or "unset", safe_args.idle_wait_s, safe_args.imap_timeout_s, safe_args.pull_interval_s, safe_args.idle_exit_after_s, DEFAULT_MANAGER_MAIL_THRESHOLD_INTERVAL_S, safe_args.total_cleanup_threshold, safe_args.unread_compression_threshold, safe_args.recent_cleanup_threshold, int(safe_args.recent_cleanup_window_s))
     split_threshold_check = (lambda: collect_split_manager_mail_thresholds(safe_args, split_settings)) if split_settings is not None and not safe_args.guest_hees else None
     background_threshold_check = BackgroundThresholdCheck(split_threshold_check) if split_threshold_check is not None else None
+    foreground_threshold_check = ForegroundThresholdCheck() if split_settings is None else None
     while True:
         try:
             with imaplib.IMAP4_SSL(config["host"], timeout=safe_args.imap_timeout_s) as client:
@@ -4253,6 +4275,17 @@ def main(argv: list[str]) -> int:
                 if safe_args.guest_hees:
                     runtime_identity = f"{runtime_identity}\0guest-hees"
                 runtime_args = replace(safe_args, inbox_identity=runtime_identity) if split_settings is not None else safe_args
+                runtime_threshold_check = background_threshold_check
+                if foreground_threshold_check is not None:
+                    threshold_args = replace(runtime_args, mail_thresholds=True)
+
+                    def check_manager_mail_thresholds() -> bool:
+                        return maybe_handle_manager_mail_thresholds(client, threshold_args)
+
+                    def run_foreground_threshold_check() -> bool:
+                        return foreground_threshold_check(check_manager_mail_thresholds)
+
+                    runtime_threshold_check = run_foreground_threshold_check
                 logging.info("email watcher connected and selected INBOX")
                 if runtime_args.live_mailbox_approval_only:
                     handle_live_mailbox_approval_replies(client, runtime_args)
@@ -4263,9 +4296,11 @@ def main(argv: list[str]) -> int:
                     if split_threshold_check is not None:
                         snapshot = split_threshold_check()
                         apply_manager_mail_thresholds(snapshot.args, snapshot.counts)
+                    elif foreground_threshold_check is not None:
+                        foreground_threshold_check(check_manager_mail_thresholds)
                     wait_email_pushes()
                     return 0
-                result = watch_inbox(client, runtime_args, background_threshold_check)
+                result = watch_inbox(client, runtime_args, runtime_threshold_check)
                 wait_email_pushes()
                 return result
         except Exception as exc:

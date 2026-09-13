@@ -8,7 +8,7 @@ import unittest
 from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 from omo_manager import email_idle_watcher as watcher
 from omo_manager import omo_pending_watch as pending_watcher
@@ -16,6 +16,50 @@ from omo_manager.omo_agent_status import parse_task_metadata
 
 
 class EmailRetentionScheduleTests(unittest.TestCase):
+    def test_quiet_idle_runs_five_second_fallback_scan(self) -> None:
+        args = watcher.Args(
+            Path("/tmp/logs"),
+            "",
+            Path("/tmp/mail"),
+            Path("/tmp/state"),
+            None,
+            False,
+            "human@example.test",
+            0,
+            Path("/bin/false"),
+            idle_wait_s=60,
+            pull_interval_s=5,
+            idle_exit_after_s=0,
+        )
+        client = Mock()
+        with (
+            patch.object(watcher.time, "monotonic", side_effect=[0.0, 0.0, 5.0]),
+            patch.object(watcher, "idle_once", return_value=False) as idle,
+            patch.object(watcher, "handle_unseen", side_effect=[False, RuntimeError("stop")]) as scan,
+            self.assertRaisesRegex(RuntimeError, "stop"),
+        ):
+            watcher.watch_inbox(client, args)
+        idle.assert_called_once_with(client, 5.0)
+        client.select.assert_called_once_with("INBOX")
+        self.assertEqual([call(client, args, "startup"), call(client, args, "poll")], scan.call_args_list)
+
+    def test_fallback_scan_default_is_five_seconds(self) -> None:
+        self.assertEqual(5, watcher.DEFAULT_PULL_INTERVAL_S)
+        self.assertEqual(5, watcher.parse_args([]).pull_interval_s)
+
+    def test_same_mailbox_retention_runs_only_every_five_minutes(self) -> None:
+        now_s = 0.0
+        schedule = watcher.ForegroundThresholdCheck(clock=lambda: now_s)
+        check = Mock(return_value=True)
+        self.assertTrue(schedule(check))
+        now_s = 5
+        self.assertFalse(schedule(check))
+        now_s = 299
+        self.assertFalse(schedule(check))
+        now_s = 300
+        self.assertTrue(schedule(check))
+        self.assertEqual(2, check.call_count)
+
     def test_human_inbox_retention_default_is_five_minutes(self) -> None:
         self.assertEqual(300, watcher.DEFAULT_MANAGER_MAIL_THRESHOLD_INTERVAL_S)
 
