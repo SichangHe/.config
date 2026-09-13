@@ -437,14 +437,18 @@ def recovery_commitment_record(candidate: Path, replay_id: str, payload: bytes) 
     return parsed
 
 
-def orphan_transfer_plan(plan: Plan) -> Plan:
+def orphan_transfer_plan(plan: Plan, *, expected_replay_id: str = "") -> Plan:
     """Create a fresh namespace for one exact, unreachable pending transaction.
 
     This does not accept, discard, or reinterpret the predecessor.  It binds a
     new transaction to the complete predecessor identity only when the old
     envelope was never linked, acknowledged, receipted, or published.
     """
-    if plan.recovery_replay_id:
+    if expected_replay_id and HASH_RE.fullmatch(expected_replay_id) is None:
+        raise ReceiptError("expected replay id is invalid")
+    if expected_replay_id:
+        candidates = [plan.receipt_directory / f"{expected_replay_id}.commitment"]
+    elif plan.recovery_replay_id:
         candidates = [plan.receipt_directory / f"{plan.recovery_replay_id}.commitment"]
     elif not os.path.lexists(plan.envelope_final):
         return plan
@@ -1685,7 +1689,12 @@ def bind_owner_prefix(
     return binding
 
 
-def build_plan(args: Arguments, *, allow_archived_done: bool = False) -> Plan:
+def build_plan(
+    args: Arguments,
+    *,
+    allow_archived_done: bool = False,
+    expected_replay_id: str = "",
+) -> Plan:
     raw_message_path = args.message_file.expanduser()
     if not raw_message_path.is_absolute():
         raw_message_path = Path.cwd() / raw_message_path
@@ -1703,6 +1712,7 @@ def build_plan(args: Arguments, *, allow_archived_done: bool = False) -> Plan:
             message_fd=message_fd,
             message=message,
             allow_archived_done=allow_archived_done,
+            expected_replay_id=expected_replay_id,
         )
     except BaseException:
         os.close(message_fd)
@@ -1717,6 +1727,7 @@ def _build_plan_from_message(
     message_fd: int,
     message: bytes,
     allow_archived_done: bool = False,
+    expected_replay_id: str = "",
 ) -> Plan:
     root = absolute_path(args.root)
     task = absolute_path(args.task)
@@ -1933,7 +1944,7 @@ def _build_plan_from_message(
         root_retained_evidence=args.root_retained_evidence,
     )
     if archived_task is None:
-        plan = orphan_transfer_plan(plan)
+        plan = orphan_transfer_plan(plan, expected_replay_id=expected_replay_id)
     current_task = archived_task or task
     task_snapshot = frontmatter_snapshot(regular_file_bytes(current_task, maximum=MAX_ROUTE_FILE_BYTES, field="task"))
     if (
@@ -4069,8 +4080,13 @@ def plan_for_historical_commitment(
     plan: Plan,
     *,
     allow_historical_route_inventory: bool = False,
+    expected_replay_id: str = "",
 ) -> Plan:
-    if plan.transaction_commitment_final.exists():
+    if expected_replay_id and HASH_RE.fullmatch(expected_replay_id) is None:
+        raise ReceiptError("expected replay id is invalid")
+    if plan.transaction_commitment_final.exists() and (
+        not expected_replay_id or plan.replay_id == expected_replay_id
+    ):
         return plan
     if plan.archived_task is not None and plan.recovery_replay_id:
         replay_id = plan.recovery_replay_id
@@ -4110,8 +4126,13 @@ def plan_for_historical_commitment(
             receipt_publication_temporary=plan.receipt_directory / f".{replay_id}.publication.tmp",
             receipt_publication_final=plan.receipt_directory / f"{replay_id}.publication.json",
         )
+    candidates = (
+        [plan.receipt_directory / f"{expected_replay_id}.commitment"]
+        if expected_replay_id
+        else sorted(plan.receipt_directory.glob("*.commitment"))
+    )
     matches: list[tuple[str, tuple[dict[str, object], ...]]] = []
-    for candidate in sorted(plan.receipt_directory.glob("*.commitment")):
+    for candidate in candidates:
         if not validate_optional_regular(candidate, "historical transaction commitment", exact_mode=0o600):
             continue
         payload = regular_file_bytes(candidate, maximum=MAX_RECEIPT_BYTES, field="historical transaction commitment")
@@ -4189,6 +4210,8 @@ def plan_for_historical_commitment(
             require_current=not allow_historical_route_inventory,
         )
         matches.append((replay_id, validated_routing_sources))
+    if not matches and expected_replay_id:
+        raise ReceiptError("expected historical transaction commitment is missing or inconsistent")
     if not matches:
         return plan
     if len(matches) != 1:
@@ -4626,7 +4649,14 @@ def validate_consumed_closure_export(payload: bytes) -> dict[str, object]:
     previous_state_home = os.environ.get("XDG_STATE_HOME")
     os.environ["XDG_STATE_HOME"] = str(state_home)
     try:
-        verified = run(argv, allow_archived_done=archived)
+        replay_id = str(attestation.get("replay_id", ""))
+        if HASH_RE.fullmatch(replay_id) is None:
+            raise ReceiptError("consumed attestation export replay id is invalid")
+        verified = run(
+            argv,
+            allow_archived_done=archived,
+            expected_replay_id=replay_id,
+        )
     finally:
         if previous_state_home is None:
             del os.environ["XDG_STATE_HOME"]
@@ -5340,14 +5370,28 @@ def pending_output(plan: Plan) -> dict[str, object]:
     }
 
 
-def run(argv: list[str] | None = None, *, allow_archived_done: bool = False) -> bytes:
+def run(
+    argv: list[str] | None = None,
+    *,
+    allow_archived_done: bool = False,
+    expected_replay_id: str = "",
+) -> bytes:
     args = parse_args(argv)
     for attempt in range(32):
-        plan = build_plan(args, allow_archived_done=allow_archived_done)
+        plan = build_plan(
+            args,
+            allow_archived_done=allow_archived_done,
+            expected_replay_id=expected_replay_id,
+        )
         try:
             if plan.mode == "describe":
                 return canonical_json(description(plan))
             if plan.mode == "verify-consumed":
+                plan = plan_for_historical_commitment(
+                    plan,
+                    allow_historical_route_inventory=True,
+                    expected_replay_id=expected_replay_id,
+                )
                 attestation = consumed_closure_attestation(plan, archived=allow_archived_done)
                 output = canonical_json(attestation)
                 if plan.consumed_attestation_output is not None:

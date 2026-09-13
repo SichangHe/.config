@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -3911,6 +3912,35 @@ return 75
             validated = validate_export_from(case, exported)
             self.assertEqual(0, validated.returncode, validated.stderr)
             self.assertEqual(json.loads(verified.stdout), json.loads(validated.stdout))
+            executed_sources = {
+                "omo_manager.omo_pending_digest": OMO_DIR / "omo_pending_digest.py",
+                "omo_manager.omo_report_receipt": OMO_DIR / "omo_report_receipt.py",
+                "omo_manager.omo_task_lock": OMO_DIR / "omo_task_lock.py",
+            }
+            source_patches = [
+                patch.object(
+                    sys.modules[module_name],
+                    "__executed_source_sha256__",
+                    hashlib.sha256(source.read_bytes()).hexdigest(),
+                    create=True,
+                )
+                for module_name, source in executed_sources.items()
+            ]
+            with ExitStack() as patches:
+                for source_patch in source_patches:
+                    patches.enter_context(source_patch)
+                patches.enter_context(patch.object(omo_report_receipt, "__executed_helper_path__", str(REPORT), create=True))
+                patches.enter_context(patch.object(
+                    omo_report_receipt,
+                    "__executed_helper_sha256__",
+                    hashlib.sha256(REPORT.read_bytes()).hexdigest(),
+                    create=True,
+                ))
+                patches.enter_context(patch.object(Path, "glob", side_effect=AssertionError("unexpected receipt archive scan")))
+                self.assertEqual(
+                    json.loads(verified.stdout),
+                    validate_consumed_closure_export(exported.read_bytes()),
+                )
             description = json.loads(run_report_from(case, draft, describe=True, status="done").stdout)
             routing = description["routing"]
             assert isinstance(routing, dict)
