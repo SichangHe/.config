@@ -66,7 +66,8 @@ unchanged since it was read.
 - remove one or more existing pending items
 - append the evidence as a task comment
 - send one durable completion email containing the exact task, items, outcome,
-  and evidence only when the caller is the exact responsible task owner
+  and evidence only when the task explicitly requests a Human-facing result and
+  the caller is the exact responsible task owner
 - require one explicit semantic key and reuse that exact key across every
   parent or child route for the same Human completion notice
 - when answering a Human question, accept paired subject/body files and combine
@@ -75,7 +76,8 @@ unchanged since it was read.
   owner-controlled executable before mutation; never fall back to invoking the
   mail helper directly when that contract is absent
 - let the mail helper infer the verified producer identity; suppress human-owned
-  task targets, explicit no-contact rules, and duplicate retries
+  task targets, manager tasks, tasks without a requested Human-facing result,
+  explicit no-contact rules, and duplicate retries
 - bind the exact task-version receipt separately from the stable Human-notice
   identity, so closure-note churn cannot authorize the same task/outcome/body
   again and an uncertain first attempt remains permanently claimed
@@ -176,12 +178,13 @@ and source email subjects.
 
 Keep `omo_task_status.py` for status changes.
 
-New transitions to `done` use a two-phase exact-owner policy. A manager queues
-the owner-authenticated executable callback and returns without closing or
-changing status. After the owner delivers the exact notice, the manager retries
-and the durable delivery marker permits closure. A manager cannot send a
-fallback on the task owner's behalf. Reissuing an already-done task does not
-retroactively send mail.
+New transitions to `done` with an explicit Human-facing result request use a
+two-phase exact-owner policy. A manager queues the owner-authenticated executable
+callback and returns without closing or changing status. After the owner
+delivers the exact notice, the manager retries and the durable delivery marker
+permits closure. A manager cannot send a fallback on the task owner's behalf.
+Tasks without that request close without Human mail. Reissuing an already-done
+task does not retroactively send mail.
 Claims are persisted before mail invocation, so a retry cannot duplicate an
 uncertain delivery.
 

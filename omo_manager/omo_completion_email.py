@@ -39,7 +39,7 @@ COMPLETION_ENTRYPOINT = Path(__file__).resolve()
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 RECONCILIATION_VERSION = "v1"
 NO_CONTACT_RE = re.compile(
-    r"\bsource[- ]985\b|\bno[- ]contact\b|\b(?:do not|must not|never) (?:send )?(?:any )?(?:human(?:-facing)? )?(?:email|mail|message|report|outreach|contact)\b|\b(?:no|forbid(?:s|den)?) human-facing reports?\b|\bhuman reporting (?:is )?(?:suppressed|forbidden|prohibited|paused)\b|\bwithout human email\b|\breport only privately\b|\bprivate reports? only\b",
+    r"\bsource[- ]985\b|\bno[- ]contact\b|\b(?:do not|must not|never) (?:send )?(?:any )?(?:human(?:-facing)? )?(?:email|mail|message|report|outreach|contact)\b|\b(?:do not|must not|never)\b[^.\n]{0,200}\b(?:send )?(?:any )?human (?:email|mail|message|report|outreach|contact)\b|\b(?:do not|must not|never)\b[^.\n]{0,100}\b(?:email|report|respond|write)\b[^.\n]{0,100}\bhuman\b|\b(?:no|forbid(?:s|den)?) human-facing reports?\b|\bhuman reporting (?:is )?(?:suppressed|forbidden|prohibited|paused)\b|\bwithout human email\b|\breport only privately\b|\bprivate reports? only\b",
     re.IGNORECASE,
 )
 MANAGER_ONLY_RE = re.compile(r"\b(?:report|return) only\b[^.\n]{0,100}\b(?:manager|submanager)\b|\bmanager[- ]only reports?\b", re.IGNORECASE)
@@ -330,6 +330,7 @@ def source1241_contact_clarification(root: Path, task: Path, text: str) -> Conta
     return ContactPolicyBinding(hashlib.sha256(task_payload).hexdigest(), source, hashlib.sha256(source_payload).hexdigest())
 
 
+# 🧑 Human: "correct the routing/reporting behavior so workers, not managers, report only requested results."
 def build_completion_email(
     root: Path,
     task: Path,
@@ -354,10 +355,12 @@ def build_completion_email(
     )
     if (
         metadata is None
+        or metadata.is_manager
         or metadata.runat == "retired"
         or metadata.runat.partition(":")[0].startswith("h")
         or guest_hees_target(metadata.runat)
         or contact_forbidden
+        or DIRECT_HUMAN_REPORT_RE.search(policy_text) is None
     ):
         return None
     relative = task.resolve().relative_to(root.resolve()).as_posix()

@@ -29,7 +29,8 @@ from omo_manager.omo_completion_email import SOURCE1241_HUMAN
 from omo_manager.omo_completion_email import SOURCE1241_META_LINE
 
 
-def task_text(body: str = "") -> str:
+def task_text(body: str = "", *, human_report: bool = True) -> str:
+    human_report_line = "Report results directly to the Human.\n" if human_report else ""
     return (
         "---\n"
         "version: v1.0.0\n"
@@ -41,22 +42,73 @@ def task_text(body: str = "") -> str:
         "pending_task_items:\n"
         "  - finish review\n"
         "---\n"
+        f"{human_report_line}"
         f"{body}\n"
     )
 
 
-def source1241_task(root: Path, *, body_suffix: str = "", source_text: str = SOURCE1241_HUMAN) -> tuple[Path, str]:
+def source1241_task(
+    root: Path,
+    *,
+    body_suffix: str = "",
+    source_text: str = SOURCE1241_HUMAN,
+    human_report: bool = True,
+) -> tuple[Path, str]:
     source = root / "manager_mail/85c5dff58359-1241.txt"
     source.parent.mkdir(exist_ok=True)
     source.write_text(source_text + "\n", encoding="utf-8")
     source.chmod(0o600)
     task = root / "hmanager_replace_fix.md"
-    text = task_text(f"{SOURCE1241_CONTEXT}{body_suffix}")
+    text = task_text(f"{SOURCE1241_CONTEXT}{body_suffix}", human_report=human_report)
     task.write_text(text, encoding="utf-8")
     return task, text
 
 
 class CompletionEmailTest(unittest.TestCase):
+    def test_manager_maintenance_without_requested_human_result_is_suppressed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "mail_close_diag.md"
+            text = task_text(
+                """<manager_delegation from="config:27">
+Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
+
+- do not reopen work, replay reports, send Human mail, commit work-log files, infer evidence, or stop the pane separately
+- report terminal completion or one exact blocker to config:27 through `omo_report.sh`
+</manager_delegation>""",
+                human_report=False,
+            )
+            task.write_text(text, encoding="utf-8")
+
+            self.assertIsNone(build_completion_email(root, task, text, "task done"))
+
+    def test_compound_no_human_mail_rule_overrides_result_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_text("Do not reopen work, replay reports, send Human mail, or commit work-log files.")
+            task.write_text(text, encoding="utf-8")
+
+            self.assertIsNone(build_completion_email(root, task, text, "task done"))
+
+    def test_negated_direct_human_report_rule_is_not_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_text("Never report results directly to the Human.")
+            task.write_text(text, encoding="utf-8")
+
+            self.assertIsNone(build_completion_email(root, task, text, "task done"))
+
+    def test_manager_task_cannot_send_even_with_result_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "manager.md"
+            text = task_text().replace("is_manager: false", "is_manager: true")
+            task.write_text(text, encoding="utf-8")
+
+            self.assertIsNone(build_completion_email(root, task, text, "task done"))
+
     def test_pending_item_notice_uses_explicit_queue_owner_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -502,6 +554,7 @@ pending_task_items:
     notices: []
 resolved_task_items: []
 ---
+Report results directly to the Human.
 work
 """
             task.write_text(initial, encoding="utf-8")
@@ -1409,6 +1462,8 @@ work
             "Never contact the human.",
             "No human-facing reports until lifted.",
             "Report only privately with omo_report.sh.",
+        )
+        manager_only_rules = (
             "Report only compact high-level status to this submanager through omo_report.sh.",
             "Report only to the manager.",
             "Return only a concise report to your manager.",
@@ -1420,6 +1475,9 @@ work
                 for rule in rules:
                     with self.subTest(rule=rule):
                         self.assertIsNone(plan_completion_email(root, task, task_text(rule), "task done"))
+                for rule in manager_only_rules:
+                    with self.subTest(rule=rule):
+                        self.assertIsNone(plan_completion_email(root, task, task_text(rule, human_report=False), "task done"))
 
     def test_source1241_exact_meta_reference_does_not_suppress_completion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1435,7 +1493,7 @@ work
         for suffix in ("\nDo not email the human.", "\nReturn only a concise report to your manager."):
             with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                task, text = source1241_task(root, body_suffix=suffix)
+                task, text = source1241_task(root, body_suffix=suffix, human_report=False)
                 with patch("omo_manager.omo_completion_email.current_active_task", return_value=task):
                     self.assertIsNone(plan_completion_email(root, task, text, "task done"))
 

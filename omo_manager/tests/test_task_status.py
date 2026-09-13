@@ -6818,7 +6818,7 @@ resolved_task_items: []
             state = root / "state"
             task = root / "task.md"
             manager = root / "manager.md"
-            original = task_frontmatter() + "body\n"
+            original = task_frontmatter() + "Report results directly to the Human.\nbody\n"
             task.write_text(original, encoding="utf-8")
             manager.write_text(task_frontmatter(runat="wl:1", managerat="main:0", is_manager=True), encoding="utf-8")
             close_args = StopArgs("wl:2", 10.0, 2000, False, False, root, "task.md", True, 0.0)
@@ -6874,7 +6874,7 @@ resolved_task_items: []
             manager_state = root / "manager-state"
             task = root / "task.md"
             manager = root / "manager.md"
-            original = task_frontmatter(status="blocked", blocked_on="waiting") + "body\n"
+            original = task_frontmatter(status="blocked", blocked_on="waiting") + "Report results directly to the Human.\nbody\n"
             task.write_text(original, encoding="utf-8")
             manager_state.mkdir(mode=0o700)
             manager.write_text(task_frontmatter(runat="wl:1", managerat="main:0", is_manager=True), encoding="utf-8")
@@ -7431,7 +7431,8 @@ resolved_task_items: []
                 helper_bin.mkdir()
                 (helper_bin / "omo_task_status.py").symlink_to(helper)
                 path = root / "task.md"
-                original = f"""{task_frontmatter(runat="cfg:1", session_id=session_id)}body
+                original = f"""{task_frontmatter(runat="cfg:1", session_id=session_id)}Report results directly to the Human.
+body
 """
                 path.write_text(original, encoding="utf-8")
                 todo = root / "TODO.md"
@@ -7452,7 +7453,8 @@ resolved_task_items: []
                     used_marker.write_text(f"{plan.target}\t{path.name}\n", encoding="utf-8")
                     used_marker.chmod(0o600)
                     mark_completion_email_delivered(plan)
-                    blocked = f"""{task_frontmatter(status="blocked", blocked_on=DONE_CLOSE_IN_PROGRESS, runat="cfg:1", session_id=session_id)}body
+                    blocked = f"""{task_frontmatter(status="blocked", blocked_on=DONE_CLOSE_IN_PROGRESS, runat="cfg:1", session_id=session_id)}Report results directly to the Human.
+body
 manager note
 """
                     path.write_text(blocked, encoding="utf-8")
