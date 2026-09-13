@@ -70,6 +70,7 @@ SOURCE1788_REF = Path("manager_mail/85c5dff58359-1788.txt")
 SOURCE1788_SHA256 = "90ec35f951bdce2eabecf1837b4271c70c969910ff1b14f542eb6f3dffa6de89"
 SOURCE1788_TASK = Path("pb_news_mgr.md")
 SOURCE1788_DISPOSITION_TASK = Path("mail_cleanup_t.md")
+SOURCE1788_POINTER_ONLY_REMOVAL_SHA256 = "f103ab21e5c2885a391bdbbed2a6baa9f6f67aa422aa24ce02385a79cbf6bb43"
 SOURCE1788_DISPOSITION_RECORD = (
     "(verified removed pending item: Human Source-1788 says the obsolete mailbox-limit blocker is stale; task status is running and fresh cleanup resumed. "
     "The item is reconciled without changing the separate book task or cleanup threshold items.)"
@@ -1007,12 +1008,19 @@ def dispositioned_source_pointer_cleanup(args: Args, path: Path, text: str, disp
             if in_pending_block:
                 raise TaskFrontmatterError("refusing to remove a source pointer inside a live `(pending)` block.")
             pointer_indices.append(index)
+    if is_source1788:
+        if not pointer_indices:
+            if task_sha256 != SOURCE1788_POINTER_ONLY_REMOVAL_SHA256 or not text.endswith("\n\n"):
+                raise TaskFrontmatterError("Source-1788 recovery requires the exact registered pointer-only intermediate bytes.")
+            return text[:-1]
+        if len(pointer_indices) != 1 or pointer_indices[0] != len(lines) - 1 or pointer_indices[0] < 1 or lines[pointer_indices[0] - 1] != "\n":
+            raise TaskFrontmatterError("Source-1788 cleanup requires one final bare pointer with its preceding blank separator.")
+        del lines[pointer_indices[0] - 1 : pointer_indices[0] + 1]
+        return "".join(lines)
     if len(pointer_indices) != 1:
         raise TaskFrontmatterError("registered disposition cleanup requires exactly one bare source pointer.")
     del lines[pointer_indices[0]]
     updated = "".join(lines)
-    if is_source1788:
-        return updated
     record = normalized_comment(
         f"dispositioned source pointer removed for {args.source_ref}: source-sha256={SOURCE1528_SHA256} prior-task-sha256={task_sha256} exact same-task Calendar A15 cancellation records preserved"
     )

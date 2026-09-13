@@ -275,7 +275,50 @@ class TaskEditTests(unittest.TestCase):
 
             self.assertEqual(0, run(args))
 
-            self.assertEqual(text.replace("(record and delegate manager_mail/85c5dff58359-1788.txt)\n", ""), task.read_text(encoding="utf-8"))
+            self.assertEqual(text.replace("\n\n(record and delegate manager_mail/85c5dff58359-1788.txt)\n", "\n"), task.read_text(encoding="utf-8"))
+
+    def test_source1788_pointer_cleanup_recovers_exact_pointer_only_intermediate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, _, disposition_text = self.source1788_fixture(root)
+            intermediate = text.replace("(record and delegate manager_mail/85c5dff58359-1788.txt)\n", "")
+            task.write_text(intermediate, encoding="utf-8")
+            args = Args(
+                root,
+                Path("pb_news_mgr.md"),
+                "source-pointer-disposition-cleanup",
+                source_ref="manager_mail/85c5dff58359-1788.txt",
+                expected_task_sha256=hashlib.sha256(intermediate.encode()).hexdigest(),
+                expected_source_sha256=SOURCE1788_SHA256,
+                expected_disposition_task_sha256=hashlib.sha256(disposition_text.encode()).hexdigest(),
+            )
+
+            with patch("omo_manager.omo_task_edit.SOURCE1788_POINTER_ONLY_REMOVAL_SHA256", hashlib.sha256(intermediate.encode()).hexdigest()):
+                self.assertEqual(0, run(args))
+
+            self.assertEqual(intermediate[:-1], task.read_text(encoding="utf-8"))
+
+    def test_source1788_pointer_cleanup_rejects_unregistered_pointerless_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, _, disposition_text = self.source1788_fixture(root)
+            intermediate = text.replace("(record and delegate manager_mail/85c5dff58359-1788.txt)\n", "")
+            task.write_text(intermediate, encoding="utf-8")
+            args = Args(
+                root,
+                Path("pb_news_mgr.md"),
+                "source-pointer-disposition-cleanup",
+                source_ref="manager_mail/85c5dff58359-1788.txt",
+                expected_task_sha256=hashlib.sha256(intermediate.encode()).hexdigest(),
+                expected_source_sha256=SOURCE1788_SHA256,
+                expected_disposition_task_sha256=hashlib.sha256(disposition_text.encode()).hexdigest(),
+            )
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                self.assertEqual(2, run(args))
+
+            self.assertEqual(intermediate, task.read_text(encoding="utf-8"))
 
     def test_source1788_pointer_cleanup_requires_exact_external_disposition(self) -> None:
         for case in (
