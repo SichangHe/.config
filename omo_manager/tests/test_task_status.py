@@ -7383,6 +7383,35 @@ resolved_task_items: []
             stop.assert_called_once()
             self.assertIn("status: done\n", task.read_text(encoding="utf-8"))
 
+    def test_close_email_thread_failure_preserves_task_and_pane(self) -> None:
+        from omo_manager.omo_completion_email import require_owner_completion as actual_require
+
+        for failure in ("no exact email thread", "email thread lookup is ambiguous"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                state = root / "state"
+                task = root / "task.md"
+                original = task_frontmatter() + "body\n"
+                task.write_text(original, encoding="utf-8")
+                with (
+                    patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                    patch("omo_manager.omo_task_status.require_owner_completion", side_effect=actual_require),
+                    patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                    patch(
+                        "omo_manager.omo_completion_email.subprocess.run",
+                        side_effect=subprocess.CalledProcessError(2, ["email_me.py"], stderr=failure),
+                    ),
+                    patch("omo_manager.omo_task_status.stop_done_agent") as stop,
+                    redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(
+                        2,
+                        run(StatusArgs(root, Path("task.md"), "done", "", completion_key="f" * 64)),
+                    )
+
+                self.assertEqual(original, task.read_text(encoding="utf-8"))
+                stop.assert_not_called()
+
     def test_manager_done_closes_from_cross_state_reconciled_receipt(self) -> None:
         from omo_manager.omo_completion_email import build_completion_email
         from omo_manager.omo_completion_email import claim_completion_email

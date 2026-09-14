@@ -28,7 +28,7 @@ if __package__ in {None, ""}:
 from omo_manager.omo_agent_status import TaskFrontmatterError
 from omo_manager.omo_agent_status import parse_task_metadata
 from omo_manager.omo_email_config import GMAIL_IMAP_HOST, configured_agent_mail, guest_hees_target
-from omo_manager.omo_email_subject import canonical_tmux_target
+from omo_manager.omo_email_subject import canonical_tmux_target, tmux_window_target
 from omo_manager.omo_task_context import current_active_task
 from omo_manager.omo_task_context import current_pending_task
 from omo_manager.omo_task_lock import task_file_lock
@@ -93,6 +93,12 @@ class CompletionEmail:
     notice_key: str
     semantic_key: str
     contact_policy: ContactPolicyBinding | None = None
+
+    @property
+    def notice_semantic_key(self) -> str:
+        if self.outcome == "task done" and self.semantic_key:
+            return hashlib.sha256(f"{self.semantic_key}\0task-close".encode()).hexdigest()
+        return self.semantic_key
 
 
 def ordinary_sent_text(message: Message) -> str:
@@ -350,6 +356,7 @@ def build_completion_email(
         contact_policy = source1241_contact_clarification(root, task, text)
         if contact_policy is not None:
             policy_text = text.replace(SOURCE1241_META_SPAN, "", 1)
+    task_close = outcome == "task done"
     contact_forbidden = NO_CONTACT_RE.search(policy_text) is not None or (
         MANAGER_ONLY_RE.search(policy_text) is not None and DIRECT_HUMAN_REPORT_RE.search(policy_text) is None
     )
@@ -360,18 +367,26 @@ def build_completion_email(
         or metadata.runat.partition(":")[0].startswith("h")
         or guest_hees_target(metadata.runat)
         or contact_forbidden
-        or DIRECT_HUMAN_REPORT_RE.search(policy_text) is None
+        or (not task_close and DIRECT_HUMAN_REPORT_RE.search(policy_text) is None)
     ):
         return None
     relative = task.resolve().relative_to(root.resolve()).as_posix()
-    details = [f"Task: {relative}", f"Outcome: {outcome}"]
-    if items:
-        details.append("Items:")
-        details.extend(f"- {item}" for item in items)
-    if evidence:
-        details.append(f"Evidence: {evidence}")
-    subject = f"{task.name}: {outcome}"
-    body = "\n".join(details) + "\n"
+    # 🧑 "When closing an agent, use the last email chain the agent used to send an automatic email ‘Closed xx:n’ with the agent’s window."
+    if task_close:
+        subject = ""
+        body = f"Closed {tmux_window_target(metadata.runat)}\n"
+    else:
+        details = [f"Task: {relative}", f"Outcome: {outcome}"]
+        if items:
+            details.append("Items:")
+            details.extend(f"- {item}" for item in items)
+        if evidence:
+            details.append(f"Evidence: {evidence}")
+        subject = f"{task.name}: {outcome}"
+        body = "\n".join(details) + "\n"
+    if semantic_key and SHA256_RE.fullmatch(semantic_key) is None:
+        raise ValueError("semantic completion key must be a lowercase SHA-256 digest")
+    notice_semantic_key = hashlib.sha256(f"{semantic_key}\0task-close".encode()).hexdigest() if task_close and semantic_key else semantic_key
     task_sha256 = hashlib.sha256(text.encode()).hexdigest()
     identity_parts = (
         str(root.resolve()),
@@ -400,7 +415,7 @@ def build_completion_email(
         body,
         task_sha256,
         contact_policy,
-        semantic_key,
+        notice_semantic_key,
     )
     return CompletionEmail(
         root.resolve(),
@@ -449,6 +464,8 @@ def plan_completion_email(
     if bool(human_subject) != bool(human_body):
         raise ValueError("human answer requires both subject and body")
     if human_subject:
+        if outcome == "task done":
+            raise ValueError("task close cannot override its exact automatic email")
         if human_subject.strip() != human_subject or "\n" in human_subject or "\r" in human_subject:
             raise ValueError("human answer subject must be one non-empty trimmed line")
         subject = human_subject
@@ -575,7 +592,7 @@ def ordinary_completion_record(
 ) -> str:
     values = (
         ("version", "v1"),
-        ("semantic_key", plan.semantic_key),
+        ("semantic_key", plan.notice_semantic_key),
         ("canonical_key", plan.key),
         ("notice_key", plan.notice_key),
         ("root", str(plan.root)),
@@ -594,6 +611,8 @@ def ordinary_completion_record(
 
 
 def ordinary_completion_is_reconciled(plan: CompletionEmail) -> bool:
+    if plan.outcome == "task done":
+        return False
     marker = completion_email_state_dir() / "ordinary-completion-by-notice" / plan.notice_key
     try:
         payload = owned_private_file(marker, "ordinary completion reconciliation", 16_384).decode()
@@ -622,7 +641,7 @@ def ordinary_completion_is_reconciled(plan: CompletionEmail) -> bool:
         len(values) != len(payload.splitlines())
         or set(values) != expected_fields
         or values["version"] != "v1"
-        or values["semantic_key"] != plan.semantic_key
+        or values["semantic_key"] != plan.notice_semantic_key
         or values["notice_key"] != plan.notice_key
         or values["root"] != str(plan.root)
         or values["task"] != plan.task.relative_to(plan.root).as_posix()
@@ -659,6 +678,8 @@ def reconcile_ordinary_sent_completion(
 ) -> None:
     """Bind exact Sent-Mail evidence to one owner task without sending mail."""
 
+    if outcome == "task done":
+        raise ValueError("ordinary Sent-Mail reconciliation cannot satisfy the exact automatic task-close email")
     if re.fullmatch(r"<[^<>\s]+>", message_id) is None:
         raise ValueError("ordinary completion Message-ID is invalid")
     if SHA256_RE.fullmatch(subject_sha256) is None or SHA256_RE.fullmatch(body_sha256) is None:
@@ -760,7 +781,7 @@ def reconcile_ordinary_sent_completion(
                     ):
                         raise OSError("completion email authorization is malformed")
                     authorizations.add(authorization.name)
-                    if values["notice_key"] == plan.notice_key and values.get("semantic_key", plan.semantic_key) == plan.semantic_key:
+                    if values["notice_key"] == plan.notice_key and values.get("semantic_key", plan.notice_semantic_key) == plan.notice_semantic_key:
                         matching_authorizations.append(authorization)
             used_dir = state / "completion-email-authorization-used"
             if used_dir.exists():
@@ -802,7 +823,7 @@ def claimed_completion_notice(plan: CompletionEmail) -> tuple[str, str, str, str
         fields = line.split("\t")
         if len(fields) not in {3, 5, 6, 7}:
             raise OSError("completion claims ledger is malformed")
-        if len(fields) == 7 and fields[5] == plan.notice_key and fields[6] == plan.semantic_key:
+        if len(fields) == 7 and fields[5] == plan.notice_key and fields[6] == plan.notice_semantic_key:
             key, target, task, manager_target, _task_sha256, _notice_key, _semantic_key = fields
             if SHA256_RE.fullmatch(key) is None:
                 raise OSError("completion notice claim is malformed")
@@ -883,7 +904,7 @@ def completion_email_is_delivered(plan: CompletionEmail) -> bool:
             and row[2] == recorded_task
             and row[4] == recorded_task_sha256
             and row[5] == plan.notice_key
-            and row[6] == plan.semantic_key
+            and row[6] == plan.notice_semantic_key
         ]
         if len(matching_claims) != 1:
             raise OSError("completion notice semantic key has no atomic claim")
@@ -956,11 +977,11 @@ def validate_completion_notice_delivery(plan: CompletionEmail) -> str:
     rows = [line.split("\t") for line in claims]
     if any(len(row) not in {3, 5, 6, 7} for row in rows):
         raise OSError("completion claims ledger is malformed")
-    expected_claim = [key, target, task_name, plan.manager_target, task_sha256, plan.notice_key, plan.semantic_key]
+    expected_claim = [key, target, task_name, plan.manager_target, task_sha256, plan.notice_key, plan.notice_semantic_key]
     if (
         [row for row in rows if row[0] == key] != [expected_claim]
         or [row for row in rows if len(row) >= 6 and row[5] == plan.notice_key] != [expected_claim]
-        or [row for row in rows if len(row) == 7 and row[6] == plan.semantic_key] != [expected_claim]
+        or [row for row in rows if len(row) == 7 and row[6] == plan.notice_semantic_key] != [expected_claim]
     ):
         raise OSError("completion notice delivery lacks one exact semantic claim")
     authorization_payload = owned_private_file(authorization_directory / key, "completion email authorization", 4096).decode()
@@ -975,7 +996,7 @@ def validate_completion_notice_delivery(plan: CompletionEmail) -> str:
         "task": plan.task.resolve().relative_to(plan.root.resolve()).as_posix(),
         "task_sha256": task_sha256,
         "notice_key": plan.notice_key,
-        "semantic_key": plan.semantic_key,
+        "semantic_key": plan.notice_semantic_key,
         "subject_sha256": hashlib.sha256(plan.subject.encode()).hexdigest(),
         "body_sha256": hashlib.sha256(plan.body.encode()).hexdigest(),
     }
@@ -1134,7 +1155,7 @@ def reconcile_delivered_completion(
             legacy_claim = f"{plan.key}\t{owner}\t{task.name}"
             detailed_claim = f"{legacy_claim}\t{plan.manager_target}\t{task_sha256}"
             current_claim = f"{detailed_claim}\t{plan.notice_key}"
-            purpose_claim = f"{current_claim}\t{plan.semantic_key}"
+            purpose_claim = f"{current_claim}\t{plan.notice_semantic_key}"
             if matching_claims not in ([legacy_claim], [detailed_claim], [current_claim], [purpose_claim]):
                 raise OSError("completion receipt has missing or ambiguous claim evidence")
             if hashlib.sha256(task.read_bytes()).hexdigest() != task_sha256:
@@ -1242,7 +1263,7 @@ def completion_authorization_payload(plan: CompletionEmail) -> str:
         f"task={relative_task}\n"
         f"task_sha256={plan.task_sha256}\n"
         f"notice_key={plan.notice_key}\n"
-        f"semantic_key={plan.semantic_key}\n"
+        f"semantic_key={plan.notice_semantic_key}\n"
         f"subject_sha256={hashlib.sha256(plan.subject.encode()).hexdigest()}\n"
         f"body_sha256={hashlib.sha256(plan.body.encode()).hexdigest()}\n"
     )
@@ -1271,7 +1292,7 @@ def refresh_unattempted_completion_claim(plan: CompletionEmail, previous_key: st
             raise OSError("completion claims ledger is malformed")
         keyed = [row for row in rows if row[0] == previous_key]
         notices = [row for row in rows if len(row) == 7 and row[5] == plan.notice_key]
-        semantic = [row for row in rows if len(row) == 7 and row[6] == plan.semantic_key]
+        semantic = [row for row in rows if len(row) == 7 and row[6] == plan.notice_semantic_key]
         if len(keyed) != 1 or keyed != notices or keyed != semantic or len(keyed[0]) != 7:
             raise OSError("previous completion claim is missing or ambiguous")
         old = keyed[0]
@@ -1309,7 +1330,7 @@ def refresh_unattempted_completion_claim(plan: CompletionEmail, previous_key: st
             or values["task"] != relative_task
             or values["task_sha256"] != old[4]
             or values["notice_key"] != plan.notice_key
-            or values["semantic_key"] != plan.semantic_key
+            or values["semantic_key"] != plan.notice_semantic_key
             or SHA256_RE.fullmatch(values["subject_sha256"]) is None
             or SHA256_RE.fullmatch(values["body_sha256"]) is None
         ):
@@ -1333,7 +1354,7 @@ def refresh_unattempted_completion_claim(plan: CompletionEmail, previous_key: st
         else:
             if recorded != current_payload:
                 raise OSError("current completion authorization is ambiguous")
-        replacement = [plan.key, plan.target, plan.task.name, plan.manager_target, plan.task_sha256, plan.notice_key, plan.semantic_key]
+        replacement = [plan.key, plan.target, plan.task.name, plan.manager_target, plan.task_sha256, plan.notice_key, plan.notice_semantic_key]
         updated_rows = [replacement if row == old else row for row in rows]
         updated = "".join("\t".join(row) + "\n" for row in updated_rows)
         temporary = ledger.with_name(f".{ledger.name}.{os.getpid()}.tmp")
@@ -1366,7 +1387,7 @@ def claim_completion_email(plan: CompletionEmail, *, recover_existing: bool = Fa
     with os.fdopen(fd, "r+", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         ordinary_marker = state_dir / "ordinary-completion-by-notice" / plan.notice_key
-        if ordinary_marker.exists():
+        if ordinary_marker.exists() and plan.outcome != "task done":
             if not ordinary_completion_is_reconciled(plan):
                 raise OSError("ordinary completion reconciliation is invalid")
             return False
@@ -1377,10 +1398,10 @@ def claim_completion_email(plan: CompletionEmail, *, recover_existing: bool = Fa
         fields = [line.split("\t") for line in previous.splitlines()]
         if any(len(row) not in {3, 5, 6, 7} for row in fields):
             raise OSError("completion claims ledger is malformed")
-        expected = [plan.key, plan.target, plan.task.name, plan.manager_target, plan.task_sha256, plan.notice_key, plan.semantic_key]
+        expected = [plan.key, plan.target, plan.task.name, plan.manager_target, plan.task_sha256, plan.notice_key, plan.notice_semantic_key]
         matching_keys = [row for row in fields if row[0] == plan.key]
         matching_notices = [row for row in fields if len(row) >= 6 and row[5] == plan.notice_key]
-        matching_semantic_keys = [row for row in fields if len(row) == 7 and row[6] == plan.semantic_key]
+        matching_semantic_keys = [row for row in fields if len(row) == 7 and row[6] == plan.notice_semantic_key]
         if matching_keys or matching_notices or matching_semantic_keys:
             if matching_keys != [expected] or matching_notices != [expected] or matching_semantic_keys != [expected]:
                 return False
@@ -1402,7 +1423,7 @@ def claim_completion_email(plan: CompletionEmail, *, recover_existing: bool = Fa
             temporary_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(temporary_fd, "w", encoding="utf-8") as handle:
                 _ = handle.write(
-                    f"{previous}{plan.key}\t{plan.target}\t{plan.task.name}\t{plan.manager_target}\t{plan.task_sha256}\t{plan.notice_key}\t{plan.semantic_key}\n"
+                    f"{previous}{plan.key}\t{plan.target}\t{plan.task.name}\t{plan.manager_target}\t{plan.task_sha256}\t{plan.notice_key}\t{plan.notice_semantic_key}\n"
                 )
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -1439,12 +1460,14 @@ def send_completion_email(plan: CompletionEmail | None) -> bool:
     if not claim_completion_email(plan, recover_existing=True):
         return False
     with tempfile.TemporaryDirectory(prefix="omo-completion-email-") as tmp:
-        subject = Path(tmp) / "subject.txt"
         body = Path(tmp) / "body.txt"
-        subject.write_text(plan.subject + "\n", encoding="utf-8")
         body.write_text(plan.body, encoding="utf-8")
         command = [str(EMAIL_HELPER), "--manager-human", "--completion-authorization", plan.key]
-        command.extend(("--subject-file", str(subject), "--message-file", str(body)))
+        if plan.subject:
+            subject = Path(tmp) / "subject.txt"
+            subject.write_text(plan.subject + "\n", encoding="utf-8")
+            command.extend(("--subject-file", str(subject)))
+        command.extend(("--message-file", str(body)))
         try:
             subprocess.run(command, check=True)
         except (OSError, subprocess.SubprocessError) as exc:

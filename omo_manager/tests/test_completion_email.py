@@ -82,6 +82,80 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
 
             self.assertIsNone(build_completion_email(root, task, text, "task done"))
 
+    def test_normal_close_uses_latest_thread_and_exact_window_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            text = task_text(human_report=False)
+            task.write_text(text, encoding="utf-8")
+            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
+                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
+            ), patch("omo_manager.omo_completion_email.subprocess.run") as email:
+                plan = plan_completion_email(root, task, text, "task done", semantic_key="a" * 64)
+                assert plan is not None
+                self.assertEqual("", plan.subject)
+                self.assertEqual("Closed cfg:2\n", plan.body)
+                self.assertTrue(send_completion_email(plan))
+                self.assertFalse(send_completion_email(plan))
+
+            command = email.call_args.args[0]
+            email.assert_called_once()
+            self.assertNotIn("--subject-file", command)
+            self.assertIn("--message-file", command)
+
+    def test_normal_close_reports_window_not_nonzero_pane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_text(human_report=False).replace("runat: cfg:2", "runat: cfg:2.1")
+            task.write_text(text, encoding="utf-8")
+
+            plan = build_completion_email(root, task, text, "task done")
+
+            assert plan is not None
+            self.assertEqual("Closed cfg:2\n", plan.body)
+
+    def test_non_close_notice_keeps_explicit_subject_and_details(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_text()
+            task.write_text(text, encoding="utf-8")
+
+            plan = build_completion_email(root, task, text, "pending item completed")
+
+            assert plan is not None
+            self.assertEqual("task.md: pending item completed", plan.subject)
+            self.assertEqual("Task: task.md\nOutcome: pending item completed\n", plan.body)
+
+    def test_task_close_rejects_answer_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_text()
+            task.write_text(text, encoding="utf-8")
+            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task):
+                with self.assertRaisesRegex(ValueError, "cannot override"):
+                    plan_completion_email(
+                        root,
+                        task,
+                        text,
+                        "task done",
+                        human_subject="Re: Different thread",
+                        human_body="Different body",
+                    )
+
+    def test_task_close_rejects_non_digest_semantic_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_text(human_report=False)
+            task.write_text(text, encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "lowercase SHA-256"):
+                build_completion_email(root, task, text, "task done", semantic_key="garbage")
+
     def test_compound_no_human_mail_rule_overrides_result_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -255,7 +329,7 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
                 with self.assertRaises(OSError):
                     validate_completion_notice_delivery(other_plan)
 
-    def test_legacy_no_email_removal_can_reconcile_exact_ordinary_sent_message(self) -> None:
+    def test_ordinary_completion_cannot_suppress_close_email(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             state = root / "state"
@@ -271,9 +345,16 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
                 "omo_manager.omo_completion_email.current_active_task", return_value=task
             ), patch(
                 "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True
-            ) as verify, patch(
-                "omo_manager.omo_completion_email.subprocess.run", side_effect=AssertionError("must not send email")
-            ):
+            ) as verify, patch("omo_manager.omo_completion_email.subprocess.run") as send:
+                reconcile_ordinary_sent_completion(
+                    root,
+                    task,
+                    "legacy pending items removed without email",
+                    message_id,
+                    subject_sha256,
+                    body_sha256,
+                    semantic_key=semantic_key,
+                )
                 reconcile_ordinary_sent_completion(
                     root,
                     task,
@@ -287,19 +368,10 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
                 task.write_text(final, encoding="utf-8")
                 plan = plan_completion_email(root, task, final, "task done", semantic_key=semantic_key)
                 assert plan is not None
-                self.assertTrue(completion_email_is_delivered(plan))
-                self.assertFalse(send_completion_email(plan))
-                task.write_text(after, encoding="utf-8")
-                reconcile_ordinary_sent_completion(
-                    root,
-                    task,
-                    "legacy pending items removed without email",
-                    message_id,
-                    subject_sha256,
-                    body_sha256,
-                    semantic_key=semantic_key,
-                )
+                self.assertFalse(completion_email_is_delivered(plan))
+                self.assertTrue(send_completion_email(plan))
             self.assertEqual(2, verify.call_count)
+            send.assert_called_once()
 
     def test_ordinary_sent_message_cannot_be_reused_for_another_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -317,13 +389,34 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
                 "omo_manager.omo_completion_email.current_active_task", side_effect=lambda _root: active
             ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
                 reconcile_ordinary_sent_completion(
-                    root, first, "task done", message_id, digest, digest, semantic_key="a" * 64
+                    root, first, "completed", message_id, digest, digest, semantic_key="a" * 64
                 )
                 active = second
                 with self.assertRaisesRegex(OSError, "different evidence"):
                     reconcile_ordinary_sent_completion(
-                        root, second, "task done", message_id, digest, digest, semantic_key="a" * 64
+                        root, second, "completed", message_id, digest, digest, semantic_key="a" * 64
                     )
+
+    def test_ordinary_sent_reconciliation_cannot_satisfy_task_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_text().replace("pending_task_items:\n  - finish review", "pending_task_items: []")
+            task.write_text(text, encoding="utf-8")
+            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch(
+                "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent"
+            ) as verify:
+                with self.assertRaisesRegex(ValueError, "cannot satisfy"):
+                    reconcile_ordinary_sent_completion(
+                        root,
+                        task,
+                        "task done",
+                        "<arbitrary@example.test>",
+                        "b" * 64,
+                        "c" * 64,
+                        semantic_key="a" * 64,
+                    )
+            verify.assert_not_called()
 
     def test_unverified_ordinary_message_creates_no_completion_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -340,7 +433,7 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
                     reconcile_ordinary_sent_completion(
                         root,
                         task,
-                        "task done",
+                        "completed",
                         "<missing@example.test>",
                         digest,
                         digest,
@@ -359,14 +452,14 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
                 "omo_manager.omo_completion_email.current_active_task", return_value=task
             ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
-                plan = plan_completion_email(root, task, text, "task done", semantic_key="a" * 64)
+                plan = plan_completion_email(root, task, text, "completed", semantic_key="a" * 64)
                 assert plan is not None
                 self.assertTrue(claim_completion_email(plan))
                 with self.assertRaisesRegex(OSError, "structured completion state"):
                     reconcile_ordinary_sent_completion(
                         root,
                         task,
-                        "task done",
+                        "completed",
                         "<already-sent@example.test>",
                         digest,
                         digest,
@@ -427,7 +520,7 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
                 reconcile_ordinary_sent_completion(
                     root,
                     task,
-                    "task done",
+                    "completed",
                     "<already-sent@example.test>",
                     "b" * 64,
                     "c" * 64,
@@ -447,18 +540,18 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
                 reconcile_ordinary_sent_completion(
                     root,
                     task,
-                    "task done",
+                    "completed",
                     "<already-sent@example.test>",
                     "b" * 64,
                     "c" * 64,
                     semantic_key="a" * 64,
                 )
-                plan = plan_completion_email(root, task, text, "task done", semantic_key="a" * 64)
+                plan = plan_completion_email(root, task, text, "completed", semantic_key="a" * 64)
                 assert plan is not None
                 self.assertFalse(claim_completion_email(plan))
             self.assertFalse((state / "completion-email-claims.tsv").exists())
 
-    def test_v1_pending_to_done_transition_reuses_one_semantic_delivery(self) -> None:
+    def test_v1_pending_completion_cannot_suppress_close_email(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             state = root / "state"
@@ -487,10 +580,12 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
                 done_plan = plan_completion_email(root, task, finished, "task done", semantic_key=semantic_key)
                 assert done_plan is not None
                 self.assertNotEqual(pending_plan.key, done_plan.key)
-                self.assertEqual(pending_plan.notice_key, done_plan.notice_key)
-                self.assertTrue(completion_email_is_delivered(done_plan))
-                self.assertFalse(send_completion_email(done_plan))
-            send.assert_called_once()
+                self.assertNotEqual(pending_plan.notice_key, done_plan.notice_key)
+                self.assertEqual(pending_plan.semantic_key, done_plan.semantic_key)
+                self.assertNotEqual(pending_plan.notice_semantic_key, done_plan.notice_semantic_key)
+                self.assertFalse(completion_email_is_delivered(done_plan))
+                self.assertTrue(send_completion_email(done_plan))
+            self.assertEqual(2, send.call_count)
 
     def test_legacy_exact_receipt_is_readable_with_its_exact_claim(self) -> None:
         for width in (3, 5, 6):
@@ -535,7 +630,7 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
                 with self.assertRaisesRegex(OSError, "does not match"):
                     completion_email_is_delivered(plan)
 
-    def test_v2_pending_to_done_transition_reuses_one_semantic_notice(self) -> None:
+    def test_v2_pending_completion_has_distinct_close_notice(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task = root / "task.md"
@@ -576,7 +671,7 @@ work
             second = build_completion_email(root, task, finished, "task done", semantic_key="a" * 64)
             assert first is not None and second is not None
             self.assertNotEqual(first.key, second.key)
-            self.assertEqual(first.notice_key, second.notice_key)
+            self.assertNotEqual(first.notice_key, second.notice_key)
 
     def test_guest_lifecycle_notice_is_suppressed_without_changing_primary_shape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -586,8 +681,8 @@ work
             primary.write_text(primary_text, encoding="utf-8")
             primary_plan = build_completion_email(root, primary, primary_text, "task done")
             assert primary_plan is not None
-            self.assertEqual("primary.md: task done", primary_plan.subject)
-            self.assertEqual("Task: primary.md\nOutcome: task done\n", primary_plan.body)
+            self.assertEqual("", primary_plan.subject)
+            self.assertEqual("Closed cfg:2\n", primary_plan.body)
 
             guest = root / "guest.md"
             guest_text = primary_text.replace("runat: cfg:2", "runat: guest_hees:7")
@@ -635,6 +730,8 @@ work
                     )
                 )
             queue.assert_called_once()
+            queued_message = queue.call_args.args[1]
+            self.assertIn(f"--semantic-key {'d' * 64}", queued_message)
             target, message = queue.call_args.args
             self.assertEqual("cfg:2", target)
             self.assertIn(str(Path(__file__).parents[1] / "omo_completion_email.py"), message)
@@ -720,7 +817,7 @@ work
             assert original_plan is not None
             claim = (source_state / "completion-email-claims.tsv").read_text(encoding="utf-8")
             self.assertEqual(
-                f"{receipt.name}\tcfg:2\t{task.name}\tcfg:1\t{original_sha256}\t{original_plan.notice_key}\t{'c' * 64}\n",
+                f"{receipt.name}\tcfg:2\t{task.name}\tcfg:1\t{original_sha256}\t{original_plan.notice_key}\t{original_plan.notice_semantic_key}\n",
                 claim,
             )
             changed = text.replace("managerat: cfg:1", "managerat: cfg:1.0") + "blocked_on: physical Mac evidence\n"
@@ -820,6 +917,9 @@ work
                 )
                 self.assertTrue(require_owner_completion(root, task, text, "task done", semantic_key="c" * 64))
             queue.assert_called_once()
+            queued_message = queue.call_args.args[1]
+            self.assertIn(f"--semantic-key {'c' * 64}", queued_message)
+            self.assertNotIn(plan.notice_semantic_key, queued_message)
 
     def test_duplicate_suppressed_delivery_receipt_reconciles_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1288,7 +1388,7 @@ work
             with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
                 "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
             ):
-                old = plan_completion_email(root, task, initial, "task done", semantic_key=semantic_key)
+                old = plan_completion_email(root, task, initial, "completed", semantic_key=semantic_key)
                 assert old is not None
                 self.assertTrue(claim_completion_email(old))
                 changed = initial + "(reviewed result)\n"
@@ -1297,7 +1397,7 @@ work
                     root,
                     task,
                     changed,
-                    "task done",
+                    "completed",
                     human_subject="Task result",
                     human_body="The task is complete.",
                     semantic_key=semantic_key,
@@ -1365,7 +1465,7 @@ work
                 with self.assertRaisesRegex(OSError, "missing or ambiguous"):
                     refresh_unattempted_completion_claim(current, old.key)
 
-    def test_completion_entrypoint_refreshes_then_sends_combined_answer(self) -> None:
+    def test_non_close_entrypoint_refreshes_then_sends_combined_answer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             state = root / "state"
@@ -1380,7 +1480,7 @@ work
             with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
                 "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
             ), patch("omo_manager.omo_completion_email.subprocess.run") as send:
-                old = plan_completion_email(root, task, initial, "task done", semantic_key=semantic_key)
+                old = plan_completion_email(root, task, initial, "completed", semantic_key=semantic_key)
                 assert old is not None
                 self.assertTrue(claim_completion_email(old))
                 task.write_text(initial + "(reviewed result)\n", encoding="utf-8")
@@ -1392,7 +1492,7 @@ work
                         "--task",
                         str(task),
                         "--outcome",
-                        "task done",
+                        "completed",
                         "--semantic-key",
                         semantic_key,
                         "--answer-subject-file",

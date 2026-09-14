@@ -147,6 +147,8 @@ def parse_args(argv: list[str]) -> CliArgs:
         parser.error("pass email subject with --subject or --subject-file; pass email body by standard input or --message-file.")
     if parsed.subject is not None and parsed.subject_file is not None:
         parser.error("pass email subject with --subject or --subject-file, not both.")
+    if parsed.subject is not None and not parsed.subject.strip():
+        parser.error("subject must not be empty; omit --subject to continue the latest verified thread.")
     if parsed.subject_file is not None:
         try:
             raw_title = parsed.subject_file.read_text(encoding="utf-8")
@@ -1536,7 +1538,11 @@ def main(argv: list[str]) -> int:
             if route_profile is None:
                 subject, reply_headers = prepare_latest_thread_for_tmux_target(subject_tmux_target)
             else:
-                subject, reply_headers = prepare_latest_thread_for_tmux_target(subject_tmux_target, route_profile=route_profile)
+                subject, reply_headers = prepare_latest_thread_for_tmux_target(
+                    subject_tmux_target,
+                    route_profile=route_profile,
+                    required_agent_session=agent_session_id() if args.completion_authorization else None,
+                )
             title = subject
         elif args.digest_authorization:
             subject, reply_headers = fresh_manager_subject(args.title, subject_tmux_target or ""), {}

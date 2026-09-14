@@ -32,6 +32,7 @@ RE_PREFIX_RE = re.compile(r"^\s*re:\s*", re.IGNORECASE)
 # 🧑 "make sure that in the future replies get sent to the guest also"
 GUEST_REPLY_PREFIX_RE = re.compile(r"^\s*(?:re:|回复：)\s*", re.IGNORECASE)
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
+AGENT_SESSION_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z", re.IGNORECASE)
 TMUX_SUBJECT_TAG_RE = re.compile(r"^\s*(?:\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\]|[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?:\s+|$)")
 TMUX_SUBJECT_TARGET_RE = re.compile(r"^\s*(?:\[([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\]|([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?))(?:\s+|$)")
 BRACKETED_TMUX_TAG_RE = re.compile(r"\[([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\]")
@@ -61,6 +62,7 @@ class RecentHeader:
     recipient: str = ""
     thread_target: str = field(default="", compare=False)
     in_reply_to: str = ""
+    agent_session: str = field(default="", compare=False)
 
 
 @dataclass(frozen=True)
@@ -220,6 +222,12 @@ def canonical_tmux_target(tmux_target: str) -> str:
     if dot and pane == "0" and ":" in window_target:
         return window_target
     return clean_target
+
+
+def tmux_window_target(tmux_target: str) -> str:
+    canonical = canonical_tmux_target(tmux_target)
+    window_target, dot, pane = canonical.rpartition(".")
+    return window_target if dot and pane.isdigit() and ":" in window_target else canonical
 
 
 def subject_tmux_target(subject: str) -> str:
@@ -401,6 +409,7 @@ def find_recent_thread_matching(
     *,
     route_profile: MailRouteProfile | None = None,
     reject_ambiguous: bool = False,
+    required_agent_session: str | None = None,
 ) -> RecentHeader | None:
     lookup_s = int(os.environ.get("OMO_MANAGER_EMAIL_THREAD_LOOKUP_S", str(DEFAULT_THREAD_LOOKUP_WINDOW_S)))
     if lookup_s <= 0:
@@ -471,6 +480,19 @@ def find_recent_thread_matching(
                 if not matches(header):
                     continue
                 candidates.append(header)
+        if required_agent_session is not None:
+            if route_profile is None:
+                raise SubjectInputError("agent-sent thread lookup requires a verified route profile")
+            required_agent_session = required_agent_session.strip().lower()
+            if AGENT_SESSION_RE.fullmatch(required_agent_session) is None:
+                raise SubjectInputError("agent-sent thread lookup requires the current agent session identity")
+            used_roots = {
+                thread_root_message_id(header)
+                for header in candidates
+                if route_matches_header(header, route_profile.agent_address, route_profile.counterparty_address)
+                and header.agent_session.strip().lower() == required_agent_session
+            }
+            candidates = [header for header in candidates if thread_root_message_id(header) in used_roots]
         if reject_ambiguous and route_profile is not None and route_profile.parent_message_ids is not None and len(candidates) > 1:
             raise SubjectInputError(f"verified email thread lookup matched {len(candidates)} open parent messages")
         selected = select_recent_thread(candidates, reject_ambiguous=reject_ambiguous)
@@ -508,6 +530,7 @@ def find_recent_thread_for_tmux_target(
     tmux_target: str,
     route_profile: MailRouteProfile | None = None,
     reject_ambiguous: bool = False,
+    required_agent_session: str | None = None,
 ) -> RecentHeader | None:
     target = canonical_tmux_target(tmux_target)
     prefix_re = GUEST_REPLY_PREFIX_RE if route_profile is not None and route_profile.route_kind == "guest-hees" else RE_PREFIX_RE
@@ -526,13 +549,23 @@ def find_recent_thread_for_tmux_target(
 
     if route_profile is None and not reject_ambiguous:
         return find_recent_thread_matching(has_exact_leading_target, target)
-    return find_recent_thread_matching(has_exact_leading_target, target, route_profile=route_profile, reject_ambiguous=reject_ambiguous)
+    return find_recent_thread_matching(
+        has_exact_leading_target,
+        target,
+        route_profile=route_profile,
+        reject_ambiguous=reject_ambiguous,
+        required_agent_session=required_agent_session,
+    )
 
 
 def fetch_recent_headers(client: imaplib.IMAP4_SSL, uids: list[str]) -> list[RecentHeader]:
     if not uids:
         return []
-    typ, data = client.uid("fetch", ",".join(uids), "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID REFERENCES IN-REPLY-TO)])")
+    typ, data = client.uid(
+        "fetch",
+        ",".join(uids),
+        "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID REFERENCES IN-REPLY-TO X-OMO-AGENT-SESSION-ID)])",
+    )
     if typ != "OK" or not data:
         raise SubjectInputError("email thread lookup failed while fetching candidate headers")
     headers: list[RecentHeader] = []
@@ -549,6 +582,7 @@ def fetch_recent_headers(client: imaplib.IMAP4_SSL, uids: list[str]) -> list[Rec
                 references=str(msg.get("References", "")),
                 recipient=str(msg.get("To", "")),
                 in_reply_to=str(msg.get("In-Reply-To", "")),
+                agent_session=str(msg.get("X-OMO-Agent-Session-ID", "")),
             )
         )
     return headers
@@ -620,6 +654,7 @@ def verified_recent_thread_header(
     subject_key: str | None = None,
     tmux_target: str | None = None,
     required: bool,
+    required_agent_session: str | None = None,
 ) -> RecentHeader | None:
     if (subject_key is None) == (tmux_target is None):
         raise ValueError("verified thread lookup requires exactly one lookup key")
@@ -631,7 +666,12 @@ def verified_recent_thread_header(
                 description = f"subject {subject_key!r}"
             else:
                 assert tmux_target is not None
-                header = find_recent_thread_for_tmux_target(tmux_target, route_profile, reject_ambiguous=True)
+                header = find_recent_thread_for_tmux_target(
+                    tmux_target,
+                    route_profile,
+                    reject_ambiguous=True,
+                    required_agent_session=required_agent_session,
+                )
                 description = f"tmux target {canonical_tmux_target(tmux_target)}"
     except SubjectInputError:
         raise
@@ -702,12 +742,18 @@ def prepare_subject_and_headers(
 def prepare_latest_thread_for_tmux_target(
     tmux_target: str,
     route_profile: MailRouteProfile | None = None,
+    *,
+    required_agent_session: str | None = None,
 ) -> tuple[str, dict[str, str]]:
-    header = (
-        verified_recent_thread_header(route_profile=route_profile, tmux_target=tmux_target, required=True)
-        if route_profile is not None
-        else recent_thread_header_for_tmux_target(tmux_target)
-    )
+    if route_profile is None:
+        header = recent_thread_header_for_tmux_target(tmux_target)
+    else:
+        header = verified_recent_thread_header(
+            route_profile=route_profile,
+            tmux_target=tmux_target,
+            required=True,
+            required_agent_session=required_agent_session,
+        )
     if header is None:
         raise SubjectInputError(f"no recent email thread found for tmux target {canonical_tmux_target(tmux_target)}; pass --subject or --subject-file")
     require_reply_target_continuity(header, tmux_target, route_profile)
