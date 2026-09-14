@@ -224,9 +224,11 @@ DELIVERY_RECOVERY_POLICY = (
     "A stop requires both a terminal failed sender result and fresh `not_codex` or unchanged fatal-error evidence after non-destructive recovery; visible input alone is insufficient."
 )
 MANAGER_COMPACTION_REMINDER = "Unless you know the current manager instructions, run `getagentsmd get agent_manager` and your role command. Normally, don't ack human"
+# 🧑 “You just move tasks lines from ‘previous’ to an older dir. You don’t check the ‘status’. Change the instructions”
 TODO_LENGTH_REMINDER = (
     "omo_pending_watch detected TODO.md with {n_lines} lines is too long. "
-    "Archive old completed tasks per docs/monthly-archive.md; keep only the newest 20 `previous` tasks in TODO.md and move older `previous` tasks to YYYYMM/old_todos.md."
+    "Archive every `previous` row to the prior month's YYYYMM/old_todos.md per docs/monthly-archive.md; "
+    "do not read task status or move task or artifact files."
 )
 TODO_ARCHIVE_PREVIEW_TIMEOUT_S = 30
 MANAGER_TASK_STATE_REMINDER_HEADER = (
@@ -7279,12 +7281,30 @@ def queue_blocking_wakes(
     return queued
 
 
+def todo_previous_rows(todo_text: str) -> tuple[str, ...]:
+    """Return exact `previous` rows selected by the work-log archive helper."""
+
+    section = ""
+    rows: list[str] = []
+    for line in todo_text.splitlines(keepends=True):
+        stripped = line.strip()
+        if re.fullmatch(r"[A-Za-z][A-Za-z -]*:", stripped):
+            section = stripped[:-1].lower()
+            continue
+        if section != "previous" or not stripped or stripped.startswith("#"):
+            continue
+        token = stripped.split(maxsplit=1)[0]
+        if token.endswith(".md") or ".md/" in token:
+            rows.append(line)
+    return tuple(rows)
+
+
 def todo_archive_preview(root: Path) -> TodoArchivePreview | None:
     """Return the material identity and verdict of the read-only retention preview."""
     helper = root / "scripts" / "manager-monthly-archive"
     try:
         result = subprocess.run(
-            [str(helper), "--root", str(root), "--retain-previous", "20"],
+            [str(helper), "--root", str(root), "--retain-previous", "0"],
             cwd=root,
             capture_output=True,
             text=True,
@@ -7299,7 +7319,7 @@ def todo_archive_preview(root: Path) -> TodoArchivePreview | None:
     plan_matches = re.findall(r"^retention plan: ([0-9a-f]{64})$", result.stdout, re.MULTILINE)
     if len(todo_matches) != 1 or len(plan_matches) != 1:
         return None
-    labels = ("stale archived TODO rows reconciled", "moved", "artifact moves", "markdown rewrites")
+    labels = ("archived previous rows", "index rewrites")
     counts: list[int] = []
     for label in labels:
         matches = re.findall(rf"^{re.escape(label)}: (\d+)$", result.stdout, re.MULTILINE)
@@ -7315,15 +7335,21 @@ def todo_archive_preview(root: Path) -> TodoArchivePreview | None:
         except ValueError:
             return None
         detail_index = header_index + 1
-        if label == "moved":
-            task_header = f"task moves: {count}"
-            if detail_index >= len(lines) or lines[detail_index] != task_header:
-                return None
-            detail_index += 1
         details = lines[detail_index : detail_index + count]
         if len(details) != count or any(not detail.startswith("  ") for detail in details):
             return None
         operation_rows.extend((header, *details))
+    try:
+        todo_bytes = (root / "TODO.md").read_bytes()
+        todo_text = todo_bytes.decode("utf-8")
+    except (OSError, UnicodeError):
+        return None
+    if hashlib.sha256(todo_bytes).hexdigest() != todo_matches[0]:
+        return None
+    previous_rows = todo_previous_rows(todo_text)
+    if len(previous_rows) != counts[0]:
+        return None
+    operation_rows.extend((f"exact previous rows: {len(previous_rows)}", *(f"  {row}" for row in previous_rows)))
     operation_sha256 = hashlib.sha256("\n".join(operation_rows).encode()).hexdigest()
     return TodoArchivePreview(any(counts), todo_matches[0], plan_matches[0], operation_sha256)
 

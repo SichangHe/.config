@@ -10419,8 +10419,8 @@ resolved_task_items: []
             text = out.getvalue()
             self.assertIn("omo_pending_watch detected TODO.md with 201 lines is too long.", text)
             self.assertIn("docs/monthly-archive.md", text)
-            self.assertIn("keep only the newest 20 `previous` tasks in TODO.md", text)
-            self.assertIn("move older `previous` tasks to YYYYMM/old_todos.md", text)
+            self.assertIn("Archive every `previous` row to the prior month's YYYYMM/old_todos.md", text)
+            self.assertIn("do not read task status or move task or artifact files", text)
             todo.write_text(todo.read_text(encoding="utf-8") + "another line\n", encoding="utf-8")
             out = StringIO()
             with redirect_stdout(out):
@@ -10435,7 +10435,7 @@ resolved_task_items: []
                 self.assertTrue(watcher.scan_once(args, seen, [todo]))
             text = out.getvalue()
             self.assertIn("omo_pending_watch detected TODO.md with 201 lines is too long.", text)
-            self.assertIn("keep only the newest 20 `previous` tasks in TODO.md", text)
+            self.assertIn("Archive every `previous` row", text)
 
     def test_oversized_todo_noop_preview_suppresses_alert(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -10455,31 +10455,69 @@ resolved_task_items: []
     def test_todo_archive_preview_requires_complete_zero_mutation_counts(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
-        zero = "\n".join(
-            (
-                f"TODO baseline: {'a' * 64}",
-                f"retention plan: {'b' * 64}",
-                "stale archived TODO rows reconciled: 0",
-                "moved: 0",
-                "task moves: 0",
-                "artifact moves: 0",
-                "markdown rewrites: 0",
+        def output(todo: Path, plan: str, rows: tuple[str, ...], indexes: tuple[str, ...]) -> str:
+            baseline = hashlib.sha256(todo.read_bytes()).hexdigest()
+            return "\n".join(
+                (
+                    f"TODO baseline: {baseline}",
+                    f"retention plan: {plan}",
+                    f"archived previous rows: {len(rows)}",
+                    *(f"  {row}" for row in rows),
+                    f"index rewrites: {len(indexes)}",
+                    *(f"  {index}" for index in indexes),
+                )
             )
-        )
-        with patch.object(watcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, zero, "")):
-            preview = watcher.todo_archive_preview(Path("/tmp/root"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            todo = root / "TODO.md"
+            todo.write_text("current:\nmanager.md wl:1\nprevious:\n", encoding="utf-8")
+            zero = output(todo, "a" * 64, (), ())
+            with patch.object(watcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, zero, "")) as run:
+                preview = watcher.todo_archive_preview(root)
             self.assertIsNotNone(preview)
             self.assertFalse(preview.actionable if preview is not None else True)
-            changed_hashes = zero.replace("a" * 64, "c" * 64).replace("b" * 64, "d" * 64)
-            with patch.object(watcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, changed_hashes, "")):
-                changed_preview = watcher.todo_archive_preview(Path("/tmp/root"))
+            self.assertEqual(
+                [str(root / "scripts/manager-monthly-archive"), "--root", str(root), "--retain-previous", "0"],
+                run.call_args.args[0],
+            )
+
+            todo.write_text("current:\nmanager.md wl:2\nprevious:\n", encoding="utf-8")
+            changed_unrelated = output(todo, "b" * 64, (), ())
+            with patch.object(watcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, changed_unrelated, "")):
+                changed_preview = watcher.todo_archive_preview(root)
             self.assertIsNotNone(changed_preview)
             self.assertEqual(preview.identity if preview is not None else "", changed_preview.identity if changed_preview is not None else "changed")
-        actionable = zero.replace("moved: 0\ntask moves: 0", "moved: 1\ntask moves: 1\n  task.md -> 202608/task.md status=done fallback=202608")
-        with patch.object(watcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, actionable, "")):
-            self.assertTrue(watcher.todo_archive_preview_actionable(Path("/tmp/root")))
-        with patch.object(watcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "moved: 0\n", "")):
-            self.assertIsNone(watcher.todo_archive_preview_actionable(Path("/tmp/root")))
+
+            todo.write_text("current:\nmanager.md wl:2\nprevious:\ntask.md cfg:1\n", encoding="utf-8")
+            first_row = output(todo, "c" * 64, ("task.md",), ("202608/old_todos.md", "TODO.md"))
+            with patch.object(watcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, first_row, "")):
+                first_preview = watcher.todo_archive_preview(root)
+            todo.write_text("current:\nmanager.md wl:2\nprevious:\ntask.md cfg:2\n", encoding="utf-8")
+            changed_row = output(todo, "d" * 64, ("task.md",), ("202608/old_todos.md", "TODO.md"))
+            with patch.object(watcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, changed_row, "")):
+                second_preview = watcher.todo_archive_preview(root)
+            self.assertIsNotNone(first_preview)
+            self.assertIsNotNone(second_preview)
+            self.assertNotEqual(first_preview.identity if first_preview is not None else "", second_preview.identity if second_preview is not None else "")
+
+            todo.write_text("previous:\ntask.md cfg:2 and report_artifact.md\n", encoding="utf-8")
+            helper_compatible = output(todo, "e" * 64, ("task.md",), ("202608/old_todos.md", "TODO.md"))
+            with patch.object(watcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, helper_compatible, "")):
+                exact_row_preview = watcher.todo_archive_preview(root)
+            self.assertIsNotNone(exact_row_preview)
+            todo.write_text("previous:\ntask.md cfg:2 and report_artifact.md  \n", encoding="utf-8")
+            whitespace_changed = output(todo, "f" * 64, ("task.md",), ("202608/old_todos.md", "TODO.md"))
+            with patch.object(watcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, whitespace_changed, "")):
+                whitespace_preview = watcher.todo_archive_preview(root)
+            self.assertIsNotNone(whitespace_preview)
+            self.assertNotEqual(
+                exact_row_preview.identity if exact_row_preview is not None else "",
+                whitespace_preview.identity if whitespace_preview is not None else "",
+            )
+
+            with patch.object(watcher.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "moved: 0\n", "")):
+                self.assertIsNone(watcher.todo_archive_preview_actionable(root))
 
     def test_todo_archive_plan_identity_survives_restart_and_rearms_on_material_change(self) -> None:
         from omo_manager import omo_pending_watch as watcher
