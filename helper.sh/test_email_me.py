@@ -1579,11 +1579,32 @@ class EmailMeTests(unittest.TestCase):
             "<sent@example.test>",
             "agent@example.test",
         )
+        older_sent = omo_email_subject.RecentHeader(
+            "agent@example.test",
+            "[wl:1] Older topic",
+            now - timedelta(minutes=2),
+            "<older-sent@example.test>",
+            "",
+            "human@example.test",
+            agent_session="01a0369c-7895-70f2-ae4b-5f59d920e99a",
+        )
+        older_inbound = omo_email_subject.RecentHeader(
+            "human@example.test",
+            "Re: [wl:1] Older topic",
+            now + timedelta(minutes=1),
+            "<older-inbound@example.test>",
+            "<older-sent@example.test>",
+            "agent@example.test",
+        )
         profile = omo_email_subject.MailRouteProfile("agent@example.test", "human@example.test", "primary")
         with (
             patch.object(omo_email_subject, "configured_agent_mail", return_value=Settings()),
             patch.object(omo_email_subject.imaplib, "IMAP4_SSL", FakeClient),
-            patch.object(omo_email_subject, "fetch_recent_headers", return_value=[sent, inbound]),
+            patch.object(
+                omo_email_subject,
+                "fetch_recent_headers",
+                return_value=[older_sent, older_inbound, sent, inbound],
+            ),
             patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "86400"}, clear=False),
         ):
             selected = omo_email_subject.find_recent_thread_for_tmux_target(
@@ -1606,6 +1627,57 @@ class EmailMeTests(unittest.TestCase):
                 required_agent_session="01a0369c-7895-70f2-ae4b-5f59d920e99a",
             )
         self.assertIsNone(selected)
+
+        tied_sent = omo_email_subject.RecentHeader(
+            **{**older_sent.__dict__, "date": sent.date}
+        )
+        with (
+            patch.object(omo_email_subject, "configured_agent_mail", return_value=Settings()),
+            patch.object(omo_email_subject.imaplib, "IMAP4_SSL", FakeClient),
+            patch.object(omo_email_subject, "fetch_recent_headers", return_value=[sent, tied_sent]),
+            patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "86400"}, clear=False),
+            self.assertRaisesRegex(omo_email_subject.SubjectInputError, "ambiguous"),
+        ):
+            omo_email_subject.find_recent_thread_for_tmux_target(
+                "wl:1",
+                profile,
+                reject_ambiguous=True,
+                required_agent_session="01a0369c-7895-70f2-ae4b-5f59d920e99a",
+            )
+
+        for headers in (
+            [omo_email_subject.RecentHeader(**{**sent.__dict__, "date": None})],
+            [sent, omo_email_subject.RecentHeader(**{**inbound.__dict__, "date": None})],
+        ):
+            with (
+                self.subTest(headers=headers),
+                patch.object(omo_email_subject, "configured_agent_mail", return_value=Settings()),
+                patch.object(omo_email_subject.imaplib, "IMAP4_SSL", FakeClient),
+                patch.object(omo_email_subject, "fetch_recent_headers", return_value=headers),
+                patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "86400"}, clear=False),
+                self.assertRaisesRegex(omo_email_subject.SubjectInputError, "ambiguous timestamp"),
+            ):
+                omo_email_subject.find_recent_thread_for_tmux_target(
+                    "wl:1",
+                    profile,
+                    reject_ambiguous=True,
+                    required_agent_session="01a0369c-7895-70f2-ae4b-5f59d920e99a",
+                )
+
+        tied_reply = omo_email_subject.RecentHeader(**{**inbound.__dict__, "date": sent.date})
+        with (
+            patch.object(omo_email_subject, "configured_agent_mail", return_value=Settings()),
+            patch.object(omo_email_subject.imaplib, "IMAP4_SSL", FakeClient),
+            patch.object(omo_email_subject, "fetch_recent_headers", return_value=[sent, tied_reply]),
+            patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "86400"}, clear=False),
+            self.assertRaisesRegex(omo_email_subject.SubjectInputError, "no unique newest message"),
+        ):
+            omo_email_subject.find_recent_thread_for_tmux_target(
+                "wl:1",
+                profile,
+                reject_ambiguous=True,
+                required_agent_session="01a0369c-7895-70f2-ae4b-5f59d920e99a",
+            )
 
         other_session = omo_email_subject.RecentHeader(
             **{**sent.__dict__, "agent_session": "01a0369c-7895-70f2-ae4b-5f59d920e99b"}

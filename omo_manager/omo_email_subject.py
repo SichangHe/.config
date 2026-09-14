@@ -468,7 +468,9 @@ def find_recent_thread_matching(
                 continue
             uids = [raw_uid.decode() if isinstance(raw_uid, bytes) else str(raw_uid) for raw_uid in data[0].split()]
             for header in fetch_recent_headers(client, uids):
-                if header.date is None or header.date < cutoff:
+                if header.date is None and required_agent_session is None:
+                    continue
+                if header.date is not None and header.date < cutoff:
                     continue
                 if route_profile is not None:
                     if not route_matches_header(header, sender, recipient):
@@ -486,13 +488,29 @@ def find_recent_thread_matching(
             required_agent_session = required_agent_session.strip().lower()
             if AGENT_SESSION_RE.fullmatch(required_agent_session) is None:
                 raise SubjectInputError("agent-sent thread lookup requires the current agent session identity")
-            used_roots = {
-                thread_root_message_id(header)
+            sent = [
+                header
                 for header in candidates
                 if route_matches_header(header, route_profile.agent_address, route_profile.counterparty_address)
                 and header.agent_session.strip().lower() == required_agent_session
+            ]
+            sent_dates = [header.date for header in sent if header.date is not None]
+            if len(sent_dates) != len(sent):
+                raise SubjectInputError("agent's last email thread has an ambiguous timestamp")
+            latest_sent_at = max(sent_dates, default=None)
+            latest_roots = {
+                thread_root_message_id(header) for header in sent if header.date == latest_sent_at
             }
-            candidates = [header for header in candidates if thread_root_message_id(header) in used_roots]
+            if len(latest_roots) > 1:
+                raise SubjectInputError("agent's last email thread is ambiguous")
+            candidates = [header for header in candidates if thread_root_message_id(header) in latest_roots]
+            if any(header.date is None for header in candidates):
+                raise SubjectInputError("agent's last email thread has an ambiguous timestamp")
+            if candidates:
+                newest_at = max(header.date for header in candidates if header.date is not None)
+                newest_ids = {header.message_id.strip() for header in candidates if header.date == newest_at}
+                if len(newest_ids) > 1:
+                    raise SubjectInputError("agent's last email thread has no unique newest message")
         if reject_ambiguous and route_profile is not None and route_profile.parent_message_ids is not None and len(candidates) > 1:
             raise SubjectInputError(f"verified email thread lookup matched {len(candidates)} open parent messages")
         selected = select_recent_thread(candidates, reject_ambiguous=reject_ambiguous)
