@@ -26,7 +26,9 @@ class AgentInstructionsTests(unittest.TestCase):
             with patch.object(instructions, "GETAGENTSMD", command):
                 result = instructions.launch_instructions("submanager").decode()
         self.assertEqual(
-            f"$ {command}\nroot\n\n$ {command} get agent_manager\nget agent_manager\n\n$ {command} get submanager\nget submanager\n",
+            f"$ {command}\nroot\n\n$ {command} get agent_manager\nget agent_manager\n\n"
+            f"$ {command} get agent_manager_core\nget agent_manager_core\n\n"
+            f"$ {command} get submanager\nget submanager\n",
             result,
         )
 

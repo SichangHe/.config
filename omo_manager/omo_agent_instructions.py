@@ -37,7 +37,7 @@ def command_output(*args: str) -> bytes:
     return f"$ {shlex.join(command)}\n{output}".encode()
 
 
-# 🧑 “change the agent-spawning scripts to show which commands it runs and the content from running those commands, as opposed to the current file inclusion”
+# 🧑 “launch_instructions() retrieves the document and makes its content available in the manager's initial prompt before the manager starts ... make it clear that it is the output of that command”
 def launch_instructions(manager_role: str | None = None) -> bytes:
     """Return command transcripts for a worker, main manager, or submanager."""
 
@@ -45,5 +45,11 @@ def launch_instructions(manager_role: str | None = None) -> bytes:
         raise ValueError(f"unknown manager role: {manager_role}")
     parts = [command_output()]
     if manager_role is not None:
-        parts.extend((command_output("get", "agent_manager"), command_output("get", manager_role)))
+        parts.extend(
+            (
+                command_output("get", "agent_manager"),
+                command_output("get", "agent_manager_core"),
+                command_output("get", manager_role),
+            )
+        )
     return b"\n".join(parts)
