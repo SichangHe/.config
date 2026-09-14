@@ -48,8 +48,17 @@ class ManagerHelperHelpTests(unittest.TestCase):
         self.assertIn("captures the command and output from getagentsmd", launch_help)
         self.assertIn("common and submanager instruction documents", launch_help)
         self.assertIn("gpt-5.6-sol medium is the default", launch_help)
+        self.assertIn("gpt-6-astra is also supported", launch_help)
+        self.assertIn("very expensive and reserved for tricky tasks", launch_help)
         self.assertIn("cursor-grok-4.6-xhigh", launch_help)
         self.assertIn("Keep --task-file as manager-side bookkeeping", launch_help)
+
+        for direct_help in (
+            helper_help("omo_codex_start.py"),
+            helper_help("omo_main_manager_model_recovery.py"),
+        ):
+            self.assertIn("gpt-6-astra is supported", direct_help)
+            self.assertIn("very expensive and reserved for tricky tasks", direct_help)
 
         cursor_help = helper_help("amh_cursor_agent.py")
         self.assertIn("cursor-grok-4.6-xhigh", cursor_help)

@@ -384,7 +384,11 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--root", type=Path, default=Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs")))
     _ = parser.add_argument("--task-file", required=True, help="Active tracked task whose `runat` names the target pane.")
     _ = parser.add_argument("--target", required=True, help="Exact existing pane: SESSION:WINDOW[.PANE].")
-    _ = parser.add_argument("--model", default="")
+    _ = parser.add_argument(
+        "--model",
+        default="",
+        help="Codex model id. gpt-6-astra is supported but very expensive and reserved for tricky tasks.",
+    )
     _ = parser.add_argument("--reasoning-effort", default="", choices=EFFORTS)
     _ = parser.add_argument("--session-id", default="", help="Existing Codex session to resume without a new prompt.")
     _ = parser.add_argument("--prompt-file", type=Path, help="Task-local prompt for a fresh Codex session.")
@@ -486,7 +490,7 @@ def parse_args(argv: list[str]) -> Args:
     if parsed.model and MODEL_RE.fullmatch(parsed.model) is None:
         parser.error("--model contains unsupported characters.")
     if parsed.model == "gpt-5.6":
-        parser.error("--model gpt-5.6 is not a supported Codex model id; use gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna.")
+        parser.error("--model gpt-5.6 is not a supported Codex model id; use gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, or gpt-6-astra.")
     if parsed.session_id and UUID_RE.fullmatch(parsed.session_id) is None:
         parser.error("--session-id must be a Codex UUID.")
     modes = (
@@ -1287,7 +1291,7 @@ def launch_command(
     pcodx_env: Mapping[str, str] | None = None,
 ) -> str:
     if args.model == "gpt-5.6":
-        raise StartError("--model gpt-5.6 is not a supported Codex model id; use gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna.")
+        raise StartError("--model gpt-5.6 is not a supported Codex model id; use gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, or gpt-6-astra.")
     executable = CODEX_LAUNCH_COMMAND if tool == "codex" else PCODX_LAUNCH_COMMAND
     codex = [executable]
     if tool == "codex":

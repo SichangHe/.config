@@ -58,6 +58,8 @@ Use `--model MODEL_NAME` for model selection and follow the applicable
 passes `--config 'model_reasoning_effort="EFFORT"'`; allowed values are `low`,
 `medium`, `high`, `xhigh`, `max`, and `ultra`. Both model and reasoning effort
 are emitted explicitly for fresh and prompted resumed Codex and PCODX launches.
+The launcher supports `gpt-6-astra`, but that model is very expensive and is
+reserved for tricky tasks; use the default model for ordinary work.
 Use repeatable `--codex-flag` only for unrelated extra Codex argv tokens, for
 example `--codex-flag=--profile --codex-flag deep-review`; raw `--model...` and
 `-m...` tokens are rejected. Use `--session-id UUID` to start

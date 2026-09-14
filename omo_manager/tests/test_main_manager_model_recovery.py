@@ -148,8 +148,25 @@ class MainManagerModelRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             args = replace(self.args(root), model="gpt-5.6")
-            with self.assertRaisesRegex(RecoveryError, "use gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna"):
+            with self.assertRaisesRegex(RecoveryError, "use gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, or gpt-6-astra"):
                 recover(args)
+
+    def test_parse_args_supports_gpt_6_astra(self) -> None:
+        args = parse_args(
+            [
+                "--model",
+                "gpt-6-astra",
+                "--authority-file",
+                "manager_mail/request.txt",
+                "--authority-lines",
+                "1-1",
+                "--authority-envelope",
+                "/tmp/authority.txt",
+                "--handoff-output",
+                "/tmp/handoff.json",
+            ]
+        )
+        self.assertEqual("gpt-6-astra", args.model)
 
     def test_authority_requires_one_exact_human_instruction_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

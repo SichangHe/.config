@@ -1656,14 +1656,15 @@ class OmoTaskTests(unittest.TestCase):
     def test_bare_gpt_5_6_model_is_rejected(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
             parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--model", "gpt-5.6"])
-        self.assertIn("use gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna", stderr.getvalue())
+        self.assertIn("use gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, or gpt-6-astra", stderr.getvalue())
         args = Args(Path("/tmp"), "x.md", "cfg", "2", "codex", None, "", None, False, False, "", "", (), model="gpt-5.6")
-        with self.assertRaisesRegex(ValueError, "use gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna"):
+        with self.assertRaisesRegex(ValueError, "use gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, or gpt-6-astra"):
             validate_inputs(args)
-        for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+        for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-astra"):
             with self.subTest(model=model):
                 parsed = parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--model", model])
                 self.assertEqual(model, parsed.model)
+        self.assertIn("--model gpt-6-astra", codex_cmd(model="gpt-6-astra", reasoning_effort="max", tool="codex", include_prompt=False))
 
     def test_validate_inputs_rejects_worker_launch_in_human_session(self) -> None:
         args = parse_args(

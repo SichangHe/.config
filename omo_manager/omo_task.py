@@ -296,7 +296,7 @@ def model_error(model: str) -> str:
     if model and MODEL_RE.fullmatch(model) is None:
         return "--model must be a nonempty model identifier containing only letters, numbers, `.`, `_`, `:`, `/`, or `-`."
     if model == "gpt-5.6":
-        return "--model gpt-5.6 is not a supported Codex model id; use gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna."
+        return "--model gpt-5.6 is not a supported Codex model id; use gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, or gpt-6-astra."
     return ""
 
 
@@ -336,7 +336,8 @@ Model guidance:
   For Codex, gpt-5.6-sol medium is the default; use max for hard tasks and ultra only for
   very hard tasks. Use gpt-5.6-sol low for submanagers, gpt-5.6-terra medium for
   easier routine tasks, and gpt-5.6-luna xhigh for trivial minimal tasks. Terra
-  and Luna are unreliable decision makers.
+  and Luna are unreliable decision makers. gpt-6-astra is also supported, but it
+  is very expensive and reserved for tricky tasks.
   For Cursor Agent, use model cursor-grok-4.6 with reasoning effort xhigh; the
   launcher passes that to Cursor as cursor-grok-4.6-xhigh.
 
