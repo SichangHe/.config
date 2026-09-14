@@ -1413,6 +1413,102 @@ work
                 self.assertTrue((state / "completion-email-authorizations" / current.key).is_file())
                 self.assertTrue(claim_completion_email(current, recover_existing=True))
 
+    def test_changed_unattempted_close_can_refresh_a_lost_semantic_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            text = task_text().replace("pending_task_items:\n  - finish review", "pending_task_items: []")
+            task.write_text(text, encoding="utf-8")
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
+                old = build_completion_email(root, task, text, "task done", semantic_key="a" * 64)
+                assert old is not None
+                self.assertTrue(claim_completion_email(old))
+                changed = text + "(manager requested a safe retry)\n"
+                task.write_text(changed, encoding="utf-8")
+                current = build_completion_email(root, task, changed, "task done", semantic_key="b" * 64)
+                assert current is not None
+
+                refresh_unattempted_completion_claim(current, old.key)
+
+                rows = (state / "completion-email-claims.tsv").read_text(encoding="utf-8").splitlines()
+                self.assertEqual([current.key], [row.split("\t")[0] for row in rows])
+                self.assertTrue(claim_completion_email(current, recover_existing=True))
+
+    def test_semantic_key_refresh_is_close_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            text = task_text().replace("pending_task_items:\n  - finish review", "pending_task_items: []")
+            task.write_text(text, encoding="utf-8")
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
+                old = build_completion_email(root, task, text, "completed", semantic_key="a" * 64)
+                assert old is not None
+                self.assertTrue(claim_completion_email(old))
+                changed = text + "(manager requested a safe retry)\n"
+                task.write_text(changed, encoding="utf-8")
+                current = build_completion_email(root, task, changed, "completed", semantic_key="b" * 64)
+                assert current is not None
+
+                with self.assertRaisesRegex(OSError, "different semantic notice"):
+                    refresh_unattempted_completion_claim(current, old.key)
+
+    def test_lost_semantic_key_refresh_rejects_old_notice_delivery_evidence(self) -> None:
+        for directory in ("completion-notice-delivered", "ordinary-completion-by-notice"):
+            with self.subTest(directory=directory), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                state = root / "state"
+                task = root / "task.md"
+                text = task_text().replace("pending_task_items:\n  - finish review", "pending_task_items: []")
+                task.write_text(text, encoding="utf-8")
+                with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
+                    old = build_completion_email(root, task, text, "task done", semantic_key="a" * 64)
+                    assert old is not None
+                    self.assertTrue(claim_completion_email(old))
+                    changed = text + "(manager requested a safe retry)\n"
+                    task.write_text(changed, encoding="utf-8")
+                    current = build_completion_email(root, task, changed, "task done", semantic_key="b" * 64)
+                    assert current is not None
+                    evidence = state / directory / old.notice_key
+                    evidence.parent.mkdir(mode=0o700)
+                    evidence.write_text("evidence\n", encoding="utf-8")
+                    evidence.chmod(0o600)
+
+                    with self.assertRaisesRegex(OSError, "may have been used"):
+                        refresh_unattempted_completion_claim(current, old.key)
+
+    def test_lost_semantic_key_refresh_rejects_current_outbound_evidence(self) -> None:
+        for directory, identity in (
+            ("completion-email-authorization-used", "key"),
+            ("completion-email-delivered", "key"),
+            ("completion-email-reconciled", "key"),
+            ("completion-email-requests", "key"),
+            ("completion-notice-delivered", "notice_key"),
+            ("ordinary-completion-by-notice", "notice_key"),
+        ):
+            with self.subTest(directory=directory), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                state = root / "state"
+                task = root / "task.md"
+                text = task_text().replace("pending_task_items:\n  - finish review", "pending_task_items: []")
+                task.write_text(text, encoding="utf-8")
+                with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
+                    old = build_completion_email(root, task, text, "task done", semantic_key="a" * 64)
+                    assert old is not None
+                    self.assertTrue(claim_completion_email(old))
+                    changed = text + "(manager requested a safe retry)\n"
+                    task.write_text(changed, encoding="utf-8")
+                    current = build_completion_email(root, task, changed, "task done", semantic_key="b" * 64)
+                    assert current is not None
+                    evidence = state / directory / getattr(current, identity)
+                    evidence.parent.mkdir(mode=0o700)
+                    evidence.write_text("evidence\n", encoding="utf-8")
+                    evidence.chmod(0o600)
+
+                    with self.assertRaisesRegex(OSError, "may have been used"):
+                        refresh_unattempted_completion_claim(current, old.key)
+
     def test_claim_refresh_rejects_any_outbound_boundary_evidence(self) -> None:
         for relative in (
             "completion-email-authorization-used/{key}",

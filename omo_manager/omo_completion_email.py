@@ -1271,12 +1271,12 @@ def completion_authorization_payload(plan: CompletionEmail) -> str:
 
 # 🧑 "Continue until each item is complete or cancelled."
 def refresh_unattempted_completion_claim(plan: CompletionEmail, previous_key: str) -> None:
-    """Replace one same-owner claim only when it provably never reached SMTP."""
+    """Replace one changed same-owner claim only when it provably never reached SMTP."""
 
     if SHA256_RE.fullmatch(previous_key) is None:
         raise ValueError("previous completion claim key must be a lowercase SHA-256 digest")
     if previous_key == plan.key:
-        raise ValueError("previous completion claim is already current")
+        raise ValueError("previous completion claim has unchanged message identity")
     state_dir = completion_email_state_dir()
     authorization_dir = state_dir / "completion-email-authorizations"
     require_private_directory(state_dir, "completion state directory")
@@ -1291,11 +1291,18 @@ def refresh_unattempted_completion_claim(plan: CompletionEmail, previous_key: st
         if any(len(row) not in {3, 5, 6, 7} for row in rows):
             raise OSError("completion claims ledger is malformed")
         keyed = [row for row in rows if row[0] == previous_key]
-        notices = [row for row in rows if len(row) == 7 and row[5] == plan.notice_key]
-        semantic = [row for row in rows if len(row) == 7 and row[6] == plan.notice_semantic_key]
-        if len(keyed) != 1 or keyed != notices or keyed != semantic or len(keyed[0]) != 7:
+        if len(keyed) != 1 or len(keyed[0]) != 7:
             raise OSError("previous completion claim is missing or ambiguous")
         old = keyed[0]
+        old_notices = [row for row in rows if len(row) == 7 and row[5] == old[5]]
+        old_semantic = [row for row in rows if len(row) == 7 and row[6] == old[6]]
+        current_notices = [row for row in rows if len(row) == 7 and row[5] == plan.notice_key]
+        current_semantic = [row for row in rows if len(row) == 7 and row[6] == plan.notice_semantic_key]
+        same_notice = old[5] == plan.notice_key and old[6] == plan.notice_semantic_key
+        if keyed != old_notices or keyed != old_semantic or (
+            same_notice and (keyed != current_notices or keyed != current_semantic)
+        ) or (not same_notice and (current_notices or current_semantic)):
+            raise OSError("previous completion claim is missing or ambiguous")
         if (
             canonical_tmux_target(old[1]) != canonical_tmux_target(plan.target)
             or old[2] != plan.task.name
@@ -1329,24 +1336,37 @@ def refresh_unattempted_completion_claim(plan: CompletionEmail, previous_key: st
             or values["root"] != str(plan.root.resolve())
             or values["task"] != relative_task
             or values["task_sha256"] != old[4]
-            or values["notice_key"] != plan.notice_key
-            or values["semantic_key"] != plan.notice_semantic_key
+            or values["notice_key"] != old[5]
+            or values["semantic_key"] != old[6]
             or SHA256_RE.fullmatch(values["subject_sha256"]) is None
             or SHA256_RE.fullmatch(values["body_sha256"]) is None
         ):
             raise OSError("previous completion authorization does not match its claim")
+        current_payload = completion_authorization_payload(plan)
+        current_values = dict(line.split("=", 1) for line in current_payload.splitlines())
+        if not same_notice and (
+            plan.outcome != "task done"
+            or values["subject_sha256"] != current_values["subject_sha256"]
+            or values["body_sha256"] != current_values["body_sha256"]
+        ):
+            raise OSError("previous completion claim belongs to a different semantic notice")
         forbidden = (
             state_dir / "completion-email-authorization-used" / previous_key,
             state_dir / "completion-email-delivered" / previous_key,
             state_dir / "completion-email-reconciled" / previous_key,
             state_dir / "completion-email-requests" / previous_key,
+            state_dir / "completion-email-authorization-used" / plan.key,
+            state_dir / "completion-email-delivered" / plan.key,
+            state_dir / "completion-email-reconciled" / plan.key,
+            state_dir / "completion-email-requests" / plan.key,
+            state_dir / "completion-notice-delivered" / old[5],
+            state_dir / "ordinary-completion-by-notice" / old[5],
             state_dir / "completion-notice-delivered" / plan.notice_key,
             state_dir / "ordinary-completion-by-notice" / plan.notice_key,
         )
         if any(path.exists() for path in forbidden):
             raise OSError("previous completion claim may have been used, delivered, reconciled, or queued")
         current_authorization = authorization_dir / plan.key
-        current_payload = completion_authorization_payload(plan)
         try:
             recorded = owned_private_file(current_authorization, "current completion authorization", 4096).decode()
         except FileNotFoundError:
@@ -1568,7 +1588,7 @@ def main(argv: list[str] | None = None) -> int:
     _ = parser.add_argument(
         "--refresh-unattempted-claim",
         default="",
-        help="Exact prior claim key to replace after proving its authorization never reached SMTP.",
+        help="Exact prior claim key to replace after task bytes changed and proof its authorization never reached SMTP.",
     )
     parsed = parser.parse_args(argv)
     root = parsed.root.resolve()

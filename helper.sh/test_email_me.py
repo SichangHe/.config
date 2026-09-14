@@ -1129,6 +1129,34 @@ class EmailMeTests(unittest.TestCase):
                 prepare.call_args.kwargs["required_agent_session"],
             )
 
+    def test_agent_used_thread_may_have_an_older_target_ancestor(self) -> None:
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        profile = omo_email_subject.MailRouteProfile("agent@example.test", "human@example.test", "primary")
+        header = omo_email_subject.RecentHeader(
+            "agent@example.test",
+            "Re: [wl:7] Existing topic",
+            email_me.datetime.now().astimezone(),
+            "<current@example.test>",
+            "<older@example.test>",
+            "human@example.test",
+            thread_target="wl:1",
+            agent_session=session,
+        )
+        with patch.object(omo_email_subject, "verified_recent_thread_header", return_value=header) as lookup:
+            prepared = omo_email_subject.prepare_latest_thread_for_tmux_target(
+                "wl:7", profile, required_agent_session=session
+            )
+        self.assertEqual(
+            ("Re: [wl:7] Existing topic", {"In-Reply-To": "<current@example.test>", "References": "<older@example.test> <current@example.test>"}),
+            prepared,
+        )
+        self.assertEqual(session, lookup.call_args.kwargs["required_agent_session"])
+        with (
+            patch.object(omo_email_subject, "verified_recent_thread_header", return_value=header),
+            self.assertRaisesRegex(omo_email_subject.SubjectInputError, "wl:1; wl:7 may not retag"),
+        ):
+            omo_email_subject.prepare_latest_thread_for_tmux_target("wl:7", profile)
+
     def test_omitted_subject_fails_when_no_thread_exists(self) -> None:
         with (
             patch.dict(os.environ, {"OMO_MANAGER_TMUX_TARGET": "wl:1"}, clear=False),

@@ -774,7 +774,8 @@ def prepare_latest_thread_for_tmux_target(
         )
     if header is None:
         raise SubjectInputError(f"no recent email thread found for tmux target {canonical_tmux_target(tmux_target)}; pass --subject or --subject-file")
-    require_reply_target_continuity(header, tmux_target, route_profile)
+    if required_agent_session is None:
+        require_reply_target_continuity(header, tmux_target, route_profile)
     guest_hees = route_profile is not None and route_profile.route_kind == "guest-hees"
     return manager_subject_w_target(subject_base(header.subject, guest_hees=guest_hees), tmux_target, True), reply_headers_from_recent_header(header)
 
