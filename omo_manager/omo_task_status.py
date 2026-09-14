@@ -106,8 +106,20 @@ CUSTODY_RECEIPT_VERSION = "v1.0.0"
 RE_ATTESTED_CUSTODY_RECEIPT_VERSION = "v2.0.0"
 SEMANTIC_CUSTODY_RECEIPT_VERSION = "v3.0.0"
 DONE_LIVE_HUMAN_CUSTODY_RECEIPT_VERSION = "v3.0.0"
+DONE_LIVE_HUMAN_ABSENCE_RECEIPT_VERSION = "v4.0.0"
 DONE_LIVE_CLOSE_OPERATION = "done-live-no-mail-close"
-DONE_LIVE_CLOSE_STATES = frozenset({"reserved", "prepared", "terminalized", "owner-stopped", "note-prepared", "complete"})
+DONE_LIVE_CLOSE_STATES = frozenset(
+    {
+        "reserved",
+        "prepared",
+        "terminalized",
+        "owner-stopped",
+        "note-prepared",
+        "complete",
+        "human-authorized-absence-prepared",
+        "human-authorized-absence-complete",
+    }
+)
 DONE_LIVE_CLOSE_AUDIT_KEYS = frozenset(
     {
         "version",
@@ -134,6 +146,10 @@ DONE_LIVE_HUMAN_AUDIT_KEYS = DONE_LIVE_CLOSE_AUDIT_KEYS | {
     "human_close_authorization_source",
     "human_close_authorization_sha256",
 }
+DONE_LIVE_HUMAN_ABSENCE_AUDIT_KEYS = DONE_LIVE_HUMAN_AUDIT_KEYS | {
+    "source_prepared_audit_sha256",
+    "audit_path_sha256",
+}
 # 🧑 Source-1845: "Subject: Re: ADIOB closure authorization needed [adiob_pipeline.md]" / "Close"
 SOURCE1845_TASK = "adiob_pipeline.md"
 SOURCE1845_TARGET = "adiob:0"
@@ -141,6 +157,14 @@ SOURCE1845_MANAGER = "pb:1"
 SOURCE1845_AUTHORITY = "manager_mail/85c5dff58359-1845.txt"
 SOURCE1845_AUTHORITY_SHA256 = "5e68c2f352eda52abf2588e7610a2fd0514457b858fdd0e226590facc0d93879"
 SOURCE1845_AUTHORITY_TEXT = "Subject: Re: ADIOB closure authorization needed [adiob_pipeline.md]\n\nClose"
+SOURCE1845_TASK_SHA256 = "4da5227609f83769bf8859bcdc8763b3fc9d6454f72575b0b91297be72f65fe7"
+SOURCE1845_TODO_SHA256 = "638a80eda70f8e6097393b7458223a9eea41a48e49f1b3bb07a6d049cad5e299"
+SOURCE1845_PANE_ID = "%2558"
+SOURCE1845_PANE_PID = 1426714
+SOURCE1845_PANE_START_TICKS = 75150814
+SOURCE1845_SESSION_ID = "01a09c0f-050a-72d2-9896-59e532e2fdb1"
+SOURCE1845_PREPARED_AUDIT_SHA256 = "73edffa0642fddce1b12666a558df83257b0160ed0feb36d9482267b6ae30305"
+SOURCE1845_AUDIT_PATH_SHA256 = "94a96d05d170929596a620ce86cbb695df446f8b529bf6b6bfc9ea89ce14b1d4"
 DONE_LIVE_CONSUMED_RECEIPT_KEYS = frozenset(
     {
         "accepted",
@@ -366,6 +390,8 @@ class DoneLiveCloseAudit:
     manager_consumed_receipt_sha256: str = ""
     human_close_authorization_source: str = ""
     human_close_authorization_sha256: str = ""
+    source_prepared_audit_sha256: str = ""
+    audit_path_sha256: str = ""
 
 
 def parse_line_range(value: str) -> tuple[int, int]:
@@ -2060,6 +2086,37 @@ def validate_done_live_human_close_authorization(args: Args, path: Path) -> None
         raise TaskFrontmatterError(f"done-live Human close authorization is unavailable: {exc}") from exc
     if payload.decode("utf-8").replace("\r\n", "\n").rstrip("\n") != SOURCE1845_AUTHORITY_TEXT:
         raise TaskFrontmatterError("done-live Human close authorization text changed.")
+
+
+def validate_source1845_absent_recovery(args: Args, path: Path, audit_text: str = "") -> None:
+    """Bind proofless recovery to the one Source-1845 terminalization failure."""
+
+    validate_done_live_human_close_authorization(args, path)
+    if (
+        args.expected_task_sha256 != SOURCE1845_TASK_SHA256
+        or args.expected_todo_sha256 != SOURCE1845_TODO_SHA256
+        or args.expected_pane_id != SOURCE1845_PANE_ID
+        or args.expected_pane_pid != SOURCE1845_PANE_PID
+        or args.expected_pane_start_ticks != SOURCE1845_PANE_START_TICKS
+        or args.expected_session_id != SOURCE1845_SESSION_ID
+        or args.audit_output is None
+        or hashlib.sha256(str(args.audit_output).encode()).hexdigest() != SOURCE1845_AUDIT_PATH_SHA256
+        or (audit_text and hashlib.sha256(audit_text.encode()).hexdigest() != SOURCE1845_PREPARED_AUDIT_SHA256)
+    ):
+        raise TaskFrontmatterError("Source-1845 absent recovery does not bind the exact failed invocation.")
+
+
+def source1845_absence_note(args: Args) -> str:
+    """Describe authenticated absence without claiming this invocation killed the pane."""
+
+    return (
+        "\n(manager recorded Human-authorized absent Codex agent; "
+        f"tmux target `{args.active_target}`; session_id: `{args.expected_session_id}`.)\n"
+    )
+
+
+def has_source1845_absence_note(note: str, args: Args) -> bool:
+    return note == source1845_absence_note(args)
 
 
 def stop_done_agent(
@@ -5415,7 +5472,9 @@ def render_done_live_close_audit(args: Args, path: Path, audit: DoneLiveCloseAud
 
     record: dict[str, object] = {
         "version": (
-            DONE_LIVE_HUMAN_CUSTODY_RECEIPT_VERSION
+            DONE_LIVE_HUMAN_ABSENCE_RECEIPT_VERSION
+            if audit.source_prepared_audit_sha256
+            else DONE_LIVE_HUMAN_CUSTODY_RECEIPT_VERSION
             if audit.human_close_authorization_sha256
             else RE_ATTESTED_CUSTODY_RECEIPT_VERSION
             if audit.manager_consumed_receipt_sha256
@@ -5443,6 +5502,9 @@ def render_done_live_close_audit(args: Args, path: Path, audit: DoneLiveCloseAud
     if audit.human_close_authorization_sha256:
         record["human_close_authorization_source"] = audit.human_close_authorization_source
         record["human_close_authorization_sha256"] = audit.human_close_authorization_sha256
+    if audit.source_prepared_audit_sha256:
+        record["source_prepared_audit_sha256"] = audit.source_prepared_audit_sha256
+        record["audit_path_sha256"] = audit.audit_path_sha256
     return json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
 
 
@@ -5469,7 +5531,9 @@ def parse_done_live_close_audit(args: Args, path: Path, text: str) -> DoneLiveCl
         record[key] = value
     version = record.get("version")
     expected_keys = (
-        DONE_LIVE_HUMAN_AUDIT_KEYS
+        DONE_LIVE_HUMAN_ABSENCE_AUDIT_KEYS
+        if version == DONE_LIVE_HUMAN_ABSENCE_RECEIPT_VERSION
+        else DONE_LIVE_HUMAN_AUDIT_KEYS
         if version == DONE_LIVE_HUMAN_CUSTODY_RECEIPT_VERSION
         else DONE_LIVE_CONSUMED_AUDIT_KEYS
         if version == RE_ATTESTED_CUSTODY_RECEIPT_VERSION
@@ -5491,6 +5555,10 @@ def parse_done_live_close_audit(args: Args, path: Path, text: str) -> DoneLiveCl
     authority_sha256 = record.get("human_close_authorization_sha256", "")
     if not isinstance(authority_source, str) or not isinstance(authority_sha256, str):
         raise TaskFrontmatterError("done-live close audit Human authority binding must be strings.")
+    source_prepared_sha256 = record.get("source_prepared_audit_sha256", "")
+    audit_path_sha256 = record.get("audit_path_sha256", "")
+    if not isinstance(source_prepared_sha256, str) or not isinstance(audit_path_sha256, str):
+        raise TaskFrontmatterError("done-live close audit absence binding must be strings.")
     audit = DoneLiveCloseAudit(
         state,
         capture_sha256,
@@ -5500,18 +5568,26 @@ def parse_done_live_close_audit(args: Args, path: Path, text: str) -> DoneLiveCl
         receipt_sha256,
         authority_source,
         authority_sha256,
+        source_prepared_sha256,
+        audit_path_sha256,
     )
     if text != render_done_live_close_audit(args, path, audit):
         raise TaskFrontmatterError("done-live close audit does not bind this exact operation.")
     pre_terminal = state in {"reserved", "prepared"}
-    note_ready = state in {"note-prepared", "complete"}
+    absence = state in {"human-authorized-absence-prepared", "human-authorized-absence-complete"}
+    note_ready = state in {"note-prepared", "complete"} or absence
     if (
         state not in DONE_LIVE_CLOSE_STATES
-        or version not in {CUSTODY_RECEIPT_VERSION, RE_ATTESTED_CUSTODY_RECEIPT_VERSION, DONE_LIVE_HUMAN_CUSTODY_RECEIPT_VERSION}
+        or version not in {
+            CUSTODY_RECEIPT_VERSION,
+            RE_ATTESTED_CUSTODY_RECEIPT_VERSION,
+            DONE_LIVE_HUMAN_CUSTODY_RECEIPT_VERSION,
+            DONE_LIVE_HUMAN_ABSENCE_RECEIPT_VERSION,
+        }
         or (version == CUSTODY_RECEIPT_VERSION and receipt_sha256)
         or (version == RE_ATTESTED_CUSTODY_RECEIPT_VERSION and (SHA256_RE.fullmatch(receipt_sha256) is None or authority_source or authority_sha256))
         or (
-            version == DONE_LIVE_HUMAN_CUSTODY_RECEIPT_VERSION
+            version in {DONE_LIVE_HUMAN_CUSTODY_RECEIPT_VERSION, DONE_LIVE_HUMAN_ABSENCE_RECEIPT_VERSION}
             and (
                 receipt_sha256
                 or authority_source != args.human_close_authorization_source
@@ -5519,12 +5595,31 @@ def parse_done_live_close_audit(args: Args, path: Path, text: str) -> DoneLiveCl
                 or SHA256_RE.fullmatch(authority_sha256) is None
             )
         )
-        or (version != DONE_LIVE_HUMAN_CUSTODY_RECEIPT_VERSION and (authority_source or authority_sha256))
-        or (pre_terminal and (capture_sha256 or commitment != "0" * 64))
-        or (not pre_terminal and (SHA256_RE.fullmatch(capture_sha256) is None or SHA256_RE.fullmatch(commitment) is None or commitment == "0" * 64))
+        or (version not in {DONE_LIVE_HUMAN_CUSTODY_RECEIPT_VERSION, DONE_LIVE_HUMAN_ABSENCE_RECEIPT_VERSION} and (authority_source or authority_sha256))
+        or (
+            version == DONE_LIVE_HUMAN_ABSENCE_RECEIPT_VERSION
+            and (
+                source_prepared_sha256 != SOURCE1845_PREPARED_AUDIT_SHA256
+                or audit_path_sha256 != SOURCE1845_AUDIT_PATH_SHA256
+            )
+        )
+        or (version != DONE_LIVE_HUMAN_ABSENCE_RECEIPT_VERSION and (source_prepared_sha256 or audit_path_sha256))
+        or ((pre_terminal or absence) and (capture_sha256 or commitment != "0" * 64))
+        or (not pre_terminal and not absence and (SHA256_RE.fullmatch(capture_sha256) is None or SHA256_RE.fullmatch(commitment) is None or commitment == "0" * 64))
         or (note_ready and (not note or SHA256_RE.fullmatch(completed_sha256) is None))
         or (not note_ready and (note or completed_sha256))
-        or (note_ready and (note != f"\n{note.strip()}\n" or not has_close_note(note, args.active_target, args.expected_session_id)))
+        or (
+            note_ready
+            and (
+                note != f"\n{note.strip()}\n"
+                or (
+                    not absence
+                    and not has_close_note(note, args.active_target, args.expected_session_id)
+                )
+                or (absence and not has_source1845_absence_note(note, args))
+            )
+        )
+        or (absence and version != DONE_LIVE_HUMAN_ABSENCE_RECEIPT_VERSION)
     ):
         raise TaskFrontmatterError("done-live close audit state is invalid.")
     return audit
@@ -5557,7 +5652,7 @@ def validate_done_live_task(args: Args, text: str, audit: DoneLiveCloseAudit | N
         and hashlib.sha256(text[: -len(audit.close_note)].encode()).hexdigest() == args.expected_task_sha256
         and current_sha256 == audit.completed_task_sha256
     )
-    if audit.state == "note-prepared" and current_sha256 == args.expected_task_sha256:
+    if audit.state in {"note-prepared", "human-authorized-absence-prepared"} and current_sha256 == args.expected_task_sha256:
         return metadata
     if not completed:
         raise TaskFrontmatterError("done-live close task bytes do not match the audit-bound close-note state.")
@@ -6654,6 +6749,55 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                     )
                 elif close_audit.state != "prepared":
                     raise TaskFrontmatterError("done-live close audit left its terminalization state.")
+
+            # 🧑 Source-1845: "Subject: Re: ADIOB closure authorization needed [adiob_pipeline.md]" / "Close"
+            if human_authorized and close_audit.state == "prepared" and done_live_pane_state(args) == "absent":
+                if path_artifact_exists(proof_path) or path_artifact_exists(started_path):
+                    raise TaskFrontmatterError("Source-1845 absent recovery found a contradictory close-proof artifact.")
+                validate_source1845_absent_recovery(args, path, audit_text)
+                note = source1845_absence_note(args)
+                advance_audit(
+                    replace(
+                        close_audit,
+                        state="human-authorized-absence-prepared",
+                        close_note=note,
+                        completed_task_sha256=hashlib.sha256(f"{current_text}{note}".encode()).hexdigest(),
+                        source_prepared_audit_sha256=SOURCE1845_PREPARED_AUDIT_SHA256,
+                        audit_path_sha256=SOURCE1845_AUDIT_PATH_SHA256,
+                    )
+                )
+
+            if close_audit.state == "human-authorized-absence-prepared":
+                if (
+                    not human_authorized
+                    or path_artifact_exists(proof_path)
+                    or path_artifact_exists(started_path)
+                    or done_live_pane_state(args) != "absent"
+                ):
+                    raise TaskFrontmatterError("Source-1845 absent recovery lost its exact authority or absence evidence.")
+                validate_source1845_absent_recovery(args, path)
+                validate_done_live_task(args, current_text, close_audit)
+                if hashlib.sha256(current_text.encode()).hexdigest() == args.expected_task_sha256:
+                    updated_text = current_text + close_audit.close_note
+                    replace_if_unchanged_locked(path, updated_text, current_before)
+                    current_text = updated_text
+                    current_before = path.stat()
+                validate_done_live_task(args, current_text, close_audit)
+                unchanged_evidence()
+                advance_audit(replace(close_audit, state="human-authorized-absence-complete"))
+
+            if close_audit.state == "human-authorized-absence-complete":
+                if (
+                    not human_authorized
+                    or path_artifact_exists(proof_path)
+                    or path_artifact_exists(started_path)
+                    or done_live_pane_state(args) != "absent"
+                ):
+                    raise TaskFrontmatterError("Source-1845 absent recovery completion lost exact custody.")
+                unchanged_evidence()
+                validate_done_live_task(args, current_text, close_audit)
+                validate_source1845_absent_recovery(args, path)
+                return args.active_target, args.expected_session_id
 
             proof_secret = ""
             if close_audit.state in {"reserved", "prepared"}:

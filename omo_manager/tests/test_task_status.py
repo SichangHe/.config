@@ -69,6 +69,9 @@ from omo_manager.omo_task_status import source788_consumed_commitment
 from omo_manager.omo_task_status import validate_consumed_closure_attestation
 from omo_manager.omo_task_status import validate_done_live_todo
 from omo_manager.omo_task_status import validate_done_live_human_close_authorization
+from omo_manager.omo_task_status import validate_source1845_absent_recovery
+from omo_manager.omo_task_status import SOURCE1845_AUDIT_PATH_SHA256
+from omo_manager.omo_task_status import SOURCE1845_PREPARED_AUDIT_SHA256
 from omo_manager.omo_task_status import Args as StatusArgs
 from omo_manager.omo_codex_stop import ExitedCodexShell
 from omo_manager.omo_codex_stop import done_live_close_started_path
@@ -4009,6 +4012,180 @@ class TaskStatusTests(unittest.TestCase):
             self.assertEqual("v3.0.0", audit["version"])
             self.assertEqual(args.human_close_authorization_source, audit["human_close_authorization_source"])
             self.assertEqual(authority_sha256, audit["human_close_authorization_sha256"])
+
+    def test_source1845_prepared_audit_finishes_after_exact_pane_disappears(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "adiob_pipeline.md"
+            text = task_frontmatter(status="done", runat="adiob:0", managerat="pb:1") + "done\n"
+            task.write_text(text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\nadiob_pipeline.md adiob:0\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            authority_sha256 = "5e68c2f352eda52abf2588e7610a2fd0514457b858fdd0e226590facc0d93879"
+            args = StatusArgs(
+                root,
+                Path("adiob_pipeline.md"),
+                "done",
+                "",
+                close_done_live_no_mail=True,
+                active_target="adiob:0",
+                manager_target="pb:1",
+                expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                expected_pane_id="%2558",
+                expected_pane_pid=1426714,
+                expected_pane_start_ticks=75150814,
+                expected_session_id="01a09c0f-050a-72d2-9896-59e532e2fdb1",
+                terminal_evidence=authority_sha256,
+                audit_output=(private / "source1845-close.json").resolve(),
+                human_close_authorization_source="manager_mail/85c5dff58359-1845.txt",
+                human_close_authorization_sha256=authority_sha256,
+            )
+            prepared = DoneLiveCloseAudit(
+                "prepared",
+                human_close_authorization_source=args.human_close_authorization_source,
+                human_close_authorization_sha256=authority_sha256,
+            )
+            prepared_text = render_done_live_close_audit(args, task, prepared)
+            args.audit_output.write_text(prepared_text, encoding="utf-8")
+            args.audit_output.chmod(0o600)
+            source = b"Subject: Re: ADIOB closure authorization needed [adiob_pipeline.md]\n\nClose\r\n"
+            fail_note = True
+
+            def replace_note(*values: object) -> None:
+                nonlocal fail_note
+                if fail_note:
+                    fail_note = False
+                    raise RuntimeError("simulated crash before absence note")
+                replace_if_unchanged_locked(*values)  # type: ignore[arg-type]
+
+            with (
+                patch("omo_manager.omo_task_status.read_human_close_authorization", return_value=source),
+                patch("omo_manager.omo_task_status.SOURCE1845_TASK_SHA256", args.expected_task_sha256),
+                patch("omo_manager.omo_task_status.SOURCE1845_TODO_SHA256", args.expected_todo_sha256),
+                patch("omo_manager.omo_task_status.SOURCE1845_PREPARED_AUDIT_SHA256", hashlib.sha256(prepared_text.encode()).hexdigest()),
+                patch("omo_manager.omo_task_status.SOURCE1845_AUDIT_PATH_SHA256", hashlib.sha256(str(args.audit_output).encode()).hexdigest()),
+                patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""),
+                patch("omo_manager.omo_task_status.pane_id", return_value=""),
+                patch("omo_manager.omo_task_status.process_start_ticks", return_value=None),
+                patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell_with_consumed_report") as terminalize,
+                patch("omo_manager.omo_task_status.close_bound_tmux_target") as close,
+                patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=replace_note),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "simulated crash"):
+                    close_done_live_no_mail(args, task, text, task.stat())
+                self.assertEqual("human-authorized-absence-prepared", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(("adiob:0", args.expected_session_id), close_done_live_no_mail(args, task, text, task.stat()))
+                self.assertEqual(("adiob:0", args.expected_session_id), close_done_live_no_mail(args, task, task.read_text(encoding="utf-8"), task.stat()))
+            terminalize.assert_not_called()
+            close.assert_not_called()
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            task_result = task.read_text(encoding="utf-8")
+            self.assertEqual(1, task_result.count("manager recorded Human-authorized absent Codex agent"))
+            self.assertNotIn("manager closed Codex agent", task_result)
+            self.assertEqual("human-authorized-absence-complete", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+            self.assertFalse(args.audit_output.with_name(f".{args.audit_output.name}.owner-stopped").exists())
+
+    def test_source1845_absent_recovery_rejects_changed_incident_binding_and_copied_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "adiob_pipeline.md"
+            text = task_frontmatter(status="done", runat="adiob:0", managerat="pb:1")
+            task.write_text(text, encoding="utf-8")
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            authority_sha256 = "5e68c2f352eda52abf2588e7610a2fd0514457b858fdd0e226590facc0d93879"
+            args = StatusArgs(
+                root,
+                Path("adiob_pipeline.md"),
+                "done",
+                "",
+                close_done_live_no_mail=True,
+                active_target="adiob:0",
+                manager_target="pb:1",
+                expected_task_sha256="a" * 64,
+                expected_todo_sha256="b" * 64,
+                expected_pane_id="%2558",
+                expected_pane_pid=1426714,
+                expected_pane_start_ticks=75150814,
+                expected_session_id="01a09c0f-050a-72d2-9896-59e532e2fdb1",
+                terminal_evidence=authority_sha256,
+                audit_output=(private / "original.json").resolve(),
+                human_close_authorization_source="manager_mail/85c5dff58359-1845.txt",
+                human_close_authorization_sha256=authority_sha256,
+            )
+            prepared = DoneLiveCloseAudit(
+                "prepared",
+                human_close_authorization_source=args.human_close_authorization_source,
+                human_close_authorization_sha256=authority_sha256,
+            )
+            prepared_text = render_done_live_close_audit(args, task, prepared)
+            source = b"Subject: Re: ADIOB closure authorization needed [adiob_pipeline.md]\n\nClose\r\n"
+            constants = {
+                "SOURCE1845_TASK_SHA256": args.expected_task_sha256,
+                "SOURCE1845_TODO_SHA256": args.expected_todo_sha256,
+                "SOURCE1845_PANE_ID": args.expected_pane_id,
+                "SOURCE1845_PANE_PID": args.expected_pane_pid,
+                "SOURCE1845_PANE_START_TICKS": args.expected_pane_start_ticks,
+                "SOURCE1845_SESSION_ID": args.expected_session_id,
+                "SOURCE1845_PREPARED_AUDIT_SHA256": hashlib.sha256(prepared_text.encode()).hexdigest(),
+                "SOURCE1845_AUDIT_PATH_SHA256": hashlib.sha256(str(args.audit_output).encode()).hexdigest(),
+            }
+            with patch("omo_manager.omo_task_status.read_human_close_authorization", return_value=source), patch.multiple("omo_manager.omo_task_status", **constants):
+                validate_source1845_absent_recovery(args, task, prepared_text)
+                changes: dict[str, object] = {
+                    "expected_task_sha256": "c" * 64,
+                    "expected_todo_sha256": "d" * 64,
+                    "expected_pane_id": "%2559",
+                    "expected_pane_pid": 1426715,
+                    "expected_pane_start_ticks": 75150815,
+                    "expected_session_id": "01a09c0f-050a-72d2-9896-59e532e2fdb2",
+                    "audit_output": (private / "copy.json").resolve(),
+                }
+                for field, value in changes.items():
+                    with self.subTest(field=field), self.assertRaisesRegex(TaskFrontmatterError, "exact failed invocation"):
+                        validate_source1845_absent_recovery(replace(args, **{field: value}), task, prepared_text)
+
+    def test_source1845_fixed_prepared_audit_and_path_match_retained_incident(self) -> None:
+        root = Path("work_logs")
+        task = root / "adiob_pipeline.md"
+        authority_sha256 = "5e68c2f352eda52abf2588e7610a2fd0514457b858fdd0e226590facc0d93879"
+        args = StatusArgs(
+            root,
+            Path("adiob_pipeline.md"),
+            "done",
+            "",
+            close_done_live_no_mail=True,
+            active_target="adiob:0",
+            manager_target="pb:1",
+            expected_task_sha256="4da5227609f83769bf8859bcdc8763b3fc9d6454f72575b0b91297be72f65fe7",
+            expected_todo_sha256="638a80eda70f8e6097393b7458223a9eea41a48e49f1b3bb07a6d049cad5e299",
+            expected_pane_id="%2558",
+            expected_pane_pid=1426714,
+            expected_pane_start_ticks=75150814,
+            expected_session_id="01a09c0f-050a-72d2-9896-59e532e2fdb1",
+            terminal_evidence=authority_sha256,
+            audit_output=Path(tempfile.gettempdir()) / "adiob-source1845-close.nJIV2w" / "audit.json",
+            human_close_authorization_source="manager_mail/85c5dff58359-1845.txt",
+            human_close_authorization_sha256=authority_sha256,
+        )
+        prepared = DoneLiveCloseAudit(
+            "prepared",
+            human_close_authorization_source=args.human_close_authorization_source,
+            human_close_authorization_sha256=authority_sha256,
+        )
+        self.assertEqual(
+            SOURCE1845_PREPARED_AUDIT_SHA256,
+            hashlib.sha256(render_done_live_close_audit(args, task, prepared).encode()).hexdigest(),
+        )
+        self.assertEqual(
+            SOURCE1845_AUDIT_PATH_SHA256,
+            hashlib.sha256(str(args.audit_output).encode()).hexdigest(),
+        )
 
     def test_done_live_close_rejects_metadata_custody_owner_and_pane_drift(self) -> None:
         for case in ("status", "queue", "pending", "manager", "tool", "task digest", "todo", "todo digest", "owner", "pane", "process"):

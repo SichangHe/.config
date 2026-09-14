@@ -15,7 +15,8 @@ command
   - the helper requires a ready pane, revalidates the export and task/TODO ownership before every pane input, sends one guarded `/status`, and returns current pane id, process id/start ticks, session, report token, and task/TODO digests
 - for the exact Source-1845 `adiob_pipeline.md` close, bind `manager_mail/85c5dff58359-1845.txt` and its SHA-256 instead of a consumed-report export
   - the helper requires the exact reply subject naming `adiob_pipeline.md`, the sole body line `Close`, owner `adiob:0`, and manager `pb:1`
-  - this authority waives only the missing terminal-report receipt; every task, TODO, ownership, pane, process, session, audit, and close-proof guard remains
+  - this authority waives only the missing terminal-report receipt; every task, TODO, ownership, pane, process, session, and audit guard remains
+  - the normal live-pane path retains the close-proof guard; the exact documented absence recovery instead requires that no proof artifact exists and records no kill claim
 - when the done task was moved into `YYYYMM/` and removed from TODO, or remains at its original path under one canonical `previous` row, first create the export with `omo_report.sh --export-archived-consumed PRIVATE_ENVELOPE --consumed-attestation-output ABSOLUTE_FILE`
   - validate it with `omo_report.sh --validate-consumed-export FILE --expected-sha256 SHA256`
   - pass the archived task path, its original manager target, the export, and its digest to the same describe command
@@ -62,6 +63,9 @@ recovery
 - `reserved` means no pane input was authorized
 - `prepared` means accepted report and lifecycle evidence were checked before terminal input
   - v2 also binds the exact manager-consumed receipt digest before terminal input
+  - for Source-1845 only, if the exact ADIOB pane and PID disappear during terminalization before a close marker can be written, retry the identical invocation and audit path
+    - the helper reauthenticates the Human reply, unchanged task/TODO, and simultaneous absence of the symbolic target, numeric pane, and original PID
+    - it records `human-authorized-absence-complete` and an absence-specific task note without sending pane input or claiming that this invocation killed the pane
 - `terminalized` binds the exact exited-shell capture and close-proof commitment
 - `terminalized` plus only `.owner-close-started` is retryable: reuse its secret if the exact pane is live, or promote it after exact absence
 - `terminalized` plus both marker names is the retryable link-before-unlink state; both names must identify one inode
