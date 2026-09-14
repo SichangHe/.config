@@ -70,6 +70,7 @@ from omo_manager.omo_task_status import validate_consumed_closure_attestation
 from omo_manager.omo_task_status import validate_done_live_todo
 from omo_manager.omo_task_status import validate_done_live_human_close_authorization
 from omo_manager.omo_task_status import validate_source1845_absent_recovery
+from omo_manager.omo_task_status import validate_source1845_todo_custody
 from omo_manager.omo_task_status import SOURCE1845_AUDIT_PATH_SHA256
 from omo_manager.omo_task_status import SOURCE1845_PREPARED_AUDIT_SHA256
 from omo_manager.omo_task_status import Args as StatusArgs
@@ -4015,13 +4016,23 @@ class TaskStatusTests(unittest.TestCase):
 
     def test_source1845_prepared_audit_finishes_after_exact_pane_disappears(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             task = root / "adiob_pipeline.md"
             text = task_frontmatter(status="done", runat="adiob:0", managerat="pb:1") + "done\n"
             task.write_text(text, encoding="utf-8")
             todo = root / "TODO.md"
             todo_text = "current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\nadiob_pipeline.md adiob:0\n"
             todo.write_text(todo_text, encoding="utf-8")
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+            subprocess.run(["git", "add", "TODO.md"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "audit-time TODO"], cwd=root, check=True)
+            source_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
+            evolved_todo = todo_text.replace("current:\n", "current:\nother.md wl:2\n")
+            todo.write_text(evolved_todo, encoding="utf-8")
+            subprocess.run(["git", "add", "TODO.md"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "unrelated TODO evolution"], cwd=root, check=True)
             private = root / "private"
             private.mkdir(mode=0o700)
             authority_sha256 = "5e68c2f352eda52abf2588e7610a2fd0514457b858fdd0e226590facc0d93879"
@@ -4066,6 +4077,7 @@ class TaskStatusTests(unittest.TestCase):
                 patch("omo_manager.omo_task_status.read_human_close_authorization", return_value=source),
                 patch("omo_manager.omo_task_status.SOURCE1845_TASK_SHA256", args.expected_task_sha256),
                 patch("omo_manager.omo_task_status.SOURCE1845_TODO_SHA256", args.expected_todo_sha256),
+                patch("omo_manager.omo_task_status.SOURCE1845_TODO_COMMIT", source_commit),
                 patch("omo_manager.omo_task_status.SOURCE1845_PREPARED_AUDIT_SHA256", hashlib.sha256(prepared_text.encode()).hexdigest()),
                 patch("omo_manager.omo_task_status.SOURCE1845_AUDIT_PATH_SHA256", hashlib.sha256(str(args.audit_output).encode()).hexdigest()),
                 patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""),
@@ -4079,11 +4091,19 @@ class TaskStatusTests(unittest.TestCase):
                     close_done_live_no_mail(args, task, text, task.stat())
                 self.assertEqual("human-authorized-absence-prepared", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
                 self.assertEqual(text, task.read_text(encoding="utf-8"))
+                todo.write_text(todo_text, encoding="utf-8")
+                subprocess.run(["git", "add", "TODO.md"], cwd=root, check=True)
+                subprocess.run(["git", "commit", "-qm", "revert TODO evolution"], cwd=root, check=True)
+                with self.assertRaisesRegex(TaskFrontmatterError, "recovery TODO changed"):
+                    close_done_live_no_mail(args, task, text, task.stat())
+                todo.write_text(evolved_todo, encoding="utf-8")
+                subprocess.run(["git", "add", "TODO.md"], cwd=root, check=True)
+                subprocess.run(["git", "commit", "-qm", "restore TODO evolution"], cwd=root, check=True)
                 self.assertEqual(("adiob:0", args.expected_session_id), close_done_live_no_mail(args, task, text, task.stat()))
                 self.assertEqual(("adiob:0", args.expected_session_id), close_done_live_no_mail(args, task, task.read_text(encoding="utf-8"), task.stat()))
             terminalize.assert_not_called()
             close.assert_not_called()
-            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            self.assertEqual(evolved_todo, todo.read_text(encoding="utf-8"))
             task_result = task.read_text(encoding="utf-8")
             self.assertEqual(1, task_result.count("manager recorded Human-authorized absent Codex agent"))
             self.assertNotIn("manager closed Codex agent", task_result)
@@ -4186,6 +4206,49 @@ class TaskStatusTests(unittest.TestCase):
             SOURCE1845_AUDIT_PATH_SHA256,
             hashlib.sha256(str(args.audit_output).encode()).hexdigest(),
         )
+
+    def test_source1845_todo_custody_accepts_only_clean_row_preserving_git_evolution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            task = root / "adiob_pipeline.md"
+            task.write_text(task_frontmatter(status="done", runat="adiob:0", managerat="pb:1"), encoding="utf-8")
+            old_text = "current:\n\nprevious:\nadiob_pipeline.md adiob:0\n"
+            todo = root / "TODO.md"
+            todo.write_text(old_text, encoding="utf-8")
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+            subprocess.run(["git", "add", "TODO.md"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "old TODO"], cwd=root, check=True)
+            source_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
+            current_text = old_text.replace("current:\n", "current:\nother.md wl:2\n")
+            todo.write_text(current_text, encoding="utf-8")
+            subprocess.run(["git", "add", "TODO.md"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-qm", "unrelated row"], cwd=root, check=True)
+            args = StatusArgs(
+                root,
+                Path("adiob_pipeline.md"),
+                "done",
+                "",
+                active_target="adiob:0",
+                expected_todo_sha256=hashlib.sha256(old_text.encode()).hexdigest(),
+            )
+            with (
+                patch("omo_manager.omo_task_status.SOURCE1845_TODO_COMMIT", source_commit),
+                patch("omo_manager.omo_task_status.SOURCE1845_TODO_SHA256", args.expected_todo_sha256),
+            ):
+                self.assertEqual(hashlib.sha256(current_text.encode()).hexdigest(), validate_source1845_todo_custody(args, task, current_text))
+                todo.write_text(current_text + "dirty\n", encoding="utf-8")
+                with self.assertRaisesRegex(TaskFrontmatterError, "Git custody"):
+                    validate_source1845_todo_custody(args, task, todo.read_text(encoding="utf-8"))
+                todo.write_text(current_text, encoding="utf-8")
+                subprocess.run(["git", "rm", "-q", "TODO.md"], cwd=root, check=True)
+                (root / ".gitignore").write_text("TODO.md\n", encoding="utf-8")
+                subprocess.run(["git", "add", ".gitignore"], cwd=root, check=True)
+                subprocess.run(["git", "commit", "-qm", "ignore removed TODO"], cwd=root, check=True)
+                todo.write_text(current_text, encoding="utf-8")
+                with self.assertRaisesRegex(TaskFrontmatterError, "Git custody"):
+                    validate_source1845_todo_custody(args, task, current_text)
 
     def test_done_live_close_rejects_metadata_custody_owner_and_pane_drift(self) -> None:
         for case in ("status", "queue", "pending", "manager", "tool", "task digest", "todo", "todo digest", "owner", "pane", "process"):

@@ -64,7 +64,8 @@ recovery
 - `prepared` means accepted report and lifecycle evidence were checked before terminal input
   - v2 also binds the exact manager-consumed receipt digest before terminal input
   - for Source-1845 only, if the exact ADIOB pane and PID disappear during terminalization before a close marker can be written, retry the identical invocation and audit path
-    - the helper reauthenticates the Human reply, unchanged task/TODO, and simultaneous absence of the symbolic target, numeric pane, and original PID
+    - the helper reauthenticates the Human reply, unchanged task, exact TODO custody, and simultaneous absence of the symbolic target, numeric pane, and original PID
+    - if unrelated TODO bookkeeping was committed after the failure, the helper requires the audit-time TODO from its exact Git commit, a clean current TODO, and the unchanged canonical ADIOB row under `previous`; the absence audit binds the current full TODO digest
     - it records `human-authorized-absence-complete` and an absence-specific task note without sending pane input or claiming that this invocation killed the pane
 - `terminalized` binds the exact exited-shell capture and close-proof commitment
 - `terminalized` plus only `.owner-close-started` is retryable: reuse its secret if the exact pane is live, or promote it after exact absence

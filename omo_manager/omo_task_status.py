@@ -149,6 +149,7 @@ DONE_LIVE_HUMAN_AUDIT_KEYS = DONE_LIVE_CLOSE_AUDIT_KEYS | {
 DONE_LIVE_HUMAN_ABSENCE_AUDIT_KEYS = DONE_LIVE_HUMAN_AUDIT_KEYS | {
     "source_prepared_audit_sha256",
     "audit_path_sha256",
+    "recovery_todo_sha256",
 }
 # 🧑 Source-1845: "Subject: Re: ADIOB closure authorization needed [adiob_pipeline.md]" / "Close"
 SOURCE1845_TASK = "adiob_pipeline.md"
@@ -165,6 +166,7 @@ SOURCE1845_PANE_START_TICKS = 75150814
 SOURCE1845_SESSION_ID = "01a09c0f-050a-72d2-9896-59e532e2fdb1"
 SOURCE1845_PREPARED_AUDIT_SHA256 = "73edffa0642fddce1b12666a558df83257b0160ed0feb36d9482267b6ae30305"
 SOURCE1845_AUDIT_PATH_SHA256 = "94a96d05d170929596a620ce86cbb695df446f8b529bf6b6bfc9ea89ce14b1d4"
+SOURCE1845_TODO_COMMIT = "5aa48c9451167c0ba55f7f55e4bef03585dca926"
 DONE_LIVE_CONSUMED_RECEIPT_KEYS = frozenset(
     {
         "accepted",
@@ -392,6 +394,7 @@ class DoneLiveCloseAudit:
     human_close_authorization_sha256: str = ""
     source_prepared_audit_sha256: str = ""
     audit_path_sha256: str = ""
+    recovery_todo_sha256: str = ""
 
 
 def parse_line_range(value: str) -> tuple[int, int]:
@@ -2104,6 +2107,57 @@ def validate_source1845_absent_recovery(args: Args, path: Path, audit_text: str 
         or (audit_text and hashlib.sha256(audit_text.encode()).hexdigest() != SOURCE1845_PREPARED_AUDIT_SHA256)
     ):
         raise TaskFrontmatterError("Source-1845 absent recovery does not bind the exact failed invocation.")
+
+
+def validate_source1845_todo_custody(args: Args, path: Path, current_text: str) -> str:
+    """Permit only clean Git evolution that preserves the exact Source-1845 row."""
+
+    try:
+        repository_root = Path(
+            subprocess.run(
+                ["git", "-C", str(args.root), "rev-parse", "--show-toplevel"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        ).resolve(strict=True)
+        historical = subprocess.run(
+            ["git", "-C", str(args.root), "show", f"{SOURCE1845_TODO_COMMIT}:TODO.md"],
+            check=True,
+            capture_output=True,
+        ).stdout
+        head = subprocess.run(
+            ["git", "-C", str(args.root), "show", "HEAD:TODO.md"],
+            check=True,
+            capture_output=True,
+        ).stdout
+        dirty = subprocess.run(
+            ["git", "-C", str(args.root), "status", "--porcelain=v1", "--", "TODO.md"],
+            check=True,
+            capture_output=True,
+        ).stdout
+        _ = subprocess.run(
+            ["git", "-C", str(args.root), "merge-base", "--is-ancestor", SOURCE1845_TODO_COMMIT, "HEAD"],
+            check=True,
+            capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise TaskFrontmatterError("Source-1845 TODO Git custody is unavailable.") from exc
+    if (
+        repository_root != args.root
+        or dirty
+        or head != current_text.encode()
+        or hashlib.sha256(historical).hexdigest() != SOURCE1845_TODO_SHA256
+        or args.expected_todo_sha256 != SOURCE1845_TODO_SHA256
+    ):
+        raise TaskFrontmatterError("Source-1845 TODO Git custody does not bind the audit-time index.")
+    try:
+        historical_text = historical.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise TaskFrontmatterError("Source-1845 historical TODO is not UTF-8.") from exc
+    validate_done_live_todo(args.root, path, historical_text, args.active_target)
+    validate_done_live_todo(args.root, path, current_text, args.active_target)
+    return hashlib.sha256(current_text.encode()).hexdigest()
 
 
 def source1845_absence_note(args: Args) -> str:
@@ -5505,6 +5559,7 @@ def render_done_live_close_audit(args: Args, path: Path, audit: DoneLiveCloseAud
     if audit.source_prepared_audit_sha256:
         record["source_prepared_audit_sha256"] = audit.source_prepared_audit_sha256
         record["audit_path_sha256"] = audit.audit_path_sha256
+        record["recovery_todo_sha256"] = audit.recovery_todo_sha256
     return json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
 
 
@@ -5557,7 +5612,8 @@ def parse_done_live_close_audit(args: Args, path: Path, text: str) -> DoneLiveCl
         raise TaskFrontmatterError("done-live close audit Human authority binding must be strings.")
     source_prepared_sha256 = record.get("source_prepared_audit_sha256", "")
     audit_path_sha256 = record.get("audit_path_sha256", "")
-    if not isinstance(source_prepared_sha256, str) or not isinstance(audit_path_sha256, str):
+    recovery_todo_sha256 = record.get("recovery_todo_sha256", "")
+    if not isinstance(source_prepared_sha256, str) or not isinstance(audit_path_sha256, str) or not isinstance(recovery_todo_sha256, str):
         raise TaskFrontmatterError("done-live close audit absence binding must be strings.")
     audit = DoneLiveCloseAudit(
         state,
@@ -5570,6 +5626,7 @@ def parse_done_live_close_audit(args: Args, path: Path, text: str) -> DoneLiveCl
         authority_sha256,
         source_prepared_sha256,
         audit_path_sha256,
+        recovery_todo_sha256,
     )
     if text != render_done_live_close_audit(args, path, audit):
         raise TaskFrontmatterError("done-live close audit does not bind this exact operation.")
@@ -5601,9 +5658,10 @@ def parse_done_live_close_audit(args: Args, path: Path, text: str) -> DoneLiveCl
             and (
                 source_prepared_sha256 != SOURCE1845_PREPARED_AUDIT_SHA256
                 or audit_path_sha256 != SOURCE1845_AUDIT_PATH_SHA256
+                or SHA256_RE.fullmatch(recovery_todo_sha256) is None
             )
         )
-        or (version != DONE_LIVE_HUMAN_ABSENCE_RECEIPT_VERSION and (source_prepared_sha256 or audit_path_sha256))
+        or (version != DONE_LIVE_HUMAN_ABSENCE_RECEIPT_VERSION and (source_prepared_sha256 or audit_path_sha256 or recovery_todo_sha256))
         or ((pre_terminal or absence) and (capture_sha256 or commitment != "0" * 64))
         or (not pre_terminal and not absence and (SHA256_RE.fullmatch(capture_sha256) is None or SHA256_RE.fullmatch(commitment) is None or commitment == "0" * 64))
         or (note_ready and (not note or SHA256_RE.fullmatch(completed_sha256) is None))
@@ -6651,13 +6709,25 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
             todo_text = todo.read_text(encoding="utf-8")
             if not same_file_state(before, current_before) or current_text != text:
                 raise TaskFrontmatterError("done-live close task changed while the operation was being prepared; retry.")
-            if (archived_task_payload is None or not monthly_archive) and hashlib.sha256(todo_text.encode()).hexdigest() != args.expected_todo_sha256:
-                raise TaskFrontmatterError("done-live close TODO bytes do not match --expected-todo-sha256.")
+            audit_text = read_private_audit(audit_path)
+            audit = parse_done_live_close_audit(args, path, audit_text) if audit_text is not None else None
+            current_todo_sha256 = hashlib.sha256(todo_text.encode()).hexdigest()
+            recovery_todo_sha256 = ""
+            if (
+                audit is not None
+                and audit.state in {"human-authorized-absence-prepared", "human-authorized-absence-complete"}
+                and audit.recovery_todo_sha256 != current_todo_sha256
+            ):
+                raise TaskFrontmatterError("Source-1845 recovery TODO changed after its absence transition.")
+            if (archived_task_payload is None or not monthly_archive) and current_todo_sha256 != args.expected_todo_sha256:
+                if not human_authorized or audit is None or audit.state not in {"prepared", "human-authorized-absence-prepared", "human-authorized-absence-complete"}:
+                    raise TaskFrontmatterError("done-live close TODO bytes do not match --expected-todo-sha256.")
+                recovery_todo_sha256 = validate_source1845_todo_custody(args, path, todo_text)
+                if audit.recovery_todo_sha256 and audit.recovery_todo_sha256 != recovery_todo_sha256:
+                    raise TaskFrontmatterError("Source-1845 recovery TODO changed after its absence transition.")
             manager_consumed = validate_manager_consumed_report(args, path, prevalidated_attestation, archived_task_payload)
             if human_authorized:
                 validate_done_live_human_close_authorization(args, path)
-            audit_text = read_private_audit(audit_path)
-            audit = parse_done_live_close_audit(args, path, audit_text) if audit_text is not None else None
             validate_done_live_task(args, current_text, audit)
             validate_done_live_todo(
                 args.root,
@@ -6764,6 +6834,7 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                         completed_task_sha256=hashlib.sha256(f"{current_text}{note}".encode()).hexdigest(),
                         source_prepared_audit_sha256=SOURCE1845_PREPARED_AUDIT_SHA256,
                         audit_path_sha256=SOURCE1845_AUDIT_PATH_SHA256,
+                        recovery_todo_sha256=recovery_todo_sha256 or current_todo_sha256,
                     )
                 )
 
