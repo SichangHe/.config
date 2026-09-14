@@ -13,6 +13,9 @@ command
 - for a consumed report whose pane output was lost, first run `omo_task_status.py --describe-done-live-no-mail TASK.md`
   - bind `--active-target`, `--manager-target`, the absolute exported `--manager-consumed-report-receipt`, and its SHA-256
   - the helper requires a ready pane, revalidates the export and task/TODO ownership before every pane input, sends one guarded `/status`, and returns current pane id, process id/start ticks, session, report token, and task/TODO digests
+- for the exact Source-1845 `adiob_pipeline.md` close, bind `manager_mail/85c5dff58359-1845.txt` and its SHA-256 instead of a consumed-report export
+  - the helper requires the exact reply subject naming `adiob_pipeline.md`, the sole body line `Close`, owner `adiob:0`, and manager `pb:1`
+  - this authority waives only the missing terminal-report receipt; every task, TODO, ownership, pane, process, session, audit, and close-proof guard remains
 - when the done task was moved into `YYYYMM/` and removed from TODO, or remains at its original path under one canonical `previous` row, first create the export with `omo_report.sh --export-archived-consumed PRIVATE_ENVELOPE --consumed-attestation-output ABSOLUTE_FILE`
   - validate it with `omo_report.sh --validate-consumed-export FILE --expected-sha256 SHA256`
   - pass the archived task path, its original manager target, the export, and its digest to the same describe command
@@ -21,6 +24,7 @@ command
   - bind `--expected-task-sha256` and `--expected-todo-sha256`
   - bind `--expected-pane-id`, `--expected-pane-pid`, and `--expected-pane-start-ticks`
   - bind `--expected-session-id` and the accepted report receipt token with `--terminal-evidence`
+  - for the exact Source-1845 path, use the Human authority SHA-256 as `--terminal-evidence` and repeat its source and SHA-256 arguments
   - reserve a new absolute owner-private `--audit-output`
   - if the manager consumed the report before the pane recorded acceptance, bind either the exported canonical `omo-report-consumed-closure/v1` attestation or the reviewed manager-acceptance bundle with `--manager-consumed-report-receipt` and its SHA-256; use its attestation/report ID as `--terminal-evidence`
 

@@ -123,6 +123,16 @@ DONE_LIVE_CLOSE_AUDIT_KEYS = frozenset(
     }
 )
 DONE_LIVE_CONSUMED_AUDIT_KEYS = DONE_LIVE_CLOSE_AUDIT_KEYS | {"manager_consumed_receipt_sha256"}
+DONE_LIVE_HUMAN_AUDIT_KEYS = DONE_LIVE_CLOSE_AUDIT_KEYS | {
+    "human_close_authorization_source",
+    "human_close_authorization_sha256",
+}
+# 🧑 Source-1845: "Subject: Re: ADIOB closure authorization needed [adiob_pipeline.md]" / "Close"
+SOURCE1845_TASK = "adiob_pipeline.md"
+SOURCE1845_TARGET = "adiob:0"
+SOURCE1845_MANAGER = "pb:1"
+SOURCE1845_AUTHORITY = "manager_mail/85c5dff58359-1845.txt"
+SOURCE1845_AUTHORITY_SHA256 = "5e68c2f352eda52abf2588e7610a2fd0514457b858fdd0e226590facc0d93879"
 
 
 @dataclass(frozen=True)
@@ -1148,7 +1158,13 @@ def done_live_close_audit_authorizes(
             return False
         record[key] = value
     version = record.get("version")
-    expected_keys = DONE_LIVE_CONSUMED_AUDIT_KEYS if version == "v2.0.0" else DONE_LIVE_CLOSE_AUDIT_KEYS
+    expected_keys = (
+        DONE_LIVE_HUMAN_AUDIT_KEYS
+        if version == "v3.0.0"
+        else DONE_LIVE_CONSUMED_AUDIT_KEYS
+        if version == "v2.0.0"
+        else DONE_LIVE_CLOSE_AUDIT_KEYS
+    )
     if set(record) != expected_keys:
         return False
     canonical = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
@@ -1162,9 +1178,21 @@ def done_live_close_audit_authorizes(
     exact_target = r"[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?"
     if (
         audit_text != canonical
-        or version not in {"v1.0.0", "v2.0.0"}
+        or version not in {"v1.0.0", "v2.0.0", "v3.0.0"}
         or (version == "v1.0.0" and "manager_consumed_receipt_sha256" in record)
         or (version == "v2.0.0" and SHA256_RE.fullmatch(str(record.get("manager_consumed_receipt_sha256"))) is None)
+        or (
+            version == "v3.0.0"
+            and (
+                task != SOURCE1845_TASK
+                or owner_target != SOURCE1845_TARGET
+                or manager_target != SOURCE1845_MANAGER
+                or record.get("human_close_authorization_source") != SOURCE1845_AUTHORITY
+                or record.get("human_close_authorization_sha256") != SOURCE1845_AUTHORITY_SHA256
+                or record.get("terminal_evidence_sha256")
+                != hashlib.sha256(SOURCE1845_AUTHORITY_SHA256.encode()).hexdigest()
+            )
+        )
         or record.get("operation") != DONE_LIVE_CLOSE_OPERATION
         or record.get("state") != "terminalized"
         or not isinstance(task, str)

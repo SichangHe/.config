@@ -57,6 +57,7 @@ from omo_manager.omo_codex_stop import moved_todo_text
 from omo_manager.omo_codex_stop import pane_id
 from omo_manager.omo_codex_stop import promote_done_live_close_started
 from omo_manager.omo_codex_stop import query_status_session_id
+from omo_manager.omo_codex_stop import read_human_close_authorization
 from omo_manager.omo_codex_stop import report_from_lines
 from omo_manager.omo_codex_stop import record_close
 from omo_manager.omo_codex_stop import stop
@@ -104,6 +105,7 @@ SOURCE1804_HUMAN_APPROVAL_BLOCKER = "Human approval of the exact Source-1804 cro
 CUSTODY_RECEIPT_VERSION = "v1.0.0"
 RE_ATTESTED_CUSTODY_RECEIPT_VERSION = "v2.0.0"
 SEMANTIC_CUSTODY_RECEIPT_VERSION = "v3.0.0"
+DONE_LIVE_HUMAN_CUSTODY_RECEIPT_VERSION = "v3.0.0"
 DONE_LIVE_CLOSE_OPERATION = "done-live-no-mail-close"
 DONE_LIVE_CLOSE_STATES = frozenset({"reserved", "prepared", "terminalized", "owner-stopped", "note-prepared", "complete"})
 DONE_LIVE_CLOSE_AUDIT_KEYS = frozenset(
@@ -128,6 +130,17 @@ DONE_LIVE_CLOSE_AUDIT_KEYS = frozenset(
     }
 )
 DONE_LIVE_CONSUMED_AUDIT_KEYS = DONE_LIVE_CLOSE_AUDIT_KEYS | {"manager_consumed_receipt_sha256"}
+DONE_LIVE_HUMAN_AUDIT_KEYS = DONE_LIVE_CLOSE_AUDIT_KEYS | {
+    "human_close_authorization_source",
+    "human_close_authorization_sha256",
+}
+# 🧑 Source-1845: "Subject: Re: ADIOB closure authorization needed [adiob_pipeline.md]" / "Close"
+SOURCE1845_TASK = "adiob_pipeline.md"
+SOURCE1845_TARGET = "adiob:0"
+SOURCE1845_MANAGER = "pb:1"
+SOURCE1845_AUTHORITY = "manager_mail/85c5dff58359-1845.txt"
+SOURCE1845_AUTHORITY_SHA256 = "5e68c2f352eda52abf2588e7610a2fd0514457b858fdd0e226590facc0d93879"
+SOURCE1845_AUTHORITY_TEXT = "Subject: Re: ADIOB closure authorization needed [adiob_pipeline.md]\n\nClose"
 DONE_LIVE_CONSUMED_RECEIPT_KEYS = frozenset(
     {
         "accepted",
@@ -351,6 +364,8 @@ class DoneLiveCloseAudit:
     close_note: str = ""
     completed_task_sha256: str = ""
     manager_consumed_receipt_sha256: str = ""
+    human_close_authorization_source: str = ""
+    human_close_authorization_sha256: str = ""
 
 
 def parse_line_range(value: str) -> tuple[int, int]:
@@ -558,7 +573,7 @@ shutdown.""",
     if any((parsed.expected_pane_pid, parsed.expected_pane_start_ticks, parsed.expected_session_id)) and not parsed.close_done_live_no_mail:
         parser.error("pane process and expected session assertions require --close-done-live-no-mail.")
     if any(human_close_authority) and (
-        parsed.status != "done"
+        (parsed.status != "done" and not parsed.describe_done_live_no_mail and not parsed.close_done_live_no_mail)
         or any(
             (
                 parsed.finish_closed_done,
@@ -578,7 +593,7 @@ shutdown.""",
             )
         )
     ):
-        parser.error("human-close authorization is valid only for a normal done transition.")
+        parser.error("human-close authorization is valid only for a normal done transition or done-live no-mail operation.")
     if parsed.park_unlinked:
         unrelated = (
             parsed.status,
@@ -1000,8 +1015,6 @@ shutdown.""",
             parsed.protected_shared_task,
             parsed.protected_shared_sha256,
             parsed.source_sha256,
-            parsed.human_close_authorization_source,
-            parsed.human_close_authorization_sha256,
             parsed.expected_task_sha256,
             parsed.expected_todo_sha256,
             parsed.expected_receipt_sha256,
@@ -1027,11 +1040,13 @@ shutdown.""",
             or active_target.partition(":")[0].startswith("h")
             or manager_target.partition(":")[0].startswith("h")
             or same_tmux_target(active_target, manager_target)
-            or receipt_path is None
-            or not receipt_path.is_absolute()
-            or SHA256_RE.fullmatch(receipt_sha256) is None
+            or bool(receipt_path) == bool(parsed.human_close_authorization_source)
+            or (
+                receipt_path is not None
+                and (not receipt_path.is_absolute() or SHA256_RE.fullmatch(receipt_sha256) is None)
+            )
         ):
-            parser.error("--describe-done-live-no-mail requires exact non-human owner/manager and an exported manager-consumed report with its lowercase SHA-256.")
+            parser.error("--describe-done-live-no-mail requires exact non-human owner/manager and exactly one hash-bound manager-consumed report or Human close authorization.")
         return Args(
             parsed.root.resolve(),
             parsed.task_file,
@@ -1040,8 +1055,10 @@ shutdown.""",
             describe_done_live_no_mail=True,
             active_target=active_target,
             manager_target=manager_target,
-            manager_consumed_report_receipt=receipt_path.resolve(),
+            manager_consumed_report_receipt=receipt_path.resolve() if receipt_path is not None else None,
             manager_consumed_report_receipt_sha256=receipt_sha256,
+            human_close_authorization_source=parsed.human_close_authorization_source.strip(),
+            human_close_authorization_sha256=parsed.human_close_authorization_sha256.strip(),
         )
     if parsed.close_done_live_no_mail:
         unrelated = (
@@ -1067,8 +1084,6 @@ shutdown.""",
             parsed.protected_shared_task,
             parsed.protected_shared_sha256,
             parsed.source_sha256,
-            parsed.human_close_authorization_source,
-            parsed.human_close_authorization_sha256,
             parsed.expected_receipt_sha256,
             parsed.authority_file,
             parsed.authority_lines,
@@ -1101,6 +1116,7 @@ shutdown.""",
                 parsed.manager_consumed_report_receipt is not None
                 and (not parsed.manager_consumed_report_receipt.is_absolute() or SHA256_RE.fullmatch(parsed.manager_consumed_report_receipt_sha256.strip()) is None)
             )
+            or bool(parsed.manager_consumed_report_receipt) and bool(parsed.human_close_authorization_source)
         ):
             parser.error("--close-done-live-no-mail requires exact done task/TODO, non-human owner/manager, pane process/session/report evidence, and an absolute audit output.")
         return Args(
@@ -1121,6 +1137,8 @@ shutdown.""",
             audit_output=parsed.audit_output.resolve(),
             manager_consumed_report_receipt=(parsed.manager_consumed_report_receipt.resolve() if parsed.manager_consumed_report_receipt is not None else None),
             manager_consumed_report_receipt_sha256=parsed.manager_consumed_report_receipt_sha256.strip(),
+            human_close_authorization_source=parsed.human_close_authorization_source.strip(),
+            human_close_authorization_sha256=parsed.human_close_authorization_sha256.strip(),
         )
     if parsed.complete_live_no_mail:
         unrelated = (
@@ -2018,6 +2036,30 @@ def validate_human_close_authorization(args: StopArgs) -> None:
     if _validate_human_close_authorization is None:
         raise TaskFrontmatterError("human-close authorization requires the compatible omo_codex_stop helper")
     _validate_human_close_authorization(args)
+
+
+def validate_done_live_human_close_authorization(args: Args, path: Path) -> None:
+    """Authenticate the exact Source-1845 ADIOB done-live close authority."""
+
+    if (
+        relative_task_ref(args.root, path) != SOURCE1845_TASK
+        or args.active_target != SOURCE1845_TARGET
+        or args.manager_target != SOURCE1845_MANAGER
+        or args.human_close_authorization_source != SOURCE1845_AUTHORITY
+        or args.human_close_authorization_sha256 != SOURCE1845_AUTHORITY_SHA256
+        or args.terminal_evidence != SOURCE1845_AUTHORITY_SHA256
+    ):
+        raise TaskFrontmatterError("done-live Human close authorization does not bind the exact Source-1845 task, owner, manager, and evidence.")
+    try:
+        payload = read_human_close_authorization(
+            args.human_close_authorization_source,
+            args.human_close_authorization_sha256,
+            args.root,
+        )
+    except RuntimeError as exc:
+        raise TaskFrontmatterError(f"done-live Human close authorization is unavailable: {exc}") from exc
+    if payload.decode("utf-8").replace("\r\n", "\n").rstrip("\n") != SOURCE1845_AUTHORITY_TEXT:
+        raise TaskFrontmatterError("done-live Human close authorization text changed.")
 
 
 def stop_done_agent(
@@ -5372,7 +5414,13 @@ def render_done_live_close_audit(args: Args, path: Path, audit: DoneLiveCloseAud
     """Render one canonical recovery record for a done live-worker close."""
 
     record: dict[str, object] = {
-        "version": RE_ATTESTED_CUSTODY_RECEIPT_VERSION if audit.manager_consumed_receipt_sha256 else CUSTODY_RECEIPT_VERSION,
+        "version": (
+            DONE_LIVE_HUMAN_CUSTODY_RECEIPT_VERSION
+            if audit.human_close_authorization_sha256
+            else RE_ATTESTED_CUSTODY_RECEIPT_VERSION
+            if audit.manager_consumed_receipt_sha256
+            else CUSTODY_RECEIPT_VERSION
+        ),
         "operation": DONE_LIVE_CLOSE_OPERATION,
         "state": audit.state,
         "task": relative_task_ref(args.root, path),
@@ -5392,6 +5440,9 @@ def render_done_live_close_audit(args: Args, path: Path, audit: DoneLiveCloseAud
     }
     if audit.manager_consumed_receipt_sha256:
         record["manager_consumed_receipt_sha256"] = audit.manager_consumed_receipt_sha256
+    if audit.human_close_authorization_sha256:
+        record["human_close_authorization_source"] = audit.human_close_authorization_source
+        record["human_close_authorization_sha256"] = audit.human_close_authorization_sha256
     return json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
 
 
@@ -5417,7 +5468,13 @@ def parse_done_live_close_audit(args: Args, path: Path, text: str) -> DoneLiveCl
             raise TaskFrontmatterError("done-live close audit keys must be strings.")
         record[key] = value
     version = record.get("version")
-    expected_keys = DONE_LIVE_CONSUMED_AUDIT_KEYS if version == RE_ATTESTED_CUSTODY_RECEIPT_VERSION else DONE_LIVE_CLOSE_AUDIT_KEYS
+    expected_keys = (
+        DONE_LIVE_HUMAN_AUDIT_KEYS
+        if version == DONE_LIVE_HUMAN_CUSTODY_RECEIPT_VERSION
+        else DONE_LIVE_CONSUMED_AUDIT_KEYS
+        if version == RE_ATTESTED_CUSTODY_RECEIPT_VERSION
+        else DONE_LIVE_CLOSE_AUDIT_KEYS
+    )
     if set(record) != expected_keys:
         raise TaskFrontmatterError("done-live close audit has an unknown or incomplete schema.")
     state = record["state"]
@@ -5430,16 +5487,39 @@ def parse_done_live_close_audit(args: Args, path: Path, text: str) -> DoneLiveCl
     receipt_sha256 = record.get("manager_consumed_receipt_sha256", "")
     if not isinstance(receipt_sha256, str):
         raise TaskFrontmatterError("done-live close audit receipt binding must be a string.")
-    audit = DoneLiveCloseAudit(state, capture_sha256, commitment, note, completed_sha256, receipt_sha256)
+    authority_source = record.get("human_close_authorization_source", "")
+    authority_sha256 = record.get("human_close_authorization_sha256", "")
+    if not isinstance(authority_source, str) or not isinstance(authority_sha256, str):
+        raise TaskFrontmatterError("done-live close audit Human authority binding must be strings.")
+    audit = DoneLiveCloseAudit(
+        state,
+        capture_sha256,
+        commitment,
+        note,
+        completed_sha256,
+        receipt_sha256,
+        authority_source,
+        authority_sha256,
+    )
     if text != render_done_live_close_audit(args, path, audit):
         raise TaskFrontmatterError("done-live close audit does not bind this exact operation.")
     pre_terminal = state in {"reserved", "prepared"}
     note_ready = state in {"note-prepared", "complete"}
     if (
         state not in DONE_LIVE_CLOSE_STATES
-        or version not in {CUSTODY_RECEIPT_VERSION, RE_ATTESTED_CUSTODY_RECEIPT_VERSION}
+        or version not in {CUSTODY_RECEIPT_VERSION, RE_ATTESTED_CUSTODY_RECEIPT_VERSION, DONE_LIVE_HUMAN_CUSTODY_RECEIPT_VERSION}
         or (version == CUSTODY_RECEIPT_VERSION and receipt_sha256)
-        or (version == RE_ATTESTED_CUSTODY_RECEIPT_VERSION and SHA256_RE.fullmatch(receipt_sha256) is None)
+        or (version == RE_ATTESTED_CUSTODY_RECEIPT_VERSION and (SHA256_RE.fullmatch(receipt_sha256) is None or authority_source or authority_sha256))
+        or (
+            version == DONE_LIVE_HUMAN_CUSTODY_RECEIPT_VERSION
+            and (
+                receipt_sha256
+                or authority_source != args.human_close_authorization_source
+                or authority_sha256 != args.human_close_authorization_sha256
+                or SHA256_RE.fullmatch(authority_sha256) is None
+            )
+        )
+        or (version != DONE_LIVE_HUMAN_CUSTODY_RECEIPT_VERSION and (authority_source or authority_sha256))
         or (pre_terminal and (capture_sha256 or commitment != "0" * 64))
         or (not pre_terminal and (SHA256_RE.fullmatch(capture_sha256) is None or SHA256_RE.fullmatch(commitment) is None or commitment == "0" * 64))
         or (note_ready and (not note or SHA256_RE.fullmatch(completed_sha256) is None))
@@ -6205,30 +6285,48 @@ def describe_done_live_no_mail(args: Args, path: Path, text: str, before: os.sta
                 args.audit_output,
             )
         )
-        or receipt_path is None
-        or SHA256_RE.fullmatch(args.manager_consumed_report_receipt_sha256) is None
+        or bool(receipt_path) == bool(args.human_close_authorization_source)
+        or (
+            receipt_path is not None
+            and SHA256_RE.fullmatch(args.manager_consumed_report_receipt_sha256) is None
+        )
     ):
         raise TaskFrontmatterError("done-live evidence arguments do not satisfy the exact no-mail recovery contract.")
     todo = args.root / "TODO.md"
     if path == todo or not todo.is_file():
         raise TaskFrontmatterError("done-live evidence requires distinct task and TODO files.")
-    prevalidated_attestation, manager_path = prevalidate_manager_consumed_export(
-        replace(args, status="done"),
-        path,
-        infer_terminal_evidence=True,
-    )
+    human_authorized = bool(args.human_close_authorization_source)
+    if human_authorized:
+        bound_args = replace(args, status="done", terminal_evidence=args.human_close_authorization_sha256)
+        validate_done_live_human_close_authorization(bound_args, path)
+        prevalidated_attestation, manager_path = None, None
+    else:
+        prevalidated_attestation, manager_path = prevalidate_manager_consumed_export(
+            replace(args, status="done"),
+            path,
+            infer_terminal_evidence=True,
+        )
     source788_evidence = (
         receipt_path == SOURCE788_COMMITMENT_PATH
         and args.manager_consumed_report_receipt_sha256 == SOURCE788_COMMITMENT_SHA256
     )
-    if manager_path is None or prevalidated_attestation is None and not source788_evidence:
+    if not human_authorized and (manager_path is None or prevalidated_attestation is None and not source788_evidence):
         raise TaskFrontmatterError("done-live evidence requires one exported consumed-closure attestation.")
     custody = prevalidated_attestation.get("archive_custody") if prevalidated_attestation is not None else None
     monthly_archive = isinstance(custody, dict) and custody.get("schema") == "omo-report-archived-task-custody/v1"
-    terminal_evidence = SOURCE788_REPLAY_ID if source788_evidence else bound_json_id(prevalidated_attestation, "attestation_id")  # type: ignore[arg-type]
+    terminal_evidence = (
+        args.human_close_authorization_sha256
+        if human_authorized
+        else SOURCE788_REPLAY_ID
+        if source788_evidence
+        else bound_json_id(prevalidated_attestation, "attestation_id")  # type: ignore[arg-type]
+    )
     with root_membership_lock(args.root), task_target_lock(args.root, args.active_target):
         with ExitStack() as locks:
-            for locked_path in sorted({path, todo, manager_path}, key=str):
+            locked_paths = {path, todo}
+            if manager_path is not None:
+                locked_paths.add(manager_path)
+            for locked_path in sorted(locked_paths, key=str):
                 locks.enter_context(task_file_lock(locked_path))
             current_before = path.stat()
             current_text = path.read_text(encoding="utf-8")
@@ -6285,7 +6383,10 @@ def describe_done_live_no_mail(args: Args, path: Path, text: str, before: os.sta
                     archived=monthly_archive,
                 )
                 validate_done_live_ownership(args.root, path, args.active_target)
-                _ = validate_manager_consumed_report(bound_args, path, prevalidated_attestation)
+                if human_authorized:
+                    validate_done_live_human_close_authorization(bound_args, path)
+                else:
+                    _ = validate_manager_consumed_report(bound_args, path, prevalidated_attestation)
 
             evidence_is_current()
             try:
@@ -6326,6 +6427,11 @@ def describe_done_live_no_mail(args: Args, path: Path, text: str, before: os.sta
                 "terminal_evidence": terminal_evidence,
                 "todo_sha256": todo_sha256,
             }
+            if human_authorized:
+                record.pop("manager_consumed_report_receipt")
+                record.pop("manager_consumed_report_receipt_sha256")
+                record["human_close_authorization_source"] = args.human_close_authorization_source
+                record["human_close_authorization_sha256"] = args.human_close_authorization_sha256
             evidence_id = hashlib.sha256(json.dumps(record, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             return {**record, "evidence_id": evidence_id}
 
@@ -6375,6 +6481,8 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
         or not args.audit_output.is_absolute()
         or bool(args.manager_consumed_report_receipt) != bool(args.manager_consumed_report_receipt_sha256)
         or (args.manager_consumed_report_receipt is not None and SHA256_RE.fullmatch(args.manager_consumed_report_receipt_sha256) is None)
+        or bool(args.human_close_authorization_source) != bool(args.human_close_authorization_sha256)
+        or bool(args.manager_consumed_report_receipt) and bool(args.human_close_authorization_source)
     ):
         raise TaskFrontmatterError("done-live close arguments do not satisfy the exact no-mail recovery contract.")
     todo = args.root / "TODO.md"
@@ -6386,6 +6494,9 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
     archived_task_payload: bytes | None = None
     prevalidated_attestation: dict[str, object] | None = None
     manager_path: Path | None = None
+    human_authorized = bool(args.human_close_authorization_source)
+    if human_authorized:
+        validate_done_live_human_close_authorization(args, path)
     recovery_audit_text = read_private_audit(audit_path)
     if recovery_audit_text is not None and args.manager_consumed_report_receipt is not None:
         recovery_audit = parse_done_live_close_audit(args, path, recovery_audit_text)
@@ -6448,6 +6559,8 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
             if (archived_task_payload is None or not monthly_archive) and hashlib.sha256(todo_text.encode()).hexdigest() != args.expected_todo_sha256:
                 raise TaskFrontmatterError("done-live close TODO bytes do not match --expected-todo-sha256.")
             manager_consumed = validate_manager_consumed_report(args, path, prevalidated_attestation, archived_task_payload)
+            if human_authorized:
+                validate_done_live_human_close_authorization(args, path)
             audit_text = read_private_audit(audit_path)
             audit = parse_done_live_close_audit(args, path, audit_text) if audit_text is not None else None
             validate_done_live_task(args, current_text, audit)
@@ -6464,15 +6577,20 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                     raise TaskFrontmatterError("done-live close refuses close artifacts without their audit.")
                 if done_live_pane_state(args) != "live":
                     raise TaskFrontmatterError("done-live close requires the exact live pane before reserving recovery evidence.")
-                audit = DoneLiveCloseAudit("reserved")
+                audit = DoneLiveCloseAudit(
+                    "reserved",
+                    human_close_authorization_source=args.human_close_authorization_source,
+                    human_close_authorization_sha256=args.human_close_authorization_sha256,
+                )
                 audit_text = render_done_live_close_audit(args, path, audit)
                 reserve_private_audit(audit_path, audit_text)
             assert audit is not None and audit_text is not None
             close_audit = audit
             if close_audit.manager_consumed_receipt_sha256 and (not manager_consumed or close_audit.manager_consumed_receipt_sha256 != args.manager_consumed_report_receipt_sha256):
                 raise TaskFrontmatterError("done-live close manager-consumed receipt changed after authentication.")
-            validate_terminal_shell = validate_exited_codex_shell_with_consumed_report if manager_consumed else validate_exited_codex_shell
-            terminalize_to_shell = terminalize_bound_codex_to_shell_with_consumed_report if manager_consumed else terminalize_bound_codex_to_shell
+            external_completion = manager_consumed or human_authorized
+            validate_terminal_shell = validate_exited_codex_shell_with_consumed_report if external_completion else validate_exited_codex_shell
+            terminalize_to_shell = terminalize_bound_codex_to_shell_with_consumed_report if external_completion else terminalize_bound_codex_to_shell
 
             def advance_audit(updated: DoneLiveCloseAudit) -> None:
                 nonlocal close_audit, audit_text
@@ -6512,6 +6630,8 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                         prevalidated_attestation,
                         validation_task_payload,
                     )
+                elif human_authorized:
+                    validate_done_live_human_close_authorization(args, path)
                 if expected_capture_sha256:
                     observed = validate_terminal_shell(
                         args.active_target,

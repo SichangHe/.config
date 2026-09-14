@@ -68,6 +68,7 @@ from omo_manager.omo_task_status import validate_manager_consumed_report
 from omo_manager.omo_task_status import source788_consumed_commitment
 from omo_manager.omo_task_status import validate_consumed_closure_attestation
 from omo_manager.omo_task_status import validate_done_live_todo
+from omo_manager.omo_task_status import validate_done_live_human_close_authorization
 from omo_manager.omo_task_status import Args as StatusArgs
 from omo_manager.omo_codex_stop import ExitedCodexShell
 from omo_manager.omo_codex_stop import done_live_close_started_path
@@ -2939,6 +2940,19 @@ class TaskStatusTests(unittest.TestCase):
         del missing_digest[index : index + 2]
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
             parse_args(missing_digest)
+        human = complete[:-1] + [
+            "--human-close-authorization-source",
+            "manager_mail/85c5dff58359-1845.txt",
+            "--human-close-authorization-sha256",
+            "c" * 64,
+            "task.md",
+        ]
+        self.assertEqual(
+            "manager_mail/85c5dff58359-1845.txt",
+            parse_args(human).human_close_authorization_source,
+        )
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args(consumed[:-1] + human[-5:])
 
     def test_done_live_evidence_parser_requires_export_and_no_close_assertions(self) -> None:
         complete = [
@@ -2971,6 +2985,43 @@ class TaskStatusTests(unittest.TestCase):
                 parse_args(candidate)
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
             parse_args([*complete[:-1], "--expected-pane-id", "%42", complete[-1]])
+        human = [
+            *complete[: complete.index("--manager-consumed-report-receipt")],
+            "--human-close-authorization-source",
+            "manager_mail/85c5dff58359-1845.txt",
+            "--human-close-authorization-sha256",
+            "c" * 64,
+            "task.md",
+        ]
+        self.assertEqual("c" * 64, parse_args(human).human_close_authorization_sha256)
+
+    def test_done_live_human_authority_is_exactly_source1845_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "adiob_pipeline.md"
+            task.write_text(task_frontmatter(status="done", runat="adiob:0", managerat="pb:1"), encoding="utf-8")
+            args = StatusArgs(
+                root,
+                Path("adiob_pipeline.md"),
+                "done",
+                "",
+                close_done_live_no_mail=True,
+                active_target="adiob:0",
+                manager_target="pb:1",
+                terminal_evidence="5e68c2f352eda52abf2588e7610a2fd0514457b858fdd0e226590facc0d93879",
+                human_close_authorization_source="manager_mail/85c5dff58359-1845.txt",
+                human_close_authorization_sha256="5e68c2f352eda52abf2588e7610a2fd0514457b858fdd0e226590facc0d93879",
+            )
+            source = b"Subject: Re: ADIOB closure authorization needed [adiob_pipeline.md]\n\nClose\r\n"
+            with patch("omo_manager.omo_task_status.read_human_close_authorization", return_value=source):
+                validate_done_live_human_close_authorization(args, task)
+                with self.assertRaisesRegex(TaskFrontmatterError, "exact Source-1845"):
+                    validate_done_live_human_close_authorization(replace(args, active_target="adiob:1"), task)
+            with (
+                patch("omo_manager.omo_task_status.read_human_close_authorization", return_value=source + b"again\n"),
+                self.assertRaisesRegex(TaskFrontmatterError, "text changed"),
+            ):
+                validate_done_live_human_close_authorization(args, task)
 
     def test_archived_accepted_report_authorizes_absent_todo_custody(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3859,6 +3910,105 @@ class TaskStatusTests(unittest.TestCase):
             proof = args.audit_output.with_name(f".{args.audit_output.name}.owner-stopped")
             self.assertTrue(proof.is_file())
             self.assertIn("no email or task reopening", output.getvalue())
+
+    def test_source1845_human_authority_closes_only_the_bound_done_live_pane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "adiob_pipeline.md"
+            text = task_frontmatter(status="done", runat="adiob:0", managerat="pb:1") + "done\n"
+            task.write_text(text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\nadiob_pipeline.md adiob:0\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            authority_sha256 = "5e68c2f352eda52abf2588e7610a2fd0514457b858fdd0e226590facc0d93879"
+            args = StatusArgs(
+                root,
+                Path("adiob_pipeline.md"),
+                "done",
+                "",
+                close_done_live_no_mail=True,
+                active_target="adiob:0",
+                manager_target="pb:1",
+                expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                expected_pane_id="%2558",
+                expected_pane_pid=1426714,
+                expected_pane_start_ticks=75150814,
+                expected_session_id="01a09c0f-050a-72d2-9896-59e532e2fdb1",
+                terminal_evidence=authority_sha256,
+                audit_output=(private / "source1845-close.json").resolve(),
+                human_close_authorization_source="manager_mail/85c5dff58359-1845.txt",
+                human_close_authorization_sha256=authority_sha256,
+            )
+            state = {"live": True}
+            source = b"Subject: Re: ADIOB closure authorization needed [adiob_pipeline.md]\n\nClose\r\n"
+
+            def target_pane(_target: str) -> str:
+                return "%2558" if state["live"] else ""
+
+            def start_ticks(_pid: int) -> int | None:
+                return 75150814 if state["live"] else None
+
+            def terminalize(*values: object) -> ExitedCodexShell:
+                callback = values[6]
+                assert callable(callback)
+                callback()
+                return ExitedCodexShell(args.expected_session_id, "c" * 64)
+
+            def close(*values: object) -> None:
+                pre_close = values[10]
+                assert callable(pre_close)
+                pre_close()
+                proof = Path(str(values[4]))
+                audit = Path(str(values[5]))
+                write_done_live_close_started(
+                    proof,
+                    audit,
+                    str(values[6]),
+                    str(values[7]),
+                    str(values[12]),
+                    args.active_target,
+                    args.expected_pane_id,
+                    args.expected_pane_pid,
+                    args.expected_pane_start_ticks,
+                )
+                state["live"] = False
+                with (
+                    patch("omo_manager.omo_codex_stop.pane_id", return_value=""),
+                    patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=None),
+                ):
+                    promote_done_live_close_started(
+                        proof,
+                        audit,
+                        str(values[7]),
+                        str(values[12]),
+                        args.active_target,
+                        args.expected_pane_id,
+                        args.expected_pane_pid,
+                        args.expected_pane_start_ticks,
+                    )
+
+            with (
+                patch("omo_manager.omo_task_status.read_human_close_authorization", return_value=source) as authority,
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_task_status.pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_task_status.process_start_ticks", side_effect=start_ticks),
+                patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell_with_consumed_report", side_effect=terminalize) as external_terminalize,
+                patch("omo_manager.omo_task_status.validate_exited_codex_shell_with_consumed_report", return_value="c" * 64),
+                patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell") as report_terminalize,
+                patch("omo_manager.omo_task_status.close_bound_tmux_target", side_effect=close),
+            ):
+                self.assertEqual(("adiob:0", args.expected_session_id), close_done_live_no_mail(args, task, text, task.stat()))
+            external_terminalize.assert_called_once()
+            report_terminalize.assert_not_called()
+            self.assertGreaterEqual(authority.call_count, 3)
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            audit = json.loads(args.audit_output.read_text(encoding="utf-8"))
+            self.assertEqual("v3.0.0", audit["version"])
+            self.assertEqual(args.human_close_authorization_source, audit["human_close_authorization_source"])
+            self.assertEqual(authority_sha256, audit["human_close_authorization_sha256"])
 
     def test_done_live_close_rejects_metadata_custody_owner_and_pane_drift(self) -> None:
         for case in ("status", "queue", "pending", "manager", "tool", "task digest", "todo", "todo digest", "owner", "pane", "process"):

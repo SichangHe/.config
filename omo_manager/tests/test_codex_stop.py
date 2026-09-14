@@ -2585,6 +2585,56 @@ $ """
             )
         )
 
+    def test_source1845_bound_child_accepts_only_exact_human_authority(self) -> None:
+        commitment = "a" * 64
+        authority_sha256 = codex_stop.SOURCE1845_AUTHORITY_SHA256
+        record: dict[str, object] = {
+            "version": "v3.0.0",
+            "operation": "done-live-no-mail-close",
+            "state": "terminalized",
+            "task": codex_stop.SOURCE1845_TASK,
+            "target": codex_stop.SOURCE1845_TARGET,
+            "manager_target": codex_stop.SOURCE1845_MANAGER,
+            "task_sha256": "b" * 64,
+            "todo_sha256": "c" * 64,
+            "pane_id": "%2558",
+            "pane_pid": 1426714,
+            "pane_start_ticks": 75150814,
+            "session_id": "01a09c0f-050a-72d2-9896-59e532e2fdb1",
+            "terminal_evidence_sha256": hashlib.sha256(authority_sha256.encode()).hexdigest(),
+            "terminal_capture_sha256": "d" * 64,
+            "close_proof_commitment": commitment,
+            "close_note": "",
+            "completed_task_sha256": "",
+            "human_close_authorization_source": codex_stop.SOURCE1845_AUTHORITY,
+            "human_close_authorization_sha256": authority_sha256,
+        }
+
+        def authorized(candidate: dict[str, object]) -> bool:
+            text = json.dumps(candidate, sort_keys=True, separators=(",", ":")) + "\n"
+            return codex_stop.done_live_close_audit_authorizes(
+                text,
+                candidate,
+                commitment,
+                target="adiob:0",
+                pane_id_value="%2558",
+                pane_pid=1426714,
+                pane_start_ticks=75150814,
+            )
+
+        self.assertTrue(authorized(record))
+        changes: dict[str, object] = {
+            "task": "other.md",
+            "target": "adiob:1",
+            "manager_target": "pb:2",
+            "human_close_authorization_source": "manager_mail/other.txt",
+            "human_close_authorization_sha256": "e" * 64,
+            "terminal_evidence_sha256": "f" * 64,
+        }
+        for field, value in changes.items():
+            with self.subTest(field=field):
+                self.assertFalse(authorized({**record, field: value}))
+
     def test_done_live_bound_child_rejects_audit_identity_drift_before_kill(self) -> None:
         secret = "a" * 64
         commitment = hashlib.sha256(secret.encode()).hexdigest()
