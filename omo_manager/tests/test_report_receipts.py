@@ -183,6 +183,7 @@ def run_report_from(
     recover_moved: str = "",
     consumed_attestation_output: Path | None = None,
     report: Path = REPORT,
+    done_task_file: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = replace(case, message=message).command(
         describe=describe,
@@ -194,6 +195,8 @@ def run_report_from(
     command[command.index("--agent") + 1] = agent
     if consumed_attestation_output is not None:
         command += ["--consumed-attestation-output", str(consumed_attestation_output)]
+    if done_task_file is not None:
+        command += ["--done-task-file", str(done_task_file)]
     return subprocess.run(
         command,
         cwd=case.root.parent,
@@ -2578,6 +2581,309 @@ class ReportReceiptTests(unittest.TestCase):
             output = json.loads(recovered.stdout)
             self.assertFalse(output["accepted"])
             self.assertIn(".transfer-", output["transfer_receipt"]["queue_item"]["pointer"])
+
+    def test_done_task_selector_disambiguates_shared_target_allocation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case = fixture(Path(tmp))
+            worker = case.root / "worker.md"
+            worker.write_text(worker.read_text().replace("status: running", "status: done", 1))
+            other = case.root / "other.md"
+            other.write_text(frontmatter(runat="cfg:7", managerat="main:0.0").replace("status: running", "status: done", 1))
+            (case.root / "TODO.md").write_text("current:\n\nprevious:\nworker.md cfg:7\nother.md cfg:7\n")
+
+            ambiguous = subprocess.run(
+                [str(REPORT), "--alloc-message-file"], cwd=case.root.parent, env=case.env,
+                text=True, capture_output=True, timeout=10, check=False,
+            )
+            selected = subprocess.run(
+                [str(REPORT), "--alloc-message-file", "--done-task-file", str(worker)],
+                cwd=case.root.parent, env=case.env, text=True, capture_output=True, timeout=10, check=False,
+            )
+
+            self.assertEqual(2, ambiguous.returncode)
+            self.assertIn("multiple done task files", ambiguous.stderr)
+            self.assertEqual(0, selected.returncode, selected.stderr)
+            draft = Path(selected.stdout.strip())
+            self.addCleanup(draft.unlink, missing_ok=True)
+            self.assertTrue(draft.name.startswith("worker."))
+
+    def test_done_task_selector_accepts_reassigned_owner_after_historical_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case = fixture(Path(tmp))
+            worker = case.root / "worker.md"
+            worker.write_text(
+                worker.read_text().replace("status: running", "status: done", 1)
+                + "\n(manager closed Codex agent 09-13 11:33 PDT; tmux target `cfg:7`; "
+                "session_id: `01a09bb2-8c44-7140-be05-c0f241706e2f`.)\n"
+                "<manager_delegation from=\"main:0.0\">new assignment</manager_delegation>\n"
+            )
+            closed = case.root / "closed.md"
+            closed.write_text(
+                frontmatter(runat="cfg:7", managerat="main:0.0").replace("status: running", "status: done", 1)
+                + "\n(manager closed Codex agent 09-14 00:31 PDT; tmux target `cfg:7.0`; "
+                "session_id: `01a09e28-a5c8-7842-9405-fec6b2a825ba`.)\n"
+            )
+            (case.root / "TODO.md").write_text("current:\n\nprevious:\nworker.md cfg:7\nclosed.md cfg:7\n")
+
+            selected = subprocess.run(
+                [str(REPORT), "--alloc-message-file", "--done-task-file", str(worker)],
+                cwd=case.root.parent, env=case.env, text=True, capture_output=True, timeout=10, check=False,
+            )
+            rejected = subprocess.run(
+                [str(REPORT), "--alloc-message-file", "--done-task-file", str(closed)],
+                cwd=case.root.parent, env=case.env, text=True, capture_output=True, timeout=10, check=False,
+            )
+            ambiguous = subprocess.run(
+                [str(REPORT), "--alloc-message-file"],
+                cwd=case.root.parent, env=case.env, text=True, capture_output=True, timeout=10, check=False,
+            )
+
+            self.assertEqual(0, selected.returncode, selected.stderr)
+            draft = Path(selected.stdout.strip())
+            self.addCleanup(draft.unlink, missing_ok=True)
+            self.assertTrue(draft.name.startswith("worker."))
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("not an exact done task", rejected.stderr)
+            self.assertEqual(2, ambiguous.returncode)
+            self.assertIn("multiple done task files", ambiguous.stderr)
+
+    def test_done_task_selector_does_not_treat_human_or_incomplete_tag_as_reassignment(self) -> None:
+        for later_text in (
+            '<human_instruction authoritative="true">new text</human_instruction>\n',
+            '<human_instruction authoritative="true">\n<manager_delegation from="main:0.0">quoted</manager_delegation>\n</human_instruction>\n',
+            '<human_instruction authoritative="true">\n<manager_delegation from="main:0.0">quoted</manager_delegation></human_instruction>\n',
+            '<agent_message from="cfg:8">\n<manager_delegation from="main:0.0">quoted</manager_delegation>\n</agent_message>\n',
+            '<human_instruction authoritative="true"\n<manager_delegation from="main:0.0">quoted</manager_delegation>\n',
+            '<agent_message from="cfg:8"\n<manager_delegation from="main:0.0">quoted</manager_delegation>\n',
+            '<manager_delegation from="main:0.0">incomplete\n',
+            '<manager_delegation>not an assignment</manager_delegation>\n',
+            '<manager_delegation from="invalid">not an assignment</manager_delegation>\n',
+            '<manager_delegation from="main:0.0">new <agent_message from="cfg:8">nested</agent_message></manager_delegation>\n',
+            '<manager_delegation from="main:0.0">new assignment</manager_delegation>\n<agent_message from="cfg:8"\n',
+        ):
+            with self.subTest(later_text=later_text), tempfile.TemporaryDirectory() as tmp:
+                case = fixture(Path(tmp))
+                worker = case.root / "worker.md"
+                worker.write_text(
+                    worker.read_text().replace("status: running", "status: done", 1)
+                    + "\n(manager closed Codex agent 09-13 11:33 PDT; tmux target `cfg:7`; "
+                    "session_id: `01a09bb2-8c44-7140-be05-c0f241706e2f`.)\n"
+                    + later_text
+                )
+                other = case.root / "other.md"
+                other.write_text(frontmatter(runat="cfg:7", managerat="main:0.0").replace("status: running", "status: done", 1))
+                (case.root / "TODO.md").write_text("current:\n\nprevious:\nworker.md cfg:7\nother.md cfg:7\n")
+
+                rejected = subprocess.run(
+                    [str(REPORT), "--alloc-message-file", "--done-task-file", str(worker)],
+                    cwd=case.root.parent, env=case.env, text=True, capture_output=True, timeout=10, check=False,
+                )
+
+                self.assertEqual(2, rejected.returncode)
+                self.assertIn("not an exact done task", rejected.stderr)
+
+    def test_done_task_selector_obeys_final_close_after_reassignment(self) -> None:
+        for final_close in (
+            "(manager closed Codex agent 09-14 01:00 PDT; tmux target `cfg:7.0`; "
+            "session_id: `01a09e28-a5c8-7842-9405-fec6b2a825ba`.)\n",
+            "(manager closed Codex agent 09-14 01:00 PDT; tmux target `cfg:7.0`; "
+            "Codex session id not found in captured tmux output.)\n",
+        ):
+            with self.subTest(final_close=final_close), tempfile.TemporaryDirectory() as tmp:
+                case = fixture(Path(tmp))
+                worker = case.root / "worker.md"
+                worker.write_text(
+                    worker.read_text().replace("status: running", "status: done", 1)
+                    + "\n(manager closed Codex agent 09-13 11:33 PDT; tmux target `cfg:7`; "
+                    "session_id: `01a09bb2-8c44-7140-be05-c0f241706e2f`.)\n"
+                    '<manager_delegation from="main:0.0">new assignment</manager_delegation>\n'
+                    + final_close
+                )
+                other = case.root / "other.md"
+                other.write_text(frontmatter(runat="cfg:7", managerat="main:0.0").replace("status: running", "status: done", 1))
+                (case.root / "TODO.md").write_text("current:\n\nprevious:\nworker.md cfg:7\nother.md cfg:7\n")
+
+                rejected = subprocess.run(
+                    [str(REPORT), "--alloc-message-file", "--done-task-file", str(worker)],
+                    cwd=case.root.parent, env=case.env, text=True, capture_output=True, timeout=10, check=False,
+                )
+
+                self.assertEqual(2, rejected.returncode)
+                self.assertIn("not an exact done task", rejected.stderr)
+
+    def test_done_task_selector_obeys_final_close_on_historical_target(self) -> None:
+        for lifecycle in (
+            "\n(manager closed Codex agent 09-14 01:00 PDT; tmux target `cfg:8`; "
+            "session_id: `01a09e28-a5c8-7842-9405-fec6b2a825ba`.)\n",
+            "\n(manager closed Codex agent 09-13 11:33 PDT; tmux target `cfg:7`; "
+            "session_id: `01a09bb2-8c44-7140-be05-c0f241706e2f`.)\n"
+            '<manager_delegation from="main:0.0">new assignment</manager_delegation>\n'
+            "(manager closed Codex agent 09-14 01:00 PDT; tmux target `cfg:8`; "
+            "session_id: `01a09e28-a5c8-7842-9405-fec6b2a825ba`.)\n",
+        ):
+            with self.subTest(lifecycle=lifecycle), tempfile.TemporaryDirectory() as tmp:
+                case = fixture(Path(tmp))
+                worker = case.root / "worker.md"
+                worker.write_text(worker.read_text().replace("status: running", "status: done", 1) + lifecycle)
+                other = case.root / "other.md"
+                other.write_text(frontmatter(runat="cfg:7", managerat="main:0.0").replace("status: running", "status: done", 1))
+                (case.root / "TODO.md").write_text("current:\n\nprevious:\nworker.md cfg:7\nother.md cfg:7\n")
+
+                rejected = subprocess.run(
+                    [str(REPORT), "--alloc-message-file", "--done-task-file", str(worker)],
+                    cwd=case.root.parent, env=case.env, text=True, capture_output=True, timeout=10, check=False,
+                )
+
+                self.assertEqual(2, rejected.returncode)
+                self.assertIn("not an exact done task", rejected.stderr)
+
+    def test_done_task_selector_rejects_final_close_without_session_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case = fixture(Path(tmp))
+            worker = case.root / "worker.md"
+            worker.write_text(
+                worker.read_text().replace("status: running", "status: done", 1)
+                + "\n(manager closed Codex agent 09-13 11:33 PDT; tmux target `cfg:7`; "
+                "Codex session id not found in captured tmux output.)\n"
+            )
+            other = case.root / "other.md"
+            other.write_text(frontmatter(runat="cfg:7", managerat="main:0.0").replace("status: running", "status: done", 1))
+            (case.root / "TODO.md").write_text("current:\n\nprevious:\nworker.md cfg:7\nother.md cfg:7\n")
+
+            rejected = subprocess.run(
+                [str(REPORT), "--alloc-message-file", "--done-task-file", str(worker)],
+                cwd=case.root.parent, env=case.env, text=True, capture_output=True, timeout=10, check=False,
+            )
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("not an exact done task", rejected.stderr)
+
+    def test_done_task_selector_rejects_wrong_shared_target_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case = fixture(Path(tmp))
+            worker = case.root / "worker.md"
+            worker.write_text(worker.read_text().replace("status: running", "status: done", 1))
+            other = case.root / "other.md"
+            other.write_text(frontmatter(runat="cfg:7", managerat="main:0.0").replace("status: running", "status: done", 1))
+            wrong = case.root / "wrong.md"
+            wrong.write_text(frontmatter(runat="cfg:7", managerat="main:0.0").replace("status: running", "status: done", 1))
+            (case.root / "TODO.md").write_text(
+                "current:\n\nprevious:\nworker.md cfg:7\nother.md cfg:7\n"
+            )
+
+            rejected = subprocess.run(
+                [str(REPORT), "--alloc-message-file", "--done-task-file", str(wrong)],
+                cwd=case.root.parent, env=case.env, text=True, capture_output=True, timeout=10, check=False,
+            )
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("not an exact done task on the current target", rejected.stderr)
+
+    def test_done_task_selector_rejects_any_active_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case = fixture(Path(tmp))
+            selected = case.root / "selected.md"
+            selected.write_text(frontmatter(runat="cfg:7", managerat="main:0.0").replace("status: running", "status: done", 1))
+            other = case.root / "other.md"
+            other.write_text(frontmatter(runat="cfg:7", managerat="main:0.0").replace("status: running", "status: done", 1))
+            (case.root / "TODO.md").write_text(
+                "current:\nworker.md cfg:7\n\nprevious:\nselected.md cfg:7\nother.md cfg:7\n"
+            )
+
+            rejected = subprocess.run(
+                [str(REPORT), "--alloc-message-file", "--done-task-file", str(selected)],
+                cwd=case.root.parent, env=case.env, text=True, capture_output=True, timeout=10, check=False,
+            )
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("while this pane has an active task", rejected.stderr)
+
+    def test_done_task_selector_preserves_fallback_root_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case = fixture(Path(tmp))
+            (case.root / "worker.md").write_text(frontmatter(runat="cfg:8", managerat="main:0.0"))
+            (case.root / "TODO.md").write_text("current:\nworker.md cfg:8\n")
+            fallback = Path(case.env["HOME"]) / "work_logs"
+            fallback.mkdir()
+            selected = fallback / "selected.md"
+            selected.write_text(frontmatter(runat="cfg:7", managerat="main:0.0").replace("status: running", "status: done", 1))
+            other = fallback / "other.md"
+            other.write_text(frontmatter(runat="cfg:7", managerat="main:0.0").replace("status: running", "status: done", 1))
+            (fallback / "TODO.md").write_text("current:\n\nprevious:\nselected.md cfg:7\nother.md cfg:7\n")
+
+            allocated = subprocess.run(
+                [str(REPORT), "--alloc-message-file", "--done-task-file", str(selected)],
+                cwd=case.root.parent, env=case.env, text=True, capture_output=True, timeout=10, check=False,
+            )
+
+            self.assertEqual(0, allocated.returncode, allocated.stderr)
+            draft = Path(allocated.stdout.strip())
+            self.addCleanup(draft.unlink, missing_ok=True)
+            self.assertTrue(draft.name.startswith("selected."))
+
+    def test_done_task_selector_preserves_nested_fallback_root_lookup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case = fixture(Path(tmp))
+            (case.root / "worker.md").write_text(frontmatter(runat="cfg:8", managerat="main:0.0"))
+            (case.root / "TODO.md").write_text("current:\nworker.md cfg:8\n")
+            case.env["HOME"] = str(case.root)
+            fallback = case.root / "work_logs"
+            fallback.mkdir()
+            selected = fallback / "selected.md"
+            selected.write_text(frontmatter(runat="cfg:7", managerat="main:0.0").replace("status: running", "status: done", 1))
+            other = fallback / "other.md"
+            other.write_text(frontmatter(runat="cfg:7", managerat="main:0.0").replace("status: running", "status: done", 1))
+            (fallback / "TODO.md").write_text("current:\n\nprevious:\nselected.md cfg:7\nother.md cfg:7\n")
+
+            allocated = subprocess.run(
+                [str(REPORT), "--alloc-message-file", "--done-task-file", str(selected)],
+                cwd=case.root.parent, env=case.env, text=True, capture_output=True, timeout=10, check=False,
+            )
+
+            self.assertEqual(0, allocated.returncode, allocated.stderr)
+            draft = Path(allocated.stdout.strip())
+            self.addCleanup(draft.unlink, missing_ok=True)
+            self.assertTrue(draft.name.startswith("selected."))
+
+    def test_done_task_selector_verifies_consumed_report_on_shared_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, manager, _owner = active_manager_fixture(Path(tmp), body=b"unused\n")
+            worker = case.root / "worker.md"
+            worker.write_text(worker.read_text().replace("status: running", "status: done", 1))
+            other = case.root / "other.md"
+            other.write_text(frontmatter(runat="cfg:7", managerat="vl:2").replace("status: running", "status: done", 1))
+            (case.root / "TODO.md").write_text(
+                "current:\nmanager.md vl:2\n\nprevious:\nworker.md cfg:7\nother.md cfg:7\n"
+            )
+            allocated = subprocess.run(
+                [str(REPORT), "--alloc-message-file", "--done-task-file", str(worker)],
+                cwd=case.root.parent, env=case.env, text=True, capture_output=True, timeout=10, check=False,
+            )
+            self.assertEqual(0, allocated.returncode, allocated.stderr)
+            draft = Path(allocated.stdout.strip())
+            self.addCleanup(draft.unlink, missing_ok=True)
+            draft.write_bytes(b"terminal selected report\n")
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            pending = run_report_from(case, draft, status="done", done_task_file=worker)
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            self.assertEqual(0, run_manager_watcher_once(case, manager).returncode)
+
+            exported = Path(tmp) / "consumed.json"
+            verified = run_report_from(
+                case, draft, status="done", verify_consumed=True, done_task_file=worker,
+                consumed_attestation_output=exported,
+            )
+            wrong = run_report_from(
+                case, draft, status="done", verify_consumed=True, done_task_file=other,
+            )
+
+            self.assertEqual(0, verified.returncode, verified.stderr)
+            verification = json.loads(verified.stdout)
+            self.assertFalse(verification["accepted"])
+            self.assertTrue(verification["terminal"])
+            self.assertEqual("omo-report-consumed-closure/v1", verification["schema"])
+            self.assertTrue(exported.is_file())
+            self.assertEqual(2, wrong.returncode)
 
     def test_done_task_fallback_allows_strict_retry_of_its_exact_committed_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

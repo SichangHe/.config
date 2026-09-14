@@ -189,6 +189,7 @@ root="${OMO_WORK_LOGS_ROOT:-$HOME/work_logs}"
 manager_target="${OMO_MANAGER_TMUX_TARGET:-}"
 if [ -n "$env_root" ]; then root="$env_root"; fi
 task_file=""
+done_task_file=""
 producer_target=""
 status=""
 recover_moved=""
@@ -217,12 +218,12 @@ agent="${OMO_AGENT_NAME:-agent}"
 agent_explicit=0
 usage() {
   printf '%s\n' \
-    "Usage: omo_report.sh --status STATUS --message-file FILE [--agent NAME] [--recover-moved REPLAY_ID]" \
-    "       omo_report.sh --describe --status STATUS --message-file FILE [--agent NAME]" \
-    "       omo_report.sh --verify-consumed [--consumed-attestation-output FILE] --status STATUS --message-file FILE [--agent NAME]" \
+    "Usage: omo_report.sh --status STATUS --message-file FILE [--agent NAME] [--recover-moved REPLAY_ID] [--done-task-file FILE]" \
+    "       omo_report.sh --describe --status STATUS --message-file FILE [--agent NAME] [--done-task-file FILE]" \
+    "       omo_report.sh --verify-consumed [--consumed-attestation-output FILE] --status STATUS --message-file FILE [--agent NAME] [--done-task-file FILE]" \
     "       omo_report.sh --export-archived-consumed REPORT --consumed-attestation-output FILE [--root-retained-no-mail-transcript FILE | --root-retained-session-transcript FILE --root-retained-lifecycle-transcript FILE --ownership-acknowledgment-message-id MESSAGE_ID --published-result-commit COMMIT]" \
     "       omo_report.sh --validate-consumed-export FILE --expected-sha256 SHA256" \
-    "       omo_report.sh --alloc-message-file" \
+    "       omo_report.sh --alloc-message-file [--done-task-file FILE]" \
     "" \
     "Allocate a private task-specific draft first, write the report through an editor or other non-shell text channel, then submit it with --status blocked|in-progress|done and --message-file." \
     "The helper infers routing from the producer pane; do not pass task-file, root, manager-target, or other manual route flags." \
@@ -230,7 +231,7 @@ usage() {
 }
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --status|--message-file|--agent|--recover-moved|--consumed-attestation-output|--validate-consumed-export|--expected-sha256|--export-archived-consumed|--root-retained-session-transcript|--root-retained-lifecycle-transcript|--ownership-acknowledgment-message-id|--published-result-commit|--root-retained-no-mail-transcript)
+    --status|--message-file|--agent|--recover-moved|--done-task-file|--consumed-attestation-output|--validate-consumed-export|--expected-sha256|--export-archived-consumed|--root-retained-session-transcript|--root-retained-lifecycle-transcript|--ownership-acknowledgment-message-id|--published-result-commit|--root-retained-no-mail-transcript)
       if [ "$#" -lt 2 ]; then echo "missing value for $1" >&2; usage >&2; exit 2; fi
       option="$1"
       value="$2"
@@ -239,6 +240,7 @@ while [ "$#" -gt 0 ]; do
         --message-file) message_file="$value" ;;
         --agent) agent="$value"; agent_explicit=1 ;;
         --recover-moved) recover_moved="$value" ;;
+        --done-task-file) done_task_file="$value" ;;
         --consumed-attestation-output) consumed_attestation_output="$value" ;;
         --validate-consumed-export) validate_consumed_export="$value"; validate_consumed_export_requested=$((validate_consumed_export_requested + 1)) ;;
         --expected-sha256) validate_consumed_export_sha256="$value"; validate_consumed_export_sha256_requested=$((validate_consumed_export_sha256_requested + 1)) ;;
@@ -259,6 +261,10 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 root_retained_evidence_requested=$((root_retained_session_transcript_requested + root_retained_lifecycle_transcript_requested + ownership_acknowledgment_message_id_requested + published_result_commit_requested + root_retained_no_mail_transcript_requested))
+if [ -n "$done_task_file" ] && { [ "$export_archived_consumed_requested" -ne 0 ] || [ "$validate_consumed_export_requested" -ne 0 ]; }; then
+  echo "--done-task-file is only valid for inferred live-pane report operations" >&2
+  exit 2
+fi
 if [ "$export_archived_consumed_requested" -eq 0 ] && [ "$root_retained_evidence_requested" -ne 0 ]; then
   echo "root-retained session evidence options require --export-archived-consumed" >&2
   exit 2
@@ -419,7 +425,7 @@ if [ -n "$recover_moved" ] && [ "$agent_explicit" -ne 1 ]; then echo "--recover-
 root_real=$(python3 -I -S -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$root")
 task_root_real="$root_real"
 if [ -z "$task_file" ]; then
-  inferred_task=$(python3 -I -S - "$root_real" "$HOME/work_logs" <<'PY'
+  inferred_task=$(python3 -I -S - "$root_real" "$HOME/work_logs" "$done_task_file" <<'PY'
 from __future__ import annotations
 import hashlib
 import json
@@ -431,10 +437,18 @@ import subprocess
 import sys
 from pathlib import Path
 roots: list[Path] = []
-for root_arg in sys.argv[1:]:
+for root_arg in sys.argv[1:-1]:
     root = Path(root_arg).resolve()
     if root not in roots:
         roots.append(root)
+selected_done_task = sys.argv[-1]
+selected_done_path: Path | None = None
+if selected_done_task:
+    selected_done_path = Path(selected_done_task)
+    if not selected_done_path.is_absolute():
+        print("--done-task-file requires an absolute path", file=sys.stderr)
+        raise SystemExit(2)
+    selected_done_path = selected_done_path.resolve(strict=False)
 TASK_SECTIONS = {"current", "human pending", "low priority", "previous"}
 ACTIVE_TASK_STATUSES = {"running", "long_running", "blocked"}
 RUNNING_TASK_STATUSES = {"running", "long_running"}
@@ -443,9 +457,13 @@ TARGET_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])([A-Za-z][A-Za-z0-9_-]*:\d+(?:\
 CLOSE_NOTE_RE = re.compile(
     r"^\(manager closed Codex agent \d{2}-\d{2} \d{2}:\d{2} [A-Za-z0-9_+\-]+; "
     r"tmux target `([^`\r\n]+)`; "
-    r"session_id: `[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}`\.\)$",
+    r"(?:session_id: `[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}`|"
+    r"Codex session id not found in captured tmux output)\.\)$",
     re.MULTILINE,
 )
+ENVELOPE_TAG_RE = re.compile(r"<(/?)(manager_delegation|human_instruction|agent_message)\b([^>\r\n]*)>")
+ENVELOPE_START_RE = re.compile(r"<(/?)(manager_delegation|human_instruction|agent_message)\b")
+MANAGER_ASSIGNMENT_ATTRIBUTES_RE = re.compile(r' from="[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?"')
 MAX_ROUTE_FILE_BYTES = 64 * 1024 * 1024
 route_evidence: dict[str, dict[str, object]] = {}
 
@@ -507,6 +525,35 @@ def canonical_tmux_target(target: str) -> tuple[str, int, int] | None:
 def same_tmux_target(left: str, right: str) -> bool:
     left_target = canonical_tmux_target(left)
     return left_target is not None and left_target == canonical_tmux_target(right)
+
+def has_top_level_manager_assignment(text: str) -> bool:
+    """Recognize one complete canonical assignment outside nested envelopes."""
+    stack: list[tuple[str, bool]] = []
+    position = 0
+    found_assignment = False
+    while start := ENVELOPE_START_RE.search(text, position):
+        match = ENVELOPE_TAG_RE.match(text, start.start())
+        if match is None:
+            return False
+        position = match.end()
+        closing, name, attributes = match.groups()
+        if closing:
+            if attributes or not stack or stack[-1][0] != name:
+                return False
+            _, assignment = stack.pop()
+            if assignment:
+                found_assignment = True
+            continue
+        if stack:
+            return False
+        line_start = match.start() == 0 or text[match.start() - 1] == "\n"
+        assignment = (
+            line_start
+            and name == "manager_delegation"
+            and MANAGER_ASSIGNMENT_ATTRIBUTES_RE.fullmatch(attributes) is not None
+        )
+        stack.append((name, assignment))
+    return not stack and found_assignment
 
 def current_tmux_target() -> str:
     if shutil.which("tmux") is None:
@@ -578,15 +625,17 @@ def task_refs(root: Path, sections: set[str]) -> list[tuple[Path, tuple[str, ...
             refs.append((path, listed_targets))
     return refs
 
-def exact_done_previous_candidates(root: Path, current: str) -> tuple[list[Path], list[Path]]:
-    """Return exact close-compatible done custody, plus malformed candidates."""
+def exact_done_previous_candidates(root: Path, current: str) -> tuple[list[Path], list[Path], list[Path], list[Path]]:
+    """Return never-closed, reassigned, closed, and malformed done custody."""
     todo = root / "TODO.md"
     text = route_text(todo)
     if text is None:
-        return [], []
+        return [], [], [], []
     lines = text.splitlines()
     previous_headers = sum(line == "previous:" for line in lines)
     candidates: list[Path] = []
+    reassigned: list[Path] = []
+    closed: list[Path] = []
     invalid: list[Path] = []
     for candidate, _listed_targets in task_refs(root, TASK_SECTIONS):
         metadata = parse_frontmatter(candidate)
@@ -613,16 +662,38 @@ def exact_done_previous_candidates(root: Path, current: str) -> tuple[list[Path]
         if candidate_text is None:
             invalid.append(candidate)
             continue
-        if any(same_tmux_target(closed_target, runat) for closed_target in CLOSE_NOTE_RE.findall(candidate_text)):
+        close_matches = list(CLOSE_NOTE_RE.finditer(candidate_text))
+        if close_matches:
+            if has_top_level_manager_assignment(candidate_text[close_matches[-1].end():]):
+                reassigned.append(candidate)
+                continue
+            closed.append(candidate)
             continue
         candidates.append(candidate)
-    return candidates, invalid
+    return candidates, reassigned, closed, invalid
 
 current = current_tmux_target()
 if not current:
     print("current tmux pane/window could not be identified; cannot infer report task", file=sys.stderr)
     raise SystemExit(2)
+if selected_done_path is not None:
+    for root in roots:
+        for candidate, listed_targets in task_refs(root, TASK_SECTIONS):
+            if listed_targets and not any(same_tmux_target(target, current) for target in listed_targets):
+                continue
+            metadata = parse_frontmatter(candidate)
+            if metadata is None or metadata.get("status") not in ACTIVE_TASK_STATUSES:
+                continue
+            runat = metadata.get("runat", "")
+            if TARGET_RE.fullmatch(runat) and same_tmux_target(runat, current):
+                print("--done-task-file cannot select a done task while this pane has an active task", file=sys.stderr)
+                raise SystemExit(2)
 for root in roots:
+    if selected_done_path is not None:
+        try:
+            selected_done_path.relative_to(root)
+        except ValueError:
+            continue
     matches: list[Path] = []
     running_matches: list[Path] = []
     for candidate, listed_targets in task_refs(root, TASK_SECTIONS):
@@ -652,10 +723,26 @@ for root in roots:
         choices = ", ".join(str(path.relative_to(root)) for path in matches)
         print(f"multiple active task files match tmux target {current}: {choices}", file=sys.stderr)
         raise SystemExit(2)
-    done_matches, invalid_done_matches = exact_done_previous_candidates(root, current)
+    never_closed_done_matches, reassigned_done_matches, closed_done_matches, invalid_done_matches = exact_done_previous_candidates(root, current)
+    done_matches = [*never_closed_done_matches, *reassigned_done_matches]
     if invalid_done_matches:
         choices = ", ".join(str(path.relative_to(root)) for path in invalid_done_matches)
         print(f"done task TODO custody is not exact for tmux target {current}: {choices}", file=sys.stderr)
+        raise SystemExit(2)
+    if selected_done_path is not None:
+        if selected_done_path not in done_matches:
+            continue
+        if len(done_matches) + len(closed_done_matches) < 2:
+            print("--done-task-file requires multiple exact done tasks on the current target", file=sys.stderr)
+            raise SystemExit(2)
+        done_metadata = parse_frontmatter(selected_done_path)
+        if done_metadata is None:
+            raise RuntimeError("selected done task routing evidence disappeared")
+        print(f"{root}\t{selected_done_path.relative_to(root)}\t{done_metadata['runat']}\t{evidence_json()}")
+        raise SystemExit(0)
+    if reassigned_done_matches and closed_done_matches:
+        choices = ", ".join(str(path.relative_to(root)) for path in [*done_matches, *closed_done_matches])
+        print(f"multiple done task files match tmux target {current}: {choices}", file=sys.stderr)
         raise SystemExit(2)
     if len(done_matches) == 1:
         done_metadata = parse_frontmatter(done_matches[0])
@@ -667,6 +754,9 @@ for root in roots:
         choices = ", ".join(str(path.relative_to(root)) for path in done_matches)
         print(f"multiple done task files match tmux target {current}: {choices}", file=sys.stderr)
         raise SystemExit(2)
+if selected_done_path is not None:
+    print("--done-task-file is not an exact done task on the current target", file=sys.stderr)
+    raise SystemExit(2)
 print(f"could not infer task file for tmux target {current}", file=sys.stderr)
 raise SystemExit(2)
 PY
@@ -975,6 +1065,8 @@ receiver_environment=(OMO_REPORT_RECEIVER_BOOTSTRAP=1 PYTHONDONTWRITEBYTECODE=1)
 if [ "$describe" -eq 1 ]; then
   receiver_environment+=("OMO_REPORT_DESCRIPTION_ROUTE_RETRY_FD=$description_route_retry_fd")
 fi
+selected_done_args=()
+if [ -n "$done_task_file" ]; then selected_done_args+=(--selected-done-task); fi
 exec env "${receiver_environment[@]}" python3 -I -S - "$receiver_path" "$pending_digest_path" "$task_lock_path" "$helper_path" \
   --mode "$mode" \
   --helper "$helper_path" \
@@ -1000,7 +1092,8 @@ exec env "${receiver_environment[@]}" python3 -I -S - "$receiver_path" "$pending
   --tmux-window-index "$tmux_window_index" \
   --tmux-pane-index "$tmux_pane_index" \
   --tmux-pane-id "$tmux_pane_id" \
-  --tmux-window-name "$tmux_window_name" <<'PY'
+  --tmux-window-name "$tmux_window_name" \
+  "${selected_done_args[@]}" <<'PY'
 from __future__ import annotations
 
 import hashlib

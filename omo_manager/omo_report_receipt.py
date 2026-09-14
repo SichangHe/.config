@@ -241,6 +241,7 @@ class Arguments:
     tmux_pane_index: str
     tmux_pane_id: str
     tmux_window_name: str
+    selected_done_task: bool
     root_retained_evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | None = None
 
 
@@ -943,6 +944,7 @@ def parse_args(argv: list[str] | None = None) -> Arguments:
     _ = parser.add_argument("--tmux-pane-index", default="")
     _ = parser.add_argument("--tmux-pane-id", default="")
     _ = parser.add_argument("--tmux-window-name", default="")
+    _ = parser.add_argument("--selected-done-task", action="store_true")
     _ = parser.add_argument("--root-retained-session-transcript", type=Path)
     _ = parser.add_argument("--root-retained-session-prefix-sha256", default="")
     _ = parser.add_argument("--root-retained-session-prefix-size-bytes", default=0, type=int)
@@ -1025,6 +1027,7 @@ def parse_args(argv: list[str] | None = None) -> Arguments:
         parsed.tmux_pane_index,
         parsed.tmux_pane_id,
         parsed.tmux_window_name,
+        parsed.selected_done_task,
         evidence,
     )
 
@@ -1990,6 +1993,7 @@ def _build_plan_from_message(
         and task_snapshot[0].get("status") == "done"
         and not plan.authenticated_recovery
         and not allow_archived_done
+        and not args.selected_done_task
     ):
         raise ReceiptError("done task routing requires an authenticated committed report allocation")
     transfer_size_probe = {**transfer_contract(plan), "commitment_id": "0" * 64, "transfer_id": "0" * 64}
@@ -8101,6 +8105,7 @@ def export_archived_consumed_report(
         tmux_pane_index="",
         tmux_pane_id="",
         tmux_window_name="",
+        selected_done_task=False,
         root_retained_evidence=root_retained_evidence,
     )
     verified_message, message_identity, message_fd = open_regular_file_snapshot(
