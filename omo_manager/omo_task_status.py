@@ -7125,29 +7125,64 @@ def finish_closed_done(args: Args, path: Path, text: str, before: os.stat_result
 
 
 # 🧑 "add the narrow supported identity- and evidence-preserving recovery path for this exact class; fail closed for unrelated exited shells"
-def interrupted_done_command_matches(command: object, args: Args, path: Path) -> bool:
-    """Recognize only a normal done invocation for this task and completion key."""
+def interrupted_helper_matches(helper: str, expected: Path) -> bool:
+    """Bind a recorded executable token to one local helper file."""
 
-    if not isinstance(command, list) or command[:2] != ["/usr/bin/zsh", "-lc"] or len(command) != 3 or not isinstance(command[2], str):
-        return False
+    if "/" in helper:
+        helper_path = Path(helper).expanduser()
+        if not helper_path.is_absolute():
+            helper_path = Path(__file__).resolve().parents[1] / helper_path
+    else:
+        helper_path = Path(shutil.which(helper) or "")
     try:
-        tokens = shlex.split(command[2])
-    except ValueError:
+        return helper_path.resolve() == expected.resolve()
+    except OSError:
         return False
+
+
+def interrupted_command_tokens(script: str) -> list[str] | None:
+    """Parse one optionally timeout-wrapped helper invocation."""
+
+    try:
+        tokens = shlex.split(script)
+    except ValueError:
+        return None
     if tokens and Path(tokens[0]).name == "timeout":
         if len(tokens) < 3 or re.fullmatch(r"[1-9][0-9]*(?:\.[0-9]+)?[smhd]?", tokens[1]) is None:
-            return False
+            return None
         tokens = tokens[2:]
     if tokens and Path(tokens[0]).name in {"python", "python3"}:
         tokens = tokens[1:]
+    return tokens
+
+
+def interrupted_completion_assignment(script: str, args: Args) -> str | None:
+    """Authenticate the exact static SHA-256 assignment used by the interrupted owner."""
+
+    prefix = "completion_key=$(printf '%s' "
+    suffix = " | sha256sum | cut -d' ' -f1)"
+    if not script.startswith(prefix) or not script.endswith(suffix):
+        return None
+    quoted = script[len(prefix) : -len(suffix)]
+    if len(quoted) < 2 or quoted[0] != "'" or quoted[-1] != "'" or "'" in quoted[1:-1]:
+        return None
+    try:
+        values = shlex.split(quoted)
+    except ValueError:
+        return None
+    if len(values) != 1 or hashlib.sha256(values[0].encode()).hexdigest() != args.completion_key:
+        return None
+    return "$completion_key"
+
+
+def interrupted_done_script_matches(script: str, args: Args, path: Path, expected_key: str) -> bool:
+    """Recognize one normal done helper invocation for exact bound inputs."""
+
+    tokens = interrupted_command_tokens(script)
     if not tokens:
         return False
     helper = tokens.pop(0)
-    helper_path = Path(helper).expanduser() if "/" in helper else Path(shutil.which(helper) or "")
-    try:
-        if helper_path.resolve() != Path(__file__).resolve():
-            return False
-    except OSError:
+    if not interrupted_helper_matches(helper, Path(__file__)):
         return False
     root = DEFAULT_ROOT.resolve()
     root_seen = False
@@ -7173,12 +7208,68 @@ def interrupted_done_command_matches(command: object, args: Args, path: Path) ->
             continue
         positionals.append(token)
         index += 1
-    if completion_key != args.completion_key or root != args.root or len(positionals) != 2 or positionals[1] != "done":
+    if completion_key != expected_key or root != args.root or len(positionals) != 2 or positionals[1] != "done":
         return False
     try:
         return task_path(root, Path(positionals[0])) == path
     except (OSError, TaskFrontmatterError):
         return False
+
+
+def interrupted_done_command_matches(command: object, args: Args, path: Path) -> bool:
+    """Recognize only a normal done invocation for this task and completion key."""
+
+    if not isinstance(command, list) or command[:2] != ["/usr/bin/zsh", "-lc"] or len(command) != 3 or not isinstance(command[2], str):
+        return False
+    assignment, separator, invocation = command[2].partition("; ")
+    if separator:
+        key = interrupted_completion_assignment(assignment, args)
+        return key is not None and interrupted_done_script_matches(invocation, args, path, key)
+    return interrupted_done_script_matches(command[2], args, path, args.completion_key)
+
+
+def interrupted_delivery_command_matches(item: dict[str, object], args: Args, path: Path) -> bool:
+    """Recognize the exact combined helper script that separately delivered completion."""
+
+    command = item.get("command")
+    expected_cwd = Path(__file__).resolve().parents[1].as_uri()
+    if (
+        not isinstance(command, list)
+        or command[:2] != ["/usr/bin/zsh", "-lc"]
+        or len(command) != 3
+        or not isinstance(command[2], str)
+        or item.get("cwd") != expected_cwd
+    ):
+        return False
+    lines = command[2].splitlines()
+    if len(lines) != 4 or lines[0] != "set -eu":
+        return False
+    key = interrupted_completion_assignment(lines[1], args)
+    tokens = interrupted_command_tokens(lines[2])
+    if key is None or not tokens:
+        return False
+    helper = tokens.pop(0)
+    if not interrupted_helper_matches(helper, Path(__file__).with_name("omo_completion_email.py")):
+        return False
+    options: dict[str, str] = {}
+    index = 0
+    allowed = {"--root", "--task", "--outcome", "--semantic-key", "--refresh-unattempted-claim"}
+    while index < len(tokens):
+        option = tokens[index]
+        if option not in allowed or option in options or index + 1 >= len(tokens):
+            return False
+        options[option] = tokens[index + 1]
+        index += 2
+    if set(options) != allowed or options["--outcome"] != "task done" or options["--semantic-key"] != key:
+        return False
+    if SHA256_RE.fullmatch(options["--refresh-unattempted-claim"]) is None:
+        return False
+    try:
+        root = Path(options["--root"]).expanduser().resolve(strict=False)
+        task = task_path(root, Path(options["--task"]))
+    except (OSError, TaskFrontmatterError):
+        return False
+    return root == args.root and task == path and interrupted_done_script_matches(lines[3], args, path, key)
 
 
 def interrupted_done_session_payload(args: Args, path: Path) -> bytes:
@@ -7250,7 +7341,7 @@ def validate_interrupted_done_session(args: Args, path: Path, payload: bytes) ->
         if isinstance(item, dict) and item.get("type") == "CommandExecution":
             executions.append((index, item))
     delivery_output = re.compile(r"Emailed the human\nMessage-ID: <[^<>\s]+>\nomo_task_status\.py: responsible-owner completion email requested; retry after owner delivery\n\Z")
-    delivered = [
+    normal_delivered = [
         index
         for index, item in executions
         if interrupted_done_command_matches(item.get("command"), args, path)
@@ -7258,6 +7349,19 @@ def validate_interrupted_done_session(args: Args, path: Path, payload: bytes) ->
         and item.get("exit_code") == 2
         and isinstance(item.get("stdout"), str)
         and delivery_output.fullmatch(str(item["stdout"])) is not None
+        and item.get("stderr") == ""
+        and item.get("aggregated_output") == item.get("stdout")
+        and item.get("formatted_output") == item.get("stdout")
+    ]
+    separate_delivery_output = re.compile(r"Emailed the human\nMessage-ID: <[^<>\s]+>\n\Z")
+    separate_delivered = [
+        index
+        for index, item in executions
+        if interrupted_delivery_command_matches(item, args, path)
+        and item.get("status") == "failed"
+        and item.get("exit_code") == -1
+        and isinstance(item.get("stdout"), str)
+        and separate_delivery_output.fullmatch(str(item["stdout"])) is not None
         and item.get("stderr") == ""
         and item.get("aggregated_output") == item.get("stdout")
         and item.get("formatted_output") == item.get("stdout")
@@ -7270,7 +7374,11 @@ def validate_interrupted_done_session(args: Args, path: Path, payload: bytes) ->
         and item.get("exit_code") == -1
         and all(item.get(field) == "" for field in ("stdout", "stderr", "aggregated_output", "formatted_output"))
     ]
-    if len(delivered) != 1 or not interrupted or interrupted[-1] != len(records) - 1 or delivered[0] >= interrupted[-1]:
+    delivered = normal_delivered + separate_delivered
+    separate_final_cwd = not separate_delivered or executions[-1][1].get("cwd") == Path(__file__).resolve().parents[1].as_uri()
+    final_interrupted = bool(interrupted) and interrupted[-1] == len(records) - 1
+    unique_separate_interruption = not separate_delivered or len(interrupted) == 1
+    if len(delivered) != 1 or not final_interrupted or delivered[0] >= interrupted[-1] or not separate_final_cwd or not unique_separate_interruption:
         raise TaskFrontmatterError("interrupted completion transcript lacks one delivery followed by the final killed normal done invocation.")
 
 

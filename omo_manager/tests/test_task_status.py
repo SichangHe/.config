@@ -8088,6 +8088,174 @@ omo_task_status.py: responsible-owner completion email requested; retry after ow
                     self.assertEqual(blocked, path.read_text(encoding="utf-8"))
                     self.assertEqual(todo_original, todo.read_text(encoding="utf-8"))
 
+    def test_cli_recovers_separately_delivered_interrupted_completion(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        semantic = "source1858-test"
+        completion_key = hashlib.sha256(semantic.encode()).hexdigest()
+        mutations = (
+            "success",
+            "success-default-root",
+            "key",
+            "task",
+            "root",
+            "helper",
+            "outcome",
+            "delivery-state",
+            "reverse",
+            "missing",
+            "duplicate",
+            "final-cwd",
+            "final-replay",
+            "later",
+            "drift",
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                state = root / "state"
+                codex_home = root / "codex"
+                path = root / "task.md"
+                original = f"""{task_frontmatter(runat="cfg:1", session_id=session_id)}Report results directly to the Human.
+body
+"""
+                path.write_text(original, encoding="utf-8")
+                todo = root / "TODO.md"
+                todo_original = "current:\ntask.md cfg:1\n\nprevious:\nother.md\n"
+                todo.write_text(todo_original, encoding="utf-8")
+                environment = {
+                    "OMO_MANAGER_STATE_DIR": str(state),
+                    "CODEX_HOME": str(codex_home),
+                }
+                with patch.dict("os.environ", environment):
+                    plan = build_completion_email(root, path, original, "task done", semantic_key=completion_key)
+                    assert plan is not None
+                    self.assertTrue(claim_completion_email(plan))
+                    used = state / "completion-email-authorization-used"
+                    used.mkdir(mode=0o700)
+                    used_marker = used / plan.key
+                    used_marker.write_text(f"{plan.target}\t{path.name}\n", encoding="utf-8")
+                    used_marker.chmod(0o600)
+                    mark_completion_email_delivered(plan)
+                    if mutation == "delivery-state":
+                        (state / "completion-notice-delivered" / plan.notice_key).unlink()
+                    blocked = f"""{task_frontmatter(status="blocked", blocked_on=DONE_CLOSE_IN_PROGRESS, runat="cfg:1", session_id=session_id)}Report results directly to the Human.
+body
+manager note
+"""
+                    path.write_text(blocked, encoding="utf-8")
+                    session_path = codex_home / "sessions/2026/09/14" / f"rollout-test-{session_id}.jsonl"
+                    session_path.parent.mkdir(parents=True)
+                    assignment_key = semantic if mutation != "key" else "another-key"
+                    assignment = f"completion_key=$(printf '%s' '{assignment_key}' | sha256sum | cut -d' ' -f1)"
+                    completion_helper = Path(__file__).parents[1] / "omo_completion_email.py"
+                    helper = completion_helper if mutation != "helper" else Path(__file__).parents[1] / "omo_report.sh"
+                    delivery_root = root if mutation != "root" else root / "other"
+                    delivery_task = "task.md" if mutation != "task" else "other.md"
+                    outcome = "task done" if mutation != "outcome" else "task blocked"
+                    done_root_option = "" if mutation == "success-default-root" else f" --root {root}"
+                    combined = "\n".join(
+                        (
+                            "set -eu",
+                            assignment,
+                            f"timeout 120s {helper} --root {delivery_root} --task {delivery_task} --outcome '{outcome}' --semantic-key \"$completion_key\" --refresh-unattempted-claim {'b' * 64}",
+                            f"timeout 120s omo_manager/omo_task_status.py{done_root_option} --completion-key \"$completion_key\" task.md done",
+                        )
+                    )
+                    final = f"{assignment}; timeout 120s omo_manager/omo_task_status.py{done_root_option} --completion-key \"$completion_key\" task.md done"
+                    delivery_output = "Emailed the human\nMessage-ID: <123.456@example.test>\n"
+                    delivery_record = {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "item_completed",
+                            "item": {
+                                "type": "CommandExecution",
+                                "command": ["/usr/bin/zsh", "-lc", combined],
+                                "cwd": Path(__file__).parents[2].resolve().as_uri(),
+                                "status": "failed",
+                                "exit_code": -1,
+                                "stdout": delivery_output,
+                                "stderr": "",
+                                "aggregated_output": delivery_output,
+                                "formatted_output": delivery_output,
+                            },
+                        },
+                    }
+                    final_record = {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "item_completed",
+                            "item": {
+                                "type": "CommandExecution",
+                                "command": ["/usr/bin/zsh", "-lc", final],
+                                "cwd": (root / "other").as_uri() if mutation == "final-cwd" else Path(__file__).parents[2].resolve().as_uri(),
+                                "status": "failed",
+                                "exit_code": -1,
+                                "stdout": "",
+                                "stderr": "",
+                                "aggregated_output": "",
+                                "formatted_output": "",
+                            },
+                        },
+                    }
+                    records = [
+                        {"type": "session_meta", "payload": {"id": session_id}},
+                        delivery_record,
+                        final_record,
+                    ]
+                    if mutation == "reverse":
+                        records[1:] = [final_record, delivery_record]
+                    elif mutation == "missing":
+                        records.remove(delivery_record)
+                    elif mutation == "duplicate":
+                        records.insert(2, delivery_record)
+                    elif mutation == "final-replay":
+                        records.insert(2, final_record)
+                    elif mutation == "later":
+                        records.append({"type": "event_msg", "payload": {"type": "turn_aborted"}})
+                    session_payload = "".join(f"{json.dumps(record)}\n" for record in records)
+                    session_path.write_text(session_payload, encoding="utf-8")
+                    session_path.chmod(0o644)
+                    args = StatusArgs(
+                        root,
+                        Path("task.md"),
+                        "done",
+                        "",
+                        session_id=session_id,
+                        recover_exited_shell_done=True,
+                        pane_id="%42",
+                        session_transcript=session_path,
+                        session_transcript_sha256=hashlib.sha256(session_payload.encode()).hexdigest(),
+                        completion_key=completion_key,
+                    )
+
+                    def close_shell(_target: str, _pane: str, _session: str, _key: str, *, evidence_is_current: Callable[[], bool]) -> None:
+                        if mutation == "drift":
+                            with session_path.open("a", encoding="utf-8") as output:
+                                output.write("{}\n")
+                            if not evidence_is_current():
+                                raise TaskFrontmatterError("expected concurrent evidence rejection")
+                        self.assertTrue(evidence_is_current())
+
+                    stderr = io.StringIO()
+                    with (
+                        patch("omo_manager.omo_task_status.DEFAULT_ROOT", root) if mutation == "success-default-root" else nullcontext(),
+                        patch("omo_manager.omo_task_status.exact_pane_id", return_value="%42"),
+                        patch("omo_manager.omo_task_status.close_exited_codex_shell_with_completion_evidence", side_effect=close_shell) as close,
+                        redirect_stdout(io.StringIO()),
+                        redirect_stderr(stderr),
+                    ):
+                        expected = 0 if mutation in {"success", "success-default-root"} else 2
+                        self.assertEqual(expected, run(args), stderr.getvalue())
+                if mutation in {"success", "success-default-root"}:
+                    close.assert_called_once()
+                    self.assertIn("status: done\nrunat: cfg:1", path.read_text(encoding="utf-8"))
+                    self.assertEqual("current:\n\nprevious:\ntask.md cfg:1\nother.md\n", todo.read_text(encoding="utf-8"))
+                else:
+                    if mutation != "drift":
+                        close.assert_not_called()
+                    self.assertEqual(blocked, path.read_text(encoding="utf-8"))
+                    self.assertEqual(todo_original, todo.read_text(encoding="utf-8"))
+
     def test_cli_recovers_only_exact_done_live_post_interrupt_state(self) -> None:
         session_id = "11111111-2222-3333-4444-555555555555"
         for blocker, recorded_session, expected_code in (
