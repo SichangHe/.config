@@ -24,5 +24,7 @@
   - pinned same-pane Codex-to-Cursor replacement for `ops_manager.md` at `wl:3`
 - `manager-replace.md`
   - digest-bound atomic close, active-child migration, rollback, and unlaunched successor publication
+- `source1923-manager-adopt.md`
+  - one-shot guarded adoption of the already-live Source-1923 DeepWiki successor
 - `amh-route-launch.md`
   - AMH Human-email route worker launch after watcher commit

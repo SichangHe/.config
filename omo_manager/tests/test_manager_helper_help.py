@@ -148,6 +148,18 @@ class ManagerHelperHelpTests(unittest.TestCase):
         self.assertIn("dirty unknown", replace_help)
         self.assertIn("17-17", replace_help)
 
+    def test_source1923_manager_adopt_help_exposes_two_phase_transaction(self) -> None:
+        top = helper_help("omo_source1923_manager_adopt.py")
+        self.assertIn("exact live Source-1923 DeepWiki successor", top)
+        self.assertIn("prepare", top)
+        self.assertIn("execute", top)
+        prepare = helper_help("omo_source1923_manager_adopt.py", "prepare")
+        execute = helper_help("omo_source1923_manager_adopt.py", "execute")
+        self.assertIn("--authority-envelope-sha256", prepare)
+        self.assertIn("--live-node", prepare)
+        self.assertIn("--packet-sha256", execute)
+        self.assertIn("--review-sha256", execute)
+
 
 if __name__ == "__main__":
     _ = unittest.main()
