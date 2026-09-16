@@ -325,7 +325,7 @@ def parse_args(argv: list[str]) -> Args:
   worker's initial prompt argument. Every new launch requires --model and
   --reasoning-effort; model selection in --codex-flag is rejected. Pass
   --is-manager for submanager launches. Every fresh launch captures the command
-  and output from getagentsmd; manager launches also capture the common and
+  and output from getagentsmd plus the agent-work document; manager launches also capture the common and
   submanager instruction documents. Do not repeat those instructions. For a
   launch caused by email, pass
   --human-email-file and the exact relevant --human-email-lines. Keep

@@ -16,7 +16,10 @@ class AgentInstructionsTests(unittest.TestCase):
             command.chmod(0o700)
             with patch.object(instructions, "GETAGENTSMD", command):
                 result = instructions.launch_instructions()
-        self.assertEqual(f"$ {command}\nroot instructions\n".encode(), result)
+        self.assertEqual(
+            f"$ {command}\nroot instructions\n\n$ {command} get agent_work\nroot instructions\n".encode(),
+            result,
+        )
 
     def test_manager_transcript_loads_common_and_role_documents_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -26,7 +29,8 @@ class AgentInstructionsTests(unittest.TestCase):
             with patch.object(instructions, "GETAGENTSMD", command):
                 result = instructions.launch_instructions("submanager").decode()
         self.assertEqual(
-            f"$ {command}\nroot\n\n$ {command} get agent_manager\nget agent_manager\n\n"
+            f"$ {command}\nroot\n\n$ {command} get agent_work\nget agent_work\n\n"
+            f"$ {command} get agent_manager\nget agent_manager\n\n"
             f"$ {command} get agent_manager_core\nget agent_manager_core\n\n"
             f"$ {command} get submanager\nget submanager\n",
             result,

@@ -44,6 +44,13 @@ NO_CONTACT_RE = re.compile(
 )
 MANAGER_ONLY_RE = re.compile(r"\b(?:report|return) only\b[^.\n]{0,100}\b(?:manager|submanager)\b|\bmanager[- ]only reports?\b", re.IGNORECASE)
 DIRECT_HUMAN_REPORT_RE = re.compile(r"\b(?:email|report|respond|write)\b[^.\n]{0,100}\b(?:directly to )?(?:the )?human\b", re.IGNORECASE)
+# 🧑 Human source `manager_mail/85c5dff58359-1926.txt:1-3`: "I haven't gotten emails of pending items created/closed by agents"
+PENDING_ITEM_NOTICE_OUTCOMES = {
+    "pending item created",
+    "pending item completed",
+    "pending item cancelled",
+    "pending item removed after verification",
+}
 SOURCE1241_REF = "manager_mail/85c5dff58359-1241.txt:1-7"
 SOURCE1241_TASK = "hmanager_replace_fix.md"
 SOURCE1241_HUMAN = """Subject: Re: Why recent agent replies were missing
@@ -357,8 +364,9 @@ def build_completion_email(
         if contact_policy is not None:
             policy_text = text.replace(SOURCE1241_META_SPAN, "", 1)
     task_close = outcome == "task done"
+    pending_item_notice = outcome in PENDING_ITEM_NOTICE_OUTCOMES
     contact_forbidden = NO_CONTACT_RE.search(policy_text) is not None or (
-        MANAGER_ONLY_RE.search(policy_text) is not None and DIRECT_HUMAN_REPORT_RE.search(policy_text) is None
+        not pending_item_notice and MANAGER_ONLY_RE.search(policy_text) is not None and DIRECT_HUMAN_REPORT_RE.search(policy_text) is None
     )
     if (
         metadata is None
@@ -367,7 +375,7 @@ def build_completion_email(
         or metadata.runat.partition(":")[0].startswith("h")
         or guest_hees_target(metadata.runat)
         or contact_forbidden
-        or (not task_close and DIRECT_HUMAN_REPORT_RE.search(policy_text) is None)
+        or (not task_close and not pending_item_notice and DIRECT_HUMAN_REPORT_RE.search(policy_text) is None)
     ):
         return None
     relative = task.resolve().relative_to(root.resolve()).as_posix()
