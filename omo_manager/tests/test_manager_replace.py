@@ -128,6 +128,14 @@ SOURCE1601_AUTHORITY = (
     b"> access controls; replacing the manager does not authorize bypassing usage\r\n"
     b"> limits.\r\n>\r\n"
 )
+SOURCE1938_AUTHORITY = (
+    b"Subject: Re: Accepted: DW status and collaborator-meeting follow-up \xe2\x80\x94 dw_gen_submgr.md\n\n"
+    b"Replace this agent\r\n"
+    b"They did not respond\r\n\r\n"
+    b"> spawn an agent to dig through my questions regarding collaborator meeting to do items and so on and my "
+    b"follow-ups and actually start those agents to handle those items. Previous agents completely fucked everything "
+    b"up and did not get anything. done\r\n\r\n"
+)
 HUMAN_QUEUE = manager_replace.SOURCE1611_OLD_QUEUE
 SOURCE1597_QUEUE = manager_replace.SOURCE1597_OLD_QUEUE
 
@@ -719,6 +727,200 @@ class ManagerReplaceTests(unittest.TestCase):
             ),
         )
         return root, exact, protected
+
+    def source1938_fixture(self, base: Path) -> tuple[Path, Args, tuple[PaneIdentity, ...], str]:
+        root = base / "work_logs"
+        root.mkdir(mode=0o700)
+        private = base / "private"
+        private.mkdir(mode=0o700)
+        (root / "manager_mail").mkdir(mode=0o700)
+        (root / "202608").mkdir(mode=0o700)
+
+        old = task_text(
+            status="blocked",
+            runat=manager_replace.SOURCE1938_OLD_TARGET,
+            managerat=manager_replace.SOURCE1938_PARENT_TARGET,
+            is_manager=True,
+            pending=manager_replace.SOURCE1938_OLD_QUEUE,
+            body="Agent-authored narrative must not reach the successor.\n",
+        )
+        (root / manager_replace.SOURCE1938_TASK).write_text(old, encoding="utf-8")
+
+        child_specs = (
+            (manager_replace.SOURCE1938_LIVE_SHARED_TASK, "long_running", "dw:33", ("Preserve repository cleanup.",), True, SESSION_ID),
+            ("collab_recovery.md", "long_running", "dw:13", ("Preserve verified meeting follow-ups.",), True, "aaaaaaaa-2222-4333-8444-555555555555"),
+            ("dw_browser_explore.md", "running", "dw:12", ("Preserve browser exploration.",), False, ""),
+            ("dw_gen_submgr.md", "blocked", "dw:32", (), True, ""),
+            ("source1908_zoom_paper_manager.md", "long_running", "dw:3", (), True, "bbbbbbbb-2222-4333-8444-555555555555"),
+            ("202608/dw_production_mgr.md", "blocked", "dw:36", (), True, ""),
+        )
+        children: list[ChildPin] = []
+        for task, status, target, queue, is_manager, session in child_specs:
+            data = task_text(
+                status=status,
+                runat=target,
+                managerat=manager_replace.SOURCE1938_OLD_TARGET,
+                is_manager=is_manager,
+                pending=queue,
+                session_id=session,
+            )
+            path = root / task
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path.write_text(data, encoding="utf-8")
+            children.append(ChildPin(task, sha(data), manager_replace.json_digest(list(queue))))
+
+        nested_specs = (
+            ("source1847_cc_rebuild.md", "running", "cc-through-july-2026:1", "dw:33", ("Preserve the complete Source-1847 lane.",)),
+            ("meeting_open_audit.md", "running", "dw:57", "dw:13", ("Audit open collaborator-meeting items.",)),
+            ("202608/dw_rescore_pages.md", "blocked", "dw:37", "dw:36", ()),
+        )
+        for task, status, target, manager, queue in nested_specs:
+            data = task_text(status=status, runat=target, managerat=manager, is_manager=False, pending=queue)
+            path = root / task
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path.write_text(data, encoding="utf-8")
+
+        parent = task_text(
+            status="long_running",
+            runat=manager_replace.SOURCE1938_PARENT_TARGET,
+            managerat="hwl:0",
+            is_manager=True,
+            pending=("Coordinate the DW lifecycle owner.",),
+            session_id="cccccccc-2222-4333-8444-555555555555",
+        )
+        (root / "wl_manager.md").write_text(parent, encoding="utf-8")
+        envelope = task_text(
+            status="running",
+            runat=manager_replace.SOURCE1938_PREPARER,
+            managerat="config:27",
+            is_manager=False,
+            pending=("Prepare the exact guarded replacement.",),
+            body=(
+                f'<manager_delegation from="wl:1" authoritative="true" source="{manager_replace.SOURCE1938_FILE}:1-7" '
+                f'sha256="{manager_replace.SOURCE1938_SHA256}">\n'
+                "Perform Source-1938 as the sole current transaction authority and email thread.\n"
+                "</manager_delegation>\n"
+            ),
+        )
+        (root / manager_replace.SOURCE1938_ENVELOPE_TASK).write_text(envelope, encoding="utf-8")
+        authority_path = root / manager_replace.SOURCE1938_FILE
+        authority_path.write_bytes(SOURCE1938_AUTHORITY)
+        authority_path.chmod(0o600)
+        self.assertEqual(manager_replace.SOURCE1938_SHA256, hashlib.sha256(SOURCE1938_AUTHORITY).hexdigest())
+
+        historical = (
+            "---\nversion: v1.0.0\nstatus: blocked\n"
+            f"blocked_on: {manager_replace.SOURCE1938_HISTORICAL_BLOCKER}\n"
+            "runat: dw:33\ntool: codex\nmanagerat: dw:31\nis_manager: true\npending_task_items: []\n---\n"
+            "Preserve the Human hold and historical custody evidence exactly.\n"
+            "(manager closed Codex agent 09-12 09:43 PDT; tmux target `dw:33`; Codex session id not found.)\n"
+        )
+        (root / manager_replace.SOURCE1938_HISTORICAL_TASK).write_text(historical, encoding="utf-8")
+        archive = "current:\n\nprevious:\ndw_recon_live_mgr.md dw:33\n"
+        (root / manager_replace.SOURCE1938_ARCHIVE_INDEX).write_text(archive, encoding="utf-8")
+
+        todo_rows = [f"{manager_replace.SOURCE1938_TASK} {manager_replace.SOURCE1938_OLD_TARGET}"]
+        todo_rows.extend(f"{task} {target}" for task, _status, target, _queue, _manager, _session in child_specs)
+        todo_rows.extend(f"{task} {target}" for task, _status, target, _manager, _queue in nested_specs)
+        todo = "current:\n" + "\n".join(todo_rows) + "\n\nhuman pending:\n\nlow priority:\n\nprevious:\n"
+        (root / "TODO.md").write_text(todo, encoding="utf-8")
+
+        targets = tuple(
+            sorted(
+                (
+                    "cc-through-july-2026:1.0",
+                    "config:24.0",
+                    "dw:3.0",
+                    "dw:12.0",
+                    "dw:13.0",
+                    "dw:33.0",
+                    "dw:57.0",
+                    "other:1.0",
+                    "wl:1.0",
+                )
+            )
+        )
+        protected = tuple(
+            PaneIdentity(target, f"%{70 + index}", 7000 + index, 1100 + index)
+            for index, target in enumerate(targets)
+        )
+        protected_sha = manager_replace.json_digest(
+            [
+                {"target": identity.target, "pane_id": identity.pane_id, "pid": identity.pid, "start_ticks": identity.start_ticks}
+                for identity in protected
+            ]
+        )
+        historical_sha = sha(historical)
+        args = Args(
+            root=root,
+            old_task=manager_replace.SOURCE1938_TASK,
+            successor_task=manager_replace.SOURCE1938_SUCCESSOR_TASK,
+            old_target=manager_replace.SOURCE1938_OLD_TARGET,
+            new_target=manager_replace.SOURCE1938_SUCCESSOR_TARGET,
+            parent_target=manager_replace.SOURCE1938_PARENT_TARGET,
+            old_sha256=sha(old),
+            todo_sha256=sha(todo),
+            children=tuple(sorted(children, key=lambda child: child.task)),
+            old_pane_id="%42",
+            old_pane_pid=4242,
+            old_pane_start_ticks=999,
+            old_session_id=SESSION_ID,
+            authority_file=manager_replace.SOURCE1938_FILE,
+            authority_lines=LineRange(*manager_replace.SOURCE1938_LINES),
+            authority_sha256=manager_replace.SOURCE1938_SHA256,
+            authority_envelope_task=manager_replace.SOURCE1938_ENVELOPE_TASK,
+            authority_envelope_sha256=sha(envelope),
+            successor_item_lines=(LineRange(*manager_replace.SOURCE1938_ITEM_LINES),),
+            protected_targets=tuple(identity.target for identity in protected),
+            audit_output=private / "source1938-replace.json",
+            preparer=manager_replace.SOURCE1938_PREPARER,
+            reviewer="independent-reviewer",
+            old_queue_sha256=manager_replace.json_digest(list(manager_replace.SOURCE1938_OLD_QUEUE)),
+            protected_targets_sha256=protected_sha,
+            historical_task=manager_replace.SOURCE1938_HISTORICAL_TASK,
+            historical_sha256=historical_sha,
+            archive_index_sha256=sha(archive),
+        )
+        return root, args, protected, historical_sha
+
+    def source1938_runtime(
+        self,
+        state: dict[str, object],
+        args: Args,
+        protected: tuple[PaneIdentity, ...],
+        historical_sha: str,
+    ) -> contextlib.ExitStack:
+        def inventory() -> dict[str, PaneIdentity]:
+            result = {identity.target: identity for identity in protected}
+            if state.get("protected_drift"):
+                first = protected[0]
+                result[first.target] = replace(first, pid=first.pid + 1)
+            if state.get("new_live"):
+                result[manager_replace.canonical_target(args.new_target)] = PaneIdentity(
+                    manager_replace.canonical_target(args.new_target), "%99", 9999, 1999
+                )
+            if state.get("old_live", True):
+                result[manager_replace.canonical_target(args.old_target)] = PaneIdentity(
+                    manager_replace.canonical_target(args.old_target), "%42", 4242, 999
+                )
+            return result
+
+        def stopped(_args: object) -> str:
+            prior_calls = state.get("stop_calls")
+            state["stop_calls"] = prior_calls + 1 if isinstance(prior_calls, int) else 1
+            state["old_live"] = False
+            hook = state.get("stop_hook")
+            if callable(hook):
+                hook()
+            return SESSION_ID
+
+        stack = contextlib.ExitStack()
+        stack.enter_context(patch.object(manager_replace, "SOURCE1938_HISTORICAL_SHA256", historical_sha))
+        stack.enter_context(patch.object(manager_replace, "SOURCE1938_ENVELOPE_SHA256", args.authority_envelope_sha256))
+        stack.enter_context(patch.object(manager_replace, "pane_inventory", side_effect=inventory))
+        stack.enter_context(patch.object(manager_replace, "stop", side_effect=stopped))
+        stack.enter_context(patch.object(manager_replace, "has_bound_close_proof", side_effect=lambda *_args: not state.get("old_live", True)))
+        return stack
 
     def whole_tree_fixture(self, base: Path) -> tuple[Path, Args, dict[str, str]]:
         root, args, files = self.fixture(base)
@@ -2386,6 +2588,298 @@ class ManagerReplaceTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ReplaceError, "separate authenticated handoff-complete proof"):
                 manager_replace.validate_targets(changed)
+
+    def test_source1938_atomic_replacement_reconciles_history_and_preserves_complete_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            old_historical_body = manager_replace.task_body((root / args.historical_task).read_bytes())
+            original_children = {
+                child.task: parsed(root / child.task, root).pending_task_items
+                for child in args.children
+            }
+            with self.source1938_runtime({"old_live": True}, args, protected, historical_sha):
+                result = replace_manager(args)
+
+            self.assertIn("migrated 6 active child", result)
+            self.assertEqual("done", parsed(root / args.old_task, root).status)
+            successor = parsed(root / args.successor_task, root)
+            self.assertEqual("blocked", successor.status)
+            self.assertEqual(manager_replace.SOURCE1938_SUCCESSOR_TARGET, successor.runat)
+            self.assertEqual(
+                (manager_replace.SOURCE1938_GOAL, *manager_replace.SOURCE1938_OLD_QUEUE),
+                successor.pending_task_items,
+            )
+            self.assertNotIn("Agent-authored narrative", (root / args.successor_task).read_text(encoding="utf-8"))
+            for child in args.children:
+                value = parsed(root / child.task, root)
+                self.assertEqual(manager_replace.SOURCE1938_SUCCESSOR_TARGET, value.managerat)
+                self.assertEqual(original_children[child.task], value.pending_task_items)
+            self.assertEqual("dw:33", parsed(root / "source1847_cc_rebuild.md", root).managerat)
+            self.assertEqual("dw:13", parsed(root / "meeting_open_audit.md", root).managerat)
+            historical = parsed(root / args.historical_task, root)
+            self.assertEqual("blocked", historical.status)
+            self.assertEqual("retired", historical.runat)
+            self.assertEqual(old_historical_body, manager_replace.task_body((root / args.historical_task).read_bytes()))
+            self.assertIn("dw_recon_live_mgr.md retired", (root / manager_replace.SOURCE1938_ARCHIVE_INDEX).read_text(encoding="utf-8"))
+            self.assertEqual(
+                (root / manager_replace.SOURCE1938_LIVE_SHARED_TASK,),
+                manager_replace.authoritative_active_target_task_paths(root, manager_replace.SOURCE1938_SHARED_TARGET),
+            )
+            audit = json.loads(args.audit_output.read_text(encoding="utf-8"))
+            self.assertEqual("committed", audit["state"])
+            self.assertEqual(manager_replace.json_digest(audit["source1938_topology"]), audit["source1938_topology_sha256"])
+
+    def test_source1938_authority_binding_is_exact_and_non_reusable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _protected, historical_sha = self.source1938_fixture(Path(tmp))
+            with (
+                patch.object(manager_replace, "SOURCE1938_HISTORICAL_SHA256", historical_sha),
+                patch.object(manager_replace, "SOURCE1938_ENVELOPE_SHA256", args.authority_envelope_sha256),
+            ):
+                self.assertTrue(manager_replace.is_source1938_semantic_exception(args))
+                variants = (
+                    {"old_task": "other.md"},
+                    {"successor_task": "other_successor.md"},
+                    {"old_target": "dw:1"},
+                    {"new_target": "dw:60"},
+                    {"parent_target": "wl:2"},
+                    {"preparer": "config:25"},
+                    {"authority_file": manager_replace.SOURCE1611_FILE},
+                    {"authority_sha256": "0" * 64},
+                    {"authority_lines": LineRange(3, 7)},
+                    {"successor_item_lines": (LineRange(1, 7),)},
+                    {"authority_envelope_task": "other.md"},
+                    {"authority_envelope_sha256": "0" * 64},
+                    {"historical_task": "202608/other.md"},
+                    {"historical_sha256": "0" * 64},
+                )
+                for changes in variants:
+                    with self.subTest(changes=changes):
+                        self.assertFalse(manager_replace.is_source1938_semantic_exception(replace(args, **changes)))
+
+    def test_source1938_historical_mismatch_fails_before_owner_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            path = root / args.historical_task
+            path.write_bytes(path.read_bytes() + b"concurrent historical drift\n")
+            state: dict[str, object] = {"old_live": True}
+            with self.source1938_runtime(state, args, protected, historical_sha), self.assertRaisesRegex(
+                ReplaceError, "historical record or archive digest changed"
+            ):
+                replace_manager(args)
+            self.assertEqual(0, state.get("stop_calls", 0))
+            self.assertFalse((root / args.successor_task).exists())
+
+    def test_source1938_queue_and_child_drift_fail_before_owner_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            old_path = root / args.old_task
+            changed_old = old_path.read_text(encoding="utf-8").replace(
+                manager_replace.SOURCE1938_OLD_QUEUE[0],
+                "Agent-invented replacement narrative.",
+            )
+            old_path.write_text(changed_old, encoding="utf-8")
+            changed_queue = parsed(old_path, root).pending_task_items
+            rebound = replace(
+                args,
+                old_sha256=sha(changed_old),
+                old_queue_sha256=manager_replace.json_digest(list(changed_queue)),
+            )
+            state: dict[str, object] = {"old_live": True}
+            with self.source1938_runtime(state, rebound, protected, historical_sha), self.assertRaisesRegex(
+                ReplaceError, "Human-provenance queue changed"
+            ):
+                replace_manager(rebound)
+            self.assertEqual(0, state.get("stop_calls", 0))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            child_path = root / manager_replace.SOURCE1938_LIVE_SHARED_TASK
+            changed_child = child_path.read_text(encoding="utf-8").replace(
+                "Preserve repository cleanup.",
+                "Changed repository cleanup queue.",
+            )
+            child_path.write_text(changed_child, encoding="utf-8")
+            children = tuple(
+                replace(child, sha256=sha(changed_child)) if child.task == manager_replace.SOURCE1938_LIVE_SHARED_TASK else child
+                for child in args.children
+            )
+            rebound = replace(args, children=children)
+            state = {"old_live": True}
+            with self.source1938_runtime(state, rebound, protected, historical_sha), self.assertRaisesRegex(
+                ReplaceError, "ordered queue changed"
+            ):
+                replace_manager(rebound)
+            self.assertEqual(0, state.get("stop_calls", 0))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            rogue = task_text(
+                status="blocked",
+                runat="dw:61",
+                managerat=manager_replace.SOURCE1938_OLD_TARGET,
+                is_manager=False,
+                pending=("Unbound child.",),
+            )
+            (root / "rogue_child.md").write_text(rogue, encoding="utf-8")
+            state = {"old_live": True}
+            with self.source1938_runtime(state, args, protected, historical_sha), self.assertRaisesRegex(
+                ReplaceError, "active child set changed"
+            ):
+                replace_manager(args)
+            self.assertEqual(0, state.get("stop_calls", 0))
+
+    def test_source1938_process_drift_and_duplicate_successor_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            state: dict[str, object] = {"old_live": True, "protected_drift": True}
+            with self.source1938_runtime(state, args, protected, historical_sha), self.assertRaisesRegex(
+                ReplaceError, "protected pane/process inventory changed"
+            ):
+                replace_manager(args)
+            self.assertEqual(0, state.get("stop_calls", 0))
+            self.assertFalse((root / args.successor_task).exists())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            (root / args.successor_task).write_text(
+                task_text(
+                    status="blocked",
+                    runat=args.new_target,
+                    managerat=args.parent_target,
+                    is_manager=True,
+                    pending=(),
+                ),
+                encoding="utf-8",
+            )
+            state = {"old_live": True}
+            with self.source1938_runtime(state, args, protected, historical_sha), self.assertRaisesRegex(
+                ReplaceError, "successor task already exists"
+            ):
+                replace_manager(args)
+            self.assertEqual(0, state.get("stop_calls", 0))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            future_child = task_text(
+                status="blocked",
+                runat="dw:62",
+                managerat=manager_replace.SOURCE1938_SUCCESSOR_TARGET,
+                is_manager=False,
+                pending=("Unreviewed future custody.",),
+            )
+            (root / "future_child.md").write_text(future_child, encoding="utf-8")
+            state = {"old_live": True}
+            with self.source1938_runtime(state, args, protected, historical_sha), self.assertRaisesRegex(
+                ReplaceError, "new target already has an active child"
+            ):
+                replace_manager(args)
+            self.assertEqual(0, state.get("stop_calls", 0))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            duplicate_retained_owner = task_text(
+                status="blocked",
+                runat="dw:57",
+                managerat="other:1",
+                is_manager=False,
+                pending=("Conflicting retained-target custody.",),
+            )
+            (root / "foreign_owner.md").write_text(duplicate_retained_owner, encoding="utf-8")
+            state = {"old_live": True}
+            with self.source1938_runtime(state, args, protected, historical_sha), self.assertRaisesRegex(
+                ReplaceError, "retained target lacks exactly one authoritative owner"
+            ):
+                replace_manager(args)
+            self.assertEqual(0, state.get("stop_calls", 0))
+
+    def test_source1938_concurrent_nested_drift_rolls_back_all_owned_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            nested = root / "meeting_open_audit.md"
+            concurrent = nested.read_bytes() + b"concurrent verified-worker note\n"
+            before = {
+                path.relative_to(root).as_posix(): path.read_bytes()
+                for path in root.rglob("*.md")
+            }
+            state: dict[str, object] = {
+                "old_live": True,
+                "stop_hook": lambda: nested.write_bytes(concurrent),
+            }
+            with self.source1938_runtime(state, args, protected, historical_sha), self.assertRaisesRegex(
+                ReplaceError, "all lifecycle writes rolled back"
+            ):
+                replace_manager(args)
+            self.assertEqual(concurrent, nested.read_bytes())
+            for task in (
+                args.old_task,
+                *(child.task for child in args.children),
+                args.historical_task,
+                manager_replace.SOURCE1938_ARCHIVE_INDEX,
+                "TODO.md",
+            ):
+                self.assertEqual(before[task], (root / task).read_bytes())
+            self.assertFalse((root / args.successor_task).exists())
+            self.assertEqual("rolled_back", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+
+    def test_source1938_historical_write_failure_has_no_partial_lifecycle_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            before = {
+                path.relative_to(root).as_posix(): path.read_bytes()
+                for path in root.rglob("*.md")
+            }
+            original = manager_replace.replace_snapshot
+
+            def fail_archive(expected, data, label):
+                if label == "Source-1938 historical archive index":
+                    raise ReplaceError("injected archive write failure")
+                return original(expected, data, label)
+
+            with (
+                self.source1938_runtime({"old_live": True}, args, protected, historical_sha),
+                patch.object(manager_replace, "replace_snapshot", side_effect=fail_archive),
+                self.assertRaisesRegex(ReplaceError, "all lifecycle writes rolled back"),
+            ):
+                replace_manager(args)
+            for task, data in before.items():
+                self.assertEqual(data, (root / task).read_bytes())
+            self.assertFalse((root / args.successor_task).exists())
+            self.assertEqual("rolled_back", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+
+    def test_source1938_crash_during_historical_reconciliation_recovers_once(self) -> None:
+        class SimulatedCrash(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            original = manager_replace.replace_snapshot
+            crashed = False
+            state: dict[str, object] = {"old_live": True}
+
+            def crash_after_historical(expected, data, label):
+                nonlocal crashed
+                result = original(expected, data, label)
+                if label == "Source-1938 historical shared-target task" and not crashed:
+                    crashed = True
+                    raise SimulatedCrash()
+                return result
+
+            with (
+                self.source1938_runtime(state, args, protected, historical_sha),
+                patch.object(manager_replace, "replace_snapshot", side_effect=crash_after_historical),
+                self.assertRaises(SimulatedCrash),
+            ):
+                replace_manager(args)
+            with self.source1938_runtime(state, args, protected, historical_sha):
+                result = replace_manager(args)
+
+            self.assertIn("sole ownership", result)
+            self.assertEqual(1, state.get("stop_calls"))
+            self.assertEqual("done", parsed(root / args.old_task, root).status)
+            self.assertEqual("blocked", parsed(root / args.successor_task, root).status)
+            self.assertEqual("retired", parsed(root / args.historical_task, root).runat)
+            self.assertEqual("committed", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
 
     def test_other_authority_cannot_request_descendant_closure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

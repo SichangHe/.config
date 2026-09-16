@@ -156,6 +156,42 @@ SOURCE1611_OLD_QUEUE = (
     "🧑 Replace the manager that took tasks outside its ownership, and require the successor manager to hand off all tasks completely to workers. Source: manager_mail/85c5dff58359-1612.txt.",
 )
 SOURCE1612_FILE = "manager_mail/85c5dff58359-1612.txt"
+SOURCE1938_FILE = "manager_mail/85c5dff58359-1938.txt"
+SOURCE1938_SHA256 = "8c80e03642329707a612d6da87b7cd7d50852c2e66bf35b900bdbdb9c23798cc"
+SOURCE1938_LINES = (1, 7)
+SOURCE1938_ITEM_LINES = (3, 7)
+SOURCE1938_TASK = "new_dw_manager.md"
+SOURCE1938_SUCCESSOR_TASK = "dw_manager_new.md"
+SOURCE1938_OLD_TARGET = "dw:0"
+SOURCE1938_SUCCESSOR_TARGET = "dw:59"
+SOURCE1938_PARENT_TARGET = "wl:1"
+SOURCE1938_PREPARER = "config:24"
+SOURCE1938_ENVELOPE_TASK = "dw_mgr_replace.md"
+SOURCE1938_ENVELOPE_SHA256 = "78853b55d9a5973838bfec04976aff8825016fd164c934327ed4690dbf05e118"
+SOURCE1938_LIVE_SHARED_TASK = "dw_cleanup_mgr.md"
+SOURCE1938_SHARED_TARGET = "dw:33"
+SOURCE1938_HISTORICAL_TASK = "202608/dw_recon_live_mgr.md"
+SOURCE1938_HISTORICAL_SHA256 = "3b3ffbb286a2397ad2c422510be002e0e7bbba09c24f3c5d3df2b1705009f5c8"
+SOURCE1938_ARCHIVE_INDEX = "202608/old_todos.md"
+SOURCE1938_HISTORICAL_MANAGER = "dw:31"
+SOURCE1938_HISTORICAL_BLOCKER = "paused by direct human shutdown instruction routed to pending_task_items_0912.md; non-human pane dw:33 closed and task record preserved for explicit resume"
+# 🧑 Source `manager_mail/85c5dff58359-1938.txt:3-7`: "Replace this agent ... actually start those agents to handle those items."
+SOURCE1938_DIRECTIVE = (
+    "Subject: Re: Accepted: DW status and collaborator-meeting follow-up — dw_gen_submgr.md\n\n"
+    "Replace this agent\n"
+    "They did not respond\n\n"
+    "> spawn an agent to dig through my questions regarding collaborator meeting to do items and so on and my follow-ups and actually start those agents to handle those items. Previous agents completely fucked everything up and did not get anything. done"
+)
+SOURCE1938_GOAL = (
+    "🧑 Read the Human’s actual collaborator-meeting questions, to-do items, and follow-ups from authoritative records; reconcile verified live owners; start one singular dedicated worker for every verified open item before emailing the Human in this thread; name each worker and its concrete ownership; never reuse the rejected Creators-site or source-index narrative."
+)
+SOURCE1938_OLD_QUEUE = (
+    "🧑 Source-1840 (manager_mail/85c5dff58359-1840.txt): launch one separate gpt-5.6-astra ultra owner to review the TheWebConf paper, meeting transcripts, and GitHub issues; autonomously advance reversible experiments, results, insights, and writeup; first email the Human a short plain-English plan and rationale without waiting for approval.",
+    "🧑 Source-1852 (manager_mail/85c5dff58359-1852.txt): \"Stop dissing the paper. If reviewers didn't have trouble with our results, you should not.\" Apply this scope and tone to ongoing Source-1840 work and Human reports.",
+    "🧑 Source-1852 (manager_mail/85c5dff58359-1852.txt): \"The page limit target is eight for the body, not twelve.\" Use an eight-page body target for paper edits, builds, and reports.",
+    "🧑 Source-1852 (manager_mail/85c5dff58359-1852.txt): \"Stop including this\" refers to the quoted \"New analysis and reproduction steps\" GitHub link. Omit those analysis/reproduction links from Human emails.",
+    "🧑 Source-1860 (manager_mail/85c5dff58359-1860.txt): inspect the beginning of 2025/0110madhyastha.md; tick checklist items already completed; execute agent-actionable remaining items such as moving detector comparison into the paper main body.",
+)
 SOURCE_ONLY_AUTHORITY_MODE = "source-only-old-task-before-image"
 PCODX_REPLACE_EVIDENCE_RE = re.compile(
     r"(?m)^Replace the failed PCODX manager (?P<task>[A-Za-z0-9_./-]+\.md) at "
@@ -250,6 +286,9 @@ class Args:
     descendants: tuple[DescendantPin, ...] = ()
     empty_tree_envelope_sha256: str = ""
     descendant_authority_envelope_sha256: str = ""
+    historical_task: str = ""
+    historical_sha256: str = ""
+    archive_index_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -300,6 +339,11 @@ class Plan:
     empty_tree_authority: Snapshot | None = None
     source1485_topology: dict[str, object] | None = None
     source1601_authority: Snapshot | None = None
+    historical: Snapshot | None = None
+    historical_after: bytes | None = None
+    archive_index: Snapshot | None = None
+    archive_index_after: bytes | None = None
+    source1938_topology: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -356,6 +400,9 @@ class ParsedArgs(argparse.Namespace):
     descendant: list[DescendantPin] = []
     empty_tree_envelope_sha256: str = ""
     descendant_authority_envelope_sha256: str = ""
+    historical_task: str = ""
+    historical_sha256: str = ""
+    archive_index_sha256: str = ""
 
 
 def digest(data: bytes) -> str:
@@ -480,8 +527,28 @@ def is_source1611_semantic_exception(args: Args) -> bool:
     )
 
 
+def is_source1938_semantic_exception(args: Args) -> bool:
+    return (
+        args.old_task == SOURCE1938_TASK
+        and args.successor_task == SOURCE1938_SUCCESSOR_TASK
+        and canonical_target(args.old_target) == canonical_target(SOURCE1938_OLD_TARGET)
+        and canonical_target(args.new_target) == canonical_target(SOURCE1938_SUCCESSOR_TARGET)
+        and canonical_target(args.parent_target) == canonical_target(SOURCE1938_PARENT_TARGET)
+        and args.preparer == SOURCE1938_PREPARER
+        and args.authority_file == SOURCE1938_FILE
+        and args.authority_sha256 == SOURCE1938_SHA256
+        and args.authority_lines == LineRange(*SOURCE1938_LINES)
+        and args.successor_item_lines == (LineRange(*SOURCE1938_ITEM_LINES),)
+        and args.authority_envelope_task == SOURCE1938_ENVELOPE_TASK
+        and args.authority_envelope_sha256 == SOURCE1938_ENVELOPE_SHA256
+        and args.historical_task == SOURCE1938_HISTORICAL_TASK
+        and args.historical_sha256 == SOURCE1938_HISTORICAL_SHA256
+        and SHA256_RE.fullmatch(args.archive_index_sha256) is not None
+    )
+
+
 def is_source_only_semantic_exception(args: Args) -> bool:
-    return is_source1597_semantic_exception(args) or is_source1611_semantic_exception(args)
+    return is_source1597_semantic_exception(args) or is_source1611_semantic_exception(args) or is_source1938_semantic_exception(args)
 
 
 def source_only_directive(args: Args) -> str:
@@ -489,6 +556,8 @@ def source_only_directive(args: Args) -> str:
         return SOURCE1597_DIRECTIVE
     if is_source1611_semantic_exception(args):
         return SOURCE1611_DIRECTIVE
+    if is_source1938_semantic_exception(args):
+        return SOURCE1938_DIRECTIVE
     raise ReplaceError("source-only authority is unavailable outside an exact replacement program")
 
 
@@ -501,10 +570,16 @@ def source_only_expected_old_queue(args: Args) -> tuple[str, ...]:
         return SOURCE1597_OLD_QUEUE
     if is_source1611_semantic_exception(args):
         return SOURCE1611_OLD_QUEUE
+    if is_source1938_semantic_exception(args):
+        return SOURCE1938_OLD_QUEUE
     raise ReplaceError("source-only queue is unavailable outside an exact replacement program")
 
 
 def source_only_added_goals(args: Args, queue: tuple[str, ...]) -> tuple[str, ...]:
+    if is_source1938_semantic_exception(args):
+        if any(SOURCE1938_FILE in item for item in queue):
+            raise ReplaceError("Source-1938 successor goal already exists in the old ordered queue")
+        return (SOURCE1938_GOAL,)
     added: list[str] = []
     if not any(args.authority_file in item for item in queue):
         added.append(f"🧑 Source {args.authority_file}: {source_only_directive(args)}")
@@ -624,6 +699,9 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--old-pcodx-wrapper-sha256", default="")
     _ = parser.add_argument("--protected-targets-sha256", default="")
     _ = parser.add_argument("--authority-envelope-file-sha256", default="")
+    _ = parser.add_argument("--historical-task", default="")
+    _ = parser.add_argument("--historical-sha256", default="")
+    _ = parser.add_argument("--archive-index-sha256", default="")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     for value, label in (
         (parsed.old_sha256, "old task"),
@@ -635,6 +713,12 @@ def parse_args(argv: list[str]) -> Args:
             parser.error(f"{label} SHA-256 must be 64 lowercase hexadecimal characters")
     if any(TASK_REF_RE.fullmatch(task) is None for task in (parsed.old_task, parsed.successor_task, parsed.authority_envelope_task)):
         parser.error("task arguments must be canonical relative Markdown paths")
+    if any((parsed.historical_task, parsed.historical_sha256, parsed.archive_index_sha256)) and (
+        TASK_REF_RE.fullmatch(parsed.historical_task) is None
+        or SHA256_RE.fullmatch(parsed.historical_sha256) is None
+        or SHA256_RE.fullmatch(parsed.archive_index_sha256) is None
+    ):
+        parser.error("historical reconciliation requires one canonical task and exact historical/archive SHA-256 bindings")
     if parsed.old_task == parsed.successor_task:
         parser.error("old and successor tasks must differ")
     if PANE_ID_RE.fullmatch(parsed.old_pane_id) is None or parsed.old_pane_pid <= 0 or parsed.old_pane_start_ticks <= 0:
@@ -704,6 +788,9 @@ def parse_args(argv: list[str]) -> Args:
         descendants=descendants,
         empty_tree_envelope_sha256=parsed.empty_tree_envelope_sha256,
         descendant_authority_envelope_sha256=parsed.descendant_authority_envelope_sha256,
+        historical_task=parsed.historical_task,
+        historical_sha256=parsed.historical_sha256,
+        archive_index_sha256=parsed.archive_index_sha256,
     )
     try:
         validate_targets(result)
@@ -1065,12 +1152,26 @@ def authority_material(args: Args, snapshot: Snapshot, envelope: Snapshot) -> tu
     if not excerpt.strip():
         raise ReplaceError("authority excerpt must not be empty")
     if is_source_only_semantic_exception(args):
-        if (
-            envelope.path != task_path(args.root, args.old_task)
-            or digest(envelope.data) != args.old_sha256
-            or canonical_excerpt != source_only_directive(args)
-        ):
-            raise ReplaceError("source-only authority or old-task before image changed")
+        if canonical_excerpt != source_only_directive(args):
+            raise ReplaceError("source-only authority changed")
+        if is_source1938_semantic_exception(args):
+            value = metadata(envelope.data, args.root, "Source-1938 lifecycle authority envelope")
+            marker = (
+                '<manager_delegation from="wl:1" authoritative="true" '
+                f'source="{SOURCE1938_FILE}:1-7" sha256="{SOURCE1938_SHA256}">'
+            )
+            if (
+                envelope.path != task_path(args.root, SOURCE1938_ENVELOPE_TASK)
+                or digest(envelope.data) != args.authority_envelope_sha256
+                or value.status != "running"
+                or canonical_target(value.runat) != canonical_target(SOURCE1938_PREPARER)
+                or value.is_manager
+                or marker not in envelope_text
+                or "Source-1938 as the sole current transaction authority and email thread" not in envelope_text
+            ):
+                raise ReplaceError("Source-1938 lifecycle authority envelope changed")
+        elif envelope.path != task_path(args.root, args.old_task) or digest(envelope.data) != args.old_sha256:
+            raise ReplaceError("source-only old-task before image changed")
         return ()
     locator = f"{args.authority_file}:{args.authority_lines.start}-{args.authority_lines.end}"
     matches = list(HUMAN_ENVELOPE_RE.finditer(envelope_text))
@@ -1292,10 +1393,11 @@ def old_and_successor_text(
     authority_items: tuple[str, ...],
     *,
     human_goals_only: bool = False,
+    authority_first: bool = False,
 ) -> tuple[bytes, bytes, tuple[str, ...]]:
     old_text = old_data.decode()
     old_metadata = metadata(old_data, root, "old manager task")
-    queue = (*old_metadata.pending_task_items, *authority_items)
+    queue = (*authority_items, *old_metadata.pending_task_items) if authority_first else (*old_metadata.pending_task_items, *authority_items)
     if len(set(queue)) != len(queue):
         raise ReplaceError("successor queue would contain duplicate open items")
     cleared = render_pending_items(old_text, ())
@@ -1380,6 +1482,77 @@ def todo_replacement(data: bytes, root: Path, old_path: Path, successor_path: Pa
         lines[previous_index] += previous_ending
     lines.insert(previous_index + 1, f"{old_ref} {old_target}{previous_ending}")
     return "".join(lines).encode()
+
+
+def replace_exact_frontmatter_value(data: bytes, root: Path, field: str, expected: str, replacement: str) -> bytes:
+    try:
+        text = data.decode()
+    except UnicodeDecodeError as exc:
+        raise ReplaceError(f"historical shared-target task is not UTF-8: {exc}") from exc
+    lines = text.splitlines(keepends=True)
+    try:
+        closing = next(index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+    except StopIteration as exc:
+        raise ReplaceError("historical shared-target task frontmatter is unterminated") from exc
+    indexes = [index for index, line in enumerate(lines[1:closing], start=1) if line.rstrip("\r\n").partition(":")[0] == field]
+    if len(indexes) != 1:
+        raise ReplaceError(f"historical shared-target task requires exactly one {field} field")
+    index = indexes[0]
+    ending = lines[index][len(lines[index].rstrip("\r\n")) :]
+    if lines[index].rstrip("\r\n") != f"{field}: {expected}":
+        raise ReplaceError(f"historical shared-target task {field} changed")
+    lines[index] = f"{field}: {replacement}{ending}"
+    updated = "".join(lines).encode()
+    _ = metadata(updated, root, "historical shared-target task after image")
+    return updated
+
+
+def task_body(data: bytes) -> bytes:
+    parts = data.split(b"---", 2)
+    if len(parts) != 3 or parts[0].strip():
+        raise ReplaceError("historical shared-target task body boundary is malformed")
+    return parts[2]
+
+
+def source1938_historical_after(root: Path, data: bytes) -> bytes:
+    updated = replace_exact_frontmatter_value(data, root, "runat", SOURCE1938_SHARED_TARGET, "retired")
+    if task_body(updated) != task_body(data):
+        raise ReplaceError("historical Human hold/evidence body changed during retirement")
+    return updated
+
+
+def source1938_archive_after(data: bytes) -> bytes:
+    try:
+        text = data.decode()
+    except UnicodeDecodeError as exc:
+        raise ReplaceError(f"historical archive index is not UTF-8: {exc}") from exc
+    lines = text.splitlines(keepends=True)
+    expected = "dw_recon_live_mgr.md dw:33"
+    rows = [index for index, line in enumerate(lines) if line.rstrip("\r\n") == expected]
+    if len(rows) != 1:
+        raise ReplaceError("historical archive index lacks one exact dw:33 custody row")
+    index = rows[0]
+    ending = lines[index][len(lines[index].rstrip("\r\n")) :]
+    lines[index] = f"dw_recon_live_mgr.md retired{ending}"
+    return "".join(lines).encode()
+
+
+def validate_source1938_historical(args: Args, historical: Snapshot, archive: Snapshot) -> tuple[bytes, bytes]:
+    if digest(historical.data) != args.historical_sha256 or digest(archive.data) != args.archive_index_sha256:
+        raise ReplaceError("Source-1938 historical record or archive digest changed")
+    value = metadata(historical.data, args.root, "Source-1938 historical shared-target task")
+    if (
+        value.status != "blocked"
+        or value.blocked_on != SOURCE1938_HISTORICAL_BLOCKER
+        or canonical_target(value.runat) != canonical_target(SOURCE1938_SHARED_TARGET)
+        or canonical_target(value.managerat) != canonical_target(SOURCE1938_HISTORICAL_MANAGER)
+        or value.tool != "codex"
+        or not value.is_manager
+        or value.pending_task_items
+        or "manager closed Codex agent 09-12 09:43 PDT; tmux target `dw:33`" not in historical.data.decode()
+    ):
+        raise ReplaceError("Source-1938 historical record does not preserve the exact Human hold/evidence")
+    return source1938_historical_after(args.root, historical.data), source1938_archive_after(archive.data)
 
 
 def require_source1485_umbrella_previous(root: Path, data: bytes) -> None:
@@ -1484,10 +1657,12 @@ def validate_targets(args: Args) -> None:
     elif is_source_only_semantic_exception(args):
         if SHA256_RE.fullmatch(args.old_queue_sha256) is None or not args.protected_targets or SHA256_RE.fullmatch(args.protected_targets_sha256) is None:
             raise ReplaceError("source-only replacement requires ordered-queue and protected-inventory SHA-256 bindings")
+        if is_source1938_semantic_exception(args) and any(SHA256_RE.fullmatch(child.queue_sha256) is None for child in args.children):
+            raise ReplaceError("Source-1938 replacement requires an ordered queue SHA-256 for every retained child")
     elif not is_pcodx_replacement(args) and args.old_queue_sha256:
         raise ReplaceError("ordered queue binding is accepted only for an exact PCODX, Source-1269, Source-1485, or source-only replacement")
-    if not is_source1485_replacement(args) and any(child.queue_sha256 for child in args.children):
-        raise ReplaceError("explicit child queue bindings are accepted only for an exact Source-1485 replacement")
+    if not (is_source1485_replacement(args) or is_source1938_semantic_exception(args)) and any(child.queue_sha256 for child in args.children):
+        raise ReplaceError("explicit child queue bindings are accepted only for an exact Source-1485 or Source-1938 replacement")
     if not uses_protected_inventory(args) and args.protected_targets_sha256:
         raise ReplaceError("protected inventory digest is accepted only for PCODX, exact Source-1485, or an exact source-only replacement")
     if not (is_pcodx_replacement(args) or is_source1485_replacement(args)) and args.authority_envelope_file_sha256:
@@ -1514,6 +1689,8 @@ def validate_targets(args: Args) -> None:
         raise ReplaceError("authority-envelope child alias is restricted to exact Source-1292 descendant mode")
     if args.authority_envelope_task == args.old_task and not is_source_only_semantic_exception(args):
         raise ReplaceError("authority-envelope old-task alias is restricted to an exact source-only mode")
+    if not is_source1938_semantic_exception(args) and any((args.historical_task, args.historical_sha256, args.archive_index_sha256)):
+        raise ReplaceError("historical duplicate reconciliation is accepted only for exact Source-1938")
     if is_source_only_semantic_exception(args) and len(Path(args.successor_task).name) >= 25:
         raise ReplaceError("source-only successor task filename must be shorter than 25 characters")
     if is_source1289_whole_tree(args) and (
@@ -1526,6 +1703,11 @@ def validate_targets(args: Args) -> None:
         raise ReplaceError("Source-1597 authority is restricted to its exact manager transition")
     if args.authority_file == SOURCE1611_FILE and not is_source1611_semantic_exception(args):
         raise ReplaceError("Source-1611 authority is restricted to its exact manager transition")
+    if args.authority_file == SOURCE1938_FILE and not is_source1938_semantic_exception(args):
+        raise ReplaceError("Source-1938 authority is restricted to its exact manager transition")
+    if is_source1938_semantic_exception(args):
+        if args.descendants or SOURCE1938_LIVE_SHARED_TASK not in {child.task for child in args.children}:
+            raise ReplaceError("Source-1938 requires the retained live dw:33 manager and no descendant closure")
     old = canonical_target(args.old_target)
     new = canonical_target(args.new_target)
     if old == new:
@@ -1732,21 +1914,129 @@ def source1485_topology_binding(args: Args, plan: Plan) -> dict[str, object]:
     }
 
 
+def source1938_topology_binding(args: Args, plan: Plan) -> dict[str, object]:
+    """Bind every retained task, ordered queue, reporting edge, and live process."""
+
+    if not is_source1938_semantic_exception(args):
+        raise ReplaceError("Source-1938 topology binding is unavailable outside its exact replacement program")
+    direct_data = {pin.task: after for pin, after in zip(args.children, plan.child_after, strict=True)}
+    rows: list[ActiveGraphRow] = [active_graph_row(args.root, args.successor_task, plan.successor_data)]
+    seen_tasks = {args.successor_task}
+    seen_targets = {rows[0].runat}
+
+    def visit(task: str, data: bytes, expected_manager: str) -> None:
+        if task in seen_tasks:
+            raise ReplaceError(f"Source-1938 retained tree repeats task {task}")
+        row = active_graph_row(args.root, task, data)
+        if row.managerat != expected_manager:
+            raise ReplaceError(f"Source-1938 retained ownership changed for {task}")
+        if row.runat in seen_targets or target_session(row.runat).startswith("h"):
+            raise ReplaceError(f"Source-1938 retained target is repeated or human-owned: {row.runat}")
+        seen_tasks.add(task)
+        seen_targets.add(row.runat)
+        rows.append(row)
+        if row.is_manager:
+            for child in active_child_task_refs(args.root, task_path(args.root, task), row.runat):
+                visit(
+                    child,
+                    read_snapshot(task_path(args.root, child), f"Source-1938 nested retained task {child}").data,
+                    row.runat,
+                )
+
+    for child in args.children:
+        visit(child.task, direct_data[child.task], canonical_target(args.new_target))
+    root = rows[0]
+    if root.managerat != canonical_target(args.parent_target) or canonical_target(args.parent_target) in seen_targets:
+        raise ReplaceError("Source-1938 successor reporting parent changed or creates a cycle")
+    parent = active_manager_owner_row(args.root, args.parent_target)
+    if parent is None or parent.task in seen_tasks or parent.managerat in seen_targets:
+        raise ReplaceError("Source-1938 successor lacks one acyclic active reporting-parent manager")
+    for row in rows[1:]:
+        if row.runat == canonical_target(SOURCE1938_SHARED_TARGET):
+            continue
+        expected_path = task_path(args.root, row.task).resolve()
+        if authoritative_active_target_task_paths(args.root, row.runat) != (expected_path,):
+            raise ReplaceError(f"Source-1938 retained target lacks exactly one authoritative owner: {row.task}")
+    if authoritative_active_target_task_paths(args.root, args.parent_target) != (task_path(args.root, parent.task).resolve(),):
+        raise ReplaceError("Source-1938 reporting parent lacks exactly one authoritative owner")
+    if authoritative_active_target_task_paths(args.root, args.preparer) != (
+        task_path(args.root, SOURCE1938_ENVELOPE_TASK).resolve(),
+    ):
+        raise ReplaceError("Source-1938 preparer target lacks exactly one authoritative lifecycle-envelope owner")
+    inventory = pane_inventory()
+    protected = {canonical_target(target) for target in args.protected_targets}
+    required_live = {
+        row.runat
+        for row in rows[1:]
+        if row.status in {"running", "long_running"} or row.runat in inventory
+    } | {canonical_target(args.parent_target), canonical_target(args.preparer)}
+    if any(target not in inventory for target in required_live) or not required_live.issubset(protected):
+        raise ReplaceError("Source-1938 retained tree lacks complete protected pane/process custody")
+    serialized_rows = [
+        {
+            "task": row.task,
+            "sha256": row.sha256,
+            "status": row.status,
+            "runat": row.runat,
+            "managerat": row.managerat,
+            "tool": row.tool,
+            "is_manager": row.is_manager,
+            "session_id": row.session_id,
+            "queue_sha256": row.queue_sha256,
+        }
+        for row in rows
+    ]
+    serialized_parent = {
+        "task": parent.task,
+        "sha256": parent.sha256,
+        "status": parent.status,
+        "runat": parent.runat,
+        "managerat": parent.managerat,
+        "tool": parent.tool,
+        "is_manager": parent.is_manager,
+        "session_id": parent.session_id,
+        "queue_sha256": parent.queue_sha256,
+    }
+    return {
+        "root_task": args.successor_task,
+        "root_target": canonical_target(args.new_target),
+        "parent_target": canonical_target(args.parent_target),
+        "acyclic": True,
+        "rows": serialized_rows,
+        "rows_sha256": json_digest(serialized_rows),
+        "parent": serialized_parent,
+        "parent_sha256": json_digest(serialized_parent),
+    }
+
+
 def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
     old_path = task_path(args.root, args.old_task)
     successor_path = task_path(args.root, args.successor_task)
     todo_path = args.root / "TODO.md"
     authority_path = task_path(args.root, args.authority_file)
     authority_envelope_path = task_path(args.root, args.authority_envelope_task)
+    historical_path = task_path(args.root, args.historical_task) if is_source1938_semantic_exception(args) else None
+    archive_index_path = args.root / SOURCE1938_ARCHIVE_INDEX if is_source1938_semantic_exception(args) else None
     if successor_path.exists() or successor_path.is_symlink():
         raise ReplaceError("successor task already exists; launch-before-proof is rejected")
     path_set = set(paths)
-    if old_path not in path_set or todo_path not in path_set or authority_envelope_path not in path_set:
+    required_paths = {old_path, todo_path, authority_envelope_path}
+    if historical_path is not None:
+        required_paths.add(historical_path)
+    if archive_index_path is not None:
+        required_paths.add(archive_index_path)
+    if not required_paths.issubset(path_set):
         raise ReplaceError("old manager, TODO, or authority envelope is absent from the locked Markdown inventory")
     old = read_snapshot(old_path, "old manager task")
     todo = read_snapshot(todo_path, "TODO")
     authority = read_snapshot(authority_path, "replacement authority")
     authority_envelope = read_snapshot(authority_envelope_path, "replacement authority envelope")
+    historical = read_snapshot(historical_path, "Source-1938 historical shared-target task") if historical_path is not None else None
+    archive_index = read_snapshot(archive_index_path, "Source-1938 historical archive index") if archive_index_path is not None else None
+    historical_after: bytes | None = None
+    archive_index_after: bytes | None = None
+    if historical is not None and archive_index is not None:
+        historical_after, archive_index_after = validate_source1938_historical(args, historical, archive_index)
     source1601_authority = source1601_material(args)
     if digest(old.data) != args.old_sha256 or digest(todo.data) != args.todo_sha256:
         raise ReplaceError("old manager or TODO digest changed")
@@ -1755,14 +2045,21 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
     old_metadata = metadata(old.data, args.root, "old manager task")
     if (
         old_metadata.version != TASK_FRONTMATTER_V1
-        or old_metadata.status != "long_running"
+        or old_metadata.status != ("blocked" if is_source1938_semantic_exception(args) else "long_running")
         or old_metadata.runat != args.old_target
         or old_metadata.managerat != args.parent_target
         or old_metadata.tool != ("pcodx" if is_pcodx_replacement(args) else "codex")
         or not old_metadata.is_manager
-        or (not is_pcodx_replacement(args) and old_metadata.session_id.lower() != args.old_session_id)
+        or (
+            not is_pcodx_replacement(args)
+            and (
+                (is_source1938_semantic_exception(args) and old_metadata.session_id.lower() not in {"", args.old_session_id})
+                or (not is_source1938_semantic_exception(args) and old_metadata.session_id.lower() != args.old_session_id)
+            )
+        )
     ):
-        raise ReplaceError("old manager must be the exact live long-running failed-manager record bound by the invocation")
+        detail = "exact blocked failed-manager" if is_source1938_semantic_exception(args) else "exact live long-running failed-manager"
+        raise ReplaceError(f"old manager must be the {detail} record bound by the invocation")
     if uses_ordered_queue_binding(args) and json_digest(list(old_metadata.pending_task_items)) != args.old_queue_sha256:
         raise ReplaceError("old manager full ordered queue changed")
     if is_source_only_semantic_exception(args) and old_metadata.pending_task_items != source_only_expected_old_queue(args):
@@ -1770,8 +2067,21 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
     old_owners = authoritative_active_target_task_paths(args.root, args.old_target)
     if old_owners != (old_path.resolve(),):
         raise ReplaceError("old target does not have exactly one authoritative active owner")
+    if historical_path is not None:
+        live_shared_path = task_path(args.root, SOURCE1938_LIVE_SHARED_TASK)
+        if set(authoritative_active_target_task_paths(args.root, SOURCE1938_SHARED_TARGET)) != {live_shared_path.resolve(), historical_path.resolve()}:
+            raise ReplaceError("Source-1938 shared target does not have exactly the retained live and historical owner set")
+        todo_rows = {
+            todo_task_path(args.root, match.group(1))
+            for line in todo.data.decode().splitlines()
+            if (match := TODO_ROW_RE.fullmatch(line)) is not None
+        }
+        if historical_path.resolve() in todo_rows:
+            raise ReplaceError("Source-1938 historical shared-target record unexpectedly appears in root TODO")
     if authoritative_active_target_task_paths(args.root, args.new_target):
         raise ReplaceError("new target already has an authoritative active owner; launch-before-proof is rejected")
+    if active_child_task_refs(args.root, successor_path, args.new_target):
+        raise ReplaceError("new target already has an active child; unreviewed successor custody is rejected")
     expected_children = tuple(sorted(child.task for child in args.children))
     actual_children = active_child_task_refs(args.root, old_path, args.old_target)
     if actual_children != expected_children:
@@ -1826,6 +2136,7 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         args.new_target,
         authority_items,
         human_goals_only=is_source_only_semantic_exception(args),
+        authority_first=is_source1938_semantic_exception(args),
     )
     todo_after = todo_replacement(todo.data, args.root, old_path, successor_path, args.old_target, args.new_target)
     protected_identities: tuple[PaneIdentity, ...] = ()
@@ -1852,12 +2163,19 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         protected_identities,
         descendant_identities,
         empty_tree_authority,
+        historical=historical,
+        historical_after=historical_after,
+        archive_index=archive_index,
+        archive_index_after=archive_index_after,
     )
     if source1601_authority is not None:
         plan = replace(plan, source1601_authority=source1601_authority)
     if is_source1485_replacement(args):
         topology = source1485_topology_binding(args, plan)
         plan = replace(plan, source1485_topology=topology)
+    if is_source1938_semantic_exception(args):
+        topology = source1938_topology_binding(args, plan)
+        plan = replace(plan, source1938_topology=topology)
     return plan
 
 
@@ -1878,7 +2196,8 @@ def authenticate_committed_authority_envelope(
     """Authenticate unchanged authority blocks in a migrated child carrier."""
 
     if is_source_only_semantic_exception(args):
-        _ = authority_material(args, plan.authority, plan.old)
+        envelope = plan.authority_envelope if is_source1938_semantic_exception(args) else plan.old
+        _ = authority_material(args, plan.authority, envelope)
         return
 
     index = authority_envelope_child_index(args)
@@ -1907,6 +2226,26 @@ def child_binding(args: Args) -> list[dict[str, str]]:
 
 
 def audit_record(args: Args, plan: Plan, secret: str, commitment: str) -> dict[str, object]:
+    source1938_files: list[dict[str, object]] = []
+    if is_source1938_semantic_exception(args):
+        if plan.historical is None or plan.historical_after is None or plan.archive_index is None or plan.archive_index_after is None:
+            raise ReplaceError("Source-1938 audit lost historical reconciliation images")
+        source1938_files = [
+            {
+                "task": args.historical_task,
+                "before": encoded(plan.historical.data),
+                "after": encoded(plan.historical_after),
+                "mode": stat.S_IMODE(plan.historical.state.st_mode),
+                "gid": plan.historical.state.st_gid,
+            },
+            {
+                "task": SOURCE1938_ARCHIVE_INDEX,
+                "before": encoded(plan.archive_index.data),
+                "after": encoded(plan.archive_index_after),
+                "mode": stat.S_IMODE(plan.archive_index.state.st_mode),
+                "gid": plan.archive_index.state.st_gid,
+            },
+        ]
     files = [
         {
             "task": args.old_task,
@@ -1925,6 +2264,7 @@ def audit_record(args: Args, plan: Plan, secret: str, commitment: str) -> dict[s
             }
             for pin, snapshot, after in zip(args.children, plan.children, plan.child_after, strict=True)
         ),
+        *source1938_files,
         {
             "task": "TODO.md",
             "before": encoded(plan.todo.data),
@@ -1987,6 +2327,18 @@ def audit_record(args: Args, plan: Plan, secret: str, commitment: str) -> dict[s
         record["source1485_topology_sha256"] = json_digest(plan.source1485_topology)
     if is_source_only_semantic_exception(args):
         record.update(source_only_audit_binding(args))
+    if is_source1938_semantic_exception(args):
+        if plan.source1938_topology is None:
+            raise ReplaceError("Source-1938 audit lost its retained topology")
+        record.update(
+            {
+                "historical_task": args.historical_task,
+                "historical_sha256": args.historical_sha256,
+                "archive_index_sha256": args.archive_index_sha256,
+                "source1938_topology": plan.source1938_topology,
+                "source1938_topology_sha256": json_digest(plan.source1938_topology),
+            }
+        )
     if args.closed_owner_audit is not None:
         record.update(
             {
@@ -2198,6 +2550,14 @@ def audit_binding(args: Args) -> dict[str, object]:
         )
     if is_source_only_semantic_exception(args):
         binding.update(source_only_audit_binding(args))
+    if is_source1938_semantic_exception(args):
+        binding.update(
+            {
+                "historical_task": args.historical_task,
+                "historical_sha256": args.historical_sha256,
+                "archive_index_sha256": args.archive_index_sha256,
+            }
+        )
     if args.closed_owner_audit is not None:
         binding.update(
             {
@@ -2242,6 +2602,8 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
         allowed.update({"protected_inventory", "source1485_topology", "source1485_topology_sha256"})
     if is_source_only_semantic_exception(args):
         allowed.add("protected_inventory")
+    if is_source1938_semantic_exception(args):
+        allowed.update({"source1938_topology", "source1938_topology_sha256"})
     if args.descendants:
         allowed.add("descendant_close_commitments")
         commitments = record.get("descendant_close_commitments")
@@ -2282,7 +2644,13 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
     file_values = record.get("files")
     if not isinstance(file_values, list):
         raise ReplaceError("private replacement audit file images are malformed")
-    expected_tasks = (args.old_task, *(child.task for child in args.children), "TODO.md", args.successor_task)
+    expected_tasks = (
+        args.old_task,
+        *(child.task for child in args.children),
+        *((args.historical_task, SOURCE1938_ARCHIVE_INDEX) if is_source1938_semantic_exception(args) else ()),
+        "TODO.md",
+        args.successor_task,
+    )
     entries: list[AuditEntry] = []
     for index, value in enumerate(file_values):
         if not isinstance(value, dict) or set(value) != {"task", "before", "after", "mode", "gid"}:
@@ -2304,9 +2672,14 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
         raise ReplaceError("private replacement audit file set changed")
     if digest(entries[0].before or b"") != args.old_sha256 or digest(entries[-2].before or b"") != args.todo_sha256:
         raise ReplaceError("private replacement audit before-image digest changed")
-    for pin, entry in zip(args.children, entries[1:-2], strict=True):
+    for pin, entry in zip(args.children, entries[1 : 1 + len(args.children)], strict=True):
         if digest(entry.before or b"") != pin.sha256:
             raise ReplaceError(f"private replacement audit child before-image changed: {pin.task}")
+    if is_source1938_semantic_exception(args):
+        historical_entry = entries[1 + len(args.children)]
+        archive_entry = entries[2 + len(args.children)]
+        if digest(historical_entry.before or b"") != args.historical_sha256 or digest(archive_entry.before or b"") != args.archive_index_sha256:
+            raise ReplaceError("private replacement audit historical before-image changed")
     if uses_protected_inventory(args):
         protected_value = record.get("protected_inventory")
         if not isinstance(protected_value, list) or json_digest(protected_value) != args.protected_targets_sha256:
@@ -2316,6 +2689,11 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
         topology_sha256 = record.get("source1485_topology_sha256")
         if not isinstance(topology, dict) or not isinstance(topology_sha256, str) or json_digest(topology) != topology_sha256:
             raise ReplaceError("private replacement audit Source-1485 topology binding changed")
+    if is_source1938_semantic_exception(args):
+        topology = record.get("source1938_topology")
+        topology_sha256 = record.get("source1938_topology_sha256")
+        if not isinstance(topology, dict) or not isinstance(topology_sha256, str) or json_digest(topology) != topology_sha256:
+            raise ReplaceError("private replacement audit Source-1938 topology binding changed")
     return dict(loaded), snapshot.data, tuple(entries), membership
 
 
@@ -2416,12 +2794,21 @@ def recovery_plan(
     record: dict[str, object],
 ) -> Plan:
     old_entry = entries[0]
-    child_entries = entries[1:-2]
+    child_end = 1 + len(args.children)
+    child_entries = entries[1:child_end]
+    historical_entry = entries[child_end] if is_source1938_semantic_exception(args) else None
+    archive_entry = entries[child_end + 1] if is_source1938_semantic_exception(args) else None
     todo_entry = entries[-2]
     old_path = task_path(args.root, args.old_task)
     todo_path = args.root / "TODO.md"
     snapshots = [read_snapshot(old_path, "recovery old manager")]
     snapshots.extend(read_snapshot(task_path(args.root, pin.task), f"recovery child {pin.task}") for pin in args.children)
+    historical: Snapshot | None = None
+    archive_index: Snapshot | None = None
+    if historical_entry is not None and archive_entry is not None:
+        historical = read_snapshot(task_path(args.root, args.historical_task), "recovery Source-1938 historical task")
+        archive_index = read_snapshot(args.root / SOURCE1938_ARCHIVE_INDEX, "recovery Source-1938 archive index")
+        snapshots.extend((historical, archive_index))
     snapshots.append(read_snapshot(todo_path, "recovery TODO"))
     if any(stat.S_IMODE(snapshot.state.st_mode) != entry.mode or snapshot.state.st_gid != entry.gid for snapshot, entry in zip(snapshots, entries[:-1], strict=True)):
         raise ReplaceError("recovery found changed lifecycle file mode or group")
@@ -2434,7 +2821,7 @@ def recovery_plan(
         if envelope_entry.before is None:
             raise ReplaceError("private replacement audit lost the authority-envelope child before image")
         envelope = Snapshot(envelope.path, envelope_entry.before, envelope.state)
-    if is_source_only_semantic_exception(args):
+    if is_source_only_semantic_exception(args) and not is_source1938_semantic_exception(args):
         if old_entry.before is None:
             raise ReplaceError("private replacement audit lost the source-only old-task authority before image")
         envelope = Snapshot(envelope.path, old_entry.before, envelope.state)
@@ -2456,11 +2843,12 @@ def recovery_plan(
         args.new_target,
         authority_items,
         human_goals_only=is_source_only_semantic_exception(args),
+        authority_first=is_source1938_semantic_exception(args),
     )
     child_before: list[Snapshot] = []
     child_after: list[bytes] = []
     child_queues: list[tuple[str, ...]] = []
-    for pin, entry, current in zip(args.children, child_entries, snapshots[1:-1], strict=True):
+    for pin, entry, current in zip(args.children, child_entries, snapshots[1 : 1 + len(args.children)], strict=True):
         assert entry.before is not None
         before = Snapshot(task_path(args.root, pin.task), entry.before, current.state)
         before_metadata = metadata(entry.before, args.root, f"recovery child {pin.task}")
@@ -2477,18 +2865,38 @@ def recovery_plan(
         child_queues.append(before_metadata.pending_task_items)
     successor_path = task_path(args.root, args.successor_task)
     todo_after = todo_replacement(todo_entry.before, args.root, old_path, successor_path, args.old_target, args.new_target)
-    canonical_after = (old_after, *child_after, todo_after, successor_after)
+    historical_after: bytes | None = None
+    archive_index_after: bytes | None = None
+    if historical_entry is not None and archive_entry is not None:
+        if historical_entry.before is None or archive_entry.before is None or historical is None or archive_index is None:
+            raise ReplaceError("private replacement audit lost Source-1938 historical before images")
+        audited_historical = Snapshot(historical.path, historical_entry.before, historical.state)
+        audited_archive = Snapshot(archive_index.path, archive_entry.before, archive_index.state)
+        historical_after, archive_index_after = validate_source1938_historical(args, audited_historical, audited_archive)
+    canonical_after = (
+        old_after,
+        *child_after,
+        *((historical_after, archive_index_after) if historical_after is not None and archive_index_after is not None else ()),
+        todo_after,
+        successor_after,
+    )
     if tuple(entry.after for entry in entries) != canonical_after:
         raise ReplaceError("private replacement audit after images are not the canonical reconstruction")
     old_metadata = metadata(old_entry.before, args.root, "recovery old manager before image")
     if (
         old_metadata.version != TASK_FRONTMATTER_V1
-        or old_metadata.status != "long_running"
+        or old_metadata.status != ("blocked" if is_source1938_semantic_exception(args) else "long_running")
         or old_metadata.runat != args.old_target
         or old_metadata.managerat != args.parent_target
         or old_metadata.tool != ("pcodx" if is_pcodx_replacement(args) else "codex")
         or not old_metadata.is_manager
-        or (not is_pcodx_replacement(args) and old_metadata.session_id.lower() != args.old_session_id)
+        or (
+            not is_pcodx_replacement(args)
+            and (
+                (is_source1938_semantic_exception(args) and old_metadata.session_id.lower() not in {"", args.old_session_id})
+                or (not is_source1938_semantic_exception(args) and old_metadata.session_id.lower() != args.old_session_id)
+            )
+        )
     ):
         raise ReplaceError("private replacement audit does not describe the exact failed manager")
     if uses_ordered_queue_binding(args) and json_digest(list(old_metadata.pending_task_items)) != args.old_queue_sha256:
@@ -2533,6 +2941,10 @@ def recovery_plan(
         tuple(protected),
         tuple(PaneIdentity(canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks) for item in args.descendants),
         empty_tree_authority,
+        historical=historical,
+        historical_after=historical_after,
+        archive_index=archive_index,
+        archive_index_after=archive_index_after,
     )
     if source1601_authority is not None:
         plan = replace(plan, source1601_authority=source1601_authority)
@@ -2541,6 +2953,11 @@ def recovery_plan(
         if topology != record.get("source1485_topology") or json_digest(topology) != record.get("source1485_topology_sha256"):
             raise ReplaceError("private replacement audit Source-1485 topology is not canonical")
         plan = replace(plan, source1485_topology=topology)
+    if is_source1938_semantic_exception(args):
+        topology = source1938_topology_binding(args, plan)
+        if topology != record.get("source1938_topology") or json_digest(topology) != record.get("source1938_topology_sha256"):
+            raise ReplaceError("private replacement audit Source-1938 topology is not canonical")
+        plan = replace(plan, source1938_topology=topology)
     return plan
 
 
@@ -2599,6 +3016,19 @@ def after_snapshots(args: Args, entries: tuple[AuditEntry, ...]) -> tuple[Snapsh
     return tuple(snapshots)
 
 
+def split_after_snapshots(
+    args: Args,
+    snapshots: tuple[Snapshot, ...],
+) -> tuple[Snapshot, tuple[Snapshot, ...], Snapshot | None, Snapshot | None, Snapshot, Snapshot]:
+    child_end = 1 + len(args.children)
+    historical: Snapshot | None = None
+    archive: Snapshot | None = None
+    if is_source1938_semantic_exception(args):
+        historical = snapshots[child_end]
+        archive = snapshots[child_end + 1]
+    return snapshots[0], snapshots[1:child_end], historical, archive, snapshots[-2], snapshots[-1]
+
+
 def recover_existing(
     args: Args,
     proof_path: Path,
@@ -2643,7 +3073,7 @@ def recover_existing(
         if not all_after or old is not None or not (proof or authorized_absence):
             raise ReplaceError("committed replacement audit no longer has its exact committed state and close outcome evidence")
         snapshots = after_snapshots(args, entries)
-        prove_committed(args, plan, snapshots[0], snapshots[1:-2], snapshots[-2], snapshots[-1])
+        prove_committed(args, plan, *split_after_snapshots(args, snapshots))
         return Recovery(
             plan,
             record,
@@ -2725,7 +3155,7 @@ def recover_existing(
     if all_after:
         snapshots = after_snapshots(args, entries)
         try:
-            prove_committed(args, plan, snapshots[0], snapshots[1:-2], snapshots[-2], snapshots[-1])
+            prove_committed(args, plan, *split_after_snapshots(args, snapshots))
         except Exception as exc:
             failures, preserved = rollback_record(args, entries, completed)
             rollback_state = "rollback_failed" if failures else "rolled_back"
@@ -2926,10 +3356,23 @@ def require_preclose_eligibility(args: Args, plan: Plan) -> None:
         require_snapshot(plan.empty_tree_authority, "pre-close Source-1292 empty-tree authority")
     for child in plan.children:
         require_snapshot(child, f"pre-close active child {child.path.name}")
+    if is_source1938_semantic_exception(args):
+        if plan.historical is None or plan.archive_index is None:
+            raise ReplaceError("Source-1938 pre-close proof lost historical reconciliation custody")
+        require_snapshot(plan.historical, "pre-close Source-1938 historical shared-target task")
+        require_snapshot(plan.archive_index, "pre-close Source-1938 historical archive index")
+        live_shared_path = task_path(args.root, SOURCE1938_LIVE_SHARED_TASK)
+        if set(authoritative_active_target_task_paths(args.root, SOURCE1938_SHARED_TARGET)) != {
+            live_shared_path.resolve(),
+            plan.historical.path.resolve(),
+        }:
+            raise ReplaceError("Source-1938 shared-target owner set changed before guarded manager close")
     if authoritative_active_target_task_paths(args.root, args.old_target) != (plan.old.path.resolve(),):
         raise ReplaceError("old target ownership changed before guarded manager close")
     if authoritative_active_target_task_paths(args.root, args.new_target):
         raise ReplaceError("successor target ownership appeared before guarded manager close")
+    if active_child_task_refs(args.root, plan.successor_path, args.new_target):
+        raise ReplaceError("successor target child custody appeared before guarded manager close")
     if active_child_task_refs(args.root, plan.old.path, args.old_target) != tuple(child.task for child in args.children):
         raise ReplaceError("active child set changed before guarded manager close")
     for child, snapshot in zip(args.descendants, plan.children):
@@ -2944,6 +3387,9 @@ def require_preclose_eligibility(args: Args, plan: Plan) -> None:
         )
         if plan.source1485_topology is None or source1485_topology_binding(args, plan) != plan.source1485_topology:
             raise ReplaceError("Source-1485 simulated post-graph changed before guarded manager close")
+    if is_source1938_semantic_exception(args):
+        if plan.source1938_topology is None or source1938_topology_binding(args, plan) != plan.source1938_topology:
+            raise ReplaceError("Source-1938 retained ownership graph changed before guarded manager close")
 
 
 def stop_old_manager(
@@ -3024,7 +3470,16 @@ def require_descendants_closed(args: Args, plan: Plan, secret: str) -> None:
             raise ReplaceError(f"descendant closure changed before old-manager close: {child.task}")
 
 
-def prove_committed(args: Args, plan: Plan, old_after: Snapshot, child_after: tuple[Snapshot, ...], todo_after: Snapshot, successor: Snapshot) -> None:
+def prove_committed(
+    args: Args,
+    plan: Plan,
+    old_after: Snapshot,
+    child_after: tuple[Snapshot, ...],
+    historical_after: Snapshot | None,
+    archive_after: Snapshot | None,
+    todo_after: Snapshot,
+    successor: Snapshot,
+) -> None:
     if args.closed_owner_audit is not None:
         _prepared, _authority, _source_args, _entries = authenticate_closed_owner_source(args)
         validate_closed_owner_absence(args)
@@ -3039,6 +3494,28 @@ def prove_committed(args: Args, plan: Plan, old_after: Snapshot, child_after: tu
     require_snapshot(successor, "committed successor")
     for snapshot in child_after:
         require_snapshot(snapshot, f"committed child {snapshot.path.name}")
+    if is_source1938_semantic_exception(args):
+        if historical_after is None or archive_after is None or plan.historical is None or plan.historical_after is None or plan.archive_index_after is None:
+            raise ReplaceError("Source-1938 commit proof lost historical reconciliation images")
+        require_snapshot(historical_after, "committed Source-1938 historical shared-target task")
+        require_snapshot(archive_after, "committed Source-1938 historical archive index")
+        if historical_after.data != plan.historical_after or archive_after.data != plan.archive_index_after:
+            raise ReplaceError("Source-1938 committed historical reconciliation differs from its reviewed images")
+        historical_metadata = metadata(historical_after.data, args.root, "committed Source-1938 historical task")
+        if (
+            historical_metadata.status != "blocked"
+            or historical_metadata.runat != "retired"
+            or historical_metadata.managerat != SOURCE1938_HISTORICAL_MANAGER
+            or historical_metadata.blocked_on != SOURCE1938_HISTORICAL_BLOCKER
+            or historical_metadata.pending_task_items
+            or task_body(historical_after.data) != task_body(plan.historical.data)
+        ):
+            raise ReplaceError("Source-1938 historical Human hold/evidence changed during reconciliation")
+        live_shared_path = task_path(args.root, SOURCE1938_LIVE_SHARED_TASK)
+        if authoritative_active_target_task_paths(args.root, SOURCE1938_SHARED_TARGET) != (live_shared_path.resolve(),):
+            raise ReplaceError("Source-1938 shared target does not have exactly the retained live owner after reconciliation")
+    elif historical_after is not None or archive_after is not None:
+        raise ReplaceError("unexpected historical reconciliation images outside Source-1938")
     if authoritative_active_target_task_paths(args.root, args.old_target):
         raise ReplaceError("old target retains an active owner after replacement")
     if authoritative_active_target_task_paths(args.root, args.new_target) != (plan.successor_path.resolve(),):
@@ -3055,6 +3532,14 @@ def prove_committed(args: Args, plan: Plan, old_after: Snapshot, child_after: tu
         )
         if plan.source1485_topology is None or source1485_topology_binding(args, committed_plan) != plan.source1485_topology:
             raise ReplaceError("Source-1485 committed ownership graph differs from its reviewed acyclic simulation")
+    if is_source1938_semantic_exception(args):
+        committed_plan = replace(
+            plan,
+            child_after=tuple(snapshot.data for snapshot in child_after),
+            successor_data=successor.data,
+        )
+        if plan.source1938_topology is None or source1938_topology_binding(args, committed_plan) != plan.source1938_topology:
+            raise ReplaceError("Source-1938 committed ownership graph differs from its reviewed retained topology")
     for snapshot, queue in zip(child_after, plan.child_queues, strict=True):
         if metadata(snapshot.data, args.root, snapshot.path.name).pending_task_items != queue:
             raise ReplaceError(f"active child queue changed during migration: {snapshot.path.name}")
@@ -3228,6 +3713,25 @@ def replace_manager(args: Args) -> str:
                 updated_children.append(after)
                 completed.append(pin.task)
                 record, audit_bytes = transition_audit(args.audit_output, audit_bytes, record, "mutating", completed=tuple(completed))
+            updated_historical: Snapshot | None = None
+            updated_archive: Snapshot | None = None
+            if is_source1938_semantic_exception(args):
+                if plan.historical is None or plan.historical_after is None or plan.archive_index is None or plan.archive_index_after is None:
+                    raise ReplaceError("Source-1938 mutation lost historical reconciliation images")
+                updated_historical = replace_snapshot(
+                    plan.historical,
+                    plan.historical_after,
+                    "Source-1938 historical shared-target task",
+                )
+                completed.append(args.historical_task)
+                record, audit_bytes = transition_audit(args.audit_output, audit_bytes, record, "mutating", completed=tuple(completed))
+                updated_archive = replace_snapshot(
+                    plan.archive_index,
+                    plan.archive_index_after,
+                    "Source-1938 historical archive index",
+                )
+                completed.append(SOURCE1938_ARCHIVE_INDEX)
+                record, audit_bytes = transition_audit(args.audit_output, audit_bytes, record, "mutating", completed=tuple(completed))
             updated_todo = replace_snapshot(plan.todo, plan.todo_after, "TODO")
             completed.append("TODO.md")
             record, audit_bytes = transition_audit(args.audit_output, audit_bytes, record, "mutating", completed=tuple(completed))
@@ -3239,7 +3743,16 @@ def replace_manager(args: Args) -> str:
             )
             completed.append(args.successor_task)
             record, audit_bytes = transition_audit(args.audit_output, audit_bytes, record, "proving", completed=tuple(completed))
-            prove_committed(args, plan, updated_old, tuple(updated_children), updated_todo, successor)
+            prove_committed(
+                args,
+                plan,
+                updated_old,
+                tuple(updated_children),
+                updated_historical,
+                updated_archive,
+                updated_todo,
+                successor,
+            )
             record, audit_bytes = transition_audit(args.audit_output, audit_bytes, record, "committed", completed=tuple(completed))
         except Exception as exc:
             failures, preserved = rollback_record(args, entries, tuple(completed))
