@@ -2,9 +2,9 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
-from omo_manager.omo_codex_status import Args, PlanPromptRecovery, Report, can_submit_stuck_input, current_block, current_input_text, dismiss_plan_prompt_if_present, dismiss_skills_menu_if_present, exact_pane_id, final_assistant_output, has_active_skills_menu, has_compacting_indicator, has_cursor_followups_overlay, has_resume_paused_goal_prompt, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, pane_has_exact_codex_process, pane_has_exact_cursor_process, report_from_lines, status, submit_stuck_input_if_present, tail, tail_pane_id, visible_error_lines
+from omo_manager.omo_codex_status import Args, PlanPromptRecovery, Report, can_submit_stuck_input, current_block, current_input_text, dismiss_plan_prompt_if_present, dismiss_skills_menu_if_present, dismiss_usage_limit_menu_if_present, exact_pane_id, final_assistant_output, has_active_quota_reset_prompt, has_quota_reset_prompt_hint, has_active_skills_menu, has_active_usage_limit_menu, has_compacting_indicator, has_cursor_followups_overlay, has_resume_paused_goal_prompt, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, pane_has_exact_codex_process, pane_has_exact_cursor_process, parse_args, quota_reset_prompt_selection, refuse_quota_reset_if_present, report_from_lines, status, submit_stuck_input_if_present, tail, tail_pane_id, visible_error_lines
 from omo_manager.omo_tmux_send import error_signature, exact_capacity_error
 
 
@@ -1027,6 +1027,156 @@ class CodexStatusTests(unittest.TestCase):
             rebound = dismiss_skills_menu_if_present('cfg:1.0', report_from_lines(menu))
         self.assertEqual(PlanPromptRecovery('not_safe:target_rebound', 'skills_menu', 'not_checked'), rebound)
         run.assert_not_called()
+
+    def test_dismiss_usage_limit_menu_sends_one_escape_with_before_after_evidence(self) -> None:
+        menu = ['Usage limit reached', 'Your included usage is exhausted. Choose an option below to continue.', '› 1. Add Credits', '  2. Reset usage', 'Press enter to confirm or esc to go back']
+        after = ['› Ask Codex to do anything', '  gpt-5.6-sol']
+        self.assertTrue(has_active_usage_limit_menu(menu))
+        with patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True), patch('omo_manager.omo_codex_status.tail_pane_id', side_effect=[menu, after]), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
+            recovery = dismiss_usage_limit_menu_if_present('cfg:1.0', report_from_lines(menu))
+        self.assertEqual(PlanPromptRecovery('sent_escape', 'usage_limit_menu', 'ready'), recovery)
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Escape'], capture_output=True, text=True, timeout=5, check=False)
+
+    def test_usage_limit_menu_accepts_either_single_selection(self) -> None:
+        common = ['Usage limit reached', 'Your included usage is exhausted. Choose an option below to continue.']
+        end = ['Press enter to confirm or esc to go back']
+        self.assertTrue(has_active_usage_limit_menu([*common, '› 1. Add Credits', '  2. Reset usage', *end]))
+        self.assertTrue(has_active_usage_limit_menu([*common, '  1. Add Credits', '› 2. Reset usage', *end]))
+        self.assertFalse(has_active_usage_limit_menu([*common, '  1. Add Credits', '  2. Reset usage', *end]))
+        self.assertFalse(has_active_usage_limit_menu([*common, '› 1. Add Credits', '› 2. Reset usage', *end]))
+
+    def test_dismiss_usage_limit_menu_fails_closed_for_stale_or_human_target(self) -> None:
+        menu = ['Usage limit reached', 'Your included usage is exhausted. Choose an option below to continue.', '› 1. Add Credits', '  2. Reset usage', 'Press enter to confirm or esc to go back']
+        latest = ['› Ask Codex to do anything', '  gpt-5.6-sol']
+        with patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True), patch('omo_manager.omo_codex_status.tail_pane_id', return_value=latest), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            stale = dismiss_usage_limit_menu_if_present('cfg:1.0', report_from_lines(menu))
+        self.assertEqual(PlanPromptRecovery('not_safe:stale_evidence', 'usage_limit_menu', 'ready'), stale)
+        run.assert_not_called()
+        with patch('omo_manager.omo_codex_status.exact_pane_id') as resolve:
+            human = dismiss_usage_limit_menu_if_present('hcfg:1.0', report_from_lines(menu))
+        self.assertEqual(PlanPromptRecovery('not_safe:human_target', 'usage_limit_menu', 'not_checked'), human)
+        resolve.assert_not_called()
+
+    def test_dismiss_usage_limit_menu_requires_codex_process_and_stable_target(self) -> None:
+        menu = ['Usage limit reached', 'Your included usage is exhausted. Choose an option below to continue.', '› 1. Add Credits', '  2. Reset usage', 'Press enter to confirm or esc to go back']
+        with patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=False), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            not_codex = dismiss_usage_limit_menu_if_present('cfg:1.0', report_from_lines(menu))
+        self.assertEqual(PlanPromptRecovery('not_safe:not_codex_process', 'usage_limit_menu', 'not_checked'), not_codex)
+        run.assert_not_called()
+        with patch('omo_manager.omo_codex_status.exact_pane_id', side_effect=['%7', '%8']), patch('omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True), patch('omo_manager.omo_codex_status.tail_pane_id', return_value=menu), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            rebound = dismiss_usage_limit_menu_if_present('cfg:1.0', report_from_lines(menu))
+        self.assertEqual(PlanPromptRecovery('not_safe:target_rebound', 'usage_limit_menu', 'not_checked'), rebound)
+        run.assert_not_called()
+
+    def test_refuse_quota_reset_confirms_only_fresh_no_selection(self) -> None:
+        yes = [
+            'Use this reset?',
+            'Full reset · Expires 19:33 on 3 Oct 2026.',
+            "› 1. Yes, use reset  Thanks for using Codex! You've been granted one free rate limit reset.",
+            '  2. No, go back     Choose a different reset.',
+            'Press enter to confirm or esc to go back',
+        ]
+        no = [yes[0], yes[1], yes[2].replace('› ', '  '), f'›{yes[3].lstrip()}', yes[4]]
+        after = ['› Ask Codex to do anything', '  gpt-5.6-sol']
+        self.assertEqual('yes', quota_reset_prompt_selection(yes))
+        self.assertEqual('no', quota_reset_prompt_selection(no))
+        self.assertTrue(has_active_quota_reset_prompt(no))
+        self.assertEqual('stuck_input', report_from_lines(no).status)
+        with patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch(
+            'omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True
+        ), patch('omo_manager.omo_codex_status.tail_pane_id', side_effect=[yes, no, no, after]), patch(
+            'omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)
+        ) as run:
+            recovery = refuse_quota_reset_if_present('cfg:1.0', report_from_lines(yes))
+        self.assertEqual(PlanPromptRecovery('sent_enter', 'quota_reset_prompt', 'ready'), recovery)
+        self.assertEqual(
+            [
+                call(['tmux', 'send-keys', '-t', '%7', 'Down'], capture_output=True, text=True, timeout=5, check=False),
+                call(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False),
+            ],
+            run.call_args_list,
+        )
+
+        with patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch(
+            'omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True
+        ), patch('omo_manager.omo_codex_status.tail_pane_id', side_effect=[no, no, after]), patch(
+            'omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)
+        ) as run:
+            recovery = refuse_quota_reset_if_present('cfg:1.0', report_from_lines(no))
+        self.assertEqual(PlanPromptRecovery('sent_enter', 'quota_reset_prompt', 'ready'), recovery)
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+
+        with patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch(
+            'omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True
+        ), patch('omo_manager.omo_codex_status.tail_pane_id', side_effect=[no, yes]), patch(
+            'omo_manager.omo_codex_status.subprocess.run'
+        ) as run:
+            recovery = refuse_quota_reset_if_present('cfg:1.0', report_from_lines(no))
+        self.assertEqual(PlanPromptRecovery('not_safe:no_not_selected', 'quota_reset_prompt', 'quota_reset_prompt'), recovery)
+        run.assert_not_called()
+
+    def test_refuse_quota_reset_fails_closed_without_verified_no(self) -> None:
+        yes = [
+            'Use this reset?',
+            'Full reset · Expires 19:33 on 3 Oct 2026.',
+            "› 1. Yes, use reset  Thanks for using Codex! You've been granted one free rate limit reset.",
+            '  2. No, go back     Choose a different reset.',
+            'Press enter to confirm or esc to go back',
+        ]
+        with patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch(
+            'omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True
+        ), patch('omo_manager.omo_codex_status.tail_pane_id', side_effect=[yes, yes]), patch(
+            'omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)
+        ) as run:
+            recovery = refuse_quota_reset_if_present('cfg:1.0', report_from_lines(yes))
+        self.assertEqual(PlanPromptRecovery('not_safe:no_not_selected', 'quota_reset_prompt', 'quota_reset_prompt'), recovery)
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Down'], capture_output=True, text=True, timeout=5, check=False)
+
+        changed = [*yes[:-1], 'Press y to spend the reset']
+        self.assertFalse(has_active_quota_reset_prompt(changed))
+        self.assertTrue(has_quota_reset_prompt_hint(changed))
+        self.assertEqual('stuck_input', report_from_lines(changed).status)
+        with patch('omo_manager.omo_codex_status.exact_pane_id') as resolve, patch('omo_manager.omo_codex_status.subprocess.run') as send:
+            stale = refuse_quota_reset_if_present('cfg:1.0', report_from_lines(changed))
+        self.assertEqual(PlanPromptRecovery('not_safe:not_quota_reset_prompt', 'stuck_input', 'not_checked'), stale)
+        resolve.assert_not_called()
+        send.assert_not_called()
+
+        with patch('omo_manager.omo_codex_status.exact_pane_id') as resolve:
+            human = refuse_quota_reset_if_present('hcfg:1.0', report_from_lines(yes))
+        self.assertEqual(PlanPromptRecovery('not_safe:human_target', 'quota_reset_prompt', 'not_checked'), human)
+        resolve.assert_not_called()
+
+        with patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch(
+            'omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=False
+        ), patch('omo_manager.omo_codex_status.subprocess.run') as send:
+            not_codex = refuse_quota_reset_if_present('cfg:1.0', report_from_lines(yes))
+        self.assertEqual(PlanPromptRecovery('not_safe:not_codex_process', 'quota_reset_prompt', 'not_checked'), not_codex)
+        send.assert_not_called()
+
+        with patch('omo_manager.omo_codex_status.exact_pane_id', side_effect=['%7', '%8']), patch(
+            'omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True
+        ), patch('omo_manager.omo_codex_status.tail_pane_id', return_value=yes), patch(
+            'omo_manager.omo_codex_status.subprocess.run'
+        ) as send:
+            rebound = refuse_quota_reset_if_present('cfg:1.0', report_from_lines(yes))
+        self.assertEqual(PlanPromptRecovery('not_safe:target_rebound', 'quota_reset_prompt', 'not_checked'), rebound)
+        send.assert_not_called()
+
+        no = [yes[0], yes[1], yes[2].replace('› ', '  '), f'›{yes[3].lstrip()}', yes[4]]
+        with patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch(
+            'omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True
+        ), patch('omo_manager.omo_codex_status.tail_pane_id', side_effect=[no, no]), patch(
+            'omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 1)
+        ):
+            send_failed = refuse_quota_reset_if_present('cfg:1.0', report_from_lines(no))
+        self.assertEqual(PlanPromptRecovery('not_safe:send_failed', 'quota_reset_prompt', 'not_checked'), send_failed)
+
+    def test_parse_args_rejects_multiple_dismiss_actions(self) -> None:
+        with self.assertRaises(SystemExit):
+            parse_args(['cfg:1', '--dismiss-skills-menu', '--dismiss-usage-limit-menu'])
+        with self.assertRaises(SystemExit):
+            parse_args(['cfg:1', '--dismiss-usage-limit-menu', '--refuse-quota-reset'])
 
     def test_status_ready_with_idle_queued_placeholder_footer(self) -> None:
         lines = [

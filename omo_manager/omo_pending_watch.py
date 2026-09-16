@@ -66,8 +66,10 @@ from omo_manager.omo_codex_status import Args as CodexStatusArgs
 from omo_manager.omo_codex_status import Report as CodexReport
 from omo_manager.omo_codex_status import SELECTED_MODEL_CAPACITY_RE
 from omo_manager.omo_codex_status import exact_pane_id
+from omo_manager.omo_codex_status import has_active_usage_limit_menu
 from omo_manager.omo_codex_status import inspect as inspect_codex
 from omo_manager.omo_codex_status import exact_tail as exact_codex_tail
+from omo_manager.omo_codex_status import pane_has_exact_codex_process
 from omo_manager.omo_codex_status import report_from_lines as report_codex_lines
 from omo_manager.amh_problem_claim import ProblemClaim
 from omo_manager.amh_problem_claim import ProblemIssue
@@ -863,11 +865,14 @@ def send_executor() -> ThreadPoolExecutor:
 def agent_problem_evidence_current(guard: AgentProblemGuard) -> bool:
     if guard.root is not None and guard.dependency_snapshots:
         current_snapshots = blocked_report_snapshot_state(guard.root, guard.report_state or DEFAULT_STATE)
-        return all((current := current_snapshots.get(task_file)) is not None and current[1] == snapshot for task_file, snapshot in guard.dependency_snapshots)
+        return all(
+            (current := current_snapshots.get(task_file)) is not None and recorded_snapshot_matches_current(snapshot, current[1])
+            for task_file, snapshot in guard.dependency_snapshots
+        )
     if guard.root is not None and guard.dependency_task_file:
         if guard.dependency_snapshot.startswith(("human:", "custody:", "cascade:", "done:")):
             current = blocked_report_snapshot_state(guard.root, guard.report_state or DEFAULT_STATE).get(guard.dependency_task_file)
-            current = current is not None and current[1] == guard.dependency_snapshot
+            current = current is not None and recorded_snapshot_matches_current(guard.dependency_snapshot, current[1])
         else:
             task = TaskLine(guard.dependency_task_file, "dependency-guard", "", "", None)
             task_path = resolve_task_path(guard.root, guard.dependency_task_file)
@@ -1247,7 +1252,9 @@ def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: flo
                 changed = True
             for task_file, expected_snapshot, snapshot in event.dependency_guarded_replacements:
                 current = current_snapshots.get(task_file)
-                current_ok = not event.dependency_require_current or (current is not None and current[1] == snapshot)
+                current_ok = not event.dependency_require_current or (
+                    current is not None and recorded_snapshot_matches_current(snapshot, current[1])
+                )
                 if event.dependency_state.get(task_file) == expected_snapshot and current_ok:
                     event.dependency_state[task_file] = snapshot
                     changed = True
@@ -4243,11 +4250,11 @@ def write_blocked_report_ledger(args: Args, snapshots: dict[str, str]) -> None:
         snapshots = {
             task_file: snapshot
             for task_file, snapshot in snapshots.items()
-            if (current_snapshot := stable.get(task_file)) is not None and current_snapshot[1] == snapshot
+            if (current_snapshot := stable.get(task_file)) is not None and recorded_snapshot_matches_current(snapshot, current_snapshot[1])
         }
         for task_file, snapshot in current.items():
             current_snapshot = stable.get(task_file)
-            if current_snapshot is not None and current_snapshot[1] == snapshot:
+            if current_snapshot is not None and recorded_snapshot_matches_current(snapshot, current_snapshot[1]):
                 snapshots[task_file] = snapshot
         replace_blocked_report_ledger_locked(args, snapshots)
 
@@ -5324,7 +5331,8 @@ def tagged_text(tag: str, text: str) -> str:
 def problem_row_line(row: ProblemRow) -> str:
     label = html.escape(task_target_label(row))
     if row.status == "stuck_input" and row.input_text:
-        return f"{label} {tagged_text('input', row.input_text)}"
+        input_text = f"{row.input_text} [{row.unstick}]" if row.unstick.startswith("not_safe:") else row.input_text
+        return f"{label} {tagged_text('input', input_text)}"
     if row.status == "untracked_agent" and row.unstick and row.input_text:
         return f"{label} {tagged_text('input', row.input_text)}"
     if row.status == "untracked_agent":
@@ -5751,8 +5759,56 @@ def recorded_done_ready_snapshot(
         task_evidence = task_path.read_bytes()
     except OSError:
         return ""
-    identity = "\0".join((*durable_done_ready_task_identity(task), state.status, state.target, owner_target, pane_evidence)).encode("utf-8")
-    return f"done:{hashlib.sha256(identity + bytes(1) + task_evidence).hexdigest()}"
+    try:
+        runtime_identity = json.loads(pane_evidence)["runtime_identity"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return ""
+    task_identity = durable_done_ready_task_identity(task)
+    stable_identity = "\0".join((*task_identity, state.status, state.target, owner_target, runtime_identity)).encode("utf-8")
+    stable_digest = hashlib.sha256(stable_identity + bytes(1) + task_evidence).hexdigest()
+    full_identity = "\0".join((*task_identity, state.status, state.target, owner_target, pane_evidence)).encode("utf-8")
+    full_digest = hashlib.sha256(full_identity + bytes(1) + task_evidence).hexdigest()
+    return f"done:{full_digest}:{stable_digest}"
+
+
+def recorded_done_usage_overlay_snapshot(
+    task_path: Path,
+    task: TaskLine,
+    state: TaskState,
+    owner_target: str,
+) -> str:
+    """Fingerprint an exact usage dialog without discarding the ready-output fingerprint."""
+
+    pane_id = exact_pane_id(state.target)
+    ok, lines = exact_codex_tail(state.target, 80)
+    if not pane_id or not ok or not has_active_usage_limit_menu(lines) or not pane_has_exact_codex_process(state.target, pane_id):
+        return ""
+    runtime_identity = blocked_custody_runtime_identity(state.target)
+    try:
+        task_evidence = task_path.read_bytes()
+    except OSError:
+        return ""
+    if not runtime_identity.startswith(f"{pane_id}\t"):
+        return ""
+    stable_identity = "\0".join((*durable_done_ready_task_identity(task), state.status, state.target, owner_target, runtime_identity)).encode("utf-8")
+    stable_digest = hashlib.sha256(stable_identity + bytes(1) + task_evidence).hexdigest()
+    return f"done-overlay:{stable_digest}"
+
+
+def recorded_snapshot_matches_current(recorded: str, current: str) -> bool:
+    """Accept an exact usage dialog only as an overlay on one recorded done runtime."""
+
+    if recorded == current:
+        return True
+    recorded_parts = recorded.split(":")
+    current_parts = current.split(":")
+    if recorded_parts[:1] == ["done"] and current_parts[:1] == ["done"] and len(recorded_parts) in {2, 3} and len(current_parts) in {2, 3}:
+        return recorded_parts[1] == current_parts[1]
+    if len(recorded_parts) == 3 and recorded_parts[0] == "done" and len(current_parts) == 2 and current_parts[0] == "done-overlay":
+        return recorded_parts[2] == current_parts[1]
+    if len(current_parts) == 3 and current_parts[0] == "done" and len(recorded_parts) == 2 and recorded_parts[0] == "done-overlay":
+        return current_parts[2] == recorded_parts[1]
+    return False
 
 
 def consumed_report_key_for_artifact(root: Path, report: AuthenticatedAgentReport) -> str:
@@ -6243,7 +6299,10 @@ def unchanged_dependency_blocked_idle_line(root: Path, line: str, current: dict[
         matches = [
             (task_file, task)
             for task_file, (task, snapshot, _owner_target) in current.items()
-            if snapshot.startswith("done:") and snapshots.get(task_file) == snapshot and same_tmux_target(task.target, target)
+            if snapshot.startswith(("done:", "done-overlay:"))
+            and (recorded := snapshots.get(task_file)) is not None
+            and recorded_snapshot_matches_current(recorded, snapshot)
+            and same_tmux_target(task.target, target)
         ]
         return len(matches) == 1 and matches[0][1].section.startswith("archive:")
     task_status = problem_line_value(line, "task_status")
@@ -6329,7 +6388,9 @@ def prune_dependency_reported_snapshots(
         current_snapshot = current.get(task_file)
         previous = snapshots[task_file]
         changed_consumed_cascade = previous.startswith("cascade:") and current_snapshot is not None and current_snapshot[1] != previous
-        if task_file not in preserved and not changed_consumed_cascade and (current_snapshot is None or current_snapshot[1] != previous):
+        if task_file not in preserved and not changed_consumed_cascade and (
+            current_snapshot is None or not recorded_snapshot_matches_current(previous, current_snapshot[1])
+        ):
             snapshots.pop(task_file, None)
 
 
@@ -6382,7 +6443,7 @@ def merge_current_blocked_report_ledger(args: Args, snapshots: dict[str, str]) -
     current = blocked_report_snapshot_state(args.root, args.state)
     for task_file, snapshot in read_blocked_report_ledger(args).items():
         current_snapshot = current.get(task_file)
-        if current_snapshot is not None and current_snapshot[1] == snapshot:
+        if current_snapshot is not None and recorded_snapshot_matches_current(snapshot, current_snapshot[1]):
             snapshots[task_file] = snapshot
 
 
@@ -6430,7 +6491,7 @@ def blocked_report_bypasses_target_repeat(
             if current_snapshot is not None and current_snapshot[1].startswith(("human:", "done:")) and line_matches_blocked_report_snapshot(root, line, *current_snapshot):
                 return True
             continue
-        if current_snapshot is None or current_snapshot[1] != previous or not line_matches_blocked_report_snapshot(root, line, *current_snapshot):
+        if current_snapshot is None or not recorded_snapshot_matches_current(previous, current_snapshot[1]) or not line_matches_blocked_report_snapshot(root, line, *current_snapshot):
             return True
     return False
 
@@ -6477,6 +6538,34 @@ def active_manager_problem_targets(root: Path, output: str, manager_target: str 
     return targets
 
 
+def quota_reset_recovery_targets(root: Path, output: str, manager_target: str = "") -> list[str]:
+    """Return live agent targets that can handle a manager reset prompt manually."""
+
+    if "unstick=not_safe:" not in output or not (
+        "recovery=quota_reset_prompt->" in output or "unstick=not_safe:unrecognized_quota_reset_prompt" in output
+    ):
+        return []
+    problem_targets = manager_problem_targets(output, manager_target)
+    targets: list[str] = []
+    for task in parse_task_lines(root / "TODO.md"):
+        if task.task_file == "TODO.md" or task.section not in MANAGER_TASK_STATE_LIVE_SECTIONS:
+            continue
+        task_path = resolve_task_path(root, task.task_file)
+        state = scan_task_state(task_path, root) if task_path is not None else None
+        if (
+            state is None
+            or state.status not in {"running", "long_running"}
+            or not state.target
+            or runat_kind(state.target) != "tmux"
+            or is_human_tmux_target(state.target)
+            or any(same_tmux_target(state.target, target) for target in problem_targets)
+            or any(same_tmux_target(state.target, target) for target in targets)
+        ):
+            continue
+        targets.append(state.target)
+    return targets
+
+
 def manager_problem_route_text(args: Args, output: str) -> str:
     lines = output.splitlines()
     body_lines = [line for line in lines[1:] if not line.startswith("manager-action: ")] if lines and lines[0].startswith("agent-problems:") else lines
@@ -6508,11 +6597,19 @@ def route_or_log_manager_problem(args: Args, seen: dict[str, float], output: str
         return False
     if now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
         return False
-    targets = active_manager_problem_targets(args.root, output, args.manager_target)
+    manager_targets = active_manager_problem_targets(args.root, output, args.manager_target)
+    fallback_targets: list[str] = []
+    for target in quota_reset_recovery_targets(args.root, output, args.manager_target):
+        if not any(same_tmux_target(target, candidate) for candidate in manager_targets):
+            fallback_targets.append(target)
+    targets: list[str] = []
+    for tier in (manager_targets, fallback_targets):
+        if not tier:
+            continue
+        route_target = args.reminder_choice(tier)
+        targets.extend((route_target, *(target for target in tier if target != route_target)))
     if not targets:
         return log_manager_problem_once(args, seen, output, key, now_wall_s)
-    route_target = args.reminder_choice(targets)
-    targets = [route_target, *(target for target in targets if target != route_target)]
     text = manager_problem_route_text(args, output)
     event = DeliverySuccessEvent(
         seen_keys=(key,),
@@ -6768,21 +6865,16 @@ def blocked_report_snapshot_state(
             or any(tmux_targets_overlap(state.target, target) for target in live_targets)
         ):
             continue
+        owner_target = effective_owner_target(root, task, task_path)
         report = inspect_codex(CodexStatusArgs(state.target, 80))
-        if report.status != "ready":
-            continue
-        pane_evidence = blocked_custody_pane_evidence(state.target, report)
-        if not pane_evidence:
-            continue
-        snapshot = recorded_done_ready_snapshot(
-            task_path,
-            task,
-            state,
-            effective_owner_target(root, task, task_path),
-            pane_evidence,
+        pane_evidence = blocked_custody_pane_evidence(state.target, report) if report.status == "ready" else ""
+        snapshot = (
+            recorded_done_ready_snapshot(task_path, task, state, owner_target, pane_evidence)
+            if pane_evidence
+            else recorded_done_usage_overlay_snapshot(task_path, task, state, owner_target)
         )
         if snapshot:
-            snapshots[task.task_file] = (task, snapshot, effective_owner_target(root, task, task_path))
+            snapshots[task.task_file] = (task, snapshot, owner_target)
     for task, task_path in archived_task_lines:
         canonical_path = task_path.resolve(strict=False)
         if task.task_file in seen_files or task_path_occurrences[canonical_path] != 1:
@@ -6802,14 +6894,14 @@ def blocked_report_snapshot_state(
             or any(tmux_targets_overlap(state.target, target) for target in live_targets)
         ):
             continue
-        report = inspect_codex(CodexStatusArgs(state.target, 80))
-        if report.status != "ready":
-            continue
-        pane_evidence = blocked_custody_pane_evidence(state.target, report)
-        if not pane_evidence:
-            continue
         owner_target = effective_owner_target(root, task, task_path)
-        snapshot = recorded_done_ready_snapshot(task_path, task, state, owner_target, pane_evidence)
+        report = inspect_codex(CodexStatusArgs(state.target, 80))
+        pane_evidence = blocked_custody_pane_evidence(state.target, report) if report.status == "ready" else ""
+        snapshot = (
+            recorded_done_ready_snapshot(task_path, task, state, owner_target, pane_evidence)
+            if pane_evidence
+            else recorded_done_usage_overlay_snapshot(task_path, task, state, owner_target)
+        )
         if snapshot:
             snapshots[task.task_file] = (task, snapshot, owner_target)
     for task in task_lines:
@@ -6882,7 +6974,7 @@ def classify_done_ready(args: Args, task_file: str) -> bool:
         snapshots = {
             stored_task: snapshot
             for stored_task, snapshot in read_blocked_report_ledger(args).items()
-            if (current := second_state.get(stored_task)) is not None and current[1] == snapshot
+            if (current := second_state.get(stored_task)) is not None and recorded_snapshot_matches_current(snapshot, current[1])
         }
         snapshots[task_file] = second[1]
         replace_blocked_report_ledger_locked(args, snapshots)
@@ -6915,7 +7007,7 @@ def classify_blocked_ready(args: Args, task_file: str) -> bool:
         snapshots = {
             stored_task: snapshot
             for stored_task, snapshot in read_blocked_report_ledger(args).items()
-            if (current := second_state.get(stored_task)) is not None and current[1] == snapshot
+            if (current := second_state.get(stored_task)) is not None and recorded_snapshot_matches_current(snapshot, current[1])
         }
         snapshots[task_file] = second[1]
         replace_blocked_report_ledger_locked(args, snapshots)
@@ -6941,7 +7033,7 @@ def maybe_push_dependency_transitions(
         if previous is None:
             snapshots[task_file] = snapshot
             continue
-        if previous == snapshot:
+        if recorded_snapshot_matches_current(previous, snapshot):
             continue
         if snapshot.startswith("done:"):
             snapshots[task_file] = snapshot

@@ -121,6 +121,15 @@ bindings.
 
 ## replace, verify, and move
 
+Before independent review, create one durable read-only evidence package for each
+explicit frozen source set with `evidence-package`. It binds complete source
+bodies, direct All Mail and Trash thread context, UIDVALIDITY, read state,
+Gmail identities, route evidence, later-arrival dispositions, runtime digest,
+and preparer/reviewer identities. Replacement identity is deliberately a
+post-send phase binding (`proposed_replacement.phase=post-send`); never invent
+its Message-ID before delivery. The command refuses duplicate evidence paths,
+ambiguous sources, boundary violations, and incomplete thread context.
+
 1. Inspect each approved explicit source set with `inspect-explicit` and
     bind its source UIDVALIDITY, source identities, thread context, and
     original sender target.

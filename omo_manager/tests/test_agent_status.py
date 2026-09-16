@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import yaml
 
-from omo_manager.omo_agent_status import Args, TaskFrontmatterError, TaskState, active_task_targets, classify_task, format_problem_summary, format_summary, is_authoritative_human_blocked_ready_task, is_targetless_low_priority_custody, load_local_env, load_task_state, main, parse_task_lines, parse_task_metadata, persistent_blocked_task_lines, registry_prune, report_output_evidence, scan_task_state, session_records
+from omo_manager.omo_agent_status import Args, TaskFrontmatterError, TaskState, active_task_targets, classify_target, classify_task, format_problem_summary, format_summary, is_authoritative_human_blocked_ready_task, is_targetless_low_priority_custody, load_local_env, load_task_state, main, parse_task_lines, parse_task_metadata, persistent_blocked_task_lines, registry_prune, report_output_evidence, scan_task_state, session_records
 from omo_manager.omo_agent_status import BLOCKED_DELIVERY_ITEMS
 from omo_manager.omo_agent_status import target_resolution_state
 from omo_manager.omo_agent_status import SessionRecord, StatusRow, TaskLine
@@ -1080,6 +1080,45 @@ resolved_task_items: []
             text = out.getvalue()
             self.assertIn("recovery=plan_prompt->stuck_input unstick=sent_escape", text)
             self.assertIn("unstuck: target=cfg:1.0 task=active.md action=sent_escape", text)
+
+    def test_problems_only_refuses_quota_reset_with_audit_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
+            prompt = [
+                "Use this reset?",
+                "Full reset · Expires 19:33 on 3 Oct 2026.",
+                "  1. Yes, use reset  Thanks for using Codex! You've been granted one free rate limit reset.",
+                "› 2. No, go back     Choose a different reset.",
+                "Press enter to confirm or esc to go back",
+            ]
+            report = Report("stuck_input", prompt)
+            recovery = PlanPromptRecovery("sent_enter", "quota_reset_prompt", "ready")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=report), patch(
+                "omo_manager.omo_agent_status.refuse_quota_reset_if_present", return_value=recovery
+            ) as refuse, patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as submit, redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            refuse.assert_called_once_with("cfg:1.0", report)
+            submit.assert_not_called()
+            text = out.getvalue()
+            self.assertIn("recovery=quota_reset_prompt->ready unstick=sent_enter", text)
+            self.assertIn("unstuck: target=cfg:1.0 task=active.md action=sent_enter", text)
+
+    def test_problems_only_routes_unrecognized_quota_reset_without_input(self) -> None:
+        report = Report("stuck_input", ["Use this reset?", "1. Yes, use reset", "2. No, go back", "Press y to spend it"])
+        with patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as submit, patch(
+            "omo_manager.omo_agent_status.refuse_quota_reset_if_present"
+        ) as refuse:
+            row = classify_target("active.md", "cfg:1.0", task_status="running", auto_unstick=True, report=report)
+        submit.assert_not_called()
+        refuse.assert_not_called()
+        self.assertEqual("stuck_input", row.status)
+        self.assertEqual("not_safe:unrecognized_quota_reset_prompt", row.unstick)
+        self.assertIn("unstick=not_safe:unrecognized_quota_reset_prompt", row.evidence)
 
     def test_problems_only_unsticks_each_target_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4599,6 +4638,39 @@ resolved_task_items: []
             text = out.getvalue()
             self.assertIn("agent-problems: ready=1", text)
             self.assertIn("ready: task=stale.md evidence=target=cfg:53 role=todo_unmanaged task_status=done", text)
+
+    def test_problems_only_ignores_exact_completed_protected_human_shell(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("previous:\nhelper_audit_human_facing.md hcfg 1\n", encoding="utf-8")
+            _ = (root / "helper_audit_human_facing.md").write_text(task_frontmatter("done", runat="hcfg:1"), encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", ["human shell"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+
+            self.assertEqual("", out.getvalue())
+
+    def test_completed_protected_human_shell_exception_keeps_launch_failures_visible(self) -> None:
+        cases = (
+            ("helper_audit_human_facing.md", "running", "hcfg:1"),
+            ("helper_audit_human_facing.md", "done", "hcfg:2"),
+            ("other.md", "done", "hcfg:1"),
+        )
+        for task_file, status, target in cases:
+            with self.subTest(task_file=task_file, status=status, target=target), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                registry = root / "sessions.json"
+                _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+                section = "current" if status == "running" else "previous"
+                _ = (root / "TODO.md").write_text(f"{section}:\n{task_file} {target.replace(':', ' ')}\n", encoding="utf-8")
+                _ = (root / task_file).write_text(task_frontmatter(status, runat=target), encoding="utf-8")
+                out = StringIO()
+                with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", ["failed launch shell"])), redirect_stdout(out):
+                    self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+
+                self.assertIn(f"not_codex: task={task_file}", out.getvalue())
 
     def test_problems_only_reports_ready_unregistered_agent_pane_as_untracked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

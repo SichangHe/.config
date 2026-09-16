@@ -26,11 +26,14 @@ from omo_manager.omo_codex_status import Report
 from omo_manager.omo_codex_status import dismiss_plan_prompt_if_present
 from omo_manager.omo_codex_status import exact_pane_id
 from omo_manager.omo_codex_status import has_active_plan_prompt
+from omo_manager.omo_codex_status import has_active_quota_reset_prompt
+from omo_manager.omo_codex_status import has_quota_reset_prompt_hint
 from omo_manager.omo_codex_status import has_selected_model_capacity_warning
 from omo_manager.omo_codex_status import ignorable_codex_apps_transport_lines
 from omo_manager.omo_codex_status import inspect
 from omo_manager.omo_codex_status import interrupt_waiting_subagent_if_present
 from omo_manager.omo_codex_status import is_stock_placeholder_input_text
+from omo_manager.omo_codex_status import refuse_quota_reset_if_present
 from omo_manager.omo_codex_status import submit_stuck_input_if_present
 from omo_manager.omo_codex_status import visible_error_lines
 from omo_manager.omo_external_task_register import resolve_registered_external_task
@@ -550,6 +553,17 @@ def quiet_closed_manager_not_codex(root: Path, task: TaskLine, row: StatusRow) -
     task_path = resolve_task_path(root, task.task_file)
     state = scan_task_state(task_path, root) if task_path is not None else None
     return state is not None and same_tmux_target(row.target, state.target) and blocked_closed_manager_dependency_is_active(root, task, state)
+
+
+# 🧑 "Fix watcher problem ... narrowly: helper_audit_human_facing.md is status done and hcfg:1 is a protected Human-owned non-Codex shell; ... suppress this exact completed protected-pane false positive, retain genuine not_codex launch failures"
+def quiet_completed_protected_human_shell(row: StatusRow) -> bool:
+    """Return whether the exact completed `hcfg:1` shell is intentionally quiet."""
+    return (
+        row.task_file == "helper_audit_human_facing.md"
+        and row.task_status == "done"
+        and row.status == "not_codex"
+        and same_tmux_target(row.target, "hcfg:1")
+    )
 
 
 def is_recorded_human_wait(state: TaskState) -> bool:
@@ -1801,7 +1815,13 @@ def classify_target(task_file: str, target: str, persistent_role: bool = False, 
             if unstick_by_target is not None and unstick_key in unstick_by_target:
                 unstick = "already_sent" if unstick_by_target[unstick_key] in {"sent_enter", "sent_escape"} else unstick_by_target[unstick_key]
             else:
-                if has_active_plan_prompt(report.lines):
+                if has_active_quota_reset_prompt(report.lines):
+                    recovery = refuse_quota_reset_if_present(target, report)
+                    evidence += f" recovery={recovery.before}->{recovery.after}"
+                    unstick = recovery.action
+                elif has_quota_reset_prompt_hint(report.lines):
+                    unstick = "not_safe:unrecognized_quota_reset_prompt"
+                elif has_active_plan_prompt(report.lines):
                     recovery = dismiss_plan_prompt_if_present(target, report)
                     evidence += f" recovery={recovery.before}->{recovery.after}"
                     unstick = recovery.action
@@ -2171,6 +2191,7 @@ def main(argv: list[str]) -> int:
                     row
                     for row in rows
                     if not is_quiet_long_running_ready_row(args.root, row)
+                    and not quiet_completed_protected_human_shell(row)
                     and not (
                         (current_task := current.get(row.task_file)) is not None
                         and quiet_closed_manager_not_codex(args.root, current_task, row)

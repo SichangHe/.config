@@ -2134,6 +2134,66 @@ def cmd_inspect_explicit(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_evidence_package(args: argparse.Namespace) -> int:
+    """Write one durable read-only package for an explicit frozen source set."""
+    if not args.task_id or any("\n" in value or "\r" in value for value in (args.task_id, args.preparer, args.reviewer)):
+        print("task, preparer, and reviewer identities must be nonempty single-line values", file=sys.stderr)
+        return 2
+    if args.preparer == args.reviewer:
+        print("preparer and reviewer must be distinct", file=sys.stderr)
+        return 2
+    try:
+        uids = parse_uids(args.uids, None)
+        if not uids:
+            raise ValueError("at least one explicit source UID is required")
+        if not args.out.is_absolute():
+            raise ValueError("evidence package path must be absolute")
+        out = args.out.resolve()
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    client, config = open_mailbox(readonly=True)
+    try:
+        sender_email, recipient_email = mail_boundary(config)
+        uidvalidity = selected_uidvalidity(client)
+        records = [replace(record, source_uidvalidity=uidvalidity) for record in fetch_records(client, uids, with_body=True, with_metadata=True)]
+        if len(records) != len(uids) or {record.uid for record in records} != set(uids):
+            raise RuntimeError("one or more explicit source UIDs are missing or duplicated")
+        require_gmail_identities(records)
+        if any(not is_manager_record(record, sender_email, recipient_email) for record in records):
+            raise RuntimeError("one or more explicit sources are outside the manager-mail boundary")
+        contexts = fetch_direct_thread_contexts(client, records)
+        source_rows = []
+        for record in sorted(records, key=lambda item: int(item.uid)):
+            source_rows.append({"uid": record.uid, "gmail_msgid": record.gmail_msgid, "gmail_thrid": record.gmail_thrid,
+                                "raw_sha256": record.raw_sha256, "body_sha256": hashlib.sha256(record.body.encode()).hexdigest(),
+                                "body_bytes": record.body_bytes, "flags": record.flags, "labels": record.labels,
+                                "read_state": read_state_from_flags(record.flags), "date": record.date, "sender": record.sender,
+                                "to": record.to, "subject": record.subject, "body": record.body})
+        context_rows = []
+        for thread, thread_records in sorted(contexts.items()):
+            for record in sorted(thread_records, key=lambda item: item.gmail_msgid):
+                context_rows.append({"gmail_msgid": record.gmail_msgid, "gmail_thrid": thread, "raw_sha256": record.raw_sha256,
+                                     "body_sha256": hashlib.sha256(record.body.encode()).hexdigest(), "body_bytes": record.body_bytes,
+                                     "flags": record.flags, "labels": record.labels, "read_state": read_state_from_flags(record.flags),
+                                     "date": record.date, "sender": record.sender, "to": record.to, "subject": record.subject,
+                                     "body": record.body, "selected": record.gmail_msgid in {item.gmail_msgid for item in records}})
+        payload = {"schema": "omo-mail-review-package/v1", "task_id": args.task_id, "preparer": args.preparer,
+                   "reviewer": args.reviewer, "source_uidvalidity": uidvalidity, "source_uids": uids,
+                   "source_mailbox": "INBOX", "runtime_bundle_sha256": args.runtime_bundle_sha256,
+                   "route_resolution": args.route_resolution, "later_arrivals": args.later_arrivals,
+                   "proposed_replacement": {"phase": "post-send", "identity": None},
+                   "sources": source_rows, "thread_context": context_rows,
+                   "thread_context_sha256": {thread: thread_context_digest(items) for thread, items in sorted(contexts.items())}}
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        payload["package_sha256"] = hashlib.sha256(canonical.encode()).hexdigest()
+        write_private_exclusive(out, json.dumps(payload, sort_keys=True, indent=2) + "\n")
+    finally:
+        logout_mailbox(client)
+    print(f"evidence_package={out} source_count={len(records)} context_count={len(context_rows)} uidvalidity={uidvalidity}")
+    return 0
+
+
 def cmd_locate_replacement(args: argparse.Namespace) -> int:
     """Print the unique RFC Message-ID for an exact current manager-mail subject."""
     if not args.subject or "\n" in args.subject or "\r" in args.subject:
@@ -4809,6 +4869,16 @@ This command moves the old message only from Inbox to recoverable Gmail Trash an
     )
     inspect_explicit.add_argument("--task-id", required=True, help="Task identity assigned to every selected source.")
     inspect_explicit.set_defaults(func=cmd_inspect_explicit)
+    package = sub.add_parser("evidence-package", help="Write one immutable read-only JSON review package for explicit source UIDs.")
+    package.add_argument("--out", type=Path, required=True, help="New absolute owner-only JSON path; existing files are refused.")
+    package.add_argument("--uids", required=True, help="Comma or whitespace separated current INBOX source UIDs.")
+    package.add_argument("--task-id", required=True, help="Single task identity for the frozen source set.")
+    package.add_argument("--preparer", required=True, help="Identity that prepared this package.")
+    package.add_argument("--reviewer", required=True, help="Distinct reviewer identity; no approval is implied by this field.")
+    package.add_argument("--runtime-bundle-sha256", required=True, help="Exact reviewed runtime bundle digest.")
+    package.add_argument("--route-resolution", action="append", default=[], metavar="TASK=TARGET", help="Authoritative route-transition evidence.")
+    package.add_argument("--later-arrival", dest="later_arrivals", action="append", default=[], metavar="UID", help="Later arrival explicitly considered or excluded.")
+    package.set_defaults(func=cmd_evidence_package)
     locate_replacement = sub.add_parser("locate-replacement", help="Find one exact current manager message and print its RFC Message-ID.")
     locate_replacement.add_argument("--subject", required=True, help="Exact current subject, including any manager prefix.")
     locate_replacement.add_argument(

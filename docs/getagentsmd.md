@@ -6,6 +6,9 @@ getagentsmd
 - commands
   - no arguments prints the root
   - `get NAME` prints only the explicitly named document
+- launcher use
+  - fresh prompted launches prepend the exact root command and its stdout
+  - retrieval failure stops launch before task, TODO, session, or pane mutation
 - retrieval
   - try GitHub first
   - cache each successful response separately

@@ -8636,6 +8636,65 @@ with exclusive_watcher_root(root):
                 self.assertFalse(watcher.classify_done_ready(args, "202608/completed.md"))
             self.assertEqual({}, watcher.read_blocked_report_ledger(args))
 
+    def test_monthly_archive_classification_tolerates_only_same_runtime_usage_overlay(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        menu = [
+            "Usage limit reached",
+            "Your included usage is exhausted. Choose an option below to continue.",
+            "› 1. Add Credits",
+            "  2. Reset usage",
+            "Press enter to confirm or esc to go back",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "202608"
+            archive.mkdir()
+            _ = (root / "TODO.md").write_text("previous:\n", encoding="utf-8")
+            _ = (archive / "old_todos.md").write_text("archived:\ncompleted.md cfg:2\n", encoding="utf-8")
+            _ = (archive / "completed.md").write_text(
+                task_frontmatter("done", runat="cfg:2", managerat="wl:1"),
+                encoding="utf-8",
+            )
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+            pane = {"report": watcher.CodexReport("ready", ["stable completed output"])}
+            runtime = {"identity": "%42\t1000\tcodex"}
+            problem = (
+                "agent-problems: untracked_agent=1\n"
+                "untracked_agent: task=tmux:cfg:2 evidence=target=cfg:2 role=tmux_unmanaged route_owner_target=-\n"
+            )
+
+            with patch.object(watcher, "inspect_codex", side_effect=lambda _args: pane["report"]), patch.object(
+                watcher, "blocked_custody_runtime_identity", side_effect=lambda _target: runtime["identity"]
+            ), patch.object(watcher, "exact_codex_tail", return_value=(True, menu)), patch.object(
+                watcher, "exact_pane_id", return_value="%42"
+            ), patch.object(watcher, "pane_has_exact_codex_process", return_value=True) as exact_process:
+                self.assertTrue(watcher.classify_done_ready(args, "202608/completed.md"))
+                recorded = watcher.read_blocked_report_ledger(args)["202608/completed.md"]
+                self.assertRegex(recorded, r"^done:[0-9a-f]{64}:[0-9a-f]{64}$")
+
+                pane["report"] = watcher.CodexReport("not_codex", menu)
+                self.assertIsNone(watcher.filter_unchanged_dependency_blocked_idle_output(args, problem, {"202608/completed.md": recorded}))
+                exact_process.assert_called_with("cfg:2", "%42")
+
+                exact_process.return_value = False
+                self.assertEqual(problem, watcher.filter_unchanged_dependency_blocked_idle_output(args, problem, {"202608/completed.md": recorded}))
+                exact_process.return_value = True
+
+                runtime["identity"] = "%43\t1000\tcodex"
+                self.assertEqual(problem, watcher.filter_unchanged_dependency_blocked_idle_output(args, problem, {"202608/completed.md": recorded}))
+
+                runtime["identity"] = "%42\t2000\tcodex"
+                self.assertEqual(problem, watcher.filter_unchanged_dependency_blocked_idle_output(args, problem, {"202608/completed.md": recorded}))
+
+                runtime["identity"] = "%42\t1000\tcodex"
+                pane["report"] = watcher.CodexReport("not_codex", [*menu[:-1], "unexpected footer"])
+                with patch.object(watcher, "exact_codex_tail", return_value=(True, [*menu[:-1], "unexpected footer"])):
+                    self.assertEqual(problem, watcher.filter_unchanged_dependency_blocked_idle_output(args, problem, {"202608/completed.md": recorded}))
+
+                pane["report"] = watcher.CodexReport("ready", ["changed output"])
+                self.assertEqual(problem, watcher.filter_unchanged_dependency_blocked_idle_output(args, problem, {"202608/completed.md": recorded}))
+
     def test_monthly_archive_classification_rejects_group_or_world_writable_evidence(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -10049,6 +10108,93 @@ resolved_task_items: []
         self.assertIn("suppressed manager self-problem report", text)
         self.assertNotIn("manager agent problem: running task marker needs attention.", text)
 
+    def test_manager_quota_reset_failure_routes_to_live_worker(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nworker.md cfg:2\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(task_frontmatter(runat="cfg:2", managerat="wl:1.0"), encoding="utf-8")
+            args = Args(
+                root,
+                "",
+                root / "seen.tsv",
+                1.0,
+                1.0,
+                30.0,
+                Path("/status.py"),
+                False,
+                False,
+                manager_target="wl:1.0",
+                agent_problem_repeat_s=300.0,
+            )
+            result = watcher.CommandOutput(
+                "agent-problems",
+                3,
+                "agent-problems: stuck_input=1\n"
+                "stuck_input: task=manager evidence=target=wl:1.0 role=manager output=Use this reset? recovery=quota_reset_prompt->not_checked unstick=not_safe:send_failed\n",
+                "",
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch(
+                "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
+            ), patch.object(watcher, "log_manager_problem", side_effect=AssertionError("unexpected log fallback")):
+                self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+            self.assertEqual(1, len(calls))
+            self.assertEqual("cfg:2", calls[0][calls[0].index("--target") + 1])
+            self.assertIn("Use this reset?", calls[0][1])
+            self.assertIn("not_safe:send_failed", calls[0][1])
+
+    def test_manager_quota_reset_failure_prefers_live_manager_over_worker(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nmanager.md wl:2\nworker.md cfg:2\n", encoding="utf-8")
+            _ = (root / "manager.md").write_text(
+                task_frontmatter(runat="wl:2", managerat="wl:1.0", is_manager=True),
+                encoding="utf-8",
+            )
+            _ = (root / "worker.md").write_text(task_frontmatter(runat="cfg:2", managerat="wl:1.0"), encoding="utf-8")
+            args = Args(
+                root,
+                "",
+                root / "seen.tsv",
+                1.0,
+                1.0,
+                30.0,
+                Path("/status.py"),
+                False,
+                False,
+                manager_target="wl:1.0",
+                agent_problem_repeat_s=300.0,
+                reminder_choice=lambda targets: targets[-1],
+            )
+            result = watcher.CommandOutput(
+                "agent-problems",
+                3,
+                "agent-problems: stuck_input=1\n"
+                "stuck_input: task=manager evidence=target=wl:1.0 role=manager output=Use this reset? recovery=quota_reset_prompt->not_checked unstick=not_safe:send_failed\n",
+                "",
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch(
+                "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
+            ):
+                self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+            self.assertEqual(1, len(calls))
+            self.assertEqual("wl:2", calls[0][calls[0].index("--target") + 1])
+
     def test_agent_problem_check_suppresses_resolved_manager_self_stuck_prompt(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -10709,6 +10855,7 @@ resolved_task_items: []
             path = root / "task.md"
             path.write_text(f"{task_frontmatter(runat='wl:2', managerat='vl:64')}\n(pending)\nplease route\n", encoding="utf-8")
             calls: list[tuple[str, str]] = []
+
             def fake_send_to_codex(target: str, message: str, _options: watcher.CodexSendOptions, **_: object) -> Future[None]:
                 calls.append((target, message))
                 raise RuntimeError("status=not_codex")
@@ -10732,6 +10879,7 @@ resolved_task_items: []
             path = root / "task.md"
             path.write_text(f"{task_frontmatter(runat='', managerat='vl:64')}\n(pending)\nplease route\n", encoding="utf-8")
             marker = watcher.find_markers(root, [path])[0]
+
             args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, manager_target="wl:1")
             seen: dict[str, float] = {}
             with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=AssertionError("must not send to manager")):

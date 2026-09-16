@@ -76,6 +76,21 @@ class GetAgentsMdTest(unittest.TestCase):
 
             self.assertEqual(f"{module.FALLBACK_NOTICE}\ncached\n", out.getvalue())
 
+    def test_root_fails_without_remote_or_cache(self):
+        module = load_getagentsmd()
+        with tempfile.TemporaryDirectory() as tmp:
+            module.CACHE_DIR = Path(tmp)
+            module.CACHE_FILE = Path(tmp) / "AGENTS.md"
+            module.get = lambda url, timeout: (_ for _ in ()).throw(
+                module.RequestException("network down")
+            )
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(1, module.main([]))
+
+            self.assertIn("Failed to fetch agent instructions", out.getvalue())
+
     def test_write_cache_rejects_symlink_cache_dir(self):
         module = load_getagentsmd()
         with tempfile.TemporaryDirectory() as tmp:

@@ -54,6 +54,16 @@ SKILLS_TITLE_RE = re.compile(r"^\s*Skills\s*$")
 SKILLS_ACTION_RE = re.compile(r"^\s*Choose an action\s*$")
 SKILLS_LIST_RE = re.compile(r"^\s*›\s*1\.\s+List skills(?:\s+Tip: press @ to open this list directly\.)?\s*$")
 SKILLS_TOGGLE_RE = re.compile(r"^\s*2\.\s+Enable/Disable Skills(?:\s+Enable or disable skills\.)?\s*$")
+USAGE_LIMIT_TITLE_RE = re.compile(r"^\s*Usage limit reached\s*$")
+USAGE_LIMIT_DETAIL_RE = re.compile(r"^\s*Your included usage is exhausted\. Choose an option below to continue\.\s*$")
+USAGE_LIMIT_CREDITS_RE = re.compile(r"^\s*(?P<selected>›\s*)?1\.\s+Add Credits\s*$")
+USAGE_LIMIT_RESET_RE = re.compile(r"^\s*(?P<selected>›\s*)?2\.\s+Reset usage\s*$")
+QUOTA_RESET_TITLE_RE = re.compile(r"^\s*Use this reset\?\s*$")
+QUOTA_RESET_DETAIL_RE = re.compile(r"^\s*Full reset\s+·\s+Expires (?:[01][0-9]|2[0-3]):[0-5][0-9] on (?:[1-9]|[12][0-9]|3[01]) [A-Z][a-z]{2} 20[0-9]{2}\.\s*$")
+QUOTA_RESET_YES_RE = re.compile(
+    r"^\s*(?P<selected>›\s*)?1\.\s+Yes, use reset\s+Thanks for using Codex! You've been granted one free rate limit reset\.\s*$"
+)
+QUOTA_RESET_NO_RE = re.compile(r"^\s*(?P<selected>›\s*)?2\.\s+No, go back\s+Choose a different reset\.\s*$")
 SESSION_MODEL_RESUME_RE = re.compile(r"\bThis session (?:was recorded|started) with model\b.+?\bis resuming with\b", re.IGNORECASE)
 FILE_SEARCH_NO_MATCHES_RE = re.compile(r"^\s*no matches\s*$", re.IGNORECASE)
 FILE_SEARCH_HELP_RE = re.compile(r"\benter insert\s*·\s*esc close\s*·\s*←/→ switch search modes\b")
@@ -100,6 +110,8 @@ class Args:
     target: str
     n_lines: int
     dismiss_skills_menu: bool = False
+    dismiss_usage_limit_menu: bool = False
+    refuse_quota_reset: bool = False
 
 
 @dataclass(frozen=True)
@@ -137,6 +149,8 @@ class ParsedArgs(argparse.Namespace):
     target: str = ""
     n_lines: int = 80
     dismiss_skills_menu: bool = False
+    dismiss_usage_limit_menu: bool = False
+    refuse_quota_reset: bool = False
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -144,10 +158,14 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("target")
     _ = parser.add_argument("--lines", type=int, default=80)
     _ = parser.add_argument("--dismiss-skills-menu", action="store_true", help="dismiss the exact active Codex Skills menu with one Escape")
+    _ = parser.add_argument("--dismiss-usage-limit-menu", action="store_true", help="dismiss the exact active Codex usage-limit menu with one Escape")
+    _ = parser.add_argument("--refuse-quota-reset", action="store_true", help="choose No on the exact active Codex quota-reset prompt")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.n_lines <= 0:
         parser.error("--lines must be positive.")
-    return Args(parsed.target, parsed.n_lines, parsed.dismiss_skills_menu)
+    if sum((parsed.dismiss_skills_menu, parsed.dismiss_usage_limit_menu, parsed.refuse_quota_reset)) > 1:
+        parser.error("choose only one dismiss action.")
+    return Args(parsed.target, parsed.n_lines, parsed.dismiss_skills_menu, parsed.dismiss_usage_limit_menu, parsed.refuse_quota_reset)
 
 
 def exact_pane_id(target: str) -> str:
@@ -468,6 +486,75 @@ def skills_menu_classification(lines: list[str]) -> str:
         return "capture_failed"
     if has_active_skills_menu(lines):
         return "skills_menu"
+    return report_from_lines(lines).status
+
+
+def has_active_usage_limit_menu(lines: list[str]) -> bool:
+    """Match only the complete usage-limit choice menu at the pane bottom."""
+
+    visible = [line.rstrip() for line in lines if line.strip()]
+    if len(visible) < 5:
+        return False
+    menu = visible[-5:]
+    credits = USAGE_LIMIT_CREDITS_RE.fullmatch(menu[2])
+    reset = USAGE_LIMIT_RESET_RE.fullmatch(menu[3])
+    return (
+        USAGE_LIMIT_TITLE_RE.fullmatch(menu[0]) is not None
+        and USAGE_LIMIT_DETAIL_RE.fullmatch(menu[1]) is not None
+        and credits is not None
+        and reset is not None
+        and bool(credits.group("selected")) != bool(reset.group("selected"))
+        and CHOICE_CONFIRM_RE.fullmatch(menu[4]) is not None
+    )
+
+
+def usage_limit_menu_classification(lines: list[str]) -> str:
+    if not lines:
+        return "capture_failed"
+    if has_active_usage_limit_menu(lines):
+        return "usage_limit_menu"
+    return report_from_lines(lines).status
+
+
+def quota_reset_prompt_selection(lines: list[str]) -> str:
+    """Return the selected choice only for the complete active reset prompt."""
+
+    visible = [line.rstrip() for line in lines if line.strip()]
+    if len(visible) < 5:
+        return ""
+    prompt = visible[-5:]
+    yes = QUOTA_RESET_YES_RE.fullmatch(prompt[2])
+    no = QUOTA_RESET_NO_RE.fullmatch(prompt[3])
+    if (
+        QUOTA_RESET_TITLE_RE.fullmatch(prompt[0]) is None
+        or QUOTA_RESET_DETAIL_RE.fullmatch(prompt[1]) is None
+        or yes is None
+        or no is None
+        or CHOICE_CONFIRM_RE.fullmatch(prompt[4]) is None
+        or bool(yes.group("selected")) == bool(no.group("selected"))
+    ):
+        return ""
+    return "yes" if yes.group("selected") else "no"
+
+
+def has_active_quota_reset_prompt(lines: list[str]) -> bool:
+    return bool(quota_reset_prompt_selection(lines))
+
+
+def has_quota_reset_prompt_hint(lines: list[str]) -> bool:
+    """Recognize reset-choice wording broadly enough to route unknown variants."""
+
+    visible = [line.strip() for line in lines[-20:] if line.strip()]
+    return any(QUOTA_RESET_TITLE_RE.fullmatch(line) is not None for line in visible) or (
+        any("Yes, use reset" in line for line in visible) and any("No, go back" in line for line in visible)
+    )
+
+
+def quota_reset_prompt_classification(lines: list[str]) -> str:
+    if not lines:
+        return "capture_failed"
+    if has_active_quota_reset_prompt(lines):
+        return "quota_reset_prompt"
     return report_from_lines(lines).status
 
 
@@ -1106,6 +1193,130 @@ def dismiss_skills_menu_if_present(target: str, report: Report, n_lines: int = C
     return PlanPromptRecovery("sent_escape", fresh, after)
 
 
+def dismiss_usage_limit_menu_if_present(target: str, report: Report, n_lines: int = COMPACTION_WAIT_LINES) -> PlanPromptRecovery:
+    """Send one Escape after exact, fresh verification of the usage-limit menu."""
+
+    before = "usage_limit_menu" if has_active_usage_limit_menu(report.lines) else report.status
+    match = TMUX_TARGET_RE.fullmatch(target)
+    if match is None:
+        return PlanPromptRecovery("not_safe:ambiguous_target", before, "not_checked")
+    if match.group(1).startswith("h"):
+        return PlanPromptRecovery("not_safe:human_target", before, "not_checked")
+    if before != "usage_limit_menu":
+        return PlanPromptRecovery("not_safe:not_usage_limit_menu", before, "not_checked")
+    try:
+        pane_id = exact_pane_id(target)
+    except (OSError, subprocess.SubprocessError):
+        return PlanPromptRecovery("not_safe:ambiguous_pane", before, "not_checked")
+    if not pane_id:
+        return PlanPromptRecovery("not_safe:ambiguous_pane", before, "not_checked")
+    try:
+        if not pane_has_exact_codex_process(target, pane_id):
+            return PlanPromptRecovery("not_safe:not_codex_process", before, "not_checked")
+    except (OSError, subprocess.SubprocessError):
+        return PlanPromptRecovery("not_safe:not_codex_process", before, "not_checked")
+    try:
+        fresh_lines = tail_pane_id(pane_id, n_lines)
+    except (OSError, subprocess.SubprocessError):
+        return PlanPromptRecovery("not_safe:capture_failed", before, "capture_failed")
+    fresh = usage_limit_menu_classification(fresh_lines)
+    if fresh != "usage_limit_menu":
+        return PlanPromptRecovery("not_safe:stale_evidence", before, fresh)
+    try:
+        if exact_pane_id(target) != pane_id:
+            return PlanPromptRecovery("not_safe:target_rebound", fresh, "not_checked")
+    except (OSError, subprocess.SubprocessError):
+        return PlanPromptRecovery("not_safe:target_rebound", fresh, "not_checked")
+    try:
+        result = subprocess.run(["tmux", "send-keys", "-t", pane_id, "Escape"], capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return PlanPromptRecovery("failed", fresh, "not_checked")
+    if result.returncode != 0:
+        return PlanPromptRecovery("failed", fresh, "not_checked")
+    try:
+        after = usage_limit_menu_classification(tail_pane_id(pane_id, n_lines))
+    except (OSError, subprocess.SubprocessError):
+        after = "capture_failed"
+    return PlanPromptRecovery("sent_escape", fresh, after)
+
+
+# 🧑 "Watcher needs to deal with stuff like this and refuse the quota refresh, or raise the problem to an agent which would directly use tmux commands"
+def refuse_quota_reset_if_present(target: str, report: Report, n_lines: int = COMPACTION_WAIT_LINES) -> PlanPromptRecovery:
+    """Confirm `No` only on a freshly verified Codex quota-reset prompt."""
+
+    selection = quota_reset_prompt_selection(report.lines)
+    before = "quota_reset_prompt" if selection else report.status
+    match = TMUX_TARGET_RE.fullmatch(target)
+    if match is None:
+        return PlanPromptRecovery("not_safe:ambiguous_target", before, "not_checked")
+    if match.group(1).startswith("h"):
+        return PlanPromptRecovery("not_safe:human_target", before, "not_checked")
+    if not selection:
+        return PlanPromptRecovery("not_safe:not_quota_reset_prompt", before, "not_checked")
+    try:
+        pane_id = exact_pane_id(target)
+    except (OSError, subprocess.SubprocessError):
+        return PlanPromptRecovery("not_safe:ambiguous_pane", before, "not_checked")
+    if not pane_id:
+        return PlanPromptRecovery("not_safe:ambiguous_pane", before, "not_checked")
+    try:
+        if not pane_has_exact_codex_process(target, pane_id):
+            return PlanPromptRecovery("not_safe:not_codex_process", before, "not_checked")
+    except (OSError, subprocess.SubprocessError):
+        return PlanPromptRecovery("not_safe:not_codex_process", before, "not_checked")
+    try:
+        fresh_lines = tail_pane_id(pane_id, n_lines)
+    except (OSError, subprocess.SubprocessError):
+        return PlanPromptRecovery("not_safe:capture_failed", before, "capture_failed")
+    fresh_selection = quota_reset_prompt_selection(fresh_lines)
+    if not fresh_selection:
+        return PlanPromptRecovery("not_safe:stale_evidence", before, quota_reset_prompt_classification(fresh_lines))
+    try:
+        if exact_pane_id(target) != pane_id:
+            return PlanPromptRecovery("not_safe:target_rebound", before, "not_checked")
+    except (OSError, subprocess.SubprocessError):
+        return PlanPromptRecovery("not_safe:target_rebound", before, "not_checked")
+    if fresh_selection == "yes":
+        try:
+            down = subprocess.run(["tmux", "send-keys", "-t", pane_id, "Down"], capture_output=True, text=True, timeout=5, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return PlanPromptRecovery("not_safe:send_failed", before, "not_checked")
+        if down.returncode != 0:
+            return PlanPromptRecovery("not_safe:send_failed", before, "not_checked")
+        try:
+            fresh_lines = tail_pane_id(pane_id, n_lines)
+            if exact_pane_id(target) != pane_id or quota_reset_prompt_selection(fresh_lines) != "no":
+                return PlanPromptRecovery("not_safe:no_not_selected", before, quota_reset_prompt_classification(fresh_lines))
+        except (OSError, subprocess.SubprocessError):
+            return PlanPromptRecovery("not_safe:no_not_selected", before, "capture_failed")
+    try:
+        if exact_pane_id(target) != pane_id:
+            return PlanPromptRecovery("not_safe:target_rebound", before, "not_checked")
+        if not pane_has_exact_codex_process(target, pane_id):
+            return PlanPromptRecovery("not_safe:not_codex_process", before, "not_checked")
+    except (OSError, subprocess.SubprocessError):
+        return PlanPromptRecovery("not_safe:not_codex_process", before, "not_checked")
+    try:
+        final_lines = tail_pane_id(pane_id, n_lines)
+        if quota_reset_prompt_selection(final_lines) != "no":
+            return PlanPromptRecovery("not_safe:no_not_selected", before, quota_reset_prompt_classification(final_lines))
+        if exact_pane_id(target) != pane_id or not pane_has_exact_codex_process(target, pane_id):
+            return PlanPromptRecovery("not_safe:target_rebound", before, "not_checked")
+    except (OSError, subprocess.SubprocessError):
+        return PlanPromptRecovery("not_safe:no_not_selected", before, "capture_failed")
+    try:
+        result = subprocess.run(["tmux", "send-keys", "-t", pane_id, "Enter"], capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return PlanPromptRecovery("not_safe:send_failed", before, "not_checked")
+    if result.returncode != 0:
+        return PlanPromptRecovery("not_safe:send_failed", before, "not_checked")
+    try:
+        after = quota_reset_prompt_classification(tail_pane_id(pane_id, n_lines))
+    except (OSError, subprocess.SubprocessError):
+        after = "capture_failed"
+    return PlanPromptRecovery("sent_enter", before, after)
+
+
 def status(lines: list[str], block: Block, *, detect_waiting_subagent: bool = False) -> str:
     if not lines:
         return "not_codex"
@@ -1118,6 +1329,7 @@ def status(lines: list[str], block: Block, *, detect_waiting_subagent: bool = Fa
             has_terminal_enter_prompt_after_codex_footer(lines),
             has_plan_prompt(lines),
             has_queued_message_footer(lines),
+            has_quota_reset_prompt_hint(lines),
         )
     )
     if content_hidden and codex_ui:
@@ -1125,6 +1337,8 @@ def status(lines: list[str], block: Block, *, detect_waiting_subagent: bool = Fa
     if has_file_search_overlay(lines):
         return "stuck_input"
     if has_resume_paused_goal_prompt(lines):
+        return "stuck_input"
+    if has_quota_reset_prompt_hint(lines):
         return "stuck_input"
     if detect_waiting_subagent and has_waiting_subagent_prompt(lines):
         return "waiting_subagent"
@@ -1244,6 +1458,18 @@ def main(argv: list[str]) -> int:
             print(f"before: {recovery.before}")
             print(f"after: {recovery.after}")
             return 0 if recovery.action == "sent_escape" else 1
+        if args.dismiss_usage_limit_menu:
+            recovery = dismiss_usage_limit_menu_if_present(args.target, report, args.n_lines)
+            print(f"action: {recovery.action}")
+            print(f"before: {recovery.before}")
+            print(f"after: {recovery.after}")
+            return 0 if recovery.action == "sent_escape" else 1
+        if args.refuse_quota_reset:
+            recovery = refuse_quota_reset_if_present(args.target, report, args.n_lines)
+            print(f"action: {recovery.action}")
+            print(f"before: {recovery.before}")
+            print(f"after: {recovery.after}")
+            return 0 if recovery.action == "sent_enter" else 1
         print(f"status: {report.status}")
         print("last_output:")
         for line in report.lines:
