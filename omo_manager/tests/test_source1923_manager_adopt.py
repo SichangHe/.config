@@ -286,6 +286,40 @@ class Source1923AdoptionTests(unittest.TestCase):
         self.assertEqual(before, (self.root / adopt.SOURCE_TASK).read_bytes())
         self.assertFalse(self.packet.exists())
 
+    def test_running_session_uses_read_only_process_binding(self) -> None:
+        pin = self.pane("dw:4", 4)
+        with (
+            patch.object(adopt, "current_pin", return_value=True),
+            patch.object(adopt, "session_from_process", return_value=CHILD_SESSION),
+            patch.object(adopt, "visible_session_id") as visible,
+            patch.object(adopt, "query_status_session_id") as query,
+        ):
+            self.assertEqual(CHILD_SESSION, adopt.live_session_id(pin, (pin,), may_query=False))
+        visible.assert_not_called()
+        query.assert_not_called()
+
+    def test_running_session_without_process_binding_fails_closed(self) -> None:
+        pin = self.pane("dw:4", 4)
+        with (
+            patch.object(adopt, "current_pin", return_value=True),
+            patch.object(adopt, "session_from_process", side_effect=TaskFrontmatterError("unavailable")),
+            patch.object(adopt, "visible_session_id", return_value=""),
+            patch.object(adopt, "query_status_session_id") as query,
+            self.assertRaisesRegex(TaskFrontmatterError, "not uniquely visible"),
+        ):
+            adopt.live_session_id(pin, (pin,), may_query=False)
+        query.assert_not_called()
+
+    def test_process_session_binding_rejects_protected_process_drift(self) -> None:
+        pin = self.pane("dw:4", 4)
+        stable_checks = iter((True, True, True, False))
+        with (
+            patch.object(adopt, "current_pin", side_effect=lambda _pin: next(stable_checks)),
+            patch.object(adopt, "session_from_process", return_value=CHILD_SESSION),
+            self.assertRaisesRegex(TaskFrontmatterError, "could not be authenticated"),
+        ):
+            adopt.live_session_id(pin, (pin,), may_query=False)
+
     def test_copied_root_identity_cannot_authorize_prepare(self) -> None:
         copied_root = Path(self.temporary.name) / "copied-work-logs"
         copied_root.mkdir()

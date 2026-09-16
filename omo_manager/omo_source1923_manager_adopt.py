@@ -51,6 +51,8 @@ from omo_manager.omo_repository_custody import (
     publish_or_validate,
     validate_held_absolute,
 )
+from omo_manager.omo_stale_predecessor_close import PanePin as ProcessPanePin
+from omo_manager.omo_stale_predecessor_close import session_from_process
 from omo_manager.omo_task_edit import render_pending_items
 from omo_manager.omo_task_lock import process_start_ticks, task_file_lock, task_target_lock
 from omo_manager.omo_task_metadata import TaskFrontmatterError, TaskMetadata, parse_task_metadata
@@ -300,16 +302,26 @@ def visible_session_id(target: str) -> str:
 
 
 def live_session_id(pin: PanePin, protected: tuple[PanePin, ...], *, may_query: bool) -> str:
-    if not current_pin(pin):
+    def stable() -> bool:
+        return current_pin(pin) and all(current_pin(item) for item in protected)
+
+    if not stable():
         raise TaskFrontmatterError(f"live target process identity changed: {pin.target}")
+    try:
+        process_session = session_from_process(ProcessPanePin(pin.target, pin.pane_id, pin.pane_pid, pin.pane_start_ticks))
+    except TaskFrontmatterError:
+        process_session = ""
+    if process_session:
+        if SESSION_RE.fullmatch(process_session) is None or not stable():
+            raise TaskFrontmatterError(f"live Codex session id could not be authenticated for `{pin.target}`.")
+        return process_session.lower()
     visible = visible_session_id(pin.target)
     if visible:
+        if not stable():
+            raise TaskFrontmatterError(f"live target process identity changed: {pin.target}")
         return visible
     if not may_query or codex_status(pin.target) != "ready":
         raise TaskFrontmatterError(f"live Codex session id is not uniquely visible for `{pin.target}`.")
-
-    def stable() -> bool:
-        return current_pin(pin) and all(current_pin(item) for item in protected)
 
     session_id, _ = query_status_session_id(
         pin.target,

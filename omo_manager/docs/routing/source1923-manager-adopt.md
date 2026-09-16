@@ -6,7 +6,7 @@
 
 Set `OMO_SOURCE1923_WORK_LOGS_ROOT` to the same exact absolute work-log root passed to `--root`; the helper refuses an unset, relative, different, or copied directory by checking the fixed Source-1923 repository device/inode identity.
 
-The `prepare` command authenticates the fixed Source-1923 mail file, its exact lines 1–10, the authoritative envelope, both manager records, the historical shared-target record, root and archived TODO indexes, the complete active child/descendant tree, every ordered queue, and every supplied live pane/PID/start-tick binding. The stale `dw:0`, retained `dw:33`, and executor Codex sessions are bound separately. Preparation produces an owner-private packet and makes no lifecycle-file change.
+The `prepare` command authenticates the fixed Source-1923 mail file, its exact lines 1–10, the authoritative envelope, both manager records, the historical shared-target record, root and archived TODO indexes, the complete active child/descendant tree, every ordered queue, and every supplied live pane/PID/start-tick binding. A live Codex session is read from the bound primary process's launch-time rollout descriptor, including while the agent is busy; an idle agent may instead answer the guarded status query. The stale `dw:0`, retained `dw:33`, and executor Codex sessions are bound separately. Preparation produces an owner-private packet and makes no lifecycle-file change.
 
 The packet requires an independent canonical PASS review that binds the packet and helper digests. `execute` reacquires the root, target, and file locks; revalidates every byte, tree edge, queue, pane, process, and session; writes a private prepared audit; then closes only the exact `dw:0` process through the guarded Codex stop capability.
 
