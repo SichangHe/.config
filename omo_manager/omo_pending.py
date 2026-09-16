@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import re
 import sys
 from dataclasses import dataclass
@@ -17,10 +18,13 @@ from omo_manager.omo_agent_status import read_task_metadata
 from omo_manager.omo_blocking import BlockingError
 from omo_manager.omo_blocking import acknowledge
 from omo_manager.omo_blocking import add_items
+from omo_manager.omo_blocking import body_with_comment
+from omo_manager.omo_blocking import document_with
 from omo_manager.omo_blocking import load_task
 from omo_manager.omo_blocking import replace_item
 from omo_manager.omo_blocking import resolve_item
 from omo_manager.omo_blocking import v2_enabled
+from omo_manager.omo_blocking import write_document
 from omo_manager.omo_task_context import current_pending_task
 from omo_manager.omo_task_edit import add_pending_items
 from omo_manager.omo_task_edit import append_comment
@@ -37,6 +41,7 @@ from omo_manager.omo_task_metadata import pending_items_with_origin
 from omo_manager.omo_task_metadata import pending_replacement_with_origin
 from omo_manager.omo_blocking_actor import request as blocking_request
 from omo_manager.omo_completion_email import plan_completion_email
+from omo_manager.omo_completion_email import completion_email_is_delivered
 from omo_manager.omo_completion_email import require_owner_completion
 
 
@@ -103,8 +108,9 @@ def parse_args(argv: list[str]) -> Args:
         "--no-email",
         action="store_true",
         help=(
-            "For legacy --item removal only, remove the verified item without sending email. "
-            "This cannot be combined with answer-email options."
+            "Legacy recovery only: after a separate completion email, remove the verified "
+            "--item without sending another email, then reconcile its exact Sent-Mail evidence "
+            "before task closure. This cannot be combined with answer-email options."
         ),
     )
     remove.add_argument("--answer-subject-file", type=Path, help="One-line email subject for the combined human answer.")
@@ -161,6 +167,74 @@ def human_answer(args: Args) -> tuple[str, str]:
     return subject, body
 
 
+PENDING_ADD_NOTICE_RE = re.compile(
+    r"(?m)^\(pending item creation notice: ([0-9a-f]{64}):([0-9a-f]{64})\)$"
+)
+
+
+def pending_add_item_digest(items: tuple[str, ...]) -> str:
+    return hashlib.sha256("\0".join(items).encode()).hexdigest()
+
+
+def pending_add_key(root: Path, path: Path, text: str, items: tuple[str, ...]) -> str:
+    """Identify one queue-add notice across a safe retry before mutation."""
+
+    relative = path.resolve().relative_to(root.resolve()).as_posix()
+    item_digest = pending_add_item_digest(items)
+    generation = sum(match.group(1) == item_digest for match in PENDING_ADD_NOTICE_RE.finditer(text))
+    identity = "\0".join(("pending-item-create", str(root.resolve()), relative, item_digest, str(generation)))
+    return hashlib.sha256(identity.encode()).hexdigest()
+
+
+def pending_add_notice_comment(items: tuple[str, ...], semantic_key: str) -> str:
+    """Return the durable successful-transition marker for one add notice."""
+
+    return f"pending item creation notice: {pending_add_item_digest(items)}:{semantic_key}"
+
+
+def delivered_pending_add_notice(root: Path, path: Path, text: str, items: tuple[str, ...]) -> tuple[str, bool]:
+    """Detect a delivered add notice whose task mutation lost a race."""
+
+    semantic_key = pending_add_key(root, path, text, items)
+    email = plan_completion_email(
+        root,
+        path,
+        text,
+        "pending item created",
+        items=items,
+        semantic_key=semantic_key,
+        pending_item_owner=True,
+    )
+    return semantic_key, email is not None and completion_email_is_delivered(email)
+
+
+def require_pending_add_notice(root: Path, path: Path, text: str, items: tuple[str, ...]) -> bool:
+    """Deliver an allowed creation notice before adding its exact items."""
+
+    semantic_key = pending_add_key(root, path, text, items)
+    email = plan_completion_email(
+        root,
+        path,
+        text,
+        "pending item created",
+        items=items,
+        semantic_key=semantic_key,
+        pending_item_owner=True,
+    )
+    if not require_owner_completion(
+        root,
+        path,
+        text,
+        "pending item created",
+        items=items,
+        owner_may_mutate_after_delivery=True,
+        semantic_key=semantic_key,
+        pending_item_owner=True,
+    ):
+        raise BlockingError("responsible-owner pending-item creation email requested; retry addition after owner delivery")
+    return email is not None
+
+
 def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
     if args.no_email and (args.item_id or args.answer_subject_file or args.answer_message_file):
         raise ValueError("--no-email requires legacy --item removal without answer-email options")
@@ -192,9 +266,35 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
                 raise BlockingError("v2 pending writes are disabled until reviewed migration enablement")
             document = load_task(path, root=root)
             if args.command == "add":
-                item_ids = add_items(document, args.items)
+                if current.status == "done":
+                    raise BlockingError("task is already done")
+                existing = set(current.pending_task_items)
+                if len(set(args.items)) != len(args.items):
+                    raise BlockingError("pending item text is repeated in this request")
+                missing_items = tuple(item for item in args.items if item not in existing)
+                semantic_key, delivered = delivered_pending_add_notice(root, path, text, args.items)
+                notice_items = args.items
+                if not delivered:
+                    if not missing_items:
+                        print("added 0 pending item(s)")
+                        return 0
+                    if len(missing_items) != len(args.items):
+                        raise BlockingError("pending item text already exists")
+                    notice_items = missing_items
+                    semantic_key = pending_add_key(root, path, text, notice_items)
+                    emailed = require_pending_add_notice(root, path, text, notice_items)
+                else:
+                    emailed = False
+                comment = pending_add_notice_comment(notice_items, semantic_key)
+                if missing_items:
+                    item_ids = add_items(document, missing_items, body_comment=comment)
+                else:
+                    write_document(document_with(document, document.metadata, body_with_comment(document.body, comment)))
+                    item_ids = ()
                 for item_id in item_ids:
                     print(item_id)
+                if emailed:
+                    print("Emailed the human with the exact created work.")
                 return 0
             if args.command == "replace":
                 if not args.item_id:
@@ -260,9 +360,29 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
         if args.command == "wake-ack":
             raise BlockingError("wake acknowledgment requires a v2 task")
         if args.command == "add":
-            updated, count = add_pending_items(text, args.items)
+            if len(set(args.items)) != len(args.items):
+                raise BlockingError("pending item text is repeated in this request")
+            existing = set(current.pending_task_items)
+            added_items = tuple(item for item in args.items if item not in existing)
+            semantic_key, delivered = delivered_pending_add_notice(root, path, text, args.items)
+            if not added_items:
+                if delivered:
+                    updated = append_comment(text, pending_add_notice_comment(args.items, semantic_key))
+                    replace_if_unchanged(path, updated, before)
+                print("added 0 pending item(s)")
+                return 0
+            updated, count = add_pending_items(text, added_items)
+            notice_items = args.items if delivered else added_items
+            if not delivered:
+                semantic_key = pending_add_key(root, path, text, notice_items)
+                emailed = require_pending_add_notice(root, path, text, notice_items)
+            else:
+                emailed = False
+            updated = append_comment(updated, pending_add_notice_comment(notice_items, semantic_key))
             replace_if_unchanged(path, updated, before)
             print(f"added {count} pending item(s)")
+            if emailed:
+                print("Emailed the human with the exact created work.")
             return 0
         if args.command == "replace":
             updated, changed = replace_pending_item(text, args.old_item, pending_replacement_with_origin(args.old_item, args.new_item))

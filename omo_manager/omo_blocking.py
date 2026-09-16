@@ -415,7 +415,15 @@ def remove_dependency(root: Path, owner_path: Path, item_id: str, source_task_id
     write_document(document_with(owner, owner.metadata, owner_body))
 
 
-def add_items(document: TaskDocument, texts: tuple[str, ...]) -> tuple[str, ...]:
+def body_with_comment(body: str, comment: str) -> str:
+    value = comment.strip()
+    if not value or "\n" in value or "\r" in value:
+        raise BlockingError("task body comment must be nonempty one-line text")
+    separator = "" if not body or body.endswith("\n") else "\n"
+    return f"{body}{separator}({value})\n"
+
+
+def add_items(document: TaskDocument, texts: tuple[str, ...], *, body_comment: str = "") -> tuple[str, ...]:
     if document.metadata["status"] == "done":
         raise BlockingError("task is already done")
     values = tuple(text.strip() for text in texts)
@@ -428,7 +436,8 @@ def add_items(document: TaskDocument, texts: tuple[str, ...]) -> tuple[str, ...]
     document.metadata["pending_task_items"].extend(
         {"id": item_id, "text": value, "blocked_on": [], "notices": []} for item_id, value in zip(item_ids, values, strict=True)
     )
-    write_document(document)
+    body = body_with_comment(document.body, body_comment) if body_comment else document.body
+    write_document(document_with(document, document.metadata, body))
     return item_ids
 
 

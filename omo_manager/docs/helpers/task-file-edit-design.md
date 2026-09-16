@@ -12,9 +12,14 @@ task path or backing-file details. Workers report with `omo_report.sh`.
 When preserved blocked records share the target, it prefers the sole `running` or
 `long_running` task; multiple runnable tasks remain ambiguous. It locks the target,
 rechecks ownership, and fails closed on missing or unresolved ownership. `list`
-prints item text. `add` and `replace` keep work open. `remove`
-requires one-line completion or cancellation evidence. Output never includes a
-task filename, `runat`, or `managerat`.
+prints item text. `add` sends one durable creation notice before keeping work
+open; a retry after delivery completes the queue mutation without replaying the
+notice. `replace` keeps work open. `remove` requires one-line completion or
+cancellation evidence and sends one durable closure notice. Explicit no-contact
+rules suppress both notices. Legacy `remove --no-email` also suppresses a
+closure notice; it is only for recovery after a separate completion email whose
+Sent-Mail evidence will be reconciled before task closure. Output never includes
+a task filename, `runat`, or `managerat`.
 
 Pending-item completion notices use that same queue-owner selection only when
 strict active-task selection is ambiguous. Whole-task completion remains strict.

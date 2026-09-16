@@ -43,7 +43,7 @@ def launch_instructions(manager_role: str | None = None) -> bytes:
 
     if manager_role not in {None, "main_manager", "submanager"}:
         raise ValueError(f"unknown manager role: {manager_role}")
-    parts = [command_output()]
+    parts = [command_output(), command_output("get", "agent_work")]
     if manager_role is not None:
         parts.extend(
             (

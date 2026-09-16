@@ -16,8 +16,9 @@ New ordinary worker tasks start with `status: running`; `--is-manager` tasks sta
 
 Non-submanager VL worker launches, identified by a `vl_` task filename or the `vl` tmux session, require `--manager-target` so reports and watcher status route to the owning VL submanager. Raw `--codex-flag` MCP server config tokens such as `mcp_servers.*` require explicit `--tool pcodx`, so ordinary new Codex agents do not inherit private partial-compaction MCP registration. The MCP tools provide an auditable partial-compaction ledger; they do not rewrite Codex's hidden native transcript.
 
-Every prompted launch begins with a transcript showing the `getagentsmd`
-command and its output; `--resume-idle` is the no-prompt recovery exception.
+Every prompted launch begins with transcripts showing `getagentsmd` and
+`getagentsmd get agent_work` plus their output; `--resume-idle` is the no-prompt
+recovery exception.
 Prompted VL launches add `VL_WORKER_DEFAULTS.md` and still require
 `--prompt-file` for task-local context. Manager launches selected with
 `--is-manager` also capture `get agent_manager` and `get submanager`. A failed
