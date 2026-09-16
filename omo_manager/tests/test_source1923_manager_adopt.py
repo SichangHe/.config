@@ -286,6 +286,11 @@ class Source1923AdoptionTests(unittest.TestCase):
         self.assertEqual(before, (self.root / adopt.SOURCE_TASK).read_bytes())
         self.assertFalse(self.packet.exists())
 
+    def test_authority_text_preserves_selected_trailing_blank_line(self) -> None:
+        selected = "\n".join(self.authority.read_text().splitlines()[:10])
+        self.assertEqual(adopt.AUTHORITY_TEXT, selected)
+        self.assertTrue(selected.endswith("> \n"))
+
     def test_running_session_uses_read_only_process_binding(self) -> None:
         pin = self.pane("dw:4", 4)
         with (

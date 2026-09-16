@@ -98,9 +98,10 @@ Replace this agent. They simply told me they accepted the task but did not deliv
 I need shit done, not acks
 
 > On Sep 16, 2026, at 11:04, sichangheagent@gmail.com wrote:
-> \x20
+>\x20
 > Accepted. We will identify the tasks produced by the previous collaborator meeting transcript, map each active agent to its work, summarize the overall direction, and state any concrete action needed from you. The existing DW submanager will own this status synthesis and email you the result directly.
-> """
+>\x20
+"""
 SOURCE_BLOCKER = "existing live successor dw:33 conflicts with archived historical dw:33 ownership and installed helpers cannot yet reconcile/adopt it safely"
 SOURCE1923_ITEM = (
     "🧑 Source-1923 (manager_mail/85c5dff58359-1923.txt): replace new_dw_manager.md at dw:0 because it only acknowledged the collaborator-meeting status synthesis; "
@@ -363,7 +364,8 @@ def authority_envelope(path: Path, expected_sha256: str, selected: str) -> None:
         raise TaskFrontmatterError("authority envelope is not the exact Source-1923 lifecycle task.")
     data = read_regular(path, expected_sha256)[0]
     matches = [match for match in ENVELOPE_RE.finditer(data.decode()) if match.group("source") == f"{AUTHORITY_REF}:1-10"]
-    if len(matches) != 1 or "\n".join(matches[0].group("body").splitlines()) != selected:
+    body = matches[0].group("body").replace("\r\n", "\n").replace("\r", "\n") if len(matches) == 1 else ""
+    if len(matches) != 1 or body != selected:
         raise TaskFrontmatterError("authority envelope does not contain the one exact Source-1923 block.")
 
 
