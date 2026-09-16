@@ -71,7 +71,7 @@ def restore_environment(previous: dict[str, str | None]) -> None:
 
 
 class BidirectionalCompatibilitySimulation(unittest.TestCase):
-    def test_current_v1_setup_migrates_without_changing_human_delivery(self) -> None:
+    def test_current_v1_setup_migrates_with_origin_safe_delivery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             isolated_environment = {
@@ -92,7 +92,9 @@ class BidirectionalCompatibilitySimulation(unittest.TestCase):
             commit(root, "TODO.md", "source.md", "owner.md")
 
             legacy_output = StringIO()
-            with patch("omo_manager.omo_pending.current_pending_task", return_value=owner_path), redirect_stdout(legacy_output):
+            with patch("omo_manager.omo_pending.current_pending_task", return_value=owner_path), patch(
+                "omo_manager.omo_pending.plan_completion_email", return_value=None
+            ), patch("omo_manager.omo_pending.require_owner_completion", return_value=True), redirect_stdout(legacy_output):
                 self.assertEqual(0, run_pending(PendingArgs("add", ("temporary legacy work",)), root))
                 self.assertEqual(0, run_pending(PendingArgs("list"), root))
                 self.assertEqual(
@@ -172,15 +174,15 @@ class BidirectionalCompatibilitySimulation(unittest.TestCase):
             self.assertEqual(2, len(deliveries))
             delivery_by_target = dict(deliveries)
             self.assertEqual({"src:2", "own:2"}, set(delivery_by_target))
-            self.assertIn("<human_instruction>", delivery_by_target["src:2"])
+            self.assertIn("<manager_delegation>", delivery_by_target["src:2"])
             self.assertIn("Keep ordinary human delivery direct", delivery_by_target["src:2"])
             self.assertIn("Pending item ready:", delivery_by_target["own:2"])
             self.assertNotIn("<human_instruction>", delivery_by_target["own:2"])
-            self.assertIn("<human_instruction>", delivered)
+            self.assertNotIn("<human_instruction>", delivered)
             self.assertIn("Keep ordinary human delivery direct", delivered)
             self.assertIn("Pending item ready:", delivered)
             self.assertIn("omo_pending.py wake-ack --notice-id", delivered)
-            self.assertEqual(1, delivered.count("<human_instruction>"))
+            self.assertEqual(1, delivered.count("<manager_delegation>"))
             queued_owner = load_task(owner_path, root=root)
             notice = metadata(owner_path, root).pending_items[0].notices[-1]
             self.assertEqual(("pending", 1, "own:2"), (notice.state, notice.attempt_count, notice.target_snapshot))

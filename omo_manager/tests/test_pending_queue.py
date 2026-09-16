@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -86,12 +87,242 @@ class PendingQueueTests(unittest.TestCase):
                 self.assertEqual(0, run(Args("replace", old_item="🧑 old wording", new_item="new wording"), root))
             self.assertIn("  - 🧑 new wording\n", path.read_text(encoding="utf-8"))
 
+    def test_add_emails_before_mutation_and_retry_does_not_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            path = root / "task.md"
+            original = task_text()
+            path.write_text(original, encoding="utf-8")
+            args = Args("add", ("inspect failure",))
+            from omo_manager.omo_task_edit import replace_if_unchanged as actual_replace
+
+            calls = 0
+
+            def fail_once(target: Path, updated: str, before: os.stat_result) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    target.write_text(target.read_text(encoding="utf-8") + "unrelated note\n", encoding="utf-8")
+                    raise OSError("task changed concurrently")
+                actual_replace(target, updated, before)
+
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_pending.current_pending_task", return_value=path
+            ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=path), patch(
+                "omo_manager.omo_pending.replace_if_unchanged", side_effect=fail_once
+            ), patch("omo_manager.omo_completion_email.subprocess.run") as email:
+                with self.assertRaisesRegex(OSError, "task changed concurrently"):
+                    run(args, root)
+                self.assertEqual(original + "unrelated note\n", path.read_text(encoding="utf-8"))
+                self.assertEqual(0, run(args, root))
+
+            email.assert_called_once()
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("  - inspect failure\n", text)
+            self.assertIn("unrelated note\n", text)
+            self.assertRegex(text, r"\(pending item creation notice: [0-9a-f]{64}:[0-9a-f]{64}\)")
+
+    def test_add_mail_failure_keeps_queue_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            path = root / "task.md"
+            original = task_text()
+            path.write_text(original, encoding="utf-8")
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_pending.current_pending_task", return_value=path
+            ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=path), patch(
+                "omo_manager.omo_completion_email.subprocess.run", side_effect=OSError("mail unavailable")
+            ):
+                with self.assertRaisesRegex(OSError, "not confirmed delivered"):
+                    run(Args("add", ("inspect failure",)), root)
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+
+    def test_add_race_with_competing_same_item_finalizes_notice_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            path = root / "task.md"
+            path.write_text(task_text(), encoding="utf-8")
+            args = Args("add", ("inspect failure",))
+            from omo_manager.omo_task_edit import add_pending_items as actual_add
+            from omo_manager.omo_task_edit import remove_pending_items as actual_remove
+            from omo_manager.omo_task_edit import replace_if_unchanged as actual_replace
+
+            calls = 0
+
+            def competing_add(target: Path, updated: str, before: os.stat_result) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    race_before = target.stat()
+                    raced, _count = actual_add(target.read_text(encoding="utf-8"), args.items)
+                    actual_replace(target, raced, race_before)
+                    raise OSError("task changed concurrently")
+                actual_replace(target, updated, before)
+
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_pending.current_pending_task", return_value=path
+            ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=path), patch(
+                "omo_manager.omo_pending.replace_if_unchanged", side_effect=competing_add
+            ), patch("omo_manager.omo_completion_email.subprocess.run") as email:
+                with self.assertRaisesRegex(OSError, "task changed concurrently"):
+                    run(args, root)
+                self.assertEqual(0, run(args, root))
+                reconciled = path.read_text(encoding="utf-8")
+                self.assertRegex(reconciled, r"\(pending item creation notice: [0-9a-f]{64}:[0-9a-f]{64}\)")
+
+                removed, _count = actual_remove(reconciled, args.items)
+                path.write_text(removed, encoding="utf-8")
+                self.assertEqual(0, run(args, root))
+
+            self.assertEqual(2, email.call_count)
+
+    def test_duplicate_add_does_not_email(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            original = task_text(items=("inspect failure",))
+            path.write_text(original, encoding="utf-8")
+            with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch(
+                "omo_manager.omo_pending.require_pending_add_notice"
+            ) as notice:
+                self.assertEqual(0, run(Args("add", ("inspect failure",)), root))
+            notice.assert_not_called()
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+
+    def test_mixed_existing_and_new_add_emails_only_new_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text(task_text(items=("already tracked",)), encoding="utf-8")
+            with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch(
+                "omo_manager.omo_pending.require_pending_add_notice", return_value=True
+            ) as notice:
+                self.assertEqual(0, run(Args("add", ("already tracked", "new work")), root))
+            self.assertEqual(("new work",), notice.call_args.args[3])
+            text = path.read_text(encoding="utf-8")
+            self.assertEqual(1, text.count("  - already tracked\n"))
+            self.assertEqual(1, text.count("  - new work\n"))
+
+    def test_repeated_item_in_one_add_is_rejected_before_email(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            original = task_text()
+            path.write_text(original, encoding="utf-8")
+            with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch(
+                "omo_manager.omo_pending.require_pending_add_notice"
+            ) as notice:
+                with self.assertRaisesRegex(BlockingError, "repeated"):
+                    run(Args("add", ("same work", "same work")), root)
+            notice.assert_not_called()
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+
+    def test_v2_add_emails_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text(v2_task_text(), encoding="utf-8")
+            document = MagicMock()
+            with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch(
+                "omo_manager.omo_pending.v2_enabled", return_value=True
+            ), patch("omo_manager.omo_pending.load_task", return_value=document), patch(
+                "omo_manager.omo_pending.require_pending_add_notice", return_value=True
+            ) as notice, patch("omo_manager.omo_pending.add_items", return_value=("pi_new",)) as add:
+                self.assertEqual(0, run(Args("add", ("inspect another failure",)), root))
+            notice.assert_called_once()
+            add.assert_called_once()
+            self.assertEqual((document, ("inspect another failure",)), add.call_args.args)
+            self.assertRegex(
+                add.call_args.kwargs["body_comment"],
+                r"^pending item creation notice: [0-9a-f]{64}:[0-9a-f]{64}$",
+            )
+
+    def test_v2_add_retry_after_unrelated_write_race_does_not_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            path = root / "task.md"
+            path.write_text(v2_task_text(), encoding="utf-8")
+            (root / ".omo-task-v2-enabled.yaml").write_text("version: v2.0.0\nenabled: true\n", encoding="utf-8")
+            args = Args("add", ("inspect another failure",))
+            from omo_manager.omo_blocking import write_document as actual_write
+
+            calls = 0
+
+            def fail_once(document: object) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    path.write_text(path.read_text(encoding="utf-8") + "unrelated note\n", encoding="utf-8")
+                    raise BlockingError("task changed concurrently")
+                actual_write(document)  # type: ignore[arg-type]
+
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_pending.current_pending_task", return_value=path
+            ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=path), patch(
+                "omo_manager.omo_blocking.write_document", side_effect=fail_once
+            ), patch("omo_manager.omo_completion_email.subprocess.run") as email:
+                with self.assertRaisesRegex(BlockingError, "task changed concurrently"):
+                    run(args, root)
+                self.assertEqual(0, run(args, root))
+
+            email.assert_called_once()
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("text: inspect another failure\n", text)
+            self.assertIn("unrelated note\n", text)
+            self.assertRegex(text, r"\(pending item creation notice: [0-9a-f]{64}:[0-9a-f]{64}\)")
+
+    def test_v2_add_race_with_competing_same_item_finalizes_notice_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            path = root / "task.md"
+            path.write_text(v2_task_text(), encoding="utf-8")
+            (root / ".omo-task-v2-enabled.yaml").write_text("version: v2.0.0\nenabled: true\n", encoding="utf-8")
+            args = Args("add", ("inspect another failure",))
+            from omo_manager.omo_blocking import document_with as actual_document_with
+            from omo_manager.omo_blocking import load_task as actual_load
+            from omo_manager.omo_blocking import resolve_item as actual_resolve
+            from omo_manager.omo_blocking import write_document as actual_write
+
+            original_body = actual_load(path, root=root).body
+            calls = 0
+
+            def competing_add(document: object) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    actual_write(actual_document_with(document, document.metadata, original_body))  # type: ignore[arg-type,union-attr]
+                    raise BlockingError("task changed concurrently")
+                actual_write(document)  # type: ignore[arg-type]
+
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_pending.current_pending_task", return_value=path
+            ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=path), patch(
+                "omo_manager.omo_blocking.write_document", side_effect=competing_add
+            ), patch("omo_manager.omo_completion_email.subprocess.run") as email:
+                with self.assertRaisesRegex(BlockingError, "task changed concurrently"):
+                    run(args, root)
+                self.assertEqual(0, run(args, root))
+                reconciled = path.read_text(encoding="utf-8")
+                self.assertRegex(reconciled, r"\(pending item creation notice: [0-9a-f]{64}:[0-9a-f]{64}\)")
+
+                document = actual_load(path, root=root)
+                item = next(item for item in document.metadata["pending_task_items"] if item["text"] == args.items[0])
+                actual_resolve(document, item["id"], "completed", "race test completed")
+                self.assertEqual(0, run(args, root))
+
+            self.assertEqual(2, email.call_count)
+
     def test_failed_owner_email_keeps_item_and_retry_cannot_duplicate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             state = root / "state"
             path = root / "task.md"
-            original = task_text(items=("finish review",))
+            original = task_text(items=("finish review",)) + "Report results directly to the Human.\n"
             path.write_text(original, encoding="utf-8")
             args = Args("remove", ("finish review",), evidence="review passed", completion_key="a" * 64)
             with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
@@ -143,7 +374,7 @@ class PendingQueueTests(unittest.TestCase):
             root = Path(tmp)
             state = root / "state"
             path = root / "task.md"
-            path.write_text(task_text(items=("finish review",)), encoding="utf-8")
+            path.write_text(task_text(items=("finish review",)) + "Report results directly to the Human.\n", encoding="utf-8")
             with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch(
                 "omo_manager.omo_pending.plan_completion_email"
             ) as plan, patch("omo_manager.omo_pending.require_owner_completion") as require:
@@ -186,9 +417,7 @@ class PendingQueueTests(unittest.TestCase):
                 return_value=(StopArgs("cfg:2", 10.0, 2000, False, False, root, "task.md", True, 0.0), "session-1"),
             ), patch("omo_manager.omo_task_status.record_close"), patch(
                 "omo_manager.omo_tmux_send.send_system_to_codex"
-            ) as queue, patch(
-                "omo_manager.omo_completion_email.subprocess.run", side_effect=AssertionError("must not send email")
-            ):
+            ) as queue, patch("omo_manager.omo_completion_email.subprocess.run") as email:
                 reconcile_ordinary_sent_completion(
                     root,
                     path,
@@ -198,8 +427,10 @@ class PendingQueueTests(unittest.TestCase):
                     digest,
                     semantic_key=semantic_key,
                 )
+                self.assertEqual(2, status_run(StatusArgs(root, Path("task.md"), "done", "", completion_key=semantic_key)))
                 self.assertEqual(0, status_run(StatusArgs(root, Path("task.md"), "done", "", completion_key=semantic_key)))
             queue.assert_not_called()
+            email.assert_called_once()
             self.assertIn("status: done\n", path.read_text(encoding="utf-8"))
 
     def test_legacy_remove_matches_displayed_text_from_quoted_colon_item(self) -> None:
@@ -492,7 +723,7 @@ class PendingQueueTests(unittest.TestCase):
                 self.assertEqual(0, run(Args("list"), root))
                 self.assertEqual(0, run(Args("replace", old_item="inspect failure", new_item="repair failure"), root))
                 self.assertEqual(0, run(Args("remove", ("repair failure",), evidence="verified fixed"), root))
-            require.assert_called_once()
+            self.assertEqual(2, require.call_count)
             self.assertGreaterEqual(parse_parts.call_count, 3)
             self.assertNotIn("secret-task", output.getvalue())
             text = path.read_text(encoding="utf-8")

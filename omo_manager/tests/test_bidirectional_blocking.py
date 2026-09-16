@@ -569,6 +569,8 @@ pending_task_items: []
         with (
             patch("omo_manager.omo_pending.current_pending_task", return_value=self.owner_path),
             patch("omo_manager.omo_pending.blocking_request", return_value={"ok": True}),
+            patch("omo_manager.omo_pending.plan_completion_email", return_value=None),
+            patch("omo_manager.omo_pending.require_owner_completion", return_value=True),
             redirect_stdout(output),
         ):
             self.assertEqual(0, run_pending(PendingArgs("add", ("new private item",)), self.root))

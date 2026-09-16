@@ -129,6 +129,24 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             self.assertEqual("task.md: pending item completed", plan.subject)
             self.assertEqual("Task: task.md\nOutcome: pending item completed\n", plan.body)
 
+    def test_pending_item_notice_does_not_require_general_human_reporting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_text("Return only a concise report to your manager.", human_report=False)
+            task.write_text(text, encoding="utf-8")
+
+            self.assertIsNotNone(build_completion_email(root, task, text, "pending item created"))
+
+    def test_pending_item_notice_honors_explicit_no_contact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_text("Never email the Human.", human_report=False)
+            task.write_text(text, encoding="utf-8")
+
+            self.assertIsNone(build_completion_email(root, task, text, "pending item created"))
+
     def test_task_close_rejects_answer_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
