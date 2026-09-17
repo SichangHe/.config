@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -42,6 +43,23 @@ EXIT_CLI = 2
 EXIT_MISSING_ROOT = 3
 EXIT_CONFIGURATION = 4
 EXIT_INVALID_STATE = 5
+
+
+@dataclass(frozen=True)
+class LegacyPurpose:
+    task: str
+    body_sha256: str
+    purpose: str
+
+
+# 🧑 "Close all opsmail0802 and agent_managers agents."
+LEGACY_PURPOSES = (
+    LegacyPurpose(
+        "202608/close_agents_1256.md",
+        "58a6169e82ac0add13bab11a643ae09e3f69f1a4f48f2dfe36becd71faa7743f",
+        "Execute Human Source-1256 by closing all opsmail0802 and agent_managers agents, consolidating their tasks and status, and replacing mailbox compression with one fresh agent outside those namespaces.",
+    ),
+)
 
 
 class TreeError(ValueError):
@@ -358,8 +376,26 @@ def assignment_paragraph(path: Path, tag: str) -> str | None:
     return " ".join(paragraph) or None
 
 
-def recorded_purpose(path: Path) -> str:
+def registered_legacy_purpose(path: Path, task_ref: str) -> str | None:
+    """Return purpose only for one registered envelope-less historical body."""
+
+    matches = [item for item in LEGACY_PURPOSES if item.task == task_ref]
+    if len(matches) != 1:
+        return None
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise TreeError(f"cannot read task purpose: {path}") from exc
+    _frontmatter, marker, body = payload.partition(b"\n---\n")
+    if not marker or hashlib.sha256(body).hexdigest() != matches[0].body_sha256:
+        return None
+    return matches[0].purpose
+
+
+def recorded_purpose(path: Path, task_ref: str = "") -> str:
     purpose = assignment_paragraph(path, "manager_delegation") or assignment_paragraph(path, "human_instruction")
+    if purpose is None:
+        purpose = registered_legacy_purpose(path, task_ref)
     if purpose is None:
         raise TreeError(f"selected task has no assignment paragraph explaining its purpose: {path}")
     return purpose
@@ -458,7 +494,7 @@ def local_records(root: Path, statuses: tuple[str, ...]) -> list[TaskRecord]:
         if metadata.status not in statuses or metadata.runat == "retired":
             continue
         membership = indexed_membership(root, relative, metadata, indexed)
-        records.append(task_record(relative, recorded_purpose(path), metadata, membership))
+        records.append(task_record(relative, recorded_purpose(path, relative), metadata, membership))
     return records
 
 

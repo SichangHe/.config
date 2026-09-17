@@ -14,6 +14,8 @@ source of truth
   and blocker
 - the first manager-delegation prose paragraph supplies purpose; a task without
   one uses its first Human-instruction prose paragraph
+- the exact historical `202608/close_agents_1256.md` body has one digest-bound
+  display-only purpose fallback; other paths or body prose remain untrusted
 - the configured main-manager target supplies the full-tree root
 - pane text never creates an agent, role, or reporting edge
 

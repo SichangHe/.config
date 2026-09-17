@@ -161,6 +161,42 @@ class AgentTreeTests(unittest.TestCase):
         with self.assertRaisesRegex(tree.TreeError, "no assignment paragraph"):
             tree.run(self.args())
 
+    def test_exact_source1256_historical_body_supplies_registered_purpose(self) -> None:
+        source = (
+            task_text("team:2", "top:0", status="blocked", blocked_on="human", pending=("Keep ordered work",))
+            .split('<manager_delegation from="top:0">', 1)[0]
+            + "Goal: Execute Human Source-1256 by closing all opsmail0802 and agent_managers agents, consolidating their tasks and status, and replacing mailbox compression with one fresh agent outside those namespaces.\n\n"
+            "- Preserve every task queue, status, artifact, and exact blocker in a consolidated durable handoff before closure.\n"
+            "- Close each tracked target only through supported lifecycle tooling and verify no target in either namespace remains active.\n"
+            "- Launch exactly one fresh mailbox-compression agent outside both namespaces with the reviewed Source-1246/1247 safeguards.\n"
+            "- Send one Human email summarizing consolidated task status and the fresh compression ownership.\n"
+        )
+        self.add_task("202608/close_agents_1256.md", source, indexed_target="team:2", section="human pending")
+        self.finish()
+
+        output = tree.run(self.args(statuses=("blocked",)))
+
+        self.assertIn("purpose: Execute Human Source-1256", output)
+        self.assertIn("Keep ordered work", output)
+
+    def test_source1256_compatibility_rejects_other_path_or_body(self) -> None:
+        body = (
+            "Goal: Execute Human Source-1256 by closing all opsmail0802 and agent_managers agents, consolidating their tasks and status, and replacing mailbox compression with one fresh agent outside those namespaces.\n\n"
+            "- Preserve every task queue, status, artifact, and exact blocker in a consolidated durable handoff before closure.\n"
+            "- Close each tracked target only through supported lifecycle tooling and verify no target in either namespace remains active.\n"
+            "- Launch exactly one fresh mailbox-compression agent outside both namespaces with the reviewed Source-1246/1247 safeguards.\n"
+            "- Send one Human email summarizing consolidated task status and the fresh compression ownership.\n"
+        )
+        frontmatter = task_text("team:2", "top:0", status="blocked", blocked_on="human").split('<manager_delegation from="top:0">', 1)[0]
+        for name, suffix in (("other.md", ""), ("202608/close_agents_1256.md", "changed\n")):
+            with self.subTest(name=name, changed=bool(suffix)):
+                self.add_task(name, frontmatter + body + suffix, indexed_target="team:2", section="human pending")
+                self.finish()
+                with self.assertRaisesRegex(tree.TreeError, "no assignment paragraph"):
+                    tree.run(self.args(statuses=("blocked",)))
+                self.todo_rows.clear()
+                (self.root / name).unlink()
+
     def test_duplicate_or_mismatched_index_fails(self) -> None:
         self.add_task("worker.md", task_text("team:2", "top:0"), indexed_target="team:2")
         self.todo_rows.append("current:\nworker.md team:2\n")
