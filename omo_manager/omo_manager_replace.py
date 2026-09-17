@@ -32,7 +32,7 @@ from omo_manager.omo_codex_start import Pane as StartPane
 from omo_manager.omo_codex_start import pcodx_state
 from omo_manager.omo_codex_stop import Args as StopArgs
 from omo_manager.omo_codex_stop import has_bound_close_proof, stop
-from omo_manager.omo_pending_watch import AuthenticatedAgentReport, authenticated_agent_report
+from omo_manager.omo_pending_watch import AuthenticatedAgentReport, authenticated_agent_report, report_owner_binding
 from omo_manager.omo_task_edit import render_pending_items
 from omo_manager.omo_task_lock import process_start_ticks, task_file_lock, task_target_lock
 from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1, TaskFrontmatterError, TaskMetadata, parse_task_metadata
@@ -218,8 +218,7 @@ SOURCE1938_REBASE_FIELDS = {
     "closed_owner_receipt_binding_sha256",
 }
 SOURCE1938_REPORT_ONLY_APPEND_RE = re.compile(
-    rb"\n\(from agent dw:33 (?P<path>/tmp/omo-agent-messages-[A-Za-z0-9_-]+/agent_in-progress_[0-9a-f]{64}\.md)\)\n"
-    rb"\(pending marker cleared line=(?P<line>[1-9][0-9]*): report-only: (?P<comment>[^\r\n]+)\)\n"
+    rb"\n\(from agent (?P<target>[A-Za-z][A-Za-z0-9_-]*:[0-9]+(?:\.[0-9]+)?) (?P<path>/tmp/omo-agent-messages-[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+\.md)\)\n\(pending marker cleared line=(?P<line>[1-9][0-9]*): report-only: (?P<comment>[^\r\n]+)\)\n"
 )
 SOURCE_ONLY_AUTHORITY_MODE = "source-only-old-task-before-image"
 PCODX_REPLACE_EVIDENCE_RE = re.compile(
@@ -2919,30 +2918,71 @@ def validate_closed_owner_absence(args: Args) -> None:
         raise ReplaceError("closed-owner source pane or process identity is no longer absent")
 
 
+def source1938_report_receipt_set(
+    args: Args,
+    source: bytes,
+    current: bytes,
+    receiver_task: str,
+    producer_is_valid: Callable[[AuthenticatedAgentReport], bool],
+    label: str,
+    *,
+    allow_unchanged: bool = False,
+) -> tuple[tuple[AuthenticatedAgentReport, ...], bytes]:
+    if current == source and allow_unchanged:
+        return (), b""
+    if current == source or not current.startswith(source):
+        raise ReplaceError(f"Source-1938 {label} is not an append-only ordered report receipt set")
+    try:
+        suffix = current[len(source) :]
+        suffix_text = suffix.decode()
+    except UnicodeDecodeError as exc:
+        raise ReplaceError(f"Source-1938 {label} receipt is not UTF-8") from exc
+    if metadata(source, args.root, f"Source-1938 {label} source task") != metadata(
+        current,
+        args.root,
+        f"Source-1938 {label} current task",
+    ):
+        raise ReplaceError(f"Source-1938 {label} metadata or ordered queue changed")
+    if has_pending_marker(suffix_text):
+        raise ReplaceError(f"Source-1938 {label} receipt retains an unconsumed pending marker")
+    matches = tuple(SOURCE1938_REPORT_ONLY_APPEND_RE.finditer(suffix))
+    if not matches or matches[0].start() != 0 or matches[-1].end() != len(suffix) or any(left.end() != right.start() for left, right in zip(matches, matches[1:], strict=False)):
+        raise ReplaceError(f"Source-1938 {label} lacks one canonical ordered report-only receipt set")
+    receiver_path = task_path(args.root, receiver_task).resolve()
+    receiver = str(receiver_path)
+    artifacts: list[AuthenticatedAgentReport] = []
+    for match in matches:
+        target = match.group("target").decode()
+        report_path_text = match.group("path").decode()
+        pointer = f"(from agent {target} {report_path_text})"
+        artifact = authenticated_agent_report(pointer)
+        owner = report_owner_binding(pointer, receiver_path)
+        prefix = source + suffix[: match.start()]
+        if (
+            artifact is None
+            or artifact.target != target
+            or artifact.path != Path(report_path_text)
+            or artifact.receiver != receiver
+            or artifact.commitment_path is None
+            or not producer_is_valid(artifact)
+            or owner is None
+            or owner.owner_sha256 != digest(prefix)
+            or owner.size_bytes != len(prefix)
+            or owner.separator_bytes != 1
+        ):
+            raise ReplaceError(f"Source-1938 {label} receipt is not an authenticated sequential report transfer")
+        artifacts.append(artifact)
+    if len({artifact.path for artifact in artifacts}) != len(artifacts) or len({artifact.commitment_path for artifact in artifacts}) != len(artifacts):
+        raise ReplaceError(f"Source-1938 {label} repeats a report-only receipt")
+    return tuple(artifacts), suffix
+
+
 def source1938_authenticated_report(
     args: Args,
     source_old: bytes,
     current_old: bytes,
     retained_child: bytes,
-) -> tuple[AuthenticatedAgentReport, bytes]:
-    if digest(source_old) == digest(current_old) or not current_old.startswith(source_old):
-        raise ReplaceError("Source-1938 closed-owner rebase is not one append-only report receipt")
-    try:
-        current_text = current_old.decode()
-    except UnicodeDecodeError as exc:
-        raise ReplaceError("Source-1938 closed-owner task receipt is not UTF-8") from exc
-    if metadata(source_old, args.root, "Source-1938 closed-owner source task") != metadata(
-        current_old,
-        args.root,
-        "Source-1938 closed-owner current task",
-    ):
-        raise ReplaceError("Source-1938 closed-owner task metadata or ordered queue changed")
-    if has_pending_marker(current_text):
-        raise ReplaceError("Source-1938 closed-owner task retains an unconsumed pending marker")
-    suffix = current_old[len(source_old) :]
-    match = SOURCE1938_REPORT_ONLY_APPEND_RE.fullmatch(suffix)
-    if match is None:
-        raise ReplaceError("Source-1938 closed-owner task lacks one canonical report-only receipt")
+) -> tuple[tuple[AuthenticatedAgentReport, ...], bytes]:
     retained = metadata(retained_child, args.root, "Source-1938 retained report producer")
     if (
         retained.status == "done"
@@ -2951,42 +2991,100 @@ def source1938_authenticated_report(
         or canonical_target(retained.managerat) != canonical_target(args.old_target)
     ):
         raise ReplaceError("Source-1938 report receipt producer is not the retained live dw:33 child")
-    report_path_text = match.group("path").decode()
     source_task = str(task_path(args.root, SOURCE1938_LIVE_SHARED_TASK))
-    receiver = str(task_path(args.root, args.old_task))
-    pointer = f"(from agent dw:33 {report_path_text})"
-    artifact = authenticated_agent_report(pointer)
+    return source1938_report_receipt_set(
+        args,
+        source_old,
+        current_old,
+        args.old_task,
+        lambda artifact: canonical_target(artifact.target) == canonical_target(SOURCE1938_SHARED_TARGET) and artifact.source_task == source_task,
+        "closed-owner task",
+    )
+
+
+def source1938_authenticated_retained_child_reports(
+    args: Args,
+    source_child: bytes,
+    current_child: bytes,
+) -> tuple[tuple[AuthenticatedAgentReport, ...], bytes]:
+    retained = metadata(source_child, args.root, "Source-1938 retained child source")
     if (
-        artifact is None
-        or artifact.target != SOURCE1938_SHARED_TARGET
-        or artifact.path != Path(report_path_text)
-        or artifact.source_task != source_task
-        or artifact.receiver != receiver
-        or artifact.commitment_path is None
+        retained.status == "done"
+        or not retained.is_manager
+        or canonical_target(retained.runat) != canonical_target(SOURCE1938_SHARED_TARGET)
+        or canonical_target(retained.managerat) != canonical_target(args.old_target)
     ):
-        raise ReplaceError("Source-1938 report receipt is not an authenticated transfer from the retained live dw:33 child")
-    return artifact, suffix
+        raise ReplaceError("Source-1938 retained child source has invalid custody")
+    receiver_path = task_path(args.root, SOURCE1938_LIVE_SHARED_TASK)
+    producers: dict[str, str] = {}
+    for task in active_child_task_refs(args.root, receiver_path, SOURCE1938_SHARED_TARGET):
+        path = task_path(args.root, task)
+        value = metadata(read_snapshot(path, f"Source-1938 retained-child report producer {task}").data, args.root, f"Source-1938 retained-child report producer {task}")
+        if value.status == "done" or canonical_target(value.managerat) != canonical_target(SOURCE1938_SHARED_TARGET):
+            raise ReplaceError("Source-1938 retained-child report producer changed custody")
+        producers[str(path.resolve())] = canonical_target(value.runat)
+
+    def producer_is_valid(artifact: AuthenticatedAgentReport) -> bool:
+        expected_target = producers.get(artifact.source_task)
+        return expected_target is not None and canonical_target(artifact.target) == expected_target
+
+    return source1938_report_receipt_set(
+        args,
+        source_child,
+        current_child,
+        SOURCE1938_LIVE_SHARED_TASK,
+        producer_is_valid,
+        "retained dw:33 child",
+        allow_unchanged=True,
+    )
+
+
+def source1938_receipt_sets(
+    args: Args,
+    source_old: bytes,
+    current_old: bytes,
+    source_child: bytes,
+    current_child: bytes,
+) -> tuple[tuple[AuthenticatedAgentReport, ...], bytes, tuple[AuthenticatedAgentReport, ...], bytes]:
+    old_artifacts, old_suffix = source1938_authenticated_report(args, source_old, current_old, source_child)
+    child_artifacts, child_suffix = source1938_authenticated_retained_child_reports(args, source_child, current_child)
+    artifacts = (*old_artifacts, *child_artifacts)
+    if len({artifact.path for artifact in artifacts}) != len(artifacts) or len({artifact.commitment_path for artifact in artifacts}) != len(artifacts):
+        raise ReplaceError("Source-1938 rebase repeats a report receipt across custody records")
+    return old_artifacts, old_suffix, child_artifacts, child_suffix
 
 
 def source1938_report_receipt_binding(
     args: Args,
     source_old: bytes,
     current_old: bytes,
-    retained_child: bytes,
+    source_child: bytes,
+    current_child: bytes,
 ) -> dict[str, str]:
-    artifact, suffix = source1938_authenticated_report(args, source_old, current_old, retained_child)
-    if artifact.commitment_path is None:
-        raise ReplaceError("Source-1938 authenticated report lost its commitment path")
-    report = read_snapshot(artifact.path, "Source-1938 retained-child report receipt")
-    commitment = read_snapshot(artifact.commitment_path, "Source-1938 retained-child report commitment")
+    old_artifacts, old_suffix, child_artifacts, child_suffix = source1938_receipt_sets(args, source_old, current_old, source_child, current_child)
+
+    def bind_set(receiver_task: str, artifacts: tuple[AuthenticatedAgentReport, ...], suffix: bytes) -> dict[str, object]:
+        receipts: list[dict[str, object]] = []
+        for artifact in artifacts:
+            if artifact.commitment_path is None:
+                raise ReplaceError("Source-1938 authenticated report lost its commitment path")
+            report = read_snapshot(artifact.path, "Source-1938 report receipt")
+            commitment = read_snapshot(artifact.commitment_path, "Source-1938 report commitment")
+            receipts.append(
+                {
+                    "commitment_path": str(artifact.commitment_path),
+                    "commitment_sha256": digest(commitment.data),
+                    "message_sha256": artifact.message_sha256,
+                    "pointer": f"(from agent {artifact.target} {artifact.path})",
+                    "report_sha256": digest(report.data),
+                    "routing_sources": list(artifact.routing_source_bindings),
+                }
+            )
+        return {"receiver_task": receiver_task, "receipts": receipts, "suffix_sha256": digest(suffix)}
+
     receipt_binding = {
-        "commitment_path": str(artifact.commitment_path),
-        "commitment_sha256": digest(commitment.data),
-        "message_sha256": artifact.message_sha256,
-        "pointer": f"(from agent dw:33 {artifact.path})",
-        "report_sha256": digest(report.data),
-        "routing_sources": list(artifact.routing_source_bindings),
-        "suffix_sha256": digest(suffix),
+        "closed_owner": bind_set(args.old_task, old_artifacts, old_suffix),
+        "retained_child": bind_set(SOURCE1938_LIVE_SHARED_TASK, child_artifacts, child_suffix),
     }
     return {
         "closed_owner_rebase_kind": SOURCE1938_REBASE_KIND,
@@ -3001,17 +3099,58 @@ def source1938_rebase_evidence_paths(args: Args) -> tuple[Path, ...]:
         return ()
     _prepared, _authority, _source_args, source_entries, _membership = authenticate_closed_owner_source(args)
     source_old = source_entries[0].before
-    retained = next((entry.before for entry in source_entries if entry.task == SOURCE1938_LIVE_SHARED_TASK), None)
-    if source_old is None or retained is None:
+    source_child = next((entry.before for entry in source_entries if entry.task == SOURCE1938_LIVE_SHARED_TASK), None)
+    if source_old is None or source_child is None:
         raise ReplaceError("Source-1938 closed-owner source lost required report-custody images")
-    current_old = read_snapshot(task_path(args.root, args.old_task), "Source-1938 current closed-owner task")
-    artifact, _suffix = source1938_authenticated_report(args, source_old, current_old.data, retained)
-    if artifact.commitment_path is None:
-        raise ReplaceError("Source-1938 authenticated report lost its commitment path")
-    return artifact.path, artifact.commitment_path
+    if args.audit_output.exists() or args.audit_output.is_symlink():
+        _record, _audit_bytes, current_entries, _current_membership = read_audit(args)
+        current_old_data = current_entries[0].before
+        current_child_data = next((entry.before for entry in current_entries if entry.task == SOURCE1938_LIVE_SHARED_TASK), None)
+        if current_old_data is None or current_child_data is None:
+            raise ReplaceError("Source-1938 fresh audit lost report-custody before images")
+    else:
+        current_old_data = read_snapshot(task_path(args.root, args.old_task), "Source-1938 current closed-owner task").data
+        current_child_data = read_snapshot(task_path(args.root, SOURCE1938_LIVE_SHARED_TASK), "Source-1938 current retained child").data
+    old_artifacts, _old_suffix, child_artifacts, _child_suffix = source1938_receipt_sets(
+        args,
+        source_old,
+        current_old_data,
+        source_child,
+        current_child_data,
+    )
+    evidence: list[Path] = []
+    for artifact in (*old_artifacts, *child_artifacts):
+        if artifact.commitment_path is None:
+            raise ReplaceError("Source-1938 authenticated report lost its commitment path")
+        evidence.extend((artifact.path, artifact.commitment_path))
+    return tuple(evidence)
 
 
 # 🧑 "Bind the exact failed manager, current TODO ... pane/process/session identity ... and protected targets."
+def source1938_source_children(args: Args, record: dict[str, object]) -> tuple[ChildPin, ...]:
+    if not is_source1938_semantic_exception(args):
+        return args.children
+    raw_children = record.get("children")
+    if not isinstance(raw_children, list):
+        raise ReplaceError("Source-1938 closed-owner source lost its child bindings")
+    source_children: list[ChildPin] = []
+    for value in raw_children:
+        if not isinstance(value, dict) or set(value) != {"task", "sha256", "queue_sha256"}:
+            raise ReplaceError("Source-1938 closed-owner source child binding is malformed")
+        task, sha256, queue_sha256 = value.get("task"), value.get("sha256"), value.get("queue_sha256")
+        if not isinstance(task, str) or SHA256_RE.fullmatch(str(sha256)) is None or SHA256_RE.fullmatch(str(queue_sha256)) is None:
+            raise ReplaceError("Source-1938 closed-owner source child binding is invalid")
+        source_children.append(ChildPin(task, str(sha256), str(queue_sha256)))
+    current = {child.task: child for child in args.children}
+    if len(current) != len(args.children) or {child.task for child in source_children} != set(current):
+        raise ReplaceError("Source-1938 current direct-child set changed")
+    for child in source_children:
+        current_child = current[child.task]
+        if current_child.queue_sha256 != child.queue_sha256 or (child.task != SOURCE1938_LIVE_SHARED_TASK and current_child.sha256 != child.sha256):
+            raise ReplaceError("Source-1938 current direct-child binding changed outside retained reports")
+    return tuple(source_children)
+
+
 def authenticate_closed_owner_source(
     args: Args,
 ) -> tuple[str, str, Args, tuple[AuditEntry, ...], tuple[Path, ...]]:
@@ -3031,10 +3170,12 @@ def authenticate_closed_owner_source(
     source_reviewer = loaded.get("reviewer")
     if not isinstance(source_preparer, str) or not source_preparer.strip() or not isinstance(source_reviewer, str) or not source_reviewer.strip() or source_preparer.strip() == source_reviewer.strip():
         raise ReplaceError("closed-owner replacement audit has invalid review identities")
+    source_children = source1938_source_children(args, loaded)
     source_args = replace(
         args,
         old_sha256=str(loaded["old_sha256"]),
         todo_sha256=str(loaded["todo_sha256"]),
+        children=source_children,
         audit_output=source_path,
         preparer=source_preparer,
         reviewer=source_reviewer,
@@ -3079,16 +3220,22 @@ def source1938_rebase_binding_from_audit(
 ) -> dict[str, str]:
     if current_membership != source_membership or len(current_entries) != len(source_entries):
         raise ReplaceError("Source-1938 closed-owner rebase changed Markdown membership")
+    retained_index = next((index for index, entry in enumerate(source_entries) if entry.task == SOURCE1938_LIVE_SHARED_TASK), None)
+    if retained_index is None:
+        raise ReplaceError("Source-1938 closed-owner source lost the retained dw:33 child")
     if any(
         current.task != source.task
         or current.before != source.before
         or current.mode != source.mode
         or current.gid != source.gid
-        for current, source in zip(current_entries[1:], source_entries[1:], strict=True)
+        for index, (current, source) in enumerate(zip(current_entries, source_entries, strict=True))
+        if index not in {0, retained_index}
     ):
         raise ReplaceError("Source-1938 closed-owner rebase changed an audited non-owner before image")
     source_old = source_entries[0]
     current_old = current_entries[0]
+    source_child = source_entries[retained_index]
+    current_child = current_entries[retained_index]
     if (
         source_old.before is None
         or current_old.before is None
@@ -3097,10 +3244,16 @@ def source1938_rebase_binding_from_audit(
         or digest(current_old.before) != args.old_sha256
     ):
         raise ReplaceError("Source-1938 closed-owner rebase changed its bound old-task image")
-    retained = next((entry.before for entry in source_entries if entry.task == SOURCE1938_LIVE_SHARED_TASK), None)
-    if retained is None:
-        raise ReplaceError("Source-1938 closed-owner source lost the retained dw:33 child")
-    return source1938_report_receipt_binding(args, source_old.before, current_old.before, retained)
+    current_pin = next((child for child in args.children if child.task == SOURCE1938_LIVE_SHARED_TASK), None)
+    if (
+        source_child.before is None
+        or current_child.before is None
+        or current_pin is None
+        or (current_child.mode, current_child.gid) != (source_child.mode, source_child.gid)
+        or digest(current_child.before) != current_pin.sha256
+    ):
+        raise ReplaceError("Source-1938 closed-owner rebase changed its bound retained-child image")
+    return source1938_report_receipt_binding(args, source_old.before, current_old.before, source_child.before, current_child.before)
 
 
 def validate_closed_owner_before_state(
@@ -3113,7 +3266,10 @@ def validate_closed_owner_before_state(
     if is_source1938_semantic_exception(args):
         if markdown_paths(args.root) != membership:
             raise ReplaceError("Source-1938 closed-owner rebase changed Markdown membership")
-        if any(state != "before" for state in states[1:]):
+        retained_index = next((index for index, entry in enumerate(entries) if entry.task == SOURCE1938_LIVE_SHARED_TASK), None)
+        if retained_index is None:
+            raise ReplaceError("Source-1938 closed-owner source lost the retained dw:33 child")
+        if any(state != "before" for index, state in enumerate(states) if index not in {0, retained_index}):
             raise ReplaceError("Source-1938 closed-owner rebase changed an audited non-owner before image")
         old_entry = entries[0]
         if old_entry.before is None:
@@ -3121,9 +3277,17 @@ def validate_closed_owner_before_state(
         current_old = read_snapshot(task_path(args.root, args.old_task), "Source-1938 current closed-owner task")
         if stat.S_IMODE(current_old.state.st_mode) != old_entry.mode or current_old.state.st_gid != old_entry.gid or digest(current_old.data) != args.old_sha256:
             raise ReplaceError("Source-1938 closed-owner rebase changed its bound old-task image")
-        retained = next((entry.before for entry in entries if entry.task == SOURCE1938_LIVE_SHARED_TASK), None)
-        if retained is None:
-            raise ReplaceError("Source-1938 closed-owner source lost the retained dw:33 child")
+        retained_entry = entries[retained_index]
+        current_child = read_snapshot(task_path(args.root, SOURCE1938_LIVE_SHARED_TASK), "Source-1938 current retained child")
+        current_pin = next((child for child in args.children if child.task == SOURCE1938_LIVE_SHARED_TASK), None)
+        if (
+            retained_entry.before is None
+            or current_pin is None
+            or stat.S_IMODE(current_child.state.st_mode) != retained_entry.mode
+            or current_child.state.st_gid != retained_entry.gid
+            or digest(current_child.data) != current_pin.sha256
+        ):
+            raise ReplaceError("Source-1938 closed-owner rebase changed its bound retained-child image")
         old_path = task_path(args.root, args.old_task)
         successor_path = task_path(args.root, args.successor_task)
         historical_path = task_path(args.root, args.historical_task)
@@ -3134,7 +3298,7 @@ def validate_closed_owner_before_state(
             raise ReplaceError("Source-1938 closed-owner rebase found prospective successor custody")
         if set(authoritative_active_target_task_paths(args.root, SOURCE1938_SHARED_TARGET)) != {live_shared_path.resolve(), historical_path.resolve()}:
             raise ReplaceError("Source-1938 closed-owner rebase changed retained dw:33 topology")
-        binding = source1938_report_receipt_binding(args, old_entry.before, current_old.data, retained)
+        binding = source1938_report_receipt_binding(args, old_entry.before, current_old.data, retained_entry.before, current_child.data)
     else:
         if any(state != "before" for state in (*states[:-2], states[-1])):
             raise ReplaceError("closed-owner source lifecycle bytes changed outside the current TODO")
@@ -4120,6 +4284,8 @@ def replace_manager(args: Args) -> str:
             locks.enter_context(task_target_lock(args.root, target))
         for path in lock_paths:
             locks.enter_context(task_file_lock(path))
+        if args.closed_owner_audit is not None and source1938_rebase_evidence_paths(args) != source_evidence_paths[3:]:
+            raise ReplaceError("closed-owner report evidence changed while replacement locks were acquired")
         if markdown_paths(args.root) != initial_paths:
             raise ReplaceError("Markdown membership changed while replacement locks were acquired")
         owner_stopped = False
