@@ -81,9 +81,11 @@ DONE_LIVE_CLOSE_OPERATION = "done-live-no-mail-close"
 STALE_PREDECESSOR_CLOSE_OPERATION = "stale-predecessor-no-mail-close"
 WEBCONF_EXITED_CLOSE_OPERATION = "webconf-exited-shell-no-mail-close"
 TRANSFERRED_MANAGER_CLOSE_OPERATION = "transferred-manager-close"
+SOURCE1923_MANAGER_ADOPT_OPERATION = "source1923-manager-adopt"
 BOUND_CLOSE_OPERATIONS = frozenset(
     {
         DONE_LIVE_CLOSE_OPERATION,
+        SOURCE1923_MANAGER_ADOPT_OPERATION,
         STALE_PREDECESSOR_CLOSE_OPERATION,
         TRANSFERRED_MANAGER_CLOSE_OPERATION,
         WEBCONF_EXITED_CLOSE_OPERATION,
@@ -1393,6 +1395,19 @@ def validate_bound_close_audit_file(
         return
     if operation == WEBCONF_EXITED_CLOSE_OPERATION:
         module_name = "omo_manager.omo_webconf_exited_shell_close" if __package__ else "omo_webconf_exited_shell_close"
+        getattr(importlib.import_module(module_name), "validate_close_authority_file")(
+            audit_path,
+            commitment,
+            target,
+            pane_id_value,
+            pane_pid,
+            pane_start_ticks,
+            expected_audit_sha256,
+            closed_identity=closed_identity,
+        )
+        return
+    if operation == SOURCE1923_MANAGER_ADOPT_OPERATION:
+        module_name = "omo_manager.omo_source1923_manager_adopt" if __package__ else "omo_source1923_manager_adopt"
         getattr(importlib.import_module(module_name), "validate_close_authority_file")(
             audit_path,
             commitment,
