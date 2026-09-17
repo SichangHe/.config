@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import subprocess
 import sys
 import tempfile
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,9 +23,17 @@ from omo_manager.omo_blocking import load_yaml_mapping
 from omo_manager.omo_blocking import render_task
 from omo_manager.omo_blocking import split_task_text
 from omo_manager.omo_blocking import v2_enabled
-from omo_manager.omo_task_status import replace_if_unchanged
+from omo_manager.omo_completion_email import NO_CONTACT_RE
+from omo_manager.omo_completion_email import completion_email_state_dir
+from omo_manager.omo_completion_email import exclusive_record
+from omo_manager.omo_completion_email import fsync_directory
+from omo_manager.omo_completion_email import owned_private_file
+from omo_manager.omo_completion_email import pending_item_notice_body
+from omo_manager.omo_task_lock import task_file_lock
+from omo_manager.omo_task_status import replace_if_unchanged_locked
 from omo_manager.omo_task_status import task_path
 from omo_manager.omo_task_metadata import PENDING_ITEM_PROVENANCE_HELP
+from omo_manager.omo_task_metadata import human_authored_pending_items
 from omo_manager.omo_task_metadata import pending_items_with_origin
 from omo_manager.omo_task_metadata import render_v1_pending_scalar
 
@@ -63,8 +73,9 @@ validates that the `(pending)` marker is still at --line before atomically
 recording the items and removing the marker.
 
 {PENDING_ITEM_PROVENANCE_HELP}
-Quote human-origin requests as closely as possible in --item. For email-origin
-requests, pass --email-file so --ack-human reuses the original subject.
+Quote human-origin requests as closely as possible in --item. Human-authored
+items require --ack-human and --email-file so creation is acknowledged on the
+agent's latest verified Human thread.
 --task-file is only for atomic initial assignment to a new owner; keep task-file
 paths out of worker prompts.""",
     )
@@ -76,8 +87,8 @@ paths out of worker prompts.""",
     origin = parser.add_mutually_exclusive_group(required=True)
     _ = origin.add_argument("--human-authored", action="store_const", const="human", dest="item_origin", help="Mark added items as Human-authored requests.")
     _ = origin.add_argument("--agent-authored", action="store_const", const="agent", dest="item_origin", help="Mark added items as agent-authored work.")
-    _ = parser.add_argument("--ack-human", action="store_true", help="Email the human after the pending marker and items are recorded.")
-    _ = parser.add_argument("--email-file", type=Path, help="Stored `manager_mail/*.txt` file whose `Subject:` header should be used for the human acknowledgement.")
+    _ = parser.add_argument("--ack-human", action="store_true", help="Email the human before the pending marker is consumed and items are recorded.")
+    _ = parser.add_argument("--email-file", type=Path, help="Stored `manager_mail/*.txt` file that proves the pending request came from the Human.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     try:
         items = pending_items_with_origin(tuple(normalized_item(item) for item in parsed.item), parsed.item_origin)
@@ -87,6 +98,8 @@ paths out of worker prompts.""",
         parser.error("at least one --item is required; use omo_task_edit.py pending-marker-clear for no-item acknowledgements or omo_task_edit.py pending-replace/pending-remove for existing-item edits.")
     if parsed.ack_human and parsed.item_origin != "human":
         parser.error("--ack-human requires --human-authored.")
+    if parsed.item_origin == "human" and not parsed.ack_human:
+        parser.error("--human-authored requires --ack-human and --email-file.")
     if parsed.ack_human and parsed.email_file is None:
         parser.error("--ack-human requires --email-file so the acknowledgement stays on its verified Human thread.")
     return Args(parsed.root.resolve(), parsed.pending_file, parsed.line, parsed.task_file or parsed.pending_file, items, parsed.ack_human, parsed.email_file)
@@ -265,78 +278,185 @@ def subject_from_email_file(path: Path) -> str:
     raise TaskFrontmatterError("email file has no nonempty `Subject:` header.")
 
 
-def ack_subject(email_path: Path) -> str:
-    subject = subject_from_email_file(email_path)
-    return subject if subject.lstrip().casefold().startswith("re:") else f"Re: {subject}"
+def pending_notice_key(args: Args) -> str:
+    """Bind one manager-ingress creation notice across safe retries."""
+    identity = "\0".join(
+        (
+            str(args.root.resolve()),
+            str(task_path(args.root, args.pending_file)),
+            str(task_path(args.root, args.task_file)),
+            str(args.line),
+            *args.items,
+        )
+    )
+    return hashlib.sha256(identity.encode()).hexdigest()
 
 
-def ack_body() -> str:
-    return "Acknowledged: I recorded your request.\n"
+def reserve_pending_notice(pending_path: Path, target_path: Path, args: Args, pending_text: str, target_text: str) -> None:
+    """Bind a creation notice to the exact ingress snapshot before delivery."""
+    base_pending_text = remove_line_once(pending_text, ack_sent_line(args.line, args.items))
+    base_target_text = base_pending_text if pending_path == target_path else target_text
+    _updated_pending, updated_target_text = update_texts(
+        base_pending_text,
+        base_target_text,
+        pending_path == target_path,
+        args.line,
+        args.items,
+        args.root,
+    )
+    pending_sha256 = hashlib.sha256(base_pending_text.encode()).hexdigest()
+    target_sha256 = hashlib.sha256(base_target_text.encode()).hexdigest()
+    updated_target_sha256 = hashlib.sha256(updated_target_text.encode()).hexdigest()
+    payload = (
+        "schema=omo-pending-creation-reservation/v1\n"
+        f"pending_path={pending_path.resolve()}\n"
+        f"target_path={target_path.resolve()}\n"
+        f"pending_sha256={pending_sha256}\n"
+        f"target_sha256={target_sha256}\n"
+        f"updated_target_sha256={updated_target_sha256}\n"
+    )
+    directory = completion_email_state_dir() / "pending-creation-reservations"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    reservation = directory / pending_notice_key(args)
+    try:
+        exclusive_record(reservation, payload)
+    except FileExistsError:
+        try:
+            recorded = dict(line.split("=", 1) for line in owned_private_file(reservation, "pending creation reservation", 4096).decode().splitlines())
+        except ValueError as exc:
+            raise TaskFrontmatterError("pending creation reservation is malformed") from exc
+        if (
+            recorded.get("schema") != "omo-pending-creation-reservation/v1"
+            or recorded.get("pending_path") != str(pending_path.resolve())
+            or recorded.get("target_path") != str(target_path.resolve())
+            or recorded.get("pending_sha256") != pending_sha256
+            or target_sha256 not in {recorded.get("target_sha256"), recorded.get("updated_target_sha256")}
+        ):
+            raise TaskFrontmatterError("pending source changed after its creation notice was reserved")
+    fsync_directory(directory)
 
 
-def send_human_ack(email_path: Path) -> None:
+def send_human_ack(args: Args) -> None:
     with tempfile.TemporaryDirectory(prefix="omo-record-pending-") as tmp:
-        subject_path = Path(tmp) / "subject.txt"
         body_path = Path(tmp) / "body.md"
-        subject_path.write_text(ack_subject(email_path) + "\n", encoding="utf-8")
-        body_path.write_text(ack_body(), encoding="utf-8")
+        body_path.write_text(pending_item_notice_body("pending item created", args.items), encoding="utf-8")
         subprocess.run(
-            [str(EMAIL_HELPER), "--manager-human", "--non-completion", "--subject-file", str(subject_path), "--message-file", str(body_path)],
+            [
+                str(EMAIL_HELPER),
+                "--manager-human",
+                "--non-completion",
+                "--pending-notice-key",
+                pending_notice_key(args),
+                "--message-file",
+                str(body_path),
+            ],
             check=True,
         )
 
 
-def send_human_ack_once(pending_path: Path, args: Args, email_path: Path | None) -> None:
+def send_human_ack_once(
+    pending_path: Path,
+    target_path: Path,
+    args: Args,
+    email_path: Path | None,
+    expected_pending_sha256: str,
+    expected_target_sha256: str,
+) -> None:
     if email_path is None:
         raise TaskFrontmatterError("--ack-human requires --email-file so the acknowledgement stays on its verified Human thread.")
+    _ = subject_from_email_file(email_path)
     before = pending_path.stat()
     text = pending_path.read_text(encoding="utf-8")
+    base_text = remove_line_once(text, ack_sent_line(args.line, args.items))
+    target_text = base_text if pending_path == target_path else target_path.read_text(encoding="utf-8")
+    if (
+        hashlib.sha256(base_text.encode()).hexdigest() != expected_pending_sha256
+        or hashlib.sha256(target_text.encode()).hexdigest() != expected_target_sha256
+    ):
+        raise TaskFrontmatterError("pending source or target changed before its creation notice delivery")
     marker = ack_sent_line(args.line, args.items)
     if line_exists(text, marker):
         return
-    if pending_marker_at_line(text, args.line):
-        raise TaskFrontmatterError("cannot retry human acknowledgement while a new live `(pending)` marker is at the original line.")
-    updated = append_line_once(text, marker)
-    replace_if_unchanged(pending_path, updated, before)
-    try:
-        send_human_ack(email_path)
-    except (OSError, subprocess.CalledProcessError):
-        rollback_before = pending_path.stat()
-        rollback_text = pending_path.read_text(encoding="utf-8")
-        replace_if_unchanged(pending_path, remove_line_once(rollback_text, marker), rollback_before)
-        raise
+    send_human_ack(args)
+    replace_if_unchanged_locked(pending_path, append_line_once(text, marker), before)
+
+
+def contact_forbidden(*texts: str) -> bool:
+    """Preserve an explicit no-contact rule on either ingress or owner task."""
+    return any(NO_CONTACT_RE.search(text) is not None for text in texts)
+
+
+def record_locked(args: Args, pending_path: Path, target_path: Path, email_path: Path | None) -> str:
+    email_text = email_path.read_text(encoding="utf-8") if email_path is not None else ""
+    pending_before = pending_path.stat()
+    target_before = target_path.stat()
+    same_file = pending_path == target_path
+    pending_text = pending_path.read_text(encoding="utf-8")
+    target_text = pending_text if same_file else target_path.read_text(encoding="utf-8")
+    reject_retry_over_new_marker(pending_text, args.line, args.items)
+    if retry_already_recorded(pending_text, target_text, args.line, args.items, args.root):
+        if args.ack_human and not contact_forbidden(pending_text, target_text, email_text):
+            base_pending_text = remove_line_once(pending_text, ack_sent_line(args.line, args.items))
+            base_target_text = base_pending_text if same_file else target_text
+            send_human_ack_once(
+                pending_path,
+                target_path,
+                args,
+                email_path,
+                hashlib.sha256(base_pending_text.encode()).hexdigest(),
+                hashlib.sha256(base_target_text.encode()).hexdigest(),
+            )
+        return f"recorded {len(args.items)} pending item(s) in {target_path.name}; `(pending)` was already removed from {pending_path.name}:{args.line}"
+    _ = update_texts(pending_text, target_text, same_file, args.line, args.items, args.root)
+    if args.ack_human and not contact_forbidden(pending_text, target_text, email_text):
+        reserve_pending_notice(pending_path, target_path, args, pending_text, target_text)
+        expected_pending = remove_line_once(pending_text, ack_sent_line(args.line, args.items))
+        expected_target = expected_pending if same_file else target_text
+        send_human_ack_once(
+            pending_path,
+            target_path,
+            args,
+            email_path,
+            hashlib.sha256(expected_pending.encode()).hexdigest(),
+            hashlib.sha256(expected_target.encode()).hexdigest(),
+        )
+        pending_before = pending_path.stat()
+        target_before = target_path.stat()
+        pending_text = pending_path.read_text(encoding="utf-8")
+        target_text = pending_text if same_file else target_path.read_text(encoding="utf-8")
+        reserve_pending_notice(pending_path, target_path, args, pending_text, target_text)
+    updated_pending, updated_target = update_texts(pending_text, target_text, same_file, args.line, args.items, args.root)
+    if same_file:
+        replace_if_unchanged_locked(pending_path, updated_pending, pending_before)
+    else:
+        replace_if_unchanged_locked(target_path, updated_target, target_before)
+        replace_if_unchanged_locked(pending_path, updated_pending, pending_before)
+    return f"recorded {len(args.items)} pending item(s) in {target_path.name}; removed `(pending)` from {pending_path.name}:{args.line}"
 
 
 def run(args: Args) -> int:
     try:
+        human_items = human_authored_pending_items(args.items)
+        if human_items and human_items != args.items:
+            raise TaskFrontmatterError("one pending record cannot mix Human- and agent-authored items.")
+        if human_items and not args.ack_human:
+            raise TaskFrontmatterError("Human-authored pending items require a Human creation acknowledgement.")
+        if args.ack_human and human_items != args.items:
+            raise TaskFrontmatterError("Human creation acknowledgement requires explicitly Human-authored pending items.")
         if args.ack_human and args.email_file is None:
             raise TaskFrontmatterError("--ack-human requires --email-file so the acknowledgement stays on its verified Human thread.")
         pending_path = task_path(args.root, args.pending_file)
         target_path = task_path(args.root, args.task_file)
         email_path = task_path(args.root, args.email_file) if args.email_file is not None else None
-        pending_before = pending_path.stat()
-        target_before = target_path.stat()
-        same_file = pending_path == target_path
-        pending_text = pending_path.read_text(encoding="utf-8")
-        target_text = pending_text if same_file else target_path.read_text(encoding="utf-8")
-        reject_retry_over_new_marker(pending_text, args.line, args.items)
-        if retry_already_recorded(pending_text, target_text, args.line, args.items, args.root):
-            if args.ack_human:
-                send_human_ack_once(pending_path, args, email_path)
-            print(f"recorded {len(args.items)} pending item(s) in {target_path.name}; `(pending)` was already removed from {pending_path.name}:{args.line}")
-            return 0
-        updated_pending, updated_target = update_texts(pending_text, target_text, same_file, args.line, args.items, args.root)
-        if same_file:
-            replace_if_unchanged(pending_path, updated_pending, pending_before)
-        else:
-            replace_if_unchanged(target_path, updated_target, target_before)
-            replace_if_unchanged(pending_path, updated_pending, pending_before)
-        if args.ack_human:
-            send_human_ack_once(pending_path, args, email_path)
+        with ExitStack() as locks:
+            for path in sorted({pending_path, target_path}):
+                locks.enter_context(task_file_lock(path))
+            result = record_locked(args, pending_path, target_path, email_path)
     except (OSError, TaskFrontmatterError, subprocess.CalledProcessError, argparse.ArgumentTypeError) as exc:
         print(f"omo_record_pending.py: {exc}", file=sys.stderr)
         return 2
-    print(f"recorded {len(args.items)} pending item(s) in {target_path.name}; removed `(pending)` from {pending_path.name}:{args.line}")
+    print(result)
     return 0
 
 

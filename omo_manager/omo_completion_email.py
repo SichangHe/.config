@@ -33,6 +33,8 @@ from omo_manager.omo_task_context import current_active_task
 from omo_manager.omo_task_context import current_pending_task
 from omo_manager.omo_task_lock import task_file_lock
 from omo_manager.omo_task_lock import task_file_lock_at_path
+from omo_manager.omo_task_metadata import human_authored_pending_items
+from omo_manager.omo_task_metadata import pending_item_without_human_prefix
 
 EMAIL_HELPER = Path(__file__).resolve().parents[1] / "helper.sh" / "email_me.py"
 COMPLETION_ENTRYPOINT = Path(__file__).resolve()
@@ -44,13 +46,20 @@ NO_CONTACT_RE = re.compile(
 )
 MANAGER_ONLY_RE = re.compile(r"\b(?:report|return) only\b[^.\n]{0,100}\b(?:manager|submanager)\b|\bmanager[- ]only reports?\b", re.IGNORECASE)
 DIRECT_HUMAN_REPORT_RE = re.compile(r"\b(?:email|report|respond|write)\b[^.\n]{0,100}\b(?:directly to )?(?:the )?human\b", re.IGNORECASE)
-# 🧑 Human source `manager_mail/85c5dff58359-1926.txt:1-3`: "I haven't gotten emails of pending items created/closed by agents"
+# 🧑 Human source `manager_mail/85c5dff58359-1929.txt:6`: "Pending items originated from the human need emails, ones from agents do not."
 PENDING_ITEM_NOTICE_OUTCOMES = {
     "pending item created",
     "pending item completed",
     "pending item cancelled",
     "pending item removed after verification",
 }
+
+
+# 🧑 Human source `manager_mail/85c5dff58359-1936.txt:3`: "pending item created/deleted messages should reuse subject of the agent’s previous email and be concise: just do like ..."
+def pending_item_notice_body(outcome: str, items: tuple[str, ...]) -> str:
+    """Render the exact concise body for a Human pending-item notice."""
+    event = "created" if outcome == "pending item created" else "deleted"
+    return f"pending item {event}:\n" + "".join(f"- {pending_item_without_human_prefix(item)}\n" for item in items)
 SOURCE1241_REF = "manager_mail/85c5dff58359-1241.txt:1-7"
 SOURCE1241_TASK = "hmanager_replace_fix.md"
 SOURCE1241_HUMAN = """Subject: Re: Why recent agent replies were missing
@@ -365,8 +374,9 @@ def build_completion_email(
             policy_text = text.replace(SOURCE1241_META_SPAN, "", 1)
     task_close = outcome == "task done"
     pending_item_notice = outcome in PENDING_ITEM_NOTICE_OUTCOMES
+    human_pending_item_notice = pending_item_notice and bool(items) and human_authored_pending_items(items) == items
     contact_forbidden = NO_CONTACT_RE.search(policy_text) is not None or (
-        not pending_item_notice and MANAGER_ONLY_RE.search(policy_text) is not None and DIRECT_HUMAN_REPORT_RE.search(policy_text) is None
+        not human_pending_item_notice and MANAGER_ONLY_RE.search(policy_text) is not None and DIRECT_HUMAN_REPORT_RE.search(policy_text) is None
     )
     if (
         metadata is None
@@ -375,6 +385,7 @@ def build_completion_email(
         or metadata.runat.partition(":")[0].startswith("h")
         or guest_hees_target(metadata.runat)
         or contact_forbidden
+        or (pending_item_notice and not human_pending_item_notice)
         or (not task_close and not pending_item_notice and DIRECT_HUMAN_REPORT_RE.search(policy_text) is None)
     ):
         return None
@@ -383,6 +394,9 @@ def build_completion_email(
     if task_close:
         subject = ""
         body = f"Closed {tmux_window_target(metadata.runat)}\n"
+    elif human_pending_item_notice:
+        subject = ""
+        body = pending_item_notice_body(outcome, items)
     else:
         details = [f"Task: {relative}", f"Outcome: {outcome}"]
         if items:
@@ -474,6 +488,8 @@ def plan_completion_email(
     if human_subject:
         if outcome == "task done":
             raise ValueError("task close cannot override its exact automatic email")
+        if outcome in PENDING_ITEM_NOTICE_OUTCOMES:
+            raise ValueError("pending-item notice cannot override its exact thread or body")
         if human_subject.strip() != human_subject or "\n" in human_subject or "\r" in human_subject:
             raise ValueError("human answer subject must be one non-empty trimmed line")
         subject = human_subject

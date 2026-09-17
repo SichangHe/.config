@@ -58,6 +58,12 @@ def pending_items_with_origin(items: tuple[str, ...], origin: str) -> tuple[str,
     return values
 
 
+# 🧑 Human source `manager_mail/85c5dff58359-1929.txt:6`: "Pending items originated from the human need emails, ones from agents do not."
+def human_authored_pending_items(items: tuple[str, ...]) -> tuple[str, ...]:
+    """Select items with explicit durable Human authorship."""
+    return tuple(item for item in items if item.startswith(HUMAN_PENDING_ITEM_PREFIX))
+
+
 def pending_replacement_with_origin(old_item: str, new_item: str) -> str:
     """Preserve an existing Human marker while replacing an item's wording."""
     value = pending_item_without_human_prefix(new_item)

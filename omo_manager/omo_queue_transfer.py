@@ -26,7 +26,7 @@ from omo_manager.omo_manager_replace import ReplaceError, Snapshot, create_snaps
 from omo_manager.omo_task_edit import has_live_pending_marker, render_pending_items
 from omo_manager.omo_task_lock import canonical_target as canonical_lock_target
 from omo_manager.omo_task_lock import task_file_lock, task_target_lock
-from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1, TaskFrontmatterError, TaskMetadata, parse_task_metadata, runat_kind
+from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1, TaskFrontmatterError, TaskMetadata, human_authored_pending_items, parse_task_metadata, runat_kind
 
 REQUEST_SCHEMA = "omo-queue-transfer-request/v1"
 MANIFEST_SCHEMA = "omo-queue-transfer-manifest/v1"
@@ -384,6 +384,13 @@ def build_plan(
         raise QueueTransferError("source queue must contain at least two items")
     if len(dispositions) != len(source_queue) or tuple(item.source_index for item in dispositions) != tuple(range(len(source_queue))):
         raise QueueTransferError("dispositions do not bind every ordered source item")
+    terminal_human_items = tuple(
+        source_queue[item.source_index]
+        for item in dispositions
+        if item.kind != "transfer" and human_authored_pending_items((source_queue[item.source_index],))
+    )
+    if terminal_human_items:
+        raise QueueTransferError("Human-authored items require the owner completion-email path before terminal disposition")
     transferred_items = tuple(source_queue[item.source_index] for item in dispositions if item.kind == "transfer")
     if len(set(transferred_items)) != len(transferred_items):
         raise QueueTransferError("duplicate source text may transfer once; disposition other copies as duplicates")

@@ -40,6 +40,7 @@ from omo_manager.omo_task_status import task_path
 from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1
 from omo_manager.omo_task_metadata import PENDING_ITEM_PROVENANCE_HELP
 from omo_manager.omo_task_metadata import frontmatter_parts
+from omo_manager.omo_task_metadata import human_authored_pending_items
 from omo_manager.omo_task_metadata import pending_items_with_origin
 from omo_manager.omo_task_metadata import pending_replacement_with_origin
 from omo_manager.omo_task_metadata import render_v1_pending_scalar
@@ -1295,6 +1296,10 @@ def run(args: Args) -> int:
             print(f"normalized later frontmatter in {path.name}:{args.line}")
             return 0
         if command == "pending-add":
+            if human_authored_pending_items(args.items):
+                raise TaskFrontmatterError(
+                    "manager-side pending-add cannot create Human-authored items without a verified Human thread; use omo_record_pending.py or the owner-local omo_pending.py helper."
+                )
             updated, count = add_pending_items(text, args.items)
             write_if_changed(path, text, updated, before)
             print(f"added {count} pending item(s) to {path.name}")
@@ -1309,12 +1314,13 @@ def run(args: Args) -> int:
             evidence = normalized_comment_message(args.evidence)
             updated, count = remove_pending_items(text, args.items)
             updated = append_comment(updated, pending_remove_evidence_comment(count, evidence))
+            notice_items = human_authored_pending_items(args.items)
             if not require_owner_completion(
                 args.root,
                 path,
                 text,
                 "pending item removed after verification",
-                items=args.items,
+                items=notice_items,
                 evidence=evidence,
                 semantic_key=args.completion_key,
             ):
@@ -1324,7 +1330,7 @@ def run(args: Args) -> int:
                 path,
                 text,
                 "pending item removed after verification",
-                items=args.items,
+                items=notice_items,
                 evidence=evidence,
                 semantic_key=args.completion_key,
             )

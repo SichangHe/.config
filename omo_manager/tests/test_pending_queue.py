@@ -37,8 +37,8 @@ def task_text(status: str = "running", items: tuple[str, ...] = ()) -> str:
     )
 
 
-def v2_task_text() -> str:
-    return """---
+def v2_task_text(item: str = "finish review") -> str:
+    return f"""---
 version: v2.0.0
 task_id: task_019f0000-0000-7000-8000-000000000001
 status: running
@@ -48,7 +48,7 @@ managerat: cfg:1
 is_manager: false
 pending_task_items:
   - id: pi_019f0000-0000-7000-8000-000000000002
-    text: finish review
+    text: {item}
     blocked_on: []
     notices: []
 resolved_task_items: []
@@ -94,7 +94,7 @@ class PendingQueueTests(unittest.TestCase):
             path = root / "task.md"
             original = task_text()
             path.write_text(original, encoding="utf-8")
-            args = Args("add", ("inspect failure",))
+            args = Args("add", ("🧑 inspect failure",))
             from omo_manager.omo_task_edit import replace_if_unchanged as actual_replace
 
             calls = 0
@@ -119,7 +119,7 @@ class PendingQueueTests(unittest.TestCase):
 
             email.assert_called_once()
             text = path.read_text(encoding="utf-8")
-            self.assertIn("  - inspect failure\n", text)
+            self.assertIn("  - 🧑 inspect failure\n", text)
             self.assertIn("unrelated note\n", text)
             self.assertRegex(text, r"\(pending item creation notice: [0-9a-f]{64}:[0-9a-f]{64}\)")
 
@@ -136,8 +136,24 @@ class PendingQueueTests(unittest.TestCase):
                 "omo_manager.omo_completion_email.subprocess.run", side_effect=OSError("mail unavailable")
             ):
                 with self.assertRaisesRegex(OSError, "not confirmed delivered"):
-                    run(Args("add", ("inspect failure",)), root)
+                    run(Args("add", ("🧑 inspect failure",)), root)
             self.assertEqual(original, path.read_text(encoding="utf-8"))
+
+    def test_agent_add_mutates_without_mail_or_notice_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text(task_text(), encoding="utf-8")
+            args = parse_args(["add", "--agent-authored", "--item", "inspect failure"])
+            with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch(
+                "omo_manager.omo_pending.plan_completion_email"
+            ) as plan, patch("omo_manager.omo_pending.require_owner_completion") as require:
+                self.assertEqual(0, run(args, root))
+            plan.assert_not_called()
+            require.assert_not_called()
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("  - inspect failure\n", text)
+            self.assertNotIn("pending item creation notice", text)
 
     def test_add_race_with_competing_same_item_finalizes_notice_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -145,7 +161,7 @@ class PendingQueueTests(unittest.TestCase):
             state = root / "state"
             path = root / "task.md"
             path.write_text(task_text(), encoding="utf-8")
-            args = Args("add", ("inspect failure",))
+            args = Args("add", ("🧑 inspect failure",))
             from omo_manager.omo_task_edit import add_pending_items as actual_add
             from omo_manager.omo_task_edit import remove_pending_items as actual_remove
             from omo_manager.omo_task_edit import replace_if_unchanged as actual_replace
@@ -183,12 +199,12 @@ class PendingQueueTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "task.md"
-            original = task_text(items=("inspect failure",))
+            original = task_text(items=("🧑 inspect failure",))
             path.write_text(original, encoding="utf-8")
             with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch(
                 "omo_manager.omo_pending.require_pending_add_notice"
             ) as notice:
-                self.assertEqual(0, run(Args("add", ("inspect failure",)), root))
+                self.assertEqual(0, run(Args("add", ("🧑 inspect failure",)), root))
             notice.assert_not_called()
             self.assertEqual(original, path.read_text(encoding="utf-8"))
 
@@ -196,15 +212,15 @@ class PendingQueueTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "task.md"
-            path.write_text(task_text(items=("already tracked",)), encoding="utf-8")
+            path.write_text(task_text(items=("🧑 already tracked",)), encoding="utf-8")
             with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch(
                 "omo_manager.omo_pending.require_pending_add_notice", return_value=True
             ) as notice:
-                self.assertEqual(0, run(Args("add", ("already tracked", "new work")), root))
-            self.assertEqual(("new work",), notice.call_args.args[3])
+                self.assertEqual(0, run(Args("add", ("🧑 already tracked", "🧑 new work")), root))
+            self.assertEqual(("🧑 new work",), notice.call_args.args[3])
             text = path.read_text(encoding="utf-8")
-            self.assertEqual(1, text.count("  - already tracked\n"))
-            self.assertEqual(1, text.count("  - new work\n"))
+            self.assertEqual(1, text.count("  - 🧑 already tracked\n"))
+            self.assertEqual(1, text.count("  - 🧑 new work\n"))
 
     def test_repeated_item_in_one_add_is_rejected_before_email(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -231,10 +247,10 @@ class PendingQueueTests(unittest.TestCase):
             ), patch("omo_manager.omo_pending.load_task", return_value=document), patch(
                 "omo_manager.omo_pending.require_pending_add_notice", return_value=True
             ) as notice, patch("omo_manager.omo_pending.add_items", return_value=("pi_new",)) as add:
-                self.assertEqual(0, run(Args("add", ("inspect another failure",)), root))
+                self.assertEqual(0, run(Args("add", ("🧑 inspect another failure",)), root))
             notice.assert_called_once()
             add.assert_called_once()
-            self.assertEqual((document, ("inspect another failure",)), add.call_args.args)
+            self.assertEqual((document, ("🧑 inspect another failure",)), add.call_args.args)
             self.assertRegex(
                 add.call_args.kwargs["body_comment"],
                 r"^pending item creation notice: [0-9a-f]{64}:[0-9a-f]{64}$",
@@ -247,7 +263,7 @@ class PendingQueueTests(unittest.TestCase):
             path = root / "task.md"
             path.write_text(v2_task_text(), encoding="utf-8")
             (root / ".omo-task-v2-enabled.yaml").write_text("version: v2.0.0\nenabled: true\n", encoding="utf-8")
-            args = Args("add", ("inspect another failure",))
+            args = Args("add", ("🧑 inspect another failure",))
             from omo_manager.omo_blocking import write_document as actual_write
 
             calls = 0
@@ -271,7 +287,7 @@ class PendingQueueTests(unittest.TestCase):
 
             email.assert_called_once()
             text = path.read_text(encoding="utf-8")
-            self.assertIn("text: inspect another failure\n", text)
+            self.assertIn("text: 🧑 inspect another failure\n", text)
             self.assertIn("unrelated note\n", text)
             self.assertRegex(text, r"\(pending item creation notice: [0-9a-f]{64}:[0-9a-f]{64}\)")
 
@@ -282,7 +298,7 @@ class PendingQueueTests(unittest.TestCase):
             path = root / "task.md"
             path.write_text(v2_task_text(), encoding="utf-8")
             (root / ".omo-task-v2-enabled.yaml").write_text("version: v2.0.0\nenabled: true\n", encoding="utf-8")
-            args = Args("add", ("inspect another failure",))
+            args = Args("add", ("🧑 inspect another failure",))
             from omo_manager.omo_blocking import document_with as actual_document_with
             from omo_manager.omo_blocking import load_task as actual_load
             from omo_manager.omo_blocking import resolve_item as actual_resolve
@@ -322,9 +338,9 @@ class PendingQueueTests(unittest.TestCase):
             root = Path(tmp)
             state = root / "state"
             path = root / "task.md"
-            original = task_text(items=("finish review",)) + "Report results directly to the Human.\n"
+            original = task_text(items=("🧑 finish review",)) + "Report results directly to the Human.\n"
             path.write_text(original, encoding="utf-8")
-            args = Args("remove", ("finish review",), evidence="review passed", completion_key="a" * 64)
+            args = Args("remove", ("🧑 finish review",), evidence="review passed", completion_key="a" * 64)
             with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
                 "omo_manager.omo_pending.current_pending_task", return_value=path
             ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=path), patch(
@@ -341,7 +357,7 @@ class PendingQueueTests(unittest.TestCase):
             root = Path(tmp)
             path = root / "task.md"
             entrypoint = root / "omo_completion_email.py"
-            original = task_text(items=("finish review",))
+            original = task_text(items=("🧑 finish review",))
             path.write_text(original, encoding="utf-8")
             entrypoint.write_text("#!/bin/sh\n", encoding="utf-8")
             entrypoint.chmod(0o600)
@@ -352,7 +368,7 @@ class PendingQueueTests(unittest.TestCase):
                 "omo_manager.omo_completion_email.EMAIL_HELPER", root / "must-not-run-email-helper"
             ), patch("omo_manager.omo_completion_email.subprocess.run", side_effect=AssertionError("must not email")):
                 with self.assertRaisesRegex(OSError, "not safely executable"):
-                    run(Args("remove", ("finish review",), evidence="review passed", completion_key="a" * 64), root)
+                    run(Args("remove", ("🧑 finish review",), evidence="review passed", completion_key="a" * 64), root)
             self.assertEqual(original, path.read_text(encoding="utf-8"))
             self.assertFalse((state / "completion-email-claims.tsv").exists())
 
@@ -363,11 +379,14 @@ class PendingQueueTests(unittest.TestCase):
         self.assertIn("answer a human question and remove its pending item with one email", " ".join(output.getvalue().split()))
 
     def test_emailing_remove_requires_lowercase_sha256_completion_key(self) -> None:
-        base = ["remove", "--item", "finish review", "--evidence", "review passed"]
-        for value in ("", "not-a-digest", "A" * 64):
+        base = ["remove", "--item", "🧑 finish review", "--evidence", "review passed"]
+        for value in ("not-a-digest", "A" * 64):
             with self.subTest(value=value), self.assertRaises(SystemExit):
                 parse_args([*base, "--completion-key", value])
+        with self.assertRaises(SystemExit):
+            parse_args(base)
         self.assertEqual("a" * 64, parse_args([*base, "--completion-key", "a" * 64]).completion_key)
+        self.assertEqual("", parse_args(["remove", "--item", "legacy item", "--evidence", "done"]).completion_key)
 
     def test_legacy_remove_no_email_preserves_evidence_without_mail_calls(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -433,6 +452,20 @@ class PendingQueueTests(unittest.TestCase):
             email.assert_called_once()
             self.assertIn("status: done\n", path.read_text(encoding="utf-8"))
 
+    def test_agent_or_legacy_remove_mutates_without_mail_or_completion_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text(task_text(items=("agent work",)), encoding="utf-8")
+            args = parse_args(["remove", "--item", "agent work", "--evidence", "verified done"])
+            with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch(
+                "omo_manager.omo_pending.plan_completion_email"
+            ) as plan, patch("omo_manager.omo_pending.require_owner_completion") as require:
+                self.assertEqual(0, run(args, root))
+            plan.assert_not_called()
+            require.assert_not_called()
+            self.assertNotIn("agent work", path.read_text(encoding="utf-8").split("---", 2)[1])
+
     def test_legacy_remove_matches_displayed_text_from_quoted_colon_item(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -482,6 +515,13 @@ class PendingQueueTests(unittest.TestCase):
                     ]
                 )
 
+    def test_human_remove_no_email_is_rejected(self) -> None:
+        with self.assertRaises(SystemExit):
+            parse_args(["remove", "--item", "🧑 answer request", "--evidence", "already sent", "--no-email"])
+
+        with self.assertRaisesRegex(ValueError, "Human-authored"):
+            run(Args("remove", ("🧑 answer request",), evidence="already sent", no_email=True), Path("/unused"))
+
     def test_legacy_remove_accepts_documented_outcome(self) -> None:
         args = parse_args(
             [
@@ -499,39 +539,29 @@ class PendingQueueTests(unittest.TestCase):
         self.assertEqual("completed", args.outcome)
         self.assertFalse(args.no_email)
 
-    def test_remove_with_answer_files_sends_only_combined_email(self) -> None:
+    def test_remove_with_answer_files_is_rejected_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "task.md"
             subject = root / "subject.txt"
             message = root / "message.txt"
-            path.write_text(task_text(items=("answer question",)), encoding="utf-8")
+            path.write_text(task_text(items=("🧑 answer question",)), encoding="utf-8")
             subject.write_text("Re: Original question\n", encoding="utf-8")
             message.write_text("The concise answer.\n", encoding="utf-8")
-            email = object()
-            with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch(
-                "omo_manager.omo_pending.plan_completion_email", return_value=email
-            ) as plan, patch("omo_manager.omo_pending.require_owner_completion", return_value=True) as require:
-                self.assertEqual(
-                    0,
-                    run(
-                        Args(
-                            "remove",
-                            ("answer question",),
-                            evidence="answered",
-                            answer_subject_file=subject,
-                            answer_message_file=message,
-                            completion_key="c" * 64,
-                        ),
-                        root,
+            original = path.read_text(encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "cannot be combined"):
+                run(
+                    Args(
+                        "remove",
+                        ("🧑 answer question",),
+                        evidence="answered",
+                        answer_subject_file=subject,
+                        answer_message_file=message,
+                        completion_key="c" * 64,
                     ),
+                    root,
                 )
-            self.assertEqual("Re: Original question", plan.call_args.kwargs["human_subject"])
-            self.assertEqual("The concise answer.\n", plan.call_args.kwargs["human_body"])
-            self.assertEqual("c" * 64, plan.call_args.kwargs["semantic_key"])
-            self.assertEqual("c" * 64, require.call_args.kwargs["semantic_key"])
-            require.assert_called_once()
-            self.assertNotIn("answer question", path.read_text(encoding="utf-8").split("---", 2)[1])
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
 
     def test_remove_with_answer_refuses_before_mutation_when_reporting_is_forbidden(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -539,21 +569,22 @@ class PendingQueueTests(unittest.TestCase):
             path = root / "task.md"
             subject = root / "subject.txt"
             message = root / "message.txt"
-            original = task_text(items=("answer question",))
+            original = task_text(items=("🧑 answer question",))
             path.write_text(original, encoding="utf-8")
             subject.write_text("Re: Original question\n", encoding="utf-8")
             message.write_text("The concise answer.\n", encoding="utf-8")
             with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch(
                 "omo_manager.omo_pending.plan_completion_email", return_value=None
             ):
-                with self.assertRaisesRegex(BlockingError, "reporting policy"):
+                with self.assertRaisesRegex(ValueError, "cannot be combined"):
                     run(
                         Args(
                             "remove",
-                            ("answer question",),
+                            ("🧑 answer question",),
                             evidence="answered",
                             answer_subject_file=subject,
                             answer_message_file=message,
+                            completion_key="c" * 64,
                         ),
                         root,
                     )
@@ -562,7 +593,7 @@ class PendingQueueTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "task.md"
-            path.write_text(v2_task_text(), encoding="utf-8")
+            path.write_text(v2_task_text("🧑 finish review"), encoding="utf-8")
             document = MagicMock(metadata={"resolved_task_items": []})
             email = object()
             with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch("omo_manager.omo_pending.v2_enabled", return_value=True), patch(
@@ -584,45 +615,63 @@ class PendingQueueTests(unittest.TestCase):
                     ),
                 )
             resolve.assert_called_once_with(document, "pi_019f0000-0000-7000-8000-000000000002", "completed", "review passed")
-            self.assertEqual(("finish review",), plan.call_args.kwargs["items"])
+            self.assertEqual(("🧑 finish review",), plan.call_args.kwargs["items"])
             self.assertEqual("review passed", plan.call_args.kwargs["evidence"])
             self.assertEqual("d" * 64, plan.call_args.kwargs["semantic_key"])
             self.assertEqual("d" * 64, require.call_args.kwargs["semantic_key"])
             require.assert_called_once()
 
-    def test_v2_remove_with_answer_files_sends_only_combined_email(self) -> None:
+    def test_v2_agent_remove_mutates_without_mail_or_completion_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "task.md"
-            subject = root / "subject.txt"
-            message = root / "message.txt"
             path.write_text(v2_task_text(), encoding="utf-8")
-            subject.write_text("Re: Original question\n", encoding="utf-8")
-            message.write_text("The concise answer.\n", encoding="utf-8")
             document = MagicMock(metadata={"resolved_task_items": []})
-            email = object()
-            with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch("omo_manager.omo_pending.v2_enabled", return_value=True), patch(
-                "omo_manager.omo_pending.load_task", return_value=document
-            ), patch("omo_manager.omo_pending.resolve_item"), patch("omo_manager.omo_pending.blocking_request"), patch(
-                "omo_manager.omo_pending.plan_completion_email", return_value=email
-            ) as plan, patch("omo_manager.omo_pending.require_owner_completion", return_value=True) as require:
+            with patch("omo_manager.omo_pending.current_pending_task", return_value=path), patch(
+                "omo_manager.omo_pending.v2_enabled", return_value=True
+            ), patch("omo_manager.omo_pending.load_task", return_value=document), patch(
+                "omo_manager.omo_pending.resolve_item"
+            ) as resolve, patch("omo_manager.omo_pending.blocking_request"), patch(
+                "omo_manager.omo_pending.plan_completion_email"
+            ) as plan, patch("omo_manager.omo_pending.require_owner_completion") as require:
                 self.assertEqual(
                     0,
                     run(
                         Args(
                             "remove",
-                            evidence="answered",
+                            evidence="review passed",
                             item_id="pi_019f0000-0000-7000-8000-000000000002",
                             outcome="completed",
-                            answer_subject_file=subject,
-                            answer_message_file=message,
                         ),
                         root,
                     ),
                 )
-            self.assertEqual("Re: Original question", plan.call_args.kwargs["human_subject"])
-            self.assertEqual("The concise answer.\n", plan.call_args.kwargs["human_body"])
-            require.assert_called_once()
+            resolve.assert_called_once_with(document, "pi_019f0000-0000-7000-8000-000000000002", "completed", "review passed")
+            plan.assert_not_called()
+            require.assert_not_called()
+
+    def test_v2_remove_with_answer_files_is_rejected_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            subject = root / "subject.txt"
+            message = root / "message.txt"
+            path.write_text(v2_task_text("🧑 finish review"), encoding="utf-8")
+            subject.write_text("Re: Original question\n", encoding="utf-8")
+            message.write_text("The concise answer.\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "cannot be combined"):
+                run(
+                    Args(
+                        "remove",
+                        evidence="answered",
+                        item_id="pi_019f0000-0000-7000-8000-000000000002",
+                        outcome="completed",
+                        answer_subject_file=subject,
+                        answer_message_file=message,
+                        completion_key="e" * 64,
+                    ),
+                    root,
+                )
 
     def test_inference_rejects_current_previous_collision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -723,7 +772,7 @@ class PendingQueueTests(unittest.TestCase):
                 self.assertEqual(0, run(Args("list"), root))
                 self.assertEqual(0, run(Args("replace", old_item="inspect failure", new_item="repair failure"), root))
                 self.assertEqual(0, run(Args("remove", ("repair failure",), evidence="verified fixed"), root))
-            self.assertEqual(2, require.call_count)
+            require.assert_not_called()
             self.assertGreaterEqual(parse_parts.call_count, 3)
             self.assertNotIn("secret-task", output.getvalue())
             text = path.read_text(encoding="utf-8")

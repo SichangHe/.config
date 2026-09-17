@@ -12,14 +12,25 @@ task path or backing-file details. Workers report with `omo_report.sh`.
 When preserved blocked records share the target, it prefers the sole `running` or
 `long_running` task; multiple runnable tasks remain ambiguous. It locks the target,
 rechecks ownership, and fails closed on missing or unresolved ownership. `list`
-prints item text. `add` sends one durable creation notice before keeping work
-open; a retry after delivery completes the queue mutation without replaying the
-notice. `replace` keeps work open. `remove` requires one-line completion or
-cancellation evidence and sends one durable closure notice. Explicit no-contact
-rules suppress both notices. Legacy `remove --no-email` also suppresses a
-closure notice; it is only for recovery after a separate completion email whose
-Sent-Mail evidence will be reconciled before task closure. Output never includes
-a task filename, `runat`, or `managerat`.
+prints item text. `add` sends one durable creation notice only for items carrying
+the explicit `🧑` Human-authorship marker; a retry after delivery completes the
+queue mutation without replaying the notice. `replace` keeps authorship unchanged.
+`remove` requires one-line completion or cancellation evidence and sends one
+durable closure notice only for `🧑` items. Unmarked legacy items are ambiguous
+and remain silent, as do agent-authored items. Explicit no-contact rules suppress
+both Human-item notices. Legacy `remove --no-email` also suppresses a closure
+notice; it is only for recovery after a separate completion email whose Sent-Mail
+evidence will be reconciled before task closure. Output never includes a task
+filename, `runat`, or `managerat`.
+
+Each Human-item notice reuses the responsible agent's newest verified Human
+email thread. Its body contains only `pending item created:` or `pending item
+deleted:` and the item list. Missing or ambiguous prior-thread identity blocks
+delivery and leaves the queue mutation unfinished.
+
+Queue-transfer transactions may move `🧑` items without changing their
+authorship. They reject terminal dispositions for those items; the responsible
+owner must use the completion-email path.
 
 Pending-item completion notices use that same queue-owner selection only when
 strict active-task selection is ambiguous. Whole-task completion remains strict.
@@ -60,6 +71,7 @@ unchanged since it was read.
 - append missing pending items
 - reject empty items
 - reject done tasks
+- reject Human-authored items because this manager-side path has no verified Human thread
 
 `pending-replace TASK.md --old-item TEXT --new-item TEXT`
 - replace one existing pending item
