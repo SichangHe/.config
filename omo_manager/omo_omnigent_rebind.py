@@ -51,6 +51,12 @@ def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def normalize_crlf(data: bytes) -> bytes:
+    """Normalize transport-preserved CRLF without accepting other byte drift."""
+
+    return data.replace(b"\r\n", b"\n")
+
+
 def canonical(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode() + b"\n"
 
@@ -289,8 +295,8 @@ def rotation_evidence(
     content = object_map(old_content, "old prompt data").get("content")
     assert isinstance(content, list)
     prompt_text = "".join(required_text(object_map(block, "old prompt block").get("text"), "old prompt text") for block in content).encode()
-    if not prompt_text.endswith(expected_task_body):
-        raise RebindError("old session prompt does not end with the exact current task instructions")
+    if not normalize_crlf(prompt_text).endswith(normalize_crlf(expected_task_body)):
+        raise RebindError("old session prompt does not end with the current task instructions modulo CRLF normalization")
     listing = object_map(request_json("GET", "/v1/sessions?limit=1000"), "OmniGent session list")
     listing_data = listing.get("data")
     if listing.get("has_more") is not False or not isinstance(listing_data, list):

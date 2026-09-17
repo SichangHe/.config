@@ -260,6 +260,22 @@ class OmniGentRotationRebindTests(unittest.TestCase):
         self.assertFalse(self.packet.exists())
 
     @patch("omo_manager.omo_omnigent_rebind.request_json")
+    def test_crlf_only_prompt_body_difference_is_accepted(self, request) -> None:
+        self.prompt = self.prompt.replace(b"Advance the paper.\n", b"Advance the paper.\r\n", 1)
+        self.old["items"][1]["data"]["content"][0]["text"] = self.prompt.decode()  # type: ignore[index]
+        request.side_effect = self.request
+        self.assertEqual(0, main(self.prepare_args()))
+        self.assertTrue(self.packet.exists())
+
+    @patch("omo_manager.omo_omnigent_rebind.request_json")
+    def test_prompt_body_content_drift_is_rejected(self, request) -> None:
+        self.prompt = self.prompt.replace(b"Advance the paper.", b"Advance a different paper.", 1)
+        self.old["items"][1]["data"]["content"][0]["text"] = self.prompt.decode()  # type: ignore[index]
+        request.side_effect = self.request
+        self.assertEqual(2, main(self.prepare_args()))
+        self.assertFalse(self.packet.exists())
+
+    @patch("omo_manager.omo_omnigent_rebind.request_json")
     def test_wrong_resource_type_does_not_prove_terminal_transfer(self, request) -> None:
         self.new["items"][0]["data"]["resource_type"] = "file"  # type: ignore[index]
         request.side_effect = self.request
