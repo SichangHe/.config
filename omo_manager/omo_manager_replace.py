@@ -33,7 +33,7 @@ from omo_manager.omo_codex_start import pcodx_state
 from omo_manager.omo_codex_stop import Args as StopArgs
 from omo_manager.omo_codex_stop import has_bound_close_proof, stop
 from omo_manager.omo_pending_watch import AuthenticatedAgentReport, authenticated_agent_report, report_owner_binding
-from omo_manager.omo_task_edit import render_pending_items
+from omo_manager.omo_task_edit import clear_pending_marker, render_pending_items
 from omo_manager.omo_task_lock import process_start_ticks, task_file_lock, task_target_lock
 from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1, TaskFrontmatterError, TaskMetadata, parse_task_metadata
 from omo_manager.omo_task_status import (
@@ -219,6 +219,12 @@ SOURCE1938_REBASE_FIELDS = {
 }
 SOURCE1938_REPORT_ONLY_APPEND_RE = re.compile(
     rb"\n\(from agent (?P<target>[A-Za-z][A-Za-z0-9_-]*:[0-9]+(?:\.[0-9]+)?) (?P<path>/tmp/omo-agent-messages-[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+\.md)\)\n\(pending marker cleared line=(?P<line>[1-9][0-9]*): report-only: (?P<comment>[^\r\n]+)\)\n"
+)
+SOURCE1938_REPORT_POINTER_RE = re.compile(
+    rb"\(from agent (?P<target>[A-Za-z][A-Za-z0-9_-]*:[0-9]+(?:\.[0-9]+)?) (?P<path>/tmp/omo-agent-messages-[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+\.md)\)"
+)
+SOURCE1938_REPORT_CLEAR_RE = re.compile(
+    rb"\(pending marker cleared line=(?P<line>[1-9][0-9]*): report-only: (?P<comment>[^\r\n]+)\)\n"
 )
 SOURCE_ONLY_AUTHORITY_MODE = "source-only-old-task-before-image"
 PCODX_REPLACE_EVIDENCE_RE = re.compile(
@@ -2918,6 +2924,33 @@ def validate_closed_owner_absence(args: Args) -> None:
         raise ReplaceError("closed-owner source pane or process identity is no longer absent")
 
 
+def source1938_report_receipt(
+    pointer: str,
+    target: str,
+    report_path: Path,
+    receiver_path: Path,
+    prefix: bytes,
+    producer_is_valid: Callable[[AuthenticatedAgentReport], bool],
+    label: str,
+) -> AuthenticatedAgentReport:
+    artifact = authenticated_agent_report(pointer)
+    owner = report_owner_binding(pointer, receiver_path)
+    if (
+        artifact is None
+        or artifact.target != target
+        or artifact.path != report_path
+        or artifact.receiver != str(receiver_path)
+        or artifact.commitment_path is None
+        or not producer_is_valid(artifact)
+        or owner is None
+        or owner.owner_sha256 != digest(prefix)
+        or owner.size_bytes != len(prefix)
+        or owner.separator_bytes != 1
+    ):
+        raise ReplaceError(f"Source-1938 {label} receipt is not an authenticated sequential report transfer")
+    return artifact
+
+
 def source1938_report_receipt_set(
     args: Args,
     source: bytes,
@@ -2925,11 +2958,7 @@ def source1938_report_receipt_set(
     receiver_task: str,
     producer_is_valid: Callable[[AuthenticatedAgentReport], bool],
     label: str,
-    *,
-    allow_unchanged: bool = False,
 ) -> tuple[tuple[AuthenticatedAgentReport, ...], bytes]:
-    if current == source and allow_unchanged:
-        return (), b""
     if current == source or not current.startswith(source):
         raise ReplaceError(f"Source-1938 {label} is not an append-only ordered report receipt set")
     try:
@@ -2949,29 +2978,23 @@ def source1938_report_receipt_set(
     if not matches or matches[0].start() != 0 or matches[-1].end() != len(suffix) or any(left.end() != right.start() for left, right in zip(matches, matches[1:], strict=False)):
         raise ReplaceError(f"Source-1938 {label} lacks one canonical ordered report-only receipt set")
     receiver_path = task_path(args.root, receiver_task).resolve()
-    receiver = str(receiver_path)
     artifacts: list[AuthenticatedAgentReport] = []
     for match in matches:
         target = match.group("target").decode()
         report_path_text = match.group("path").decode()
         pointer = f"(from agent {target} {report_path_text})"
-        artifact = authenticated_agent_report(pointer)
-        owner = report_owner_binding(pointer, receiver_path)
         prefix = source + suffix[: match.start()]
-        if (
-            artifact is None
-            or artifact.target != target
-            or artifact.path != Path(report_path_text)
-            or artifact.receiver != receiver
-            or artifact.commitment_path is None
-            or not producer_is_valid(artifact)
-            or owner is None
-            or owner.owner_sha256 != digest(prefix)
-            or owner.size_bytes != len(prefix)
-            or owner.separator_bytes != 1
-        ):
-            raise ReplaceError(f"Source-1938 {label} receipt is not an authenticated sequential report transfer")
-        artifacts.append(artifact)
+        artifacts.append(
+            source1938_report_receipt(
+                pointer,
+                target,
+                Path(report_path_text),
+                receiver_path,
+                prefix,
+                producer_is_valid,
+                label,
+            )
+        )
     if len({artifact.path for artifact in artifacts}) != len(artifacts) or len({artifact.commitment_path for artifact in artifacts}) != len(artifacts):
         raise ReplaceError(f"Source-1938 {label} repeats a report-only receipt")
     return tuple(artifacts), suffix
@@ -3028,15 +3051,109 @@ def source1938_authenticated_retained_child_reports(
         expected_target = producers.get(artifact.source_task)
         return expected_target is not None and canonical_target(artifact.target) == expected_target
 
-    return source1938_report_receipt_set(
-        args,
-        source_child,
+    label = "retained dw:33 child"
+    if metadata(source_child, args.root, f"Source-1938 {label} source task") != metadata(
         current_child,
-        SOURCE1938_LIVE_SHARED_TASK,
-        producer_is_valid,
-        "retained dw:33 child",
-        allow_unchanged=True,
-    )
+        args.root,
+        f"Source-1938 {label} current task",
+    ):
+        raise ReplaceError(f"Source-1938 {label} metadata or ordered queue changed")
+    try:
+        current_text = current_child.decode()
+    except UnicodeDecodeError as exc:
+        raise ReplaceError(f"Source-1938 {label} receipt is not UTF-8") from exc
+    if has_pending_marker(current_text):
+        raise ReplaceError(f"Source-1938 {label} retains an unconsumed pending marker")
+    if current_child == source_child:
+        return (), b""
+
+    receiver_path = receiver_path.resolve()
+    source_lines = source_child.splitlines(keepends=True)
+    current_lines = current_child.splitlines(keepends=True)
+    source_idx = 0
+    current_idx = 0
+    source_offset = 0
+    removed: dict[str, AuthenticatedAgentReport] = {}
+    while source_idx < len(source_lines):
+        source_line = source_lines[source_idx]
+        if current_idx < len(current_lines) and source_line == current_lines[current_idx]:
+            source_offset += len(source_line)
+            source_idx += 1
+            current_idx += 1
+            continue
+        pointer_line = source_lines[source_idx + 1].rstrip(b"\r\n") if source_idx + 1 < len(source_lines) else b""
+        pointer_match = SOURCE1938_REPORT_POINTER_RE.fullmatch(pointer_line)
+        if source_line.rstrip(b"\r\n") != b"(pending)" or pointer_match is None or source_offset < 1 or source_child[source_offset - 1 : source_offset] != b"\n":
+            raise ReplaceError(f"Source-1938 {label} changed outside supported report-only marker clearing")
+        target = pointer_match.group("target").decode()
+        report_path = Path(pointer_match.group("path").decode())
+        pointer = pointer_line.decode()
+        if pointer in removed:
+            raise ReplaceError(f"Source-1938 {label} repeats a pending report receipt")
+        removed[pointer] = source1938_report_receipt(
+            pointer,
+            target,
+            report_path,
+            receiver_path,
+            source_child[: source_offset - 1],
+            producer_is_valid,
+            label,
+        )
+        source_offset += len(source_line)
+        source_idx += 1
+
+    suffix = b"".join(current_lines[current_idx:])
+    replay = source_child
+    artifacts: list[AuthenticatedAgentReport] = []
+    cleared: set[str] = set()
+    suffix_offset = 0
+    while suffix_offset < len(suffix):
+        appended = SOURCE1938_REPORT_ONLY_APPEND_RE.match(suffix, suffix_offset)
+        if appended is not None:
+            target = appended.group("target").decode()
+            report_path = Path(appended.group("path").decode())
+            pointer = f"(from agent {target} {report_path})"
+            artifacts.append(
+                source1938_report_receipt(
+                    pointer,
+                    target,
+                    report_path,
+                    receiver_path,
+                    replay,
+                    producer_is_valid,
+                    label,
+                )
+            )
+            replay += appended.group(0)
+            suffix_offset = appended.end()
+            continue
+        cleared_record = SOURCE1938_REPORT_CLEAR_RE.match(suffix, suffix_offset)
+        if cleared_record is None:
+            raise ReplaceError(f"Source-1938 {label} lacks one canonical ordered report-only transition set")
+        line_number = int(cleared_record.group("line"))
+        comment = cleared_record.group("comment").decode()
+        replay_text = replay.decode()
+        replay_lines = replay_text.splitlines()
+        pointer = replay_lines[line_number] if line_number < len(replay_lines) else ""
+        artifact = removed.get(pointer)
+        if artifact is None or pointer in cleared:
+            raise ReplaceError(f"Source-1938 {label} clears a report outside its authenticated source set")
+        try:
+            updated, changed = clear_pending_marker(replay_text, line_number, comment, "report-only")
+        except (argparse.ArgumentTypeError, TaskFrontmatterError) as exc:
+            raise ReplaceError(f"Source-1938 {label} has a noncanonical report-only marker clear") from exc
+        if not changed:
+            raise ReplaceError(f"Source-1938 {label} repeats a report-only marker clear")
+        replay = updated.encode()
+        artifacts.append(artifact)
+        cleared.add(pointer)
+        suffix_offset = cleared_record.end()
+
+    if replay != current_child or cleared != set(removed):
+        raise ReplaceError(f"Source-1938 {label} report-only transition replay changed")
+    if len({artifact.path for artifact in artifacts}) != len(artifacts) or len({artifact.commitment_path for artifact in artifacts}) != len(artifacts):
+        raise ReplaceError(f"Source-1938 {label} repeats a report-only receipt")
+    return tuple(artifacts), suffix
 
 
 def source1938_receipt_sets(
