@@ -197,11 +197,21 @@ SOURCE1938_HISTORICAL_BLOCKER = "paused by direct human shutdown instruction rou
 SOURCE1938_STALE_TASK = "dw_fpr_new.md"
 SOURCE1938_STALE_MANAGER_SHA256 = "dbebec48a3b5cb3fac614c5ec307c39b994927f05464db5b04db41e14fcdfcbd"
 SOURCE1938_STALE_TARGET = "dw:14"
+SOURCE1938_RETAINED_STALE_TARGET_TASK = "meeting_todo_launch.md"
 SOURCE1938_STALE_MANAGER = "config:23"
 SOURCE1938_STALE_AUTHORITY = "202608/manager_mail/85c5dff58359-1624.txt"
 SOURCE1938_STALE_AUTHORITY_SHA256 = "ae9a6a4851883a80082aa0c139f0746cd44d02d3d673328344c900bb03750810"
 SOURCE1938_STALE_BLOCKER = (
     "paused by direct human shutdown instruction routed to 202608/purge_agents_1624.md; non-human pane dw:14 closed and pending queue preserved for explicit resume; "
+    "authority 202608/manager_mail/85c5dff58359-1624.txt:3-24"
+)
+SOURCE1938_SECONDARY_STALE_TASK = "dw_root_new.md"
+SOURCE1938_SECONDARY_STALE_SHA256 = "82b71541a6fbe99ad39542f4a2fb4c482c1342ff572f31e646ea47b7feea0cc3"
+SOURCE1938_SECONDARY_STALE_TARGET = "dw:15"
+SOURCE1938_SECONDARY_STALE_MANAGER = "dw:35"
+SOURCE1938_SECONDARY_STALE_RETAINED_TASK = "src1943_pangram.md"
+SOURCE1938_SECONDARY_STALE_BLOCKER = (
+    "paused by direct human shutdown instruction routed to 202608/purge_agents_1624.md; non-human pane dw:15 closed and pending queue preserved for explicit resume; "
     "authority 202608/manager_mail/85c5dff58359-1624.txt:3-24"
 )
 SOURCE1938_PARENT_HISTORICAL = (
@@ -217,6 +227,46 @@ SOURCE1938_DIRECTIVE = (
 )
 SOURCE1938_GOAL = (
     "🧑 Read the Human’s actual collaborator-meeting questions, to-do items, and follow-ups from authoritative records; reconcile verified live owners; start one singular dedicated worker for every verified open item before emailing the Human in this thread; name each worker and its concrete ownership; never reuse the rejected Creators-site or source-index narrative."
+)
+SOURCE1944_FILE = "manager_mail/85c5dff58359-1944.txt"
+SOURCE1944_SHA256 = "501a1fad4d4e8aa3318b18bcf8332349107ef688f505ff37234d908f1ca01172"
+SOURCE1944_LINES = (1, 7)
+SOURCE1944_PENDING_BLOCK = b"\n(pending)\n(record and delegate manager_mail/85c5dff58359-1944.txt)\n"
+SOURCE1944_DISPOSITION_BLOCK = (
+    b"\n(record and delegate manager_mail/85c5dff58359-1944.txt)\n"
+    b"(pending marker cleared line=351: existing-owner-item: Source-1944 assigned to verified running owners "
+    b"eval_sufficiency.md at dw:58 and paper_review_loop.md at DeGenTWeb_writeup:3; combined supervision item "
+    b"recorded in collab_recovery.md; Human acknowledgement already sent by wl:1)\n"
+)
+SOURCE1944_CUSTODY_TASK = "collab_recovery.md"
+SOURCE1944_CUSTODY_ITEM = (
+    "🧑 Source-1944 (manager_mail/85c5dff58359-1944.txt): supervise the separate evidence/sufficiency owner "
+    "eval_sufficiency.md at dw:58 and interactive paper-review owner paper_review_loop.md at "
+    "DeGenTWeb_writeup:3 through reviewed delivery; preserve existing plot/writeup owners and require direct "
+    "Human ownership acceptance."
+)
+SOURCE1944_SUCCESSOR_DISPOSITION = "successor-goal"
+SOURCE1944_CHILD_DISPOSITION = "retained-child"
+SOURCE1944_GOAL = (
+    "🧑 Source-1944: route two separate suitable agents: one to determine from the FPR/FNR box plots and underlying statistics whether the test-data evaluation has converged, whether precision/recall should be argued instead, and how to justify evaluation sufficiency without a larger dataset; another smart, well-resourced owner to lead an interactive paper-revision workflow that gives the Human two review items at a time and adapts edits and the plan to feedback while leaving existing plot/writeup TODO work with their current owners. Spawn new owners if needed."
+)
+SOURCE1946_FILE = "manager_mail/85c5dff58359-1946.txt"
+SOURCE1946_SHA256 = "c01b82d67854d8df583e95fb5cfcbb7dd3db12f6f01357e0a51b3c17d158b3d2"
+SOURCE1946_LINES = (1, 15)
+SOURCE1946_CUSTODY_ITEM = (
+    "🧑 Source-1946 (manager_mail/85c5dff58359-1946.txt): “Why is it taking so damn long to clean it up? "
+    "Don’t you just delete what’s not needed and commit what’s needed, push and rebase a bunch?” Finish the remaining "
+    "dw cleanup promptly by preserving useful work, deleting unnecessary material, integrating or rebasing useful commits, "
+    "and publishing non-force; do not leave repositories dirty behind process excuses."
+)
+SOURCE1947_FILE = "manager_mail/85c5dff58359-1947.txt"
+SOURCE1947_SHA256 = "85663485ee8ff225edad5b20bbbf02a5fb59583400a92416def4ae3118d8aa2b"
+SOURCE1947_LINES = (1, 12)
+SOURCE1947_CUSTODY_ITEM = (
+    "🧑 Source-1947 (manager_mail/85c5dff58359-1947.txt), verbatim Human request: “Why is wl:1 not dw:0 "
+    "responding to my email addressed to dw:0? Did you give the agents my words verbatim? There seems to be deviation "
+    "of what they report they think they should do I also did not receive emails regarding pending task items created, "
+    "so why are they not following procedures? The agents should use different email chains”"
 )
 SOURCE1938_OLD_QUEUE = (
     "🧑 Source-1840 (manager_mail/85c5dff58359-1840.txt): launch one separate gpt-5.6-astra ultra owner to review the TheWebConf paper, meeting transcripts, and GitHub issues; autonomously advance reversible experiments, results, insights, and writeup; first email the Human a short plain-English plan and rationale without waiting for approval.",
@@ -236,6 +286,9 @@ SOURCE1938_REBASE_FIELDS = {
 }
 SOURCE1938_REPORT_ONLY_APPEND_RE = re.compile(
     rb"\n\(from agent (?P<target>[A-Za-z][A-Za-z0-9_-]*:[0-9]+(?:\.[0-9]+)?) (?P<path>/tmp/omo-agent-messages-[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+\.md)\)\n\(pending marker cleared line=(?P<line>[1-9][0-9]*): report-only: (?P<comment>[^\r\n]+)\)\n"
+)
+SOURCE1938_PENDING_APPEND_RE = re.compile(
+    rb"(?P<separator>\n{1,2})\(pending\)\n(?P<pointer>\(from agent (?P<target>[A-Za-z][A-Za-z0-9_-]*:[0-9]+(?:\.[0-9]+)?) (?P<path>/tmp/omo-agent-messages-[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+\.md)\))\n"
 )
 SOURCE1938_REPORT_POINTER_RE = re.compile(
     rb"\(from agent (?P<target>[A-Za-z][A-Za-z0-9_-]*:[0-9]+(?:\.[0-9]+)?) (?P<path>/tmp/omo-agent-messages-[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+\.md)\)"
@@ -348,6 +401,7 @@ class Args:
     archive_index_sha256: str = ""
     stale_manager_task: str = ""
     stale_manager_sha256: str = ""
+    source1938_legacy_source_audit: bool = False
 
 
 @dataclass(frozen=True)
@@ -406,6 +460,12 @@ class Plan:
     stale_manager_after: bytes | None = None
     stale_manager_authority: Snapshot | None = None
     stale_manager_queue: tuple[str, ...] = ()
+    secondary_stale_manager: Snapshot | None = None
+    secondary_stale_manager_after: bytes | None = None
+    source1944_authority: Snapshot | None = None
+    source1944_disposition: str = ""
+    source1946_authority: Snapshot | None = None
+    source1947_authority: Snapshot | None = None
     source1938_topology: dict[str, object] | None = None
 
 
@@ -645,11 +705,19 @@ def source_only_expected_old_queue(args: Args) -> tuple[str, ...]:
     raise ReplaceError("source-only queue is unavailable outside an exact replacement program")
 
 
-def source_only_added_goals(args: Args, queue: tuple[str, ...]) -> tuple[str, ...]:
+def source_only_added_goals(
+    args: Args,
+    queue: tuple[str, ...],
+    source1944_disposition: str = "",
+) -> tuple[str, ...]:
     if is_source1938_semantic_exception(args):
-        if any(SOURCE1938_FILE in item for item in queue):
-            raise ReplaceError("Source-1938 successor goal already exists in the old ordered queue")
-        return (SOURCE1938_GOAL,)
+        if any(SOURCE1938_FILE in item or "Source-1944" in item for item in queue):
+            raise ReplaceError("Source-1938 or Source-1944 successor goal already exists in the old ordered queue")
+        if source1944_disposition == SOURCE1944_SUCCESSOR_DISPOSITION:
+            return SOURCE1938_GOAL, SOURCE1944_GOAL
+        if source1944_disposition == SOURCE1944_CHILD_DISPOSITION:
+            return (SOURCE1938_GOAL,)
+        raise ReplaceError("Source-1938 Source-1944 disposition is absent or unrecognized")
     added: list[str] = []
     if not any(args.authority_file in item for item in queue):
         added.append(f"🧑 Source {args.authority_file}: {source_only_directive(args)}")
@@ -1684,8 +1752,9 @@ def validate_source1938_stale_manager(
         or close_note not in stale_text.splitlines()
     ):
         raise ReplaceError("Source-1938 stale-manager record does not preserve the exact stopped owner and queue")
-    if active_child_task_refs(args.root, stale.path, value.runat):
-        raise ReplaceError("Source-1938 stopped stale manager unexpectedly owns an active child")
+    # The stopped record shares dw:14 with the retained collaborator-follow-up
+    # manager. Its active child set is therefore authenticated against the
+    # complete retained topology after that topology has been constructed.
     cleared = cleared_pending_task_text(stale_text, args.root)
     after = update_frontmatter_status(cleared, "done", "", args.root).encode()
     closed = metadata(after, args.root, "Source-1938 stopped stale manager after image")
@@ -1701,6 +1770,65 @@ def validate_source1938_stale_manager(
     ):
         raise ReplaceError("Source-1938 stale-manager close would alter retained evidence")
     return after, value.pending_task_items
+
+
+def validate_source1938_secondary_stale_manager(
+    args: Args,
+    stale: Snapshot,
+    authority: Snapshot,
+) -> bytes:
+    """Close the exact queue-empty dw:15 record superseded by its retained live worker."""
+
+    if (
+        digest(stale.data) != SOURCE1938_SECONDARY_STALE_SHA256
+        or digest(authority.data) != SOURCE1938_STALE_AUTHORITY_SHA256
+    ):
+        raise ReplaceError("Source-1938 secondary stale-manager record or Human shutdown authority changed")
+    try:
+        authority_lines = authority.data.decode().splitlines()
+        stale_text = stale.data.decode()
+    except UnicodeDecodeError as exc:
+        raise ReplaceError(f"Source-1938 secondary stale-manager evidence is not UTF-8: {exc}") from exc
+    if (
+        len(authority_lines) < 24
+        or authority_lines[2] != "Kill these agents immediately:"
+        or authority_lines[21] != f"{SOURCE1938_SECONDARY_STALE_TASK} {SOURCE1938_SECONDARY_STALE_TARGET}"
+        or authority_lines[23] != "If they are a manager, temporarily manage their workers, then rebalance workers after you kill them all"
+    ):
+        raise ReplaceError("Source-1938 secondary stale-manager authority does not bind the exact Human shutdown")
+    value = metadata(stale.data, args.root, "Source-1938 secondary stopped stale manager")
+    close_note = (
+        f"(manager closed Codex agent after human shutdown; tmux target `{SOURCE1938_SECONDARY_STALE_TARGET}`; "
+        f"authority {SOURCE1938_STALE_AUTHORITY}:3-24)"
+    )
+    if (
+        value.version != TASK_FRONTMATTER_V1
+        or value.status != "blocked"
+        or value.blocked_on != SOURCE1938_SECONDARY_STALE_BLOCKER
+        or value.runat != SOURCE1938_SECONDARY_STALE_TARGET
+        or value.managerat != SOURCE1938_SECONDARY_STALE_MANAGER
+        or value.tool != "codex"
+        or not value.is_manager
+        or value.pending_task_items
+        or has_pending_marker(stale_text)
+        or close_note not in stale_text.splitlines()
+        or active_child_task_refs(args.root, stale.path, value.runat)
+    ):
+        raise ReplaceError("Source-1938 secondary stale-manager record does not preserve the exact stopped owner")
+    after = update_frontmatter_status(stale_text, "done", "", args.root).encode()
+    closed = metadata(after, args.root, "Source-1938 secondary stopped stale manager after image")
+    if (
+        closed.status != "done"
+        or closed.runat != value.runat
+        or closed.managerat != value.managerat
+        or closed.tool != value.tool
+        or closed.is_manager != value.is_manager
+        or closed.session_id != value.session_id
+        or closed.pending_task_items
+        or task_body(after) != task_body(stale.data)
+    ):
+        raise ReplaceError("Source-1938 secondary stale-manager close would alter retained evidence")
+    return after
 
 
 def require_source1485_umbrella_previous(root: Path, data: bytes) -> None:
@@ -2167,10 +2295,16 @@ def source1938_topology_binding(args: Args, plan: Plan) -> dict[str, object]:
                 "queue_sha256": json_digest(list(value.pending_task_items)),
             }
         )
-    if plan.stale_manager is None:
-        raise ReplaceError("Source-1938 retained topology lost the stopped stale-manager record")
+    if plan.stale_manager is None or plan.secondary_stale_manager is None:
+        raise ReplaceError("Source-1938 retained topology lost a stopped stale-manager record")
     stale_value = metadata(plan.stale_manager.data, args.root, "Source-1938 topology stale manager")
     stale_active = stale_value.status != "done"
+    secondary_stale_value = metadata(
+        plan.secondary_stale_manager.data,
+        args.root,
+        "Source-1938 topology secondary stale manager",
+    )
+    secondary_stale_active = secondary_stale_value.status != "done"
     for row in rows[1:]:
         if row.runat == canonical_target(SOURCE1938_SHARED_TARGET):
             continue
@@ -2178,6 +2312,10 @@ def source1938_topology_binding(args: Args, plan: Plan) -> dict[str, object]:
         expected_owners = {expected_path}
         if row.runat == canonical_target(SOURCE1938_STALE_TARGET) and stale_active:
             expected_owners.add(plan.stale_manager.path.resolve())
+        if row.runat == canonical_target(SOURCE1938_SECONDARY_STALE_TARGET) and secondary_stale_active:
+            if row.task != SOURCE1938_SECONDARY_STALE_RETAINED_TASK:
+                raise ReplaceError("Source-1938 secondary stopped target changed its exact retained worker")
+            expected_owners.add(plan.secondary_stale_manager.path.resolve())
         if set(authoritative_active_target_task_paths(args.root, row.runat)) != expected_owners:
             raise ReplaceError(f"Source-1938 retained target lacks exactly one authoritative owner: {row.task}")
     if authoritative_active_target_task_paths(args.root, args.preparer) != (
@@ -2225,6 +2363,37 @@ def source1938_topology_binding(args: Args, plan: Plan) -> dict[str, object]:
     }
 
 
+def validate_source1938_stale_target_children(args: Args, plan: Plan, stage: str) -> tuple[str, ...]:
+    """Bind dw:14 children to the one retained live owner, not its stopped collision."""
+
+    if plan.source1938_topology is None or plan.stale_manager is None:
+        raise ReplaceError(f"Source-1938 {stage} proof lost the retained stopped-target topology")
+    rows = plan.source1938_topology.get("rows")
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ReplaceError(f"Source-1938 {stage} stopped-target topology rows are malformed")
+    target = canonical_target(SOURCE1938_STALE_TARGET)
+    owners = [row for row in rows if row.get("runat") == target]
+    if (
+        len(owners) != 1
+        or owners[0].get("task") != SOURCE1938_RETAINED_STALE_TARGET_TASK
+        or owners[0].get("is_manager") is not True
+    ):
+        raise ReplaceError(f"Source-1938 {stage} stopped target lacks its exact retained live manager")
+    expected = tuple(
+        sorted(
+            row["task"]
+            for row in rows
+            if row.get("managerat") == target and isinstance(row.get("task"), str)
+        )
+    )
+    actual = active_child_task_refs(args.root, plan.stale_manager.path, SOURCE1938_STALE_TARGET)
+    if actual != expected:
+        raise ReplaceError(
+            f"Source-1938 {stage} retained stopped-target child set changed: expected {expected}, found {actual}"
+        )
+    return expected
+
+
 def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
     old_path = task_path(args.root, args.old_task)
     successor_path = task_path(args.root, args.successor_task)
@@ -2234,6 +2403,11 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
     historical_path = task_path(args.root, args.historical_task) if is_source1938_semantic_exception(args) else None
     archive_index_path = args.root / SOURCE1938_ARCHIVE_INDEX if is_source1938_semantic_exception(args) else None
     stale_manager_path = task_path(args.root, args.stale_manager_task) if is_source1938_semantic_exception(args) else None
+    secondary_stale_manager_path = (
+        task_path(args.root, SOURCE1938_SECONDARY_STALE_TASK)
+        if is_source1938_semantic_exception(args)
+        else None
+    )
     stale_manager_authority_path = task_path(args.root, SOURCE1938_STALE_AUTHORITY) if is_source1938_semantic_exception(args) else None
     if successor_path.exists() or successor_path.is_symlink():
         raise ReplaceError("successor task already exists; launch-before-proof is rejected")
@@ -2245,6 +2419,8 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         required_paths.add(archive_index_path)
     if stale_manager_path is not None:
         required_paths.add(stale_manager_path)
+    if secondary_stale_manager_path is not None:
+        required_paths.add(secondary_stale_manager_path)
     if not required_paths.issubset(path_set):
         raise ReplaceError("old manager, TODO, or authority envelope is absent from the locked Markdown inventory")
     old = read_snapshot(old_path, "old manager task")
@@ -2254,14 +2430,23 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
     historical = read_snapshot(historical_path, "Source-1938 historical shared-target task") if historical_path is not None else None
     archive_index = read_snapshot(archive_index_path, "Source-1938 historical archive index") if archive_index_path is not None else None
     stale_manager = read_snapshot(stale_manager_path, "Source-1938 stopped stale manager") if stale_manager_path is not None else None
+    secondary_stale_manager = (
+        read_snapshot(secondary_stale_manager_path, "Source-1938 secondary stopped stale manager")
+        if secondary_stale_manager_path is not None
+        else None
+    )
     stale_manager_authority = (
         read_snapshot(stale_manager_authority_path, "Source-1938 stale-manager Human shutdown authority")
         if stale_manager_authority_path is not None
         else None
     )
+    source1944_authority = source1938_source1944_authority(args) if is_source1938_semantic_exception(args) else None
+    source1946_authority = source1938_source1946_authority(args) if is_source1938_semantic_exception(args) else None
+    source1947_authority = source1938_source1947_authority(args) if is_source1938_semantic_exception(args) else None
     historical_after: bytes | None = None
     archive_index_after: bytes | None = None
     stale_manager_after: bytes | None = None
+    secondary_stale_manager_after: bytes | None = None
     stale_manager_queue: tuple[str, ...] = ()
     if historical is not None and archive_index is not None:
         historical_after, archive_index_after = validate_source1938_historical(args, historical, archive_index)
@@ -2269,6 +2454,12 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         stale_manager_after, stale_manager_queue = validate_source1938_stale_manager(
             args,
             stale_manager,
+            stale_manager_authority,
+        )
+    if secondary_stale_manager is not None and stale_manager_authority is not None:
+        secondary_stale_manager_after = validate_source1938_secondary_stale_manager(
+            args,
+            secondary_stale_manager,
             stale_manager_authority,
         )
     source1601_authority = source1601_material(args)
@@ -2358,15 +2549,55 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         child_after.append(updated)
         child_queues.append(child_metadata.pending_task_items)
         child_metadata_values.append(child_metadata)
+    old_transition_data = old.data
+    source1944_disposition = ""
+    if is_source1938_semantic_exception(args):
+        old_transition_data, source1944_disposition = source1938_strip_source1944_transport(
+            args,
+            old.data,
+            required=True,
+            label="current old-manager task",
+        )
+        old_transition_data = source1938_clear_authenticated_pending_reports(
+            args,
+            old_transition_data,
+            "current old-manager task",
+        )
+        try:
+            source1944_child_index = expected_children.index(SOURCE1944_CUSTODY_TASK)
+        except ValueError as exc:
+            raise ReplaceError("Source-1938 current tree lost the Source-1944 custody child") from exc
+        source1944_queue = child_metadata_values[source1944_child_index].pending_task_items
+        expected_source1944_queue = (
+            (SOURCE1944_CUSTODY_ITEM, SOURCE1947_CUSTODY_ITEM)
+            if source1944_disposition == SOURCE1944_CHILD_DISPOSITION
+            else ()
+        )
+        if source1944_queue != expected_source1944_queue:
+            raise ReplaceError("Source-1938 current Source-1944 disposition and child custody disagree")
+        try:
+            source1946_child_index = expected_children.index(SOURCE1938_LIVE_SHARED_TASK)
+        except ValueError as exc:
+            raise ReplaceError("Source-1938 current tree lost the Source-1946 cleanup custody child") from exc
+        source1946_queue = child_metadata_values[source1946_child_index].pending_task_items
+        if source1946_queue.count(SOURCE1946_CUSTODY_ITEM) != 1 or source1946_queue[-1] != SOURCE1946_CUSTODY_ITEM:
+            raise ReplaceError("Source-1938 current tree lost exact Source-1946 cleanup custody")
     authority_items = authority_material(args, authority, authority_envelope)
     if is_source_only_semantic_exception(args):
-        authority_items = (*authority_items, *source_only_added_goals(args, old_metadata.pending_task_items))
+        authority_items = (
+            *authority_items,
+            *source_only_added_goals(
+                args,
+                old_metadata.pending_task_items,
+                source1944_disposition,
+            ),
+        )
     empty_tree_authority: Snapshot | None = None
     if is_source1292_empty_tree(args) or is_source1292_descendant_tree(args):
         empty_tree_authority, empty_tree_item = empty_tree_authority_material(args, authority_envelope)
         authority_items = (*authority_items, empty_tree_item)
     old_after, successor_data, successor_queue = old_and_successor_text(
-        old.data,
+        old_transition_data,
         args.root,
         args.old_target,
         args.new_target,
@@ -2411,6 +2642,12 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         stale_manager_after=stale_manager_after,
         stale_manager_authority=stale_manager_authority,
         stale_manager_queue=stale_manager_queue,
+        secondary_stale_manager=secondary_stale_manager,
+        secondary_stale_manager_after=secondary_stale_manager_after,
+        source1944_authority=source1944_authority,
+        source1944_disposition=source1944_disposition,
+        source1946_authority=source1946_authority,
+        source1947_authority=source1947_authority,
     )
     if source1601_authority is not None:
         plan = replace(plan, source1601_authority=source1601_authority)
@@ -2477,6 +2714,11 @@ def audit_record(args: Args, plan: Plan, secret: str, commitment: str) -> dict[s
             or plan.historical_after is None
             or plan.stale_manager is None
             or plan.stale_manager_after is None
+            or plan.secondary_stale_manager is None
+            or plan.secondary_stale_manager_after is None
+            or plan.source1944_authority is None
+            or plan.source1946_authority is None
+            or plan.source1947_authority is None
             or plan.archive_index is None
             or plan.archive_index_after is None
         ):
@@ -2495,6 +2737,13 @@ def audit_record(args: Args, plan: Plan, secret: str, commitment: str) -> dict[s
                 "after": encoded(plan.stale_manager_after),
                 "mode": stat.S_IMODE(plan.stale_manager.state.st_mode),
                 "gid": plan.stale_manager.state.st_gid,
+            },
+            {
+                "task": SOURCE1938_SECONDARY_STALE_TASK,
+                "before": encoded(plan.secondary_stale_manager.data),
+                "after": encoded(plan.secondary_stale_manager_after),
+                "mode": stat.S_IMODE(plan.secondary_stale_manager.state.st_mode),
+                "gid": plan.secondary_stale_manager.state.st_gid,
             },
             {
                 "task": SOURCE1938_ARCHIVE_INDEX,
@@ -2598,6 +2847,15 @@ def audit_record(args: Args, plan: Plan, secret: str, commitment: str) -> dict[s
                 "stale_manager_authority": SOURCE1938_STALE_AUTHORITY,
                 "stale_manager_authority_sha256": SOURCE1938_STALE_AUTHORITY_SHA256,
                 "stale_manager_queue_sha256": json_digest(list(plan.stale_manager_queue)),
+                "secondary_stale_manager_task": SOURCE1938_SECONDARY_STALE_TASK,
+                "secondary_stale_manager_sha256": SOURCE1938_SECONDARY_STALE_SHA256,
+                "source1944_authority_file": SOURCE1944_FILE,
+                "source1944_authority_sha256": SOURCE1944_SHA256,
+                "source1944_disposition": plan.source1944_disposition,
+                "source1946_authority_file": SOURCE1946_FILE,
+                "source1946_authority_sha256": SOURCE1946_SHA256,
+                "source1947_authority_file": SOURCE1947_FILE,
+                "source1947_authority_sha256": SOURCE1947_SHA256,
                 "source1938_topology": plan.source1938_topology,
                 "source1938_topology_sha256": json_digest(plan.source1938_topology),
             }
@@ -2827,6 +3085,19 @@ def audit_binding(args: Args) -> dict[str, object]:
                 "stale_manager_authority_sha256": SOURCE1938_STALE_AUTHORITY_SHA256,
             }
         )
+        if not args.source1938_legacy_source_audit:
+            binding.update(
+                {
+                    "secondary_stale_manager_task": SOURCE1938_SECONDARY_STALE_TASK,
+                    "secondary_stale_manager_sha256": SOURCE1938_SECONDARY_STALE_SHA256,
+                    "source1944_authority_file": SOURCE1944_FILE,
+                    "source1944_authority_sha256": SOURCE1944_SHA256,
+                    "source1946_authority_file": SOURCE1946_FILE,
+                    "source1946_authority_sha256": SOURCE1946_SHA256,
+                    "source1947_authority_file": SOURCE1947_FILE,
+                    "source1947_authority_sha256": SOURCE1947_SHA256,
+                }
+            )
     if args.closed_owner_audit is not None:
         binding.update(
             {
@@ -2875,6 +3146,8 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
         allowed.add("protected_inventory")
     if is_source1938_semantic_exception(args):
         allowed.update({"source1938_topology", "source1938_topology_sha256", "stale_manager_queue_sha256"})
+        if not args.source1938_legacy_source_audit:
+            allowed.add("source1944_disposition")
         if args.closed_owner_audit is not None:
             allowed.update(SOURCE1938_REBASE_FIELDS)
     if args.descendants:
@@ -2920,7 +3193,16 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
     expected_tasks = (
         args.old_task,
         *(child.task for child in args.children),
-        *((args.historical_task, args.stale_manager_task, SOURCE1938_ARCHIVE_INDEX) if is_source1938_semantic_exception(args) else ()),
+        *(
+            (
+                args.historical_task,
+                args.stale_manager_task,
+                *(() if args.source1938_legacy_source_audit else (SOURCE1938_SECONDARY_STALE_TASK,)),
+                SOURCE1938_ARCHIVE_INDEX,
+            )
+            if is_source1938_semantic_exception(args)
+            else ()
+        ),
         "TODO.md",
         args.successor_task,
     )
@@ -2951,10 +3233,15 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
     if is_source1938_semantic_exception(args):
         historical_entry = entries[1 + len(args.children)]
         stale_entry = entries[2 + len(args.children)]
-        archive_entry = entries[3 + len(args.children)]
+        secondary_stale_entry = None if args.source1938_legacy_source_audit else entries[3 + len(args.children)]
+        archive_entry = entries[(3 if args.source1938_legacy_source_audit else 4) + len(args.children)]
         if (
             digest(historical_entry.before or b"") != args.historical_sha256
             or digest(stale_entry.before or b"") != args.stale_manager_sha256
+            or (
+                secondary_stale_entry is not None
+                and digest(secondary_stale_entry.before or b"") != SOURCE1938_SECONDARY_STALE_SHA256
+            )
             or digest(archive_entry.before or b"") != args.archive_index_sha256
         ):
             raise ReplaceError("private replacement audit duplicate-manager before-image changed")
@@ -2977,6 +3264,11 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
             raise ReplaceError("private replacement audit Source-1938 topology binding changed")
         if args.closed_owner_audit is not None and topology_sha256 != args.closed_owner_current_topology_sha256:
             raise ReplaceError("private replacement audit Source-1938 current topology pin changed")
+        if not args.source1938_legacy_source_audit and record.get("source1944_disposition") not in {
+            SOURCE1944_SUCCESSOR_DISPOSITION,
+            SOURCE1944_CHILD_DISPOSITION,
+        }:
+            raise ReplaceError("private replacement audit Source-1944 disposition changed")
     return dict(loaded), snapshot.data, tuple(entries), membership
 
 
@@ -3103,21 +3395,33 @@ def source1938_watcher_child_reports(
     source: bytes,
     current: bytes,
     report_transitions: Mapping[str, tuple[str, ...]] | None = None,
+    source1944_disposition: str = SOURCE1944_SUCCESSOR_DISPOSITION,
 ) -> tuple[tuple[AuthenticatedAgentReport, ...], dict[str, object], tuple[Path, ...]]:
     label = f"direct child {child_task}"
+    raw_current = current
+    current_sha256 = digest(current)
+    source1944_transition = False
+    if child_task == SOURCE1944_CUSTODY_TASK:
+        current, source1944_transition = source1938_normalize_source1944_custody(
+            args,
+            source,
+            current,
+            source1944_disposition,
+        )
     if metadata(source, args.root, f"Source-1938 {label} source") != metadata(current, args.root, f"Source-1938 {label} current"):
         raise ReplaceError(f"Source-1938 {label} metadata or ordered queue changed")
     try:
-        current_text = current.decode()
+        _ = current.decode()
     except UnicodeDecodeError as exc:
         raise ReplaceError(f"Source-1938 {label} is not UTF-8") from exc
-    if has_pending_marker(current_text):
-        raise ReplaceError(f"Source-1938 {label} retains an unconsumed pending marker")
     binding: dict[str, object] = {
         "task": child_task,
         "source_sha256": digest(source),
-        "current_sha256": digest(current),
+        "current_sha256": current_sha256,
         "normalized_terminal_newlines": False,
+        "source1944_disposition": source1944_disposition if child_task == SOURCE1944_CUSTODY_TASK else "",
+        "source1944_queue_transition": source1944_transition,
+        "appended_receipts": [],
         "transitions": [],
     }
     if current == source:
@@ -3134,6 +3438,19 @@ def source1938_watcher_child_reports(
         if isinstance(row.get("managerat"), str) and canonical_target(str(row["managerat"])) == receiver_target
     }
     receiver_path = task_path(args.root, child_task).resolve()
+
+    current_producers: dict[str, str] = {}
+    for task in active_child_task_refs(args.root, receiver_path, receiver_target):
+        path = task_path(args.root, task)
+        snapshot = read_snapshot(path, f"Source-1938 {label} current report producer {task}")
+        value = metadata(snapshot.data, args.root, f"Source-1938 {label} current report producer {task}")
+        if value.status == "done" or canonical_target(value.managerat) != receiver_target:
+            raise ReplaceError(f"Source-1938 {label} current report producer changed custody")
+        current_producers[str(path.resolve())] = canonical_target(value.runat)
+
+    def current_producer_is_valid(artifact: AuthenticatedAgentReport) -> bool:
+        return current_producers.get(artifact.source_task) == canonical_target(artifact.target)
+
     candidates: list[tuple[str, bytes, AuthenticatedAgentReport, tuple[str, ...]]] = []
     for match in SOURCE1938_PENDING_REPORT_RE.finditer(source):
         pointer = match.group("pointer").decode()
@@ -3196,6 +3513,7 @@ def source1938_watcher_child_reports(
     replay = source
     used: set[str] = set()
     artifacts: list[AuthenticatedAgentReport] = []
+    appended_receipts: list[dict[str, str]] = []
     transitions: list[dict[str, object]] = []
     transition_sources: list[Path] = []
     normalized = False
@@ -3208,6 +3526,110 @@ def source1938_watcher_child_reports(
                     raise ReplaceError(f"Source-1938 {label} watcher transition order is ambiguous")
                 selected = candidate
         if selected is None:
+            append_base = replay
+            if not current.startswith(append_base):
+                normalized_base = replay.rstrip(b"\n") + b"\n"
+                if used and current.startswith(normalized_base) and normalized_base != replay:
+                    append_base = normalized_base
+                    normalized = True
+            if current.startswith(append_base) and current != append_base:
+                suffix = current[len(append_base) :]
+                queue_states = [metadata(append_base, args.root, f"Source-1938 {label} append source").pending_task_items]
+                if source1944_transition:
+                    for state in (
+                        (SOURCE1944_CUSTODY_ITEM,),
+                        (SOURCE1944_CUSTODY_ITEM, SOURCE1947_CUSTODY_ITEM),
+                    ):
+                        if state not in queue_states:
+                            queue_states.append(state)
+                final_queue = metadata(
+                    raw_current,
+                    args.root,
+                    f"Source-1938 {label} current append custody",
+                ).pending_task_items
+                if final_queue not in queue_states:
+                    raise ReplaceError(f"Source-1938 {label} append custody queue changed")
+
+                append_replay = append_base
+                queue_index = 0
+                suffix_offset = 0
+                appended: list[AuthenticatedAgentReport] = []
+                while suffix_offset < len(suffix):
+                    report_only = SOURCE1938_REPORT_ONLY_APPEND_RE.match(suffix, suffix_offset)
+                    pending = SOURCE1938_PENDING_APPEND_RE.match(suffix, suffix_offset)
+                    match = report_only if report_only is not None else pending
+                    if match is None:
+                        raise ReplaceError(f"Source-1938 {label} lacks one canonical ordered appended report set")
+                    target = match.group("target").decode()
+                    report_path = Path(match.group("path").decode())
+                    pointer = f"(from agent {target} {report_path})"
+                    artifact: AuthenticatedAgentReport | None = None
+                    original_exc: ReplaceError | None = None
+                    for candidate_index in range(queue_index, len(queue_states)):
+                        try:
+                            candidate_replay = render_pending_items(
+                                append_replay.decode(),
+                                queue_states[candidate_index],
+                            ).encode()
+                        except (UnicodeDecodeError, TaskFrontmatterError) as exc:
+                            raise ReplaceError(f"Source-1938 {label} appended report queue cannot be normalized") from exc
+                        try:
+                            artifact = source1938_report_receipt(
+                                pointer,
+                                target,
+                                report_path,
+                                receiver_path,
+                                candidate_replay,
+                                current_producer_is_valid,
+                                label,
+                            )
+                        except ReplaceError as exc:
+                            if original_exc is None:
+                                original_exc = exc
+                            continue
+                        append_replay = candidate_replay
+                        queue_index = candidate_index
+                        break
+                    if artifact is None:
+                        if original_exc is not None:
+                            raise original_exc
+                        raise ReplaceError(f"Source-1938 {label} appended report lacks an authenticated owner")
+                    if pending is not None:
+                        owner = report_owner_binding(pointer, receiver_path)
+                        if owner is None or owner.separator_bytes != len(pending.group("separator")):
+                            raise ReplaceError(f"Source-1938 {label} appended report separator changed")
+                    if artifact.commitment_path is None:
+                        raise ReplaceError(f"Source-1938 {label} appended report lost its commitment")
+                    appended_receipts.append(
+                        {
+                            "commitment_sha256": digest(
+                                read_snapshot(
+                                    artifact.commitment_path,
+                                    f"Source-1938 {label} appended report commitment",
+                                ).data
+                            ),
+                            "owner_queue_sha256": json_digest(list(queue_states[queue_index])),
+                            "pointer_sha256": digest(pointer.encode()),
+                            "report_sha256": digest(
+                                read_snapshot(
+                                    artifact.path,
+                                    f"Source-1938 {label} appended report",
+                                ).data
+                            ),
+                        }
+                    )
+                    appended.append(artifact)
+                    append_replay += match.group(0)
+                    suffix_offset = match.end()
+                try:
+                    append_replay = render_pending_items(append_replay.decode(), final_queue).encode()
+                except (UnicodeDecodeError, TaskFrontmatterError) as exc:
+                    raise ReplaceError(f"Source-1938 {label} final append custody cannot be normalized") from exc
+                if append_replay != raw_current:
+                    raise ReplaceError(f"Source-1938 {label} appended report replay changed")
+                artifacts.extend(appended)
+                replay = current
+                continue
             normalized_replay = replay.rstrip(b"\n") + b"\n"
             if used and normalized_replay == current and normalized_replay != replay:
                 replay = normalized_replay
@@ -3248,6 +3670,7 @@ def source1938_watcher_child_reports(
         transition_sources.append(Path(transition[14]).resolve())
 
     binding["normalized_terminal_newlines"] = normalized
+    binding["appended_receipts"] = appended_receipts
     binding["transitions"] = transitions
     if not artifacts or len({artifact.path for artifact in artifacts}) != len(artifacts) or len({artifact.commitment_path for artifact in artifacts}) != len(artifacts):
         raise ReplaceError(f"Source-1938 {label} watcher receipts are empty or repeated")
@@ -3266,7 +3689,7 @@ def source1938_report_receipt_set(
         raise ReplaceError(f"Source-1938 {label} is not an append-only ordered report receipt set")
     try:
         suffix = current[len(source) :]
-        suffix_text = suffix.decode()
+        _ = suffix.decode()
     except UnicodeDecodeError as exc:
         raise ReplaceError(f"Source-1938 {label} receipt is not UTF-8") from exc
     if metadata(source, args.root, f"Source-1938 {label} source task") != metadata(
@@ -3275,18 +3698,30 @@ def source1938_report_receipt_set(
         f"Source-1938 {label} current task",
     ):
         raise ReplaceError(f"Source-1938 {label} metadata or ordered queue changed")
-    if has_pending_marker(suffix_text):
-        raise ReplaceError(f"Source-1938 {label} receipt retains an unconsumed pending marker")
-    matches = tuple(SOURCE1938_REPORT_ONLY_APPEND_RE.finditer(suffix))
-    if not matches or matches[0].start() != 0 or matches[-1].end() != len(suffix) or any(left.end() != right.start() for left, right in zip(matches, matches[1:], strict=False)):
-        raise ReplaceError(f"Source-1938 {label} lacks one canonical ordered report-only receipt set")
     receiver_path = task_path(args.root, receiver_task).resolve()
     artifacts: list[AuthenticatedAgentReport] = []
-    for match in matches:
+    offset = 0
+    while offset < len(suffix):
+        human_transport = next(
+            (
+                block
+                for block in (SOURCE1944_PENDING_BLOCK, SOURCE1944_DISPOSITION_BLOCK)
+                if suffix.startswith(block, offset)
+            ),
+            None,
+        )
+        if human_transport is not None:
+            offset += len(human_transport)
+            continue
+        report_only = SOURCE1938_REPORT_ONLY_APPEND_RE.match(suffix, offset)
+        pending = SOURCE1938_PENDING_APPEND_RE.match(suffix, offset)
+        match = report_only if report_only is not None else pending
+        if match is None:
+            raise ReplaceError(f"Source-1938 {label} lacks one canonical ordered report receipt set")
         target = match.group("target").decode()
         report_path_text = match.group("path").decode()
         pointer = f"(from agent {target} {report_path_text})"
-        prefix = source + suffix[: match.start()]
+        prefix = source + suffix[:offset]
         artifacts.append(
             source1938_report_receipt(
                 pointer,
@@ -3298,9 +3733,201 @@ def source1938_report_receipt_set(
                 label,
             )
         )
+        if pending is not None:
+            owner = report_owner_binding(pointer, receiver_path)
+            if owner is None or owner.separator_bytes != len(pending.group("separator")):
+                raise ReplaceError(f"Source-1938 {label} pending report separator changed")
+        offset = match.end()
+    if not artifacts:
+        raise ReplaceError(f"Source-1938 {label} lacks one canonical ordered report receipt set")
     if len({artifact.path for artifact in artifacts}) != len(artifacts) or len({artifact.commitment_path for artifact in artifacts}) != len(artifacts):
         raise ReplaceError(f"Source-1938 {label} repeats a report-only receipt")
     return tuple(artifacts), suffix
+
+
+def source1938_clear_authenticated_pending_reports(args: Args, data: bytes, label: str) -> bytes:
+    """Canonicalize authenticated agent-report markers before retiring the absent owner."""
+
+    if args.closed_owner_audit is None:
+        if SOURCE1938_PENDING_REPORT_RE.search(data):
+            raise ReplaceError(f"Source-1938 {label} cannot clear a report without closed-owner evidence")
+        return data
+    try:
+        text = data.decode()
+    except UnicodeDecodeError as exc:
+        raise ReplaceError(f"Source-1938 {label} pending report is not UTF-8") from exc
+    while True:
+        match = SOURCE1938_PENDING_REPORT_RE.search(text.encode())
+        if match is None:
+            return text.encode()
+        prefix = text.encode()[: match.start()]
+        line_number = prefix.count(b"\n") + 1
+        try:
+            updated, changed = clear_pending_marker(
+                text,
+                line_number,
+                "authenticated report preserved during guarded Source-1938 replacement; existing custody and ordered queue remain authoritative; no new Human work was requested.",
+                "report-only",
+            )
+        except (argparse.ArgumentTypeError, TaskFrontmatterError) as exc:
+            raise ReplaceError(f"Source-1938 {label} pending report cannot be cleared canonically: {exc}") from exc
+        if not changed:
+            raise ReplaceError(f"Source-1938 {label} pending report clear was not applied")
+        text = updated
+
+
+def source1938_source1944_authority(args: Args) -> Snapshot:
+    """Authenticate the exact later Human follow-up carried by the stale owner."""
+
+    authority = read_snapshot(task_path(args.root, SOURCE1944_FILE), "Source-1944 Human authority")
+    if digest(authority.data) != SOURCE1944_SHA256:
+        raise ReplaceError("Source-1944 Human authority changed")
+    try:
+        lines = authority.data.decode().splitlines()
+    except UnicodeDecodeError as exc:
+        raise ReplaceError(f"Source-1944 Human authority is not UTF-8: {exc}") from exc
+    if len(lines) != SOURCE1944_LINES[1] or lines[0] != "Subject: Re: Does SVM accuracy converge? Roadmap for human to take in paper revision":
+        raise ReplaceError("Source-1944 Human authority line envelope changed")
+    if (
+        lines[2] != "Route these to separate suitable agents to work on. Spawn new ones if needed"
+        or "more test data would probably not make a difference" not in lines[4]
+        or "tell the human 2 things to look at at a time" not in lines[6]
+    ):
+        raise ReplaceError("Source-1944 Human authority no longer binds the two exact delegated goals")
+    return authority
+
+
+def source1938_source1946_authority(args: Args) -> Snapshot:
+    """Authenticate the exact later Human cleanup follow-up retained by dw:33."""
+
+    authority = read_snapshot(task_path(args.root, SOURCE1946_FILE), "Source-1946 Human authority")
+    if digest(authority.data) != SOURCE1946_SHA256:
+        raise ReplaceError("Source-1946 Human authority changed")
+    try:
+        lines = authority.data.decode().splitlines()
+    except UnicodeDecodeError as exc:
+        raise ReplaceError(f"Source-1946 Human authority is not UTF-8: {exc}") from exc
+    if (
+        len(lines) != SOURCE1946_LINES[1]
+        or lines[0] != "Subject: Re: Taking over DW cleanup — dw_cleanup_mgr.md"
+        or not lines[2].startswith("Why is it taking so damn long to clean it up?")
+        or lines[12] != "> I am your only contact for this cleanup. You do not need to do anything. Cleanup is continuing; I will report again when the complete dw* inventory is clean and every useful change has been pushed."
+    ):
+        raise ReplaceError("Source-1946 Human authority line envelope changed")
+    return authority
+
+
+def source1938_source1947_authority(args: Args) -> Snapshot:
+    """Authenticate the exact Human mail/procedure follow-up retained by dw:13."""
+
+    authority = read_snapshot(task_path(args.root, SOURCE1947_FILE), "Source-1947 Human authority")
+    if digest(authority.data) != SOURCE1947_SHA256:
+        raise ReplaceError("Source-1947 Human authority changed")
+    try:
+        lines = authority.data.decode().splitlines()
+    except UnicodeDecodeError as exc:
+        raise ReplaceError(f"Source-1947 Human authority is not UTF-8: {exc}") from exc
+    if (
+        len(lines) != SOURCE1947_LINES[1]
+        or lines[0] != "Subject: Re: Does SVM accuracy converge? Roadmap for human to take in paper revision"
+        or lines[2] != "Why is wl:1 not dw:0 responding to my email addressed to dw:0?"
+        or lines[5] != "The agents should use different email chains"
+    ):
+        raise ReplaceError("Source-1947 Human authority line envelope changed")
+    return authority
+
+
+def source1938_normalize_source1946_custody(
+    args: Args,
+    source: bytes,
+    current: bytes,
+) -> tuple[bytes, bool]:
+    """Normalize only one exact Human-routed Source-1946 append on retained dw:33."""
+
+    _ = source1938_source1946_authority(args)
+    source_value = metadata(source, args.root, "Source-1938 Source-1946 source custody")
+    current_value = metadata(current, args.root, "Source-1938 Source-1946 current custody")
+    if current_value.pending_task_items == source_value.pending_task_items:
+        return current, False
+    if (
+        SOURCE1946_CUSTODY_ITEM in source_value.pending_task_items
+        or current_value.pending_task_items != (*source_value.pending_task_items, SOURCE1946_CUSTODY_ITEM)
+    ):
+        raise ReplaceError("Source-1938 Source-1946 retained-child queue changed")
+    try:
+        normalized = render_pending_items(current.decode(), source_value.pending_task_items).encode()
+    except (UnicodeDecodeError, TaskFrontmatterError) as exc:
+        raise ReplaceError(f"Source-1938 Source-1946 retained-child queue cannot be normalized: {exc}") from exc
+    if metadata(normalized, args.root, "Source-1938 normalized Source-1946 custody") != source_value:
+        raise ReplaceError("Source-1938 Source-1946 retained-child transition changed non-queue metadata")
+    return normalized, True
+
+
+def source1938_strip_source1944_transport(
+    args: Args,
+    data: bytes,
+    *,
+    required: bool,
+    label: str,
+) -> tuple[bytes, str]:
+    """Remove one exact Source-1944 transport or supported disposition block."""
+
+    _ = source1938_source1944_authority(args)
+    pending_count = data.count(SOURCE1944_PENDING_BLOCK)
+    disposition_count = data.count(SOURCE1944_DISPOSITION_BLOCK)
+    if pending_count == 0 and disposition_count == 0 and not required:
+        return data, ""
+    if pending_count == 1 and disposition_count == 0 and data.endswith(SOURCE1944_PENDING_BLOCK):
+        stripped = data[: -len(SOURCE1944_PENDING_BLOCK)]
+        disposition = SOURCE1944_SUCCESSOR_DISPOSITION
+    elif pending_count == 0 and disposition_count == 1:
+        stripped = data.replace(SOURCE1944_DISPOSITION_BLOCK, b"", 1)
+        disposition = SOURCE1944_CHILD_DISPOSITION
+    else:
+        raise ReplaceError(f"Source-1938 {label} lacks one exact Source-1944 transport disposition")
+    if metadata(data, args.root, f"Source-1938 {label} with Source-1944") != metadata(
+        stripped,
+        args.root,
+        f"Source-1938 {label} without Source-1944",
+    ):
+        raise ReplaceError(f"Source-1938 {label} Source-1944 transport changed task metadata")
+    return stripped, disposition
+
+
+def source1938_normalize_source1944_custody(
+    args: Args,
+    source: bytes,
+    current: bytes,
+    disposition: str,
+) -> tuple[bytes, bool]:
+    """Normalize only the exact Human-routed Source-1944 child queue transition."""
+
+    _ = source1938_source1944_authority(args)
+    _ = source1938_source1947_authority(args)
+    source_value = metadata(source, args.root, "Source-1938 Source-1944 source custody")
+    current_value = metadata(current, args.root, "Source-1938 Source-1944 current custody")
+    if disposition == SOURCE1944_SUCCESSOR_DISPOSITION:
+        if current_value.pending_task_items != source_value.pending_task_items or SOURCE1944_CUSTODY_ITEM in current_value.pending_task_items:
+            raise ReplaceError("Source-1938 pending Source-1944 transport conflicts with retained-child custody")
+        return current, False
+    if disposition != SOURCE1944_CHILD_DISPOSITION:
+        raise ReplaceError("Source-1938 Source-1944 custody disposition is absent or unrecognized")
+    current_custody = (SOURCE1944_CUSTODY_ITEM, SOURCE1947_CUSTODY_ITEM)
+    if current_value.pending_task_items != current_custody or source_value.pending_task_items not in {
+        (),
+        (SOURCE1944_CUSTODY_ITEM,),
+        current_custody,
+    }:
+        raise ReplaceError("Source-1938 Source-1944 retained-child queue changed")
+    if source_value.pending_task_items == current_value.pending_task_items:
+        return current, False
+    try:
+        normalized = render_pending_items(current.decode(), source_value.pending_task_items).encode()
+    except (UnicodeDecodeError, TaskFrontmatterError) as exc:
+        raise ReplaceError(f"Source-1938 Source-1944 retained-child queue cannot be normalized: {exc}") from exc
+    if metadata(normalized, args.root, "Source-1938 normalized Source-1944 custody") != source_value:
+        raise ReplaceError("Source-1938 Source-1944 retained-child transition changed non-queue metadata")
+    return normalized, True
 
 
 def source1938_authenticated_report(
@@ -3317,13 +3944,58 @@ def source1938_authenticated_report(
         or canonical_target(retained.managerat) != canonical_target(args.old_target)
     ):
         raise ReplaceError("Source-1938 report receipt producer is not the retained live dw:33 child")
-    source_task = str(task_path(args.root, SOURCE1938_LIVE_SHARED_TASK))
-    return source1938_report_receipt_set(
+    direct_producers: dict[str, str] = {}
+    for child in args.children:
+        child_path = task_path(args.root, child.task)
+        child_snapshot = read_snapshot(child_path, f"Source-1938 direct report producer {child.task}")
+        child_value = metadata(child_snapshot.data, args.root, f"Source-1938 direct report producer {child.task}")
+        child_matches_pin = digest(child_snapshot.data) == child.sha256
+        if canonical_target(child_value.managerat) == canonical_target(args.new_target):
+            child_matches_pin = child_matches_pin or digest(
+                migrate_manager_owner(
+                    child_snapshot.data,
+                    args.new_target,
+                    args.old_target,
+                    args.root,
+                )
+            ) == child.sha256
+        if (
+            not child_matches_pin
+            or child_value.status == "done"
+            or canonical_target(child_value.managerat)
+            not in {canonical_target(args.old_target), canonical_target(args.new_target)}
+        ):
+            raise ReplaceError("Source-1938 direct report producer changed custody")
+        direct_producers[str(child_path.resolve())] = canonical_target(child_value.runat)
+    source_without_human, source_disposition = source1938_strip_source1944_transport(
         args,
         source_old,
+        required=False,
+        label="closed-owner source task",
+    )
+    current_without_human, current_disposition = source1938_strip_source1944_transport(
+        args,
         current_old,
+        required=True,
+        label="current closed-owner task",
+    )
+    if source_disposition == SOURCE1944_CHILD_DISPOSITION and current_disposition != SOURCE1944_CHILD_DISPOSITION:
+        raise ReplaceError("Source-1938 Source-1944 retained-child disposition regressed")
+    if current_old.startswith(source_old):
+        report_source = source_old
+        report_current = current_old
+    elif source_disposition:
+        report_source = source_without_human
+        report_current = current_without_human
+    else:
+        report_source = source_old
+        report_current = current_old
+    return source1938_report_receipt_set(
+        args,
+        report_source,
+        report_current,
         args.old_task,
-        lambda artifact: canonical_target(artifact.target) == canonical_target(SOURCE1938_SHARED_TARGET) and artifact.source_task == source_task,
+        lambda artifact: direct_producers.get(artifact.source_task) == canonical_target(artifact.target),
         "closed-owner task",
     )
 
@@ -3333,6 +4005,13 @@ def source1938_authenticated_retained_child_reports(
     source_child: bytes,
     current_child: bytes,
 ) -> tuple[tuple[AuthenticatedAgentReport, ...], bytes]:
+    raw_current_child = current_child
+    original_source_child = source_child
+    current_child, source1946_transition = source1938_normalize_source1946_custody(
+        args,
+        source_child,
+        current_child,
+    )
     retained = metadata(source_child, args.root, "Source-1938 retained child source")
     if (
         retained.status == "done"
@@ -3362,11 +4041,9 @@ def source1938_authenticated_retained_child_reports(
     ):
         raise ReplaceError(f"Source-1938 {label} metadata or ordered queue changed")
     try:
-        current_text = current_child.decode()
+        _ = current_child.decode()
     except UnicodeDecodeError as exc:
         raise ReplaceError(f"Source-1938 {label} receipt is not UTF-8") from exc
-    if has_pending_marker(current_text):
-        raise ReplaceError(f"Source-1938 {label} retains an unconsumed pending marker")
     if current_child == source_child:
         return (), b""
 
@@ -3375,12 +4052,14 @@ def source1938_authenticated_retained_child_reports(
     current_lines = current_child.splitlines(keepends=True)
     source_idx = 0
     current_idx = 0
-    source_offset = 0
     removed: dict[str, AuthenticatedAgentReport] = {}
+    original_pending = {
+        match.group("pointer").decode(): match
+        for match in SOURCE1938_PENDING_REPORT_RE.finditer(original_source_child)
+    }
     while source_idx < len(source_lines):
         source_line = source_lines[source_idx]
         if current_idx < len(current_lines) and source_line == current_lines[current_idx]:
-            source_offset += len(source_line)
             source_idx += 1
             current_idx += 1
             continue
@@ -3393,12 +4072,17 @@ def source1938_authenticated_retained_child_reports(
         pointer = pointer_line.decode()
         if pointer in removed:
             raise ReplaceError(f"Source-1938 {label} repeats a pending report receipt")
+        original_match = original_pending.get(pointer)
         owner = report_owner_binding(pointer, receiver_path)
         if (
-            owner is None
+            original_match is None
+            or owner is None
             or owner.separator_bytes not in {1, 2}
-            or source_offset < owner.separator_bytes
-            or source_child[source_offset - owner.separator_bytes : source_offset] != b"\n" * owner.separator_bytes
+            or original_match.start() < owner.separator_bytes
+            or original_source_child[
+                original_match.start() - owner.separator_bytes : original_match.start()
+            ]
+            != b"\n" * owner.separator_bytes
         ):
             raise ReplaceError(f"Source-1938 {label} report lacks its bound separator")
         removed[pointer] = source1938_report_receipt(
@@ -3406,26 +4090,38 @@ def source1938_authenticated_retained_child_reports(
             target,
             report_path,
             receiver_path,
-            source_child[: source_offset - owner.separator_bytes],
+            original_source_child[: original_match.start() - owner.separator_bytes],
             producer_is_valid,
             label,
         )
-        source_offset += len(source_line)
         source_idx += 1
 
     suffix = b"".join(current_lines[current_idx:])
     replay = source_child
+    replay_has_source1946 = not source1946_transition
+    source1946_queue = metadata(
+        raw_current_child,
+        args.root,
+        "Source-1938 current Source-1946 replay custody",
+    ).pending_task_items
+
+    def with_source1946_queue(value: bytes) -> bytes:
+        try:
+            return render_pending_items(value.decode(), source1946_queue).encode()
+        except (UnicodeDecodeError, TaskFrontmatterError) as exc:
+            raise ReplaceError(f"Source-1938 {label} Source-1946 replay cannot be normalized: {exc}") from exc
+
     artifacts: list[AuthenticatedAgentReport] = []
     cleared: set[str] = set()
     suffix_offset = 0
     while suffix_offset < len(suffix):
-        appended = SOURCE1938_REPORT_ONLY_APPEND_RE.match(suffix, suffix_offset)
-        if appended is not None:
-            target = appended.group("target").decode()
-            report_path = Path(appended.group("path").decode())
-            pointer = f"(from agent {target} {report_path})"
-            artifacts.append(
-                source1938_report_receipt(
+        pending = SOURCE1938_PENDING_APPEND_RE.match(suffix, suffix_offset)
+        if pending is not None:
+            target = pending.group("target").decode()
+            report_path = Path(pending.group("path").decode())
+            pointer = pending.group("pointer").decode()
+            try:
+                artifact = source1938_report_receipt(
                     pointer,
                     target,
                     report_path,
@@ -3434,7 +4130,65 @@ def source1938_authenticated_retained_child_reports(
                     producer_is_valid,
                     label,
                 )
-            )
+            except ReplaceError as original_exc:
+                if replay_has_source1946:
+                    raise
+                upgraded = with_source1946_queue(replay)
+                try:
+                    artifact = source1938_report_receipt(
+                        pointer,
+                        target,
+                        report_path,
+                        receiver_path,
+                        upgraded,
+                        producer_is_valid,
+                        label,
+                    )
+                except ReplaceError:
+                    raise original_exc
+                replay = upgraded
+                replay_has_source1946 = True
+            owner = report_owner_binding(pointer, receiver_path)
+            if owner is None or owner.separator_bytes != len(pending.group("separator")):
+                raise ReplaceError(f"Source-1938 {label} pending report separator changed")
+            artifacts.append(artifact)
+            replay += pending.group(0)
+            suffix_offset = pending.end()
+            continue
+        appended = SOURCE1938_REPORT_ONLY_APPEND_RE.match(suffix, suffix_offset)
+        if appended is not None:
+            target = appended.group("target").decode()
+            report_path = Path(appended.group("path").decode())
+            pointer = f"(from agent {target} {report_path})"
+            try:
+                artifact = source1938_report_receipt(
+                    pointer,
+                    target,
+                    report_path,
+                    receiver_path,
+                    replay,
+                    producer_is_valid,
+                    label,
+                )
+            except ReplaceError as original_exc:
+                if replay_has_source1946:
+                    raise
+                upgraded = with_source1946_queue(replay)
+                try:
+                    artifact = source1938_report_receipt(
+                        pointer,
+                        target,
+                        report_path,
+                        receiver_path,
+                        upgraded,
+                        producer_is_valid,
+                        label,
+                    )
+                except ReplaceError:
+                    raise original_exc
+                replay = upgraded
+                replay_has_source1946 = True
+            artifacts.append(artifact)
             replay += appended.group(0)
             suffix_offset = appended.end()
             continue
@@ -3451,8 +4205,16 @@ def source1938_authenticated_retained_child_reports(
             raise ReplaceError(f"Source-1938 {label} clears a report outside its authenticated source set")
         try:
             updated, changed = clear_pending_marker(replay_text, line_number, comment, "report-only")
-        except (argparse.ArgumentTypeError, TaskFrontmatterError) as exc:
-            raise ReplaceError(f"Source-1938 {label} has a noncanonical report-only marker clear") from exc
+        except (argparse.ArgumentTypeError, TaskFrontmatterError) as original_exc:
+            if replay_has_source1946:
+                raise ReplaceError(f"Source-1938 {label} has a noncanonical report-only marker clear") from original_exc
+            upgraded = with_source1946_queue(replay)
+            try:
+                updated, changed = clear_pending_marker(upgraded.decode(), line_number, comment, "report-only")
+            except (argparse.ArgumentTypeError, TaskFrontmatterError) as exc:
+                raise ReplaceError(f"Source-1938 {label} has a noncanonical report-only marker clear") from exc
+            replay = upgraded
+            replay_has_source1946 = True
         if not changed:
             raise ReplaceError(f"Source-1938 {label} repeats a report-only marker clear")
         replay = updated.encode()
@@ -3460,7 +4222,10 @@ def source1938_authenticated_retained_child_reports(
         cleared.add(pointer)
         suffix_offset = cleared_record.end()
 
-    if replay != current_child or cleared != set(removed):
+    if not replay_has_source1946:
+        replay = with_source1946_queue(replay)
+        replay_has_source1946 = True
+    if replay != raw_current_child or cleared != set(removed):
         raise ReplaceError(f"Source-1938 {label} report-only transition replay changed")
     if len({artifact.path for artifact in artifacts}) != len(artifacts) or len({artifact.commitment_path for artifact in artifacts}) != len(artifacts):
         raise ReplaceError(f"Source-1938 {label} repeats a report-only receipt")
@@ -3513,6 +4278,11 @@ def source1938_report_receipt_binding(
     receipt_binding = {
         "closed_owner": bind_set(args.old_task, old_artifacts, old_suffix),
         "retained_child": bind_set(SOURCE1938_LIVE_SHARED_TASK, child_artifacts, child_suffix),
+        "source1946_custody": {
+            "authority_sha256": SOURCE1946_SHA256,
+            "source_sha256": digest(source_child),
+            "current_sha256": digest(current_child),
+        },
     }
     return {
         "closed_owner_rebase_kind": SOURCE1938_REBASE_KIND,
@@ -3530,6 +4300,12 @@ def source1938_closed_owner_rebase_binding(
     current_children: dict[str, bytes],
     report_transitions: Mapping[str, tuple[str, ...]] | None = None,
 ) -> tuple[dict[str, str], tuple[AuthenticatedAgentReport, ...], tuple[Path, ...]]:
+    _normalized_current_old, source1944_disposition = source1938_strip_source1944_transport(
+        args,
+        current_old,
+        required=True,
+        label="current closed-owner rebase task",
+    )
     source_old = source_entries[0].before
     source_children = {entry.task: entry.before for entry in source_entries if entry.task in {child.task for child in args.children}}
     retained_source = source_children.get(SOURCE1938_LIVE_SHARED_TASK)
@@ -3561,6 +4337,7 @@ def source1938_closed_owner_rebase_binding(
             source_child,
             current_child,
             report_transitions,
+            source1944_disposition,
         )
         direct_artifacts.extend(artifacts)
         direct_bindings.append(child_binding)
@@ -3626,7 +4403,11 @@ def source1938_source_children(args: Args, record: dict[str, object]) -> tuple[C
         raise ReplaceError("Source-1938 current direct-child set changed")
     for child in source_children:
         current_child = current[child.task]
-        if current_child.queue_sha256 != child.queue_sha256:
+        supported_human_queue_progress = child.task in {
+            SOURCE1944_CUSTODY_TASK,
+            SOURCE1938_LIVE_SHARED_TASK,
+        }
+        if current_child.queue_sha256 != child.queue_sha256 and not supported_human_queue_progress:
             raise ReplaceError("Source-1938 current direct-child binding changed outside retained reports")
     return tuple(source_children)
 
@@ -3671,6 +4452,10 @@ def authenticate_closed_owner_source(
         source_protected_digest = str(source_protected_sha256)
         source_authority_envelope_sha256 = str(source_envelope_sha256)
     source_children = source1938_source_children(args, loaded)
+    source1938_legacy_source_audit = (
+        is_source1938_semantic_exception(args)
+        and "secondary_stale_manager_sha256" not in loaded
+    )
     source_args = replace(
         args,
         old_sha256=str(loaded["old_sha256"]),
@@ -3686,6 +4471,7 @@ def authenticate_closed_owner_source(
         closed_owner_audit_sha256="",
         closed_owner_current_membership_sha256="",
         closed_owner_current_topology_sha256="",
+        source1938_legacy_source_audit=source1938_legacy_source_audit,
     )
     record, audit_bytes, entries, membership = read_audit(source_args)
     if audit_bytes != source_snapshot.data:
@@ -3724,21 +4510,30 @@ def source1938_rebase_binding_from_audit(
     current_record: dict[str, object],
     report_transitions: Mapping[str, tuple[str, ...]] | None = None,
 ) -> dict[str, str]:
-    if len(current_entries) != len(source_entries):
+    source_by_task = {entry.task: entry for entry in source_entries}
+    current_by_task = {entry.task: entry for entry in current_entries}
+    expected_current_tasks = set(source_by_task)
+    if source_args.source1938_legacy_source_audit:
+        expected_current_tasks.add(SOURCE1938_SECONDARY_STALE_TASK)
+    if len(source_by_task) != len(source_entries) or len(current_by_task) != len(current_entries) or set(current_by_task) != expected_current_tasks:
         raise ReplaceError("Source-1938 closed-owner rebase changed its lifecycle file set")
-    mutable_indices = {0, len(source_entries) - 2, *(index for index, entry in enumerate(source_entries) if entry.task in {child.task for child in args.children})}
+    mutable_tasks = {args.old_task, "TODO.md", *(child.task for child in args.children)}
     if any(
-        current.task != source.task
-        or current.mode != source.mode
+        current_by_task[task].mode != source.mode
         or current.gid != source.gid
-        for index, (current, source) in enumerate(zip(current_entries, source_entries, strict=True))
-        if index not in mutable_indices
+        for task, source in source_by_task.items()
+        if task not in mutable_tasks
+        for current in (current_by_task[task],)
     ):
         raise ReplaceError("Source-1938 closed-owner rebase changed fixed lifecycle file metadata")
-    if any(current.before != source.before for index, (current, source) in enumerate(zip(current_entries, source_entries, strict=True)) if index not in mutable_indices):
+    if any(
+        current_by_task[task].before != source.before
+        for task, source in source_by_task.items()
+        if task not in mutable_tasks
+    ):
         raise ReplaceError("Source-1938 closed-owner rebase changed a fixed lifecycle before image")
-    source_old = source_entries[0]
-    current_old = current_entries[0]
+    source_old = source_by_task[args.old_task]
+    current_old = current_by_task[args.old_task]
     if (
         source_old.before is None
         or current_old.before is None
@@ -3748,8 +4543,6 @@ def source1938_rebase_binding_from_audit(
     ):
         raise ReplaceError("Source-1938 closed-owner rebase changed its bound old-task image")
     current_children: dict[str, bytes] = {}
-    source_by_task = {entry.task: entry for entry in source_entries}
-    current_by_task = {entry.task: entry for entry in current_entries}
     for child in args.children:
         source_child = source_by_task.get(child.task)
         current_child = current_by_task.get(child.task)
@@ -3763,7 +4556,7 @@ def source1938_rebase_binding_from_audit(
         ):
             raise ReplaceError(f"Source-1938 closed-owner rebase changed bound direct child {child.task}")
         current_children[child.task] = current_child.before
-    current_todo = current_entries[-2].before
+    current_todo = current_by_task["TODO.md"].before
     if current_todo is None or digest(current_todo) != args.todo_sha256:
         raise ReplaceError("Source-1938 closed-owner rebase changed its bound current TODO")
     binding, _artifacts, _transition_sources = source1938_closed_owner_rebase_binding(
@@ -3888,7 +4681,16 @@ def recovery_plan(
     child_entries = entries[1:child_end]
     historical_entry = entries[child_end] if is_source1938_semantic_exception(args) else None
     stale_manager_entry = entries[child_end + 1] if is_source1938_semantic_exception(args) else None
-    archive_entry = entries[child_end + 2] if is_source1938_semantic_exception(args) else None
+    secondary_stale_manager_entry = (
+        entries[child_end + 2]
+        if is_source1938_semantic_exception(args) and not args.source1938_legacy_source_audit
+        else None
+    )
+    archive_entry = (
+        entries[child_end + (2 if args.source1938_legacy_source_audit else 3)]
+        if is_source1938_semantic_exception(args)
+        else None
+    )
     todo_entry = entries[-2]
     old_path = task_path(args.root, args.old_task)
     todo_path = args.root / "TODO.md"
@@ -3896,6 +4698,7 @@ def recovery_plan(
     snapshots.extend(read_snapshot(task_path(args.root, pin.task), f"recovery child {pin.task}") for pin in args.children)
     historical: Snapshot | None = None
     stale_manager: Snapshot | None = None
+    secondary_stale_manager: Snapshot | None = None
     stale_manager_authority: Snapshot | None = None
     archive_index: Snapshot | None = None
     if historical_entry is not None and stale_manager_entry is not None and archive_entry is not None:
@@ -3905,13 +4708,28 @@ def recovery_plan(
             task_path(args.root, SOURCE1938_STALE_AUTHORITY),
             "recovery Source-1938 stale-manager Human shutdown authority",
         )
+        if secondary_stale_manager_entry is not None:
+            secondary_stale_manager = read_snapshot(
+                task_path(args.root, SOURCE1938_SECONDARY_STALE_TASK),
+                "recovery Source-1938 secondary stopped stale manager",
+            )
         archive_index = read_snapshot(args.root / SOURCE1938_ARCHIVE_INDEX, "recovery Source-1938 archive index")
-        snapshots.extend((historical, stale_manager, archive_index))
+        snapshots.extend(
+            (
+                historical,
+                stale_manager,
+                *((secondary_stale_manager,) if secondary_stale_manager is not None else ()),
+                archive_index,
+            )
+        )
     snapshots.append(read_snapshot(todo_path, "recovery TODO"))
     if any(stat.S_IMODE(snapshot.state.st_mode) != entry.mode or snapshot.state.st_gid != entry.gid for snapshot, entry in zip(snapshots, entries[:-1], strict=True)):
         raise ReplaceError("recovery found changed lifecycle file mode or group")
     authority = read_snapshot(task_path(args.root, args.authority_file), "recovery replacement authority")
     envelope = read_snapshot(task_path(args.root, args.authority_envelope_task), "recovery authority envelope")
+    source1944_authority = source1938_source1944_authority(args) if is_source1938_semantic_exception(args) else None
+    source1946_authority = source1938_source1946_authority(args) if is_source1938_semantic_exception(args) else None
+    source1947_authority = source1938_source1947_authority(args) if is_source1938_semantic_exception(args) else None
     source1601_authority = source1601_material(args)
     envelope_child_index = authority_envelope_child_index(args)
     if envelope_child_index is not None:
@@ -3923,19 +4741,73 @@ def recovery_plan(
         if old_entry.before is None:
             raise ReplaceError("private replacement audit lost the source-only old-task authority before image")
         envelope = Snapshot(envelope.path, old_entry.before, envelope.state)
+    if old_entry.before is None or todo_entry.before is None or any(entry.before is None for entry in child_entries):
+        raise ReplaceError("private replacement audit lost a required before image")
+    old_transition_data = old_entry.before
+    source1944_disposition = ""
+    if is_source1938_semantic_exception(args):
+        old_transition_data, source1944_disposition = source1938_strip_source1944_transport(
+            args,
+            old_entry.before,
+            required=True,
+            label="recovery old-manager before image",
+        )
+        old_transition_data = source1938_clear_authenticated_pending_reports(
+            args,
+            old_transition_data,
+            "recovery old-manager before image",
+        )
+        if not args.source1938_legacy_source_audit and record.get("source1944_disposition") != source1944_disposition:
+            raise ReplaceError("private replacement audit Source-1944 disposition no longer matches its before image")
+        source1944_entry = next(
+            (entry for entry in child_entries if entry.task == SOURCE1944_CUSTODY_TASK),
+            None,
+        )
+        if source1944_entry is None or source1944_entry.before is None:
+            raise ReplaceError("private replacement audit lost Source-1944 retained-child custody")
+        source1944_queue = metadata(
+            source1944_entry.before,
+            args.root,
+            "recovery Source-1944 custody child",
+        ).pending_task_items
+        expected_source1944_queue = (
+            (SOURCE1944_CUSTODY_ITEM, SOURCE1947_CUSTODY_ITEM)
+            if source1944_disposition == SOURCE1944_CHILD_DISPOSITION
+            else ()
+        )
+        if source1944_queue != expected_source1944_queue:
+            raise ReplaceError("private replacement audit Source-1944 disposition and child custody disagree")
+        source1946_entry = next(
+            (entry for entry in child_entries if entry.task == SOURCE1938_LIVE_SHARED_TASK),
+            None,
+        )
+        if source1946_entry is None or source1946_entry.before is None:
+            raise ReplaceError("private replacement audit lost Source-1946 cleanup custody")
+        source1946_queue = metadata(
+            source1946_entry.before,
+            args.root,
+            "recovery Source-1946 cleanup child",
+        ).pending_task_items
+        if source1946_queue.count(SOURCE1946_CUSTODY_ITEM) != 1 or source1946_queue[-1] != SOURCE1946_CUSTODY_ITEM:
+            raise ReplaceError("private replacement audit lost exact Source-1946 cleanup custody")
     authority_items = authority_material(args, authority, envelope)
     empty_tree_authority: Snapshot | None = None
     if is_source1292_empty_tree(args) or is_source1292_descendant_tree(args):
         empty_tree_authority, empty_tree_item = empty_tree_authority_material(args, envelope)
         authority_items = (*authority_items, empty_tree_item)
-    if old_entry.before is None or todo_entry.before is None or any(entry.before is None for entry in child_entries):
-        raise ReplaceError("private replacement audit lost a required before image")
     old_before_metadata = metadata(old_entry.before, args.root, "recovery old manager before image")
     if is_source_only_semantic_exception(args):
-        authority_items = (*authority_items, *source_only_added_goals(args, old_before_metadata.pending_task_items))
+        authority_items = (
+            *authority_items,
+            *source_only_added_goals(
+                args,
+                old_before_metadata.pending_task_items,
+                source1944_disposition,
+            ),
+        )
     old_before = Snapshot(old_path, old_entry.before, snapshots[0].state)
     old_after, successor_after, successor_queue = old_and_successor_text(
-        old_entry.before,
+        old_transition_data,
         args.root,
         args.old_target,
         args.new_target,
@@ -3965,6 +4837,7 @@ def recovery_plan(
     todo_after = todo_replacement(todo_entry.before, args.root, old_path, successor_path, args.old_target, args.new_target)
     historical_after: bytes | None = None
     stale_manager_after: bytes | None = None
+    secondary_stale_manager_after: bytes | None = None
     stale_manager_queue: tuple[str, ...] = ()
     archive_index_after: bytes | None = None
     if historical_entry is not None and stale_manager_entry is not None and archive_entry is not None:
@@ -3975,6 +4848,7 @@ def recovery_plan(
             or historical is None
             or stale_manager is None
             or stale_manager_authority is None
+            or (secondary_stale_manager_entry is not None and secondary_stale_manager is None)
             or archive_index is None
         ):
             raise ReplaceError("private replacement audit lost Source-1938 duplicate-manager before images")
@@ -3987,11 +4861,29 @@ def recovery_plan(
             audited_stale,
             stale_manager_authority,
         )
+        if secondary_stale_manager_entry is not None:
+            if secondary_stale_manager_entry.before is None or secondary_stale_manager is None:
+                raise ReplaceError("private replacement audit lost Source-1938 secondary stale-manager before image")
+            audited_secondary_stale = Snapshot(
+                secondary_stale_manager.path,
+                secondary_stale_manager_entry.before,
+                secondary_stale_manager.state,
+            )
+            secondary_stale_manager_after = validate_source1938_secondary_stale_manager(
+                args,
+                audited_secondary_stale,
+                stale_manager_authority,
+            )
     canonical_after = (
         old_after,
         *child_after,
         *(
-            (historical_after, stale_manager_after, archive_index_after)
+            (
+                historical_after,
+                stale_manager_after,
+                *((secondary_stale_manager_after,) if secondary_stale_manager_after is not None else ()),
+                archive_index_after,
+            )
             if historical_after is not None and stale_manager_after is not None and archive_index_after is not None
             else ()
         ),
@@ -4067,6 +4959,12 @@ def recovery_plan(
         stale_manager_after=stale_manager_after,
         stale_manager_authority=stale_manager_authority,
         stale_manager_queue=stale_manager_queue,
+        secondary_stale_manager=secondary_stale_manager,
+        secondary_stale_manager_after=secondary_stale_manager_after,
+        source1944_authority=source1944_authority,
+        source1944_disposition=source1944_disposition,
+        source1946_authority=source1946_authority,
+        source1947_authority=source1947_authority,
     )
     if source1601_authority is not None:
         plan = replace(plan, source1601_authority=source1601_authority)
@@ -4141,16 +5039,37 @@ def after_snapshots(args: Args, entries: tuple[AuditEntry, ...]) -> tuple[Snapsh
 def split_after_snapshots(
     args: Args,
     snapshots: tuple[Snapshot, ...],
-) -> tuple[Snapshot, tuple[Snapshot, ...], Snapshot | None, Snapshot | None, Snapshot | None, Snapshot, Snapshot]:
+) -> tuple[
+    Snapshot,
+    tuple[Snapshot, ...],
+    Snapshot | None,
+    Snapshot | None,
+    Snapshot | None,
+    Snapshot | None,
+    Snapshot,
+    Snapshot,
+]:
     child_end = 1 + len(args.children)
     historical: Snapshot | None = None
     stale_manager: Snapshot | None = None
+    secondary_stale_manager: Snapshot | None = None
     archive: Snapshot | None = None
     if is_source1938_semantic_exception(args):
         historical = snapshots[child_end]
         stale_manager = snapshots[child_end + 1]
-        archive = snapshots[child_end + 2]
-    return snapshots[0], snapshots[1:child_end], historical, stale_manager, archive, snapshots[-2], snapshots[-1]
+        if not args.source1938_legacy_source_audit:
+            secondary_stale_manager = snapshots[child_end + 2]
+        archive = snapshots[child_end + (2 if args.source1938_legacy_source_audit else 3)]
+    return (
+        snapshots[0],
+        snapshots[1:child_end],
+        historical,
+        stale_manager,
+        secondary_stale_manager,
+        archive,
+        snapshots[-2],
+        snapshots[-1],
+    )
 
 
 def recover_existing(
@@ -4500,11 +5419,22 @@ def require_preclose_eligibility(args: Args, plan: Plan) -> None:
             plan.historical is None
             or plan.stale_manager is None
             or plan.stale_manager_authority is None
+            or plan.secondary_stale_manager is None
+            or plan.source1944_authority is None
+            or plan.source1946_authority is None
+            or plan.source1947_authority is None
             or plan.archive_index is None
         ):
             raise ReplaceError("Source-1938 pre-close proof lost duplicate-manager reconciliation custody")
         require_snapshot(plan.historical, "pre-close Source-1938 historical shared-target task")
         require_snapshot(plan.stale_manager, "pre-close Source-1938 stopped stale manager")
+        require_snapshot(
+            plan.secondary_stale_manager,
+            "pre-close Source-1938 secondary stopped stale manager",
+        )
+        require_snapshot(plan.source1944_authority, "pre-close Source-1944 Human authority")
+        require_snapshot(plan.source1946_authority, "pre-close Source-1946 Human authority")
+        require_snapshot(plan.source1947_authority, "pre-close Source-1947 Human authority")
         require_snapshot(plan.stale_manager_authority, "pre-close Source-1938 stale-manager Human shutdown authority")
         require_snapshot(plan.archive_index, "pre-close Source-1938 historical archive index")
         live_shared_path = task_path(args.root, SOURCE1938_LIVE_SHARED_TASK)
@@ -4533,8 +5463,22 @@ def require_preclose_eligibility(args: Args, plan: Plan) -> None:
             plan.stale_manager.path.resolve(),
         }:
             raise ReplaceError("Source-1938 stopped stale-manager owner set changed before guarded manager close")
-        if active_child_task_refs(args.root, plan.stale_manager.path, SOURCE1938_STALE_TARGET):
-            raise ReplaceError("Source-1938 stopped stale manager gained an active child before guarded manager close")
+        validate_source1938_stale_target_children(args, plan, "pre-close")
+        retained_secondary_path = task_path(
+            args.root,
+            SOURCE1938_SECONDARY_STALE_RETAINED_TASK,
+        ).resolve()
+        if set(authoritative_active_target_task_paths(args.root, SOURCE1938_SECONDARY_STALE_TARGET)) != {
+            retained_secondary_path,
+            plan.secondary_stale_manager.path.resolve(),
+        }:
+            raise ReplaceError("Source-1938 secondary stopped-manager owner set changed before guarded manager close")
+        if active_child_task_refs(
+            args.root,
+            plan.secondary_stale_manager.path,
+            SOURCE1938_SECONDARY_STALE_TARGET,
+        ):
+            raise ReplaceError("Source-1938 secondary stopped manager gained an active child before guarded manager close")
     if authoritative_active_target_task_paths(args.root, args.old_target) != (plan.old.path.resolve(),):
         raise ReplaceError("old target ownership changed before guarded manager close")
     if authoritative_active_target_task_paths(args.root, args.new_target):
@@ -4645,6 +5589,7 @@ def prove_committed(
     child_after: tuple[Snapshot, ...],
     historical_after: Snapshot | None,
     stale_manager_after: Snapshot | None,
+    secondary_stale_manager_after: Snapshot | None,
     archive_after: Snapshot | None,
     todo_after: Snapshot,
     successor: Snapshot,
@@ -4669,22 +5614,36 @@ def prove_committed(
         if (
             historical_after is None
             or stale_manager_after is None
+            or secondary_stale_manager_after is None
             or archive_after is None
             or plan.historical is None
             or plan.historical_after is None
             or plan.stale_manager is None
             or plan.stale_manager_after is None
+            or plan.secondary_stale_manager is None
+            or plan.secondary_stale_manager_after is None
             or plan.stale_manager_authority is None
+            or plan.source1944_authority is None
+            or plan.source1946_authority is None
+            or plan.source1947_authority is None
             or plan.archive_index_after is None
         ):
             raise ReplaceError("Source-1938 commit proof lost duplicate-manager reconciliation images")
         require_snapshot(historical_after, "committed Source-1938 historical shared-target task")
         require_snapshot(stale_manager_after, "committed Source-1938 stopped stale manager")
+        require_snapshot(
+            secondary_stale_manager_after,
+            "committed Source-1938 secondary stopped stale manager",
+        )
+        require_snapshot(plan.source1944_authority, "committed Source-1944 Human authority")
+        require_snapshot(plan.source1946_authority, "committed Source-1946 Human authority")
+        require_snapshot(plan.source1947_authority, "committed Source-1947 Human authority")
         require_snapshot(plan.stale_manager_authority, "committed Source-1938 stale-manager Human shutdown authority")
         require_snapshot(archive_after, "committed Source-1938 historical archive index")
         if (
             historical_after.data != plan.historical_after
             or stale_manager_after.data != plan.stale_manager_after
+            or secondary_stale_manager_after.data != plan.secondary_stale_manager_after
             or archive_after.data != plan.archive_index_after
         ):
             raise ReplaceError("Source-1938 committed duplicate-manager reconciliation differs from its reviewed images")
@@ -4717,9 +5676,40 @@ def prove_committed(
         )
         if len(retained_stale_target) != 1:
             raise ReplaceError("Source-1938 stopped stale-manager target lacks exactly one retained live owner")
-        if active_child_task_refs(args.root, plan.stale_manager.path, SOURCE1938_STALE_TARGET):
-            raise ReplaceError("Source-1938 stopped stale manager gained an active child during replacement")
-    elif historical_after is not None or stale_manager_after is not None or archive_after is not None:
+        validate_source1938_stale_target_children(args, plan, "committed")
+        secondary_stale_metadata = metadata(
+            secondary_stale_manager_after.data,
+            args.root,
+            "committed Source-1938 secondary stopped stale manager",
+        )
+        if (
+            secondary_stale_metadata.status != "done"
+            or secondary_stale_metadata.runat != SOURCE1938_SECONDARY_STALE_TARGET
+            or secondary_stale_metadata.managerat != SOURCE1938_SECONDARY_STALE_MANAGER
+            or secondary_stale_metadata.pending_task_items
+            or task_body(secondary_stale_manager_after.data) != task_body(plan.secondary_stale_manager.data)
+        ):
+            raise ReplaceError("Source-1938 secondary stopped stale-manager evidence changed during reconciliation")
+        retained_secondary_target = task_path(
+            args.root,
+            SOURCE1938_SECONDARY_STALE_RETAINED_TASK,
+        ).resolve()
+        if authoritative_active_target_task_paths(args.root, SOURCE1938_SECONDARY_STALE_TARGET) != (
+            retained_secondary_target,
+        ):
+            raise ReplaceError("Source-1938 secondary stopped target lacks exactly its retained live worker")
+        if active_child_task_refs(
+            args.root,
+            plan.secondary_stale_manager.path,
+            SOURCE1938_SECONDARY_STALE_TARGET,
+        ):
+            raise ReplaceError("Source-1938 secondary stopped manager gained an active child during replacement")
+    elif (
+        historical_after is not None
+        or stale_manager_after is not None
+        or secondary_stale_manager_after is not None
+        or archive_after is not None
+    ):
         raise ReplaceError("unexpected historical reconciliation images outside Source-1938")
     if authoritative_active_target_task_paths(args.root, args.old_target):
         raise ReplaceError("old target retains an active owner after replacement")
@@ -4743,6 +5733,7 @@ def prove_committed(
             child_after=tuple(snapshot.data for snapshot in child_after),
             successor_data=successor.data,
             stale_manager=stale_manager_after,
+            secondary_stale_manager=secondary_stale_manager_after,
         )
         if plan.source1938_topology is None or source1938_topology_binding(args, committed_plan) != plan.source1938_topology:
             raise ReplaceError("Source-1938 committed ownership graph differs from its reviewed retained topology")
@@ -4793,6 +5784,9 @@ def replace_manager(args: Args) -> str:
     source1601_path = task_path(args.root, SOURCE1601_FILE)
     empty_tree_authority_path = task_path(args.root, SOURCE1292_FILE)
     source1938_stale_authority_path = task_path(args.root, SOURCE1938_STALE_AUTHORITY)
+    source1944_authority_path = task_path(args.root, SOURCE1944_FILE)
+    source1946_authority_path = task_path(args.root, SOURCE1946_FILE)
+    source1947_authority_path = task_path(args.root, SOURCE1947_FILE)
     close_authority_path, proof_path = closed_owner_evidence_paths(args.audit_output)
     source_evidence_paths = (
         ()
@@ -4815,6 +5809,9 @@ def replace_manager(args: Args) -> str:
                 *((source1601_path,) if source1601_required(args) else ()),
                 *((empty_tree_authority_path,) if is_source1292_empty_tree(args) or is_source1292_descendant_tree(args) else ()),
                 *((source1938_stale_authority_path,) if is_source1938_semantic_exception(args) else ()),
+                *((source1944_authority_path,) if is_source1938_semantic_exception(args) else ()),
+                *((source1946_authority_path,) if is_source1938_semantic_exception(args) else ()),
+                *((source1947_authority_path,) if is_source1938_semantic_exception(args) else ()),
                 args.audit_output,
                 close_authority_path,
                 proof_path,
@@ -4958,6 +5955,12 @@ def replace_manager(args: Args) -> str:
                 require_snapshot(plan.empty_tree_authority, "Source-1292 replacement authority")
             if plan.stale_manager_authority is not None:
                 require_snapshot(plan.stale_manager_authority, "Source-1938 stale-manager Human shutdown authority")
+            if plan.source1944_authority is not None:
+                require_snapshot(plan.source1944_authority, "Source-1944 Human authority")
+            if plan.source1946_authority is not None:
+                require_snapshot(plan.source1946_authority, "Source-1946 Human authority")
+            if plan.source1947_authority is not None:
+                require_snapshot(plan.source1947_authority, "Source-1947 Human authority")
             record, audit_bytes = transition_audit(args.audit_output, audit_bytes, record, "mutating", completed=())
             # 🧑 "The agent failed. They did not run the experiment. Replace them. The replacement agent should finish the task."
             updated_old = replace_snapshot(plan.old, plan.old_after, "old manager")
@@ -4971,6 +5974,7 @@ def replace_manager(args: Args) -> str:
                 record, audit_bytes = transition_audit(args.audit_output, audit_bytes, record, "mutating", completed=tuple(completed))
             updated_historical: Snapshot | None = None
             updated_stale_manager: Snapshot | None = None
+            updated_secondary_stale_manager: Snapshot | None = None
             updated_archive: Snapshot | None = None
             if is_source1938_semantic_exception(args):
                 if (
@@ -4978,6 +5982,8 @@ def replace_manager(args: Args) -> str:
                     or plan.historical_after is None
                     or plan.stale_manager is None
                     or plan.stale_manager_after is None
+                    or plan.secondary_stale_manager is None
+                    or plan.secondary_stale_manager_after is None
                     or plan.archive_index is None
                     or plan.archive_index_after is None
                 ):
@@ -4996,6 +6002,19 @@ def replace_manager(args: Args) -> str:
                 )
                 completed.append(args.stale_manager_task)
                 record, audit_bytes = transition_audit(args.audit_output, audit_bytes, record, "mutating", completed=tuple(completed))
+                updated_secondary_stale_manager = replace_snapshot(
+                    plan.secondary_stale_manager,
+                    plan.secondary_stale_manager_after,
+                    "Source-1938 secondary stopped stale manager",
+                )
+                completed.append(SOURCE1938_SECONDARY_STALE_TASK)
+                record, audit_bytes = transition_audit(
+                    args.audit_output,
+                    audit_bytes,
+                    record,
+                    "mutating",
+                    completed=tuple(completed),
+                )
                 updated_archive = replace_snapshot(
                     plan.archive_index,
                     plan.archive_index_after,
@@ -5021,6 +6040,7 @@ def replace_manager(args: Args) -> str:
                 tuple(updated_children),
                 updated_historical,
                 updated_stale_manager,
+                updated_secondary_stale_manager,
                 updated_archive,
                 updated_todo,
                 successor,

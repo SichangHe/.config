@@ -162,6 +162,30 @@ SOURCE1624_AUTHORITY = (
     b"If they are a manager, temporarily manage their workers, then rebalance workers after you kill them all\r\n"
     b"If they have pending work items, organize all of those into a hierarchical Minimal Bullet Tree and send them to me to decide"
 )
+SOURCE1944_AUTHORITY = (
+    b"Subject: Re: Does SVM accuracy converge? Roadmap for human to take in paper revision\n\n"
+    b"Route these to separate suitable agents to work on. Spawn new ones if needed\r\n\r\n"
+    b"Based on our FPR/FNR box plots and the underlying stats, do we have enough test data s.t. more test data would probably not make a difference (results converge)? Should we argue for precision/recall instead? How exactly do we argue this, basically the eval is sufficient and there is no need for larger datasets?\r\n\r\n"
+    b"Current agent edit diff of the writeup is huge and it would be very hard for the human to go through. It will have to be an interactive process where an agent plan out what the human should look at and the human would edit that bit and leave feedback, and look at another part, while the agent address any feedback and change the rest of the agent edits and the human plan as suitable, and so on iteratively. Obviously this agent needs to be smart but also have all the resources and subagents in their disposal. Either way, start with a current plan based on what we have and tell the human 2 things to look at at a time. Let the other agents supply all the plots and writeup etc. from the TODO items previously given to managers but leave those works to those other agents"
+)
+SOURCE1946_AUTHORITY = (
+    "Subject: Re: Taking over DW cleanup — dw_cleanup_mgr.md\n\n"
+    "Why is it taking so damn long to clean it up? Don’t you just delete what’s not needed and commit what’s needed, push and rebase a bunch?\r\n\r\n"
+    "> On Sep 16, 2026, at 18:58, sichangheagent@gmail.com wrote:\r\n> \r\n"
+    "> No. The complete dw* inventory has been audited, but dw, dw4, and auxiliary working copies inside dw2 still need cleanup. They contain uncommitted files, and some current checkouts still contain Git LFS metadata that must be removed.\r\n> \r\n"
+    "> dw-main is permanently deleted. Before deletion, an independent review verified that everything useful in it had already been pushed and could be retrieved from the remotes.\r\n> \r\n"
+    "> The primary repositories in dw0, dw1, dw2, dw3, dw5, and dw6, including their docs, are clean and match the live remotes. The primary dw2 repository is clean; only its auxiliary working copies remain unfinished.\r\n> \r\n"
+    "> I am your only contact for this cleanup. You do not need to do anything. Cleanup is continuing; I will report again when the complete dw* inventory is clean and every useful change has been pushed.\r\n> \r\n\r\n"
+).encode()
+SOURCE1947_AUTHORITY = (
+    "Subject: Re: Does SVM accuracy converge? Roadmap for human to take in paper revision\n\n"
+    "Why is wl:1 not dw:0 responding to my email addressed to dw:0?\r\n"
+    "Did you give the agents my words verbatim? There seems to be deviation of what they report they think they should do\r\n"
+    "I also did not receive emails regarding pending task items created, so why are they not following procedures?\r\n"
+    "The agents should use different email chains\r\n\r\n"
+    "> On Sep 16, 2026, at 19:57, sichangheagent@gmail.com wrote:\r\n> \r\n"
+    "> Accepted. I am assigning these as two separate tasks: one agent will determine what the current FPR/FNR evidence can support about sample sufficiency, convergence, and whether precision/recall framing is preferable; another will run the interactive paper-review process and begin by sending you exactly two concrete things to review at a time. The interactive editor will consume outputs from the existing plot and writeup owners rather than duplicate their work.\r\n> \r\n\r\n"
+).encode()
 HUMAN_QUEUE = manager_replace.SOURCE1611_OLD_QUEUE
 SOURCE1597_QUEUE = manager_replace.SOURCE1597_OLD_QUEUE
 
@@ -778,7 +802,7 @@ class ManagerReplaceTests(unittest.TestCase):
             is_manager=True,
             pending=manager_replace.SOURCE1938_OLD_QUEUE,
             body="Agent-authored narrative must not reach the successor.\n",
-        )
+        ) + manager_replace.SOURCE1944_DISPOSITION_BLOCK.decode()
         (root / manager_replace.SOURCE1938_TASK).write_text(old, encoding="utf-8")
 
         for index, (task, _expected_sha256) in enumerate(manager_replace.SOURCE1938_PARENT_HISTORICAL, start=2):
@@ -794,8 +818,22 @@ class ManagerReplaceTests(unittest.TestCase):
             path.write_text(historical_parent, encoding="utf-8")
 
         child_specs = (
-            (manager_replace.SOURCE1938_LIVE_SHARED_TASK, "long_running", "dw:33", ("Preserve repository cleanup.",), True, SESSION_ID),
-            ("collab_recovery.md", "long_running", "dw:13", ("Preserve verified meeting follow-ups.",), True, "aaaaaaaa-2222-4333-8444-555555555555"),
+            (
+                manager_replace.SOURCE1938_LIVE_SHARED_TASK,
+                "long_running",
+                "dw:33",
+                ("Preserve repository cleanup.", manager_replace.SOURCE1946_CUSTODY_ITEM),
+                True,
+                SESSION_ID,
+            ),
+            (
+                "collab_recovery.md",
+                "long_running",
+                "dw:13",
+                (manager_replace.SOURCE1944_CUSTODY_ITEM, manager_replace.SOURCE1947_CUSTODY_ITEM),
+                True,
+                "aaaaaaaa-2222-4333-8444-555555555555",
+            ),
             ("dw_browser_explore.md", "running", "dw:12", ("Preserve browser exploration.",), False, ""),
             ("dw_gen_submgr.md", "blocked", "dw:32", (), True, ""),
             ("source1908_zoom_paper_manager.md", "long_running", "dw:3", (), True, "bbbbbbbb-2222-4333-8444-555555555555"),
@@ -820,6 +858,13 @@ class ManagerReplaceTests(unittest.TestCase):
             ("source1847_cc_rebuild.md", "running", "cc-through-july-2026:1", "dw:33", ("Preserve the complete Source-1847 lane.",)),
             ("meeting_open_audit.md", "running", "dw:57", "dw:13", ("Audit open collaborator-meeting items.",)),
             ("meeting_todo_launch.md", "long_running", "dw:14", "dw:13", ()),
+            (
+                manager_replace.SOURCE1938_SECONDARY_STALE_RETAINED_TASK,
+                "blocked",
+                manager_replace.SOURCE1938_SECONDARY_STALE_TARGET,
+                manager_replace.SOURCE1938_STALE_TARGET,
+                ("Preserve the Human-requested Pangram follow-up.",),
+            ),
             ("202608/dw_rescore_pages.md", "blocked", "dw:37", "dw:36", ()),
         )
         for task, status, target, manager, queue in nested_specs:
@@ -856,6 +901,17 @@ class ManagerReplaceTests(unittest.TestCase):
         stale_authority.write_bytes(SOURCE1624_AUTHORITY)
         stale_authority.chmod(0o600)
         self.assertEqual(manager_replace.SOURCE1938_STALE_AUTHORITY_SHA256, hashlib.sha256(SOURCE1624_AUTHORITY).hexdigest())
+        source1944_authority = root / manager_replace.SOURCE1944_FILE
+        source1944_authority.write_bytes(SOURCE1944_AUTHORITY)
+        source1944_authority.chmod(0o600)
+        source1946_authority = root / manager_replace.SOURCE1946_FILE
+        source1946_authority.write_bytes(SOURCE1946_AUTHORITY)
+        source1946_authority.chmod(0o600)
+        self.assertEqual(manager_replace.SOURCE1946_SHA256, hashlib.sha256(SOURCE1946_AUTHORITY).hexdigest())
+        source1947_authority = root / manager_replace.SOURCE1947_FILE
+        source1947_authority.write_bytes(SOURCE1947_AUTHORITY)
+        source1947_authority.chmod(0o600)
+        self.assertEqual(manager_replace.SOURCE1947_SHA256, hashlib.sha256(SOURCE1947_AUTHORITY).hexdigest())
 
         stale_queue = (
             "Preserve exact first Human Pangram item.",
@@ -876,6 +932,26 @@ class ManagerReplaceTests(unittest.TestCase):
         ).replace("blocked_on: fixture blocker\n", f"blocked_on: {manager_replace.SOURCE1938_STALE_BLOCKER}\n")
         (root / manager_replace.SOURCE1938_STALE_TASK).write_text(stale, encoding="utf-8")
 
+        secondary_stale = task_text(
+            status="blocked",
+            runat=manager_replace.SOURCE1938_SECONDARY_STALE_TARGET,
+            managerat=manager_replace.SOURCE1938_SECONDARY_STALE_MANAGER,
+            is_manager=True,
+            pending=(),
+            body=(
+                "Preserve the secondary stopped manager evidence exactly.\n"
+                f"(manager closed Codex agent after human shutdown; tmux target `{manager_replace.SOURCE1938_SECONDARY_STALE_TARGET}`; "
+                f"authority {manager_replace.SOURCE1938_STALE_AUTHORITY}:3-24)\n"
+            ),
+        ).replace(
+            "blocked_on: fixture blocker\n",
+            f"blocked_on: {manager_replace.SOURCE1938_SECONDARY_STALE_BLOCKER}\n",
+        )
+        (root / manager_replace.SOURCE1938_SECONDARY_STALE_TASK).write_text(
+            secondary_stale,
+            encoding="utf-8",
+        )
+
         historical = (
             "---\nversion: v1.0.0\nstatus: blocked\n"
             f"blocked_on: {manager_replace.SOURCE1938_HISTORICAL_BLOCKER}\n"
@@ -884,7 +960,7 @@ class ManagerReplaceTests(unittest.TestCase):
             "(manager closed Codex agent 09-12 09:43 PDT; tmux target `dw:33`; Codex session id not found.)\n"
         )
         (root / manager_replace.SOURCE1938_HISTORICAL_TASK).write_text(historical, encoding="utf-8")
-        archive = "current:\n\nprevious:\ndw_recon_live_mgr.md dw:33\ndw_fpr_new.md dw:14\n"
+        archive = "current:\n\nprevious:\ndw_recon_live_mgr.md dw:33\ndw_fpr_new.md dw:14\ndw_root_new.md dw:15\n"
         (root / manager_replace.SOURCE1938_ARCHIVE_INDEX).write_text(archive, encoding="utf-8")
 
         todo_rows = [f"{manager_replace.SOURCE1938_TASK} {manager_replace.SOURCE1938_OLD_TARGET}"]
@@ -992,6 +1068,20 @@ class ManagerReplaceTests(unittest.TestCase):
         stack.enter_context(
             patch.object(
                 manager_replace,
+                "SOURCE1938_SECONDARY_STALE_SHA256",
+                hashlib.sha256((args.root / manager_replace.SOURCE1938_SECONDARY_STALE_TASK).read_bytes()).hexdigest(),
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                manager_replace,
+                "SOURCE1944_SHA256",
+                hashlib.sha256((args.root / manager_replace.SOURCE1944_FILE).read_bytes()).hexdigest(),
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                manager_replace,
                 "SOURCE1938_CLOSED_OWNER_ENVELOPE_SHA256",
                 source_envelope_sha256 or args.authority_envelope_sha256,
             )
@@ -1086,6 +1176,10 @@ class ManagerReplaceTests(unittest.TestCase):
         pointer = f"(from agent {producer_target} {report_path})"
         receiver_target = parsed(receiver_path, root).runat
         owner_bytes = receiver_path.read_bytes()
+        terminal_human_block = b""
+        if receiver_task == args.old_task and owner_bytes.endswith(manager_replace.SOURCE1944_PENDING_BLOCK):
+            terminal_human_block = manager_replace.SOURCE1944_PENDING_BLOCK
+            owner_bytes = owner_bytes[: -len(terminal_human_block)]
         separator_bytes = 1 if not owner_bytes or owner_bytes.endswith(b"\n") else 2
         message = b"Retained child progress only.\n"
         message_sha256 = hashlib.sha256(message).hexdigest()
@@ -1146,7 +1240,7 @@ class ManagerReplaceTests(unittest.TestCase):
                 f"\n{pointer}\n"
                 + "(pending marker cleared line=342: report-only: Reviewed retained dw:33 progress; existing custody and ordered queue remain authoritative; no new Human work was requested.)\n"
             )
-        receiver_path.write_text(receiver_path.read_text(encoding="utf-8") + receipt, encoding="utf-8")
+        receiver_path.write_bytes(owner_bytes + receipt.encode() + terminal_human_block)
         return report_path
 
     def clear_source1938_pending_report(self, root: Path, report_path: Path, comment: str) -> int:
@@ -2880,6 +2974,9 @@ class ManagerReplaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
             old_historical_body = manager_replace.task_body((root / args.historical_task).read_bytes())
+            secondary_stale_body = manager_replace.task_body(
+                (root / manager_replace.SOURCE1938_SECONDARY_STALE_TASK).read_bytes()
+            )
             original_children = {
                 child.task: parsed(root / child.task, root).pending_task_items
                 for child in args.children
@@ -2889,11 +2986,18 @@ class ManagerReplaceTests(unittest.TestCase):
 
             self.assertIn("migrated 6 active child", result)
             self.assertEqual("done", parsed(root / args.old_task, root).status)
+            self.assertNotIn(
+                manager_replace.SOURCE1944_DISPOSITION_BLOCK.decode(),
+                (root / args.old_task).read_text(encoding="utf-8"),
+            )
             successor = parsed(root / args.successor_task, root)
             self.assertEqual("blocked", successor.status)
             self.assertEqual(manager_replace.SOURCE1938_SUCCESSOR_TARGET, successor.runat)
             self.assertEqual(
-                (manager_replace.SOURCE1938_GOAL, *manager_replace.SOURCE1938_OLD_QUEUE),
+                (
+                    manager_replace.SOURCE1938_GOAL,
+                    *manager_replace.SOURCE1938_OLD_QUEUE,
+                ),
                 successor.pending_task_items,
             )
             self.assertNotIn("Agent-authored narrative", (root / args.successor_task).read_text(encoding="utf-8"))
@@ -2912,6 +3016,22 @@ class ManagerReplaceTests(unittest.TestCase):
             stale = parsed(root / args.stale_manager_task, root)
             self.assertEqual("done", stale.status)
             self.assertEqual((), stale.pending_task_items)
+            secondary_stale = parsed(root / manager_replace.SOURCE1938_SECONDARY_STALE_TASK, root)
+            self.assertEqual("done", secondary_stale.status)
+            self.assertEqual((), secondary_stale.pending_task_items)
+            self.assertEqual(
+                secondary_stale_body,
+                manager_replace.task_body(
+                    (root / manager_replace.SOURCE1938_SECONDARY_STALE_TASK).read_bytes()
+                ),
+            )
+            self.assertEqual(
+                (root / manager_replace.SOURCE1938_SECONDARY_STALE_RETAINED_TASK,),
+                manager_replace.authoritative_active_target_task_paths(
+                    root,
+                    manager_replace.SOURCE1938_SECONDARY_STALE_TARGET,
+                ),
+            )
             self.assertEqual(
                 (root / manager_replace.SOURCE1938_LIVE_SHARED_TASK,),
                 manager_replace.authoritative_active_target_task_paths(root, manager_replace.SOURCE1938_SHARED_TARGET),
@@ -2923,6 +3043,54 @@ class ManagerReplaceTests(unittest.TestCase):
                 audit["stale_manager_queue_sha256"],
             )
             self.assertEqual(manager_replace.json_digest(audit["source1938_topology"]), audit["source1938_topology_sha256"])
+
+    def test_source1938_preserves_topology_bound_children_of_retained_dw14_manager(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            worker_task = "meeting_followup_worker.md"
+            worker = task_text(
+                status="running",
+                runat="dw:60",
+                managerat=manager_replace.SOURCE1938_STALE_TARGET,
+                is_manager=False,
+                pending=("Complete the Human-requested collaborator follow-up.",),
+            )
+            (root / worker_task).write_text(worker, encoding="utf-8")
+            todo_path = root / "TODO.md"
+            todo = todo_path.read_text(encoding="utf-8").replace(
+                "\nhuman pending:\n",
+                f"{worker_task} dw:60\n\nhuman pending:\n",
+                1,
+            )
+            todo_path.write_text(todo, encoding="utf-8")
+            worker_identity = PaneIdentity("dw:60.0", "%160", 16000, 2600)
+            rebound_protected = tuple(sorted((*protected, worker_identity), key=lambda identity: identity.target))
+            rebound = replace(
+                args,
+                todo_sha256=sha(todo),
+                protected_targets=tuple(identity.target for identity in rebound_protected),
+                protected_targets_sha256=manager_replace.json_digest(
+                    [
+                        {
+                            "target": identity.target,
+                            "pane_id": identity.pane_id,
+                            "pid": identity.pid,
+                            "start_ticks": identity.start_ticks,
+                        }
+                        for identity in rebound_protected
+                    ]
+                ),
+            )
+
+            with self.source1938_runtime({"old_live": True}, rebound, rebound_protected, historical_sha):
+                result = replace_manager(rebound)
+
+            self.assertIn("sole ownership", result)
+            self.assertEqual(worker, (root / worker_task).read_text(encoding="utf-8"))
+            audit = json.loads(rebound.audit_output.read_text(encoding="utf-8"))
+            rows = audit["source1938_topology"]["rows"]
+            self.assertIn(worker_task, [row["task"] for row in rows])
+            self.assertEqual("done", parsed(root / rebound.stale_manager_task, root).status)
 
     def test_source1938_authority_binding_is_exact_and_non_reusable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2987,6 +3155,124 @@ class ManagerReplaceTests(unittest.TestCase):
                 self.assertEqual(0, state.get("stop_calls", 0))
                 self.assertFalse((root / args.successor_task).exists())
 
+    def test_source1938_secondary_stale_manager_mismatch_fails_before_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            state: dict[str, object] = {"old_live": True}
+            with (
+                self.source1938_runtime(state, args, protected, historical_sha),
+                patch.object(manager_replace, "SOURCE1938_SECONDARY_STALE_SHA256", "0" * 64),
+                self.assertRaisesRegex(ReplaceError, "secondary stale-manager record"),
+            ):
+                replace_manager(args)
+            self.assertEqual(0, state.get("stop_calls", 0))
+            self.assertFalse((root / args.successor_task).exists())
+
+    def test_source1938_source1944_authority_or_transport_mismatch_fails_before_close(self) -> None:
+        for drift in ("authority", "transport"):
+            with self.subTest(drift=drift), tempfile.TemporaryDirectory() as tmp:
+                root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+                rebound = args
+                if drift == "authority":
+                    authority = root / manager_replace.SOURCE1944_FILE
+                    authority.write_bytes(authority.read_bytes() + b"\ndrift\n")
+                else:
+                    old = root / args.old_task
+                    changed = old.read_bytes().replace(
+                        manager_replace.SOURCE1944_DISPOSITION_BLOCK,
+                        b"\n(record and delegate manager_mail/85c5dff58359-1944.txt)\n",
+                    )
+                    old.write_bytes(changed)
+                    rebound = replace(args, old_sha256=hashlib.sha256(changed).hexdigest())
+                state: dict[str, object] = {"old_live": True}
+                with self.source1938_runtime(state, rebound, protected, historical_sha), self.assertRaisesRegex(
+                    ReplaceError,
+                    "Source-1944 Human authority line envelope changed|Source-1944 transport disposition",
+                ):
+                    replace_manager(rebound)
+                self.assertEqual(0, state.get("stop_calls", 0))
+                self.assertFalse((root / args.successor_task).exists())
+
+    def test_source1938_late_human_authority_and_custody_mismatch_fail_before_close(self) -> None:
+        for source_file, label in (
+            (manager_replace.SOURCE1946_FILE, "Source-1946 Human authority changed"),
+            (manager_replace.SOURCE1947_FILE, "Source-1947 Human authority changed"),
+        ):
+            with self.subTest(source_file=source_file), tempfile.TemporaryDirectory() as tmp:
+                root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+                authority = root / source_file
+                authority.write_bytes(authority.read_bytes() + b"drift\n")
+                state: dict[str, object] = {"old_live": True}
+                with self.source1938_runtime(state, args, protected, historical_sha), self.assertRaisesRegex(
+                    ReplaceError,
+                    label,
+                ):
+                    replace_manager(args)
+                self.assertEqual(0, state.get("stop_calls", 0))
+                self.assertFalse((root / args.successor_task).exists())
+
+        for child_task, queue, label in (
+            (
+                manager_replace.SOURCE1938_LIVE_SHARED_TASK,
+                ("Preserve repository cleanup.",),
+                "exact Source-1946 cleanup custody",
+            ),
+            (
+                manager_replace.SOURCE1944_CUSTODY_TASK,
+                (manager_replace.SOURCE1947_CUSTODY_ITEM, manager_replace.SOURCE1944_CUSTODY_ITEM),
+                "Source-1944 disposition and child custody disagree",
+            ),
+        ):
+            with self.subTest(child_task=child_task), tempfile.TemporaryDirectory() as tmp:
+                root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+                child_path = root / child_task
+                changed = manager_replace.render_pending_items(child_path.read_text(encoding="utf-8"), queue).encode()
+                child_path.write_bytes(changed)
+                rebound = replace(
+                    args,
+                    children=tuple(
+                        replace(
+                            child,
+                            sha256=hashlib.sha256(changed).hexdigest(),
+                            queue_sha256=manager_replace.json_digest(list(queue)),
+                        )
+                        if child.task == child_task
+                        else child
+                        for child in args.children
+                    ),
+                )
+                state = {"old_live": True}
+                with self.source1938_runtime(state, rebound, protected, historical_sha), self.assertRaisesRegex(
+                    ReplaceError,
+                    label,
+                ):
+                    replace_manager(rebound)
+                self.assertEqual(0, state.get("stop_calls", 0))
+                self.assertFalse((root / args.successor_task).exists())
+
+    def test_source1938_late_human_authority_is_rechecked_before_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            authority = root / manager_replace.SOURCE1947_FILE
+            original = manager_replace.reserve_audit
+            close_authority, _proof = manager_replace.closed_owner_evidence_paths(args.audit_output)
+
+            def drift_after_preparation(path: Path, record: dict[str, object]) -> bytes:
+                result = original(path, record)
+                if path == close_authority:
+                    authority.write_bytes(authority.read_bytes() + b"concurrent drift\n")
+                return result
+
+            state: dict[str, object] = {"old_live": True}
+            with (
+                self.source1938_runtime(state, args, protected, historical_sha),
+                patch.object(manager_replace, "reserve_audit", side_effect=drift_after_preparation),
+                self.assertRaisesRegex(ReplaceError, "pre-close Source-1947 Human authority changed"),
+            ):
+                replace_manager(args)
+            self.assertEqual(0, state.get("stop_calls", 0))
+            self.assertFalse((root / args.successor_task).exists())
+
     def test_source1938_stale_manager_child_activation_fails_before_close(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
@@ -3012,7 +3298,7 @@ class ManagerReplaceTests(unittest.TestCase):
             with (
                 self.source1938_runtime(state, args, protected, historical_sha),
                 patch.object(manager_replace, "reserve_audit", side_effect=activate_after_preparation),
-                self.assertRaisesRegex(ReplaceError, "stopped stale manager gained an active child before guarded manager close"),
+                self.assertRaisesRegex(ReplaceError, "pre-close retained stopped-target child set changed"),
             ):
                 replace_manager(args)
             self.assertEqual(0, state.get("stop_calls", 0))
@@ -3407,7 +3693,7 @@ class ManagerReplaceTests(unittest.TestCase):
             source_child = (root / manager_replace.SOURCE1938_LIVE_SHARED_TASK).read_bytes()
             state = self.source1938_stop_failed(args, protected, historical_sha)
             source_bytes = args.audit_output.read_bytes()
-            first_report = self.append_source1938_report_receipt(root, args)
+            first_report = self.append_source1938_report_receipt(root, args, pending=True)
             second_report = self.append_source1938_report_receipt(root, args, "second")
             child_report = self.append_source1938_report_receipt(
                 root,
@@ -3419,29 +3705,29 @@ class ManagerReplaceTests(unittest.TestCase):
             )
             current_old = (root / args.old_task).read_text(encoding="utf-8")
             current_child = (root / manager_replace.SOURCE1938_LIVE_SHARED_TASK).read_bytes()
-            artifacts, _suffix = manager_replace.source1938_authenticated_report(
-                args,
-                source_old,
-                current_old.encode(),
-                source_child,
-            )
-            self.assertEqual((first_report, second_report), tuple(artifact.path for artifact in artifacts))
-            child_artifacts, _child_suffix = manager_replace.source1938_authenticated_retained_child_reports(
-                args,
-                source_child,
-                current_child,
-            )
-            self.assertEqual((child_report,), tuple(artifact.path for artifact in child_artifacts))
             current_children = tuple(
                 replace(child, sha256=hashlib.sha256(current_child).hexdigest())
                 if child.task == manager_replace.SOURCE1938_LIVE_SHARED_TASK
                 else child
                 for child in args.children
             )
+            current_args = replace(args, children=current_children)
+            artifacts, _suffix = manager_replace.source1938_authenticated_report(
+                current_args,
+                source_old,
+                current_old.encode(),
+                source_child,
+            )
+            self.assertEqual((first_report, second_report), tuple(artifact.path for artifact in artifacts))
+            child_artifacts, _child_suffix = manager_replace.source1938_authenticated_retained_child_reports(
+                current_args,
+                source_child,
+                current_child,
+            )
+            self.assertEqual((child_report,), tuple(artifact.path for artifact in child_artifacts))
             rebased = replace(
-                args,
+                current_args,
                 old_sha256=sha(current_old),
-                children=current_children,
                 audit_output=args.audit_output.with_name("source1938-rebased.json"),
                 closed_owner_audit=args.audit_output,
                 closed_owner_audit_sha256=hashlib.sha256(source_bytes).hexdigest(),
@@ -3460,6 +3746,12 @@ class ManagerReplaceTests(unittest.TestCase):
             self.assertIn("sole ownership", result)
             self.assertEqual(source_bytes, args.audit_output.read_bytes())
             self.assertEqual("done", parsed(root / args.old_task, root).status)
+            retired_old = (root / args.old_task).read_text(encoding="utf-8")
+            self.assertNotIn("(pending)\n", retired_old)
+            self.assertIn(
+                "authenticated report preserved during guarded Source-1938 replacement",
+                retired_old,
+            )
             self.assertEqual("blocked", parsed(root / args.successor_task, root).status)
             record = json.loads(rebased.audit_output.read_text(encoding="utf-8"))
             self.assertEqual("committed", record["state"])
@@ -3473,7 +3765,87 @@ class ManagerReplaceTests(unittest.TestCase):
             root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
             source_envelope_sha256 = args.authority_envelope_sha256
             state = self.source1938_stop_failed(args, protected, historical_sha)
-            source_audit = args.audit_output.read_bytes()
+            legacy = json.loads(args.audit_output.read_text(encoding="utf-8"))
+            legacy_images = {
+                args.old_task: (root / args.old_task).read_bytes()[: -len(manager_replace.SOURCE1944_DISPOSITION_BLOCK)],
+                manager_replace.SOURCE1938_LIVE_SHARED_TASK: manager_replace.render_pending_items(
+                    (root / manager_replace.SOURCE1938_LIVE_SHARED_TASK).read_text(encoding="utf-8"),
+                    ("Preserve repository cleanup.",),
+                ).encode(),
+                manager_replace.SOURCE1944_CUSTODY_TASK: manager_replace.render_pending_items(
+                    (root / manager_replace.SOURCE1944_CUSTODY_TASK).read_text(encoding="utf-8"),
+                    (),
+                ).encode(),
+            }
+            legacy["old_sha256"] = hashlib.sha256(legacy_images[args.old_task]).hexdigest()
+            child_bindings = {value["task"]: value for value in legacy["children"]}
+            topology = legacy["source1938_topology"]
+            topology_rows = {value["task"]: value for value in topology["rows"]}
+            for entry in legacy["files"]:
+                task = entry["task"]
+                if task not in legacy_images:
+                    continue
+                before = legacy_images[task]
+                entry["before"] = manager_replace.encoded(before)
+                if task != args.old_task:
+                    after = manager_replace.migrate_manager_owner(
+                        before,
+                        args.old_target,
+                        args.new_target,
+                        root,
+                    )
+                    entry["after"] = manager_replace.encoded(after)
+                    value = manager_replace.metadata(before, root, f"legacy source child {task}")
+                    child_bindings[task]["sha256"] = hashlib.sha256(before).hexdigest()
+                    child_bindings[task]["queue_sha256"] = manager_replace.json_digest(
+                        list(value.pending_task_items)
+                    )
+                    after_value = manager_replace.metadata(after, root, f"legacy migrated child {task}")
+                    topology_rows[task]["sha256"] = hashlib.sha256(after).hexdigest()
+                    topology_rows[task]["queue_sha256"] = manager_replace.json_digest(
+                        list(after_value.pending_task_items)
+                    )
+            topology["rows_sha256"] = manager_replace.json_digest(topology["rows"])
+            legacy["source1938_topology_sha256"] = manager_replace.json_digest(topology)
+            legacy.pop("record_sha256")
+            legacy.pop("secondary_stale_manager_task")
+            legacy.pop("secondary_stale_manager_sha256")
+            legacy.pop("source1944_authority_file")
+            legacy.pop("source1944_authority_sha256")
+            legacy.pop("source1944_disposition")
+            legacy.pop("source1946_authority_file")
+            legacy.pop("source1946_authority_sha256")
+            legacy.pop("source1947_authority_file")
+            legacy.pop("source1947_authority_sha256")
+            legacy["files"] = [
+                entry
+                for entry in legacy["files"]
+                if entry["task"] != manager_replace.SOURCE1938_SECONDARY_STALE_TASK
+            ]
+            source_audit = manager_replace.serialized_audit(legacy)
+            args.audit_output.write_bytes(source_audit)
+            prepared = dict(legacy)
+            prepared["state"] = "prepared"
+            prepared["completed_writes"] = []
+            prepared.pop("error", None)
+            prepared_bytes = manager_replace.serialized_audit(prepared)
+            authority_path, _proof_path = manager_replace.closed_owner_evidence_paths(args.audit_output)
+            authority_path.write_bytes(
+                manager_replace.serialized_audit(
+                    manager_replace.close_authority_record(
+                        args,
+                        prepared_bytes,
+                        str(legacy["close_proof_commitment"]),
+                    )
+                )
+            )
+            cleanup_path = root / manager_replace.SOURCE1938_LIVE_SHARED_TASK
+            cleanup_path.write_bytes(
+                manager_replace.render_pending_items(
+                    cleanup_path.read_text(encoding="utf-8"),
+                    parsed(cleanup_path, root).pending_task_items,
+                ).encode()
+            )
             self.append_source1938_report_receipt(root, args, "envelope-old")
             self.append_source1938_report_receipt(
                 root,
@@ -3913,6 +4285,7 @@ class ManagerReplaceTests(unittest.TestCase):
                 source,
                 collab_path.read_bytes(),
                 transitions,
+                manager_replace.SOURCE1944_CHILD_DISPOSITION,
             )
 
             self.assertEqual((report,), tuple(artifact.path for artifact in artifacts))
@@ -3921,6 +4294,94 @@ class ManagerReplaceTests(unittest.TestCase):
             assert isinstance(transition_binding, list)
             self.assertEqual(1, len(transition_binding))
             self.assertEqual((manager_replace.TASK_LOCK_SOURCE_PATH,), transition_sources)
+
+    def test_source1938_direct_child_pending_reports_preserve_staged_human_custody(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            state = self.source1938_stop_failed(args, protected, historical_sha)
+            source_record = json.loads(args.audit_output.read_text(encoding="utf-8"))
+            collab_path = root / manager_replace.SOURCE1944_CUSTODY_TASK
+            source = manager_replace.render_pending_items(collab_path.read_text(encoding="utf-8"), ()).encode()
+            collab_path.write_bytes(source)
+            first = self.append_source1938_report_receipt(
+                root,
+                args,
+                "collab-pending-before-source1944",
+                receiver_task=manager_replace.SOURCE1944_CUSTODY_TASK,
+                producer_task="meeting_open_audit.md",
+                producer_target="dw:57",
+                pending=True,
+            )
+            collab_path.write_bytes(
+                manager_replace.render_pending_items(
+                    collab_path.read_text(encoding="utf-8"),
+                    (manager_replace.SOURCE1944_CUSTODY_ITEM,),
+                ).encode()
+            )
+            second = self.append_source1938_report_receipt(
+                root,
+                args,
+                "collab-pending-after-source1944",
+                receiver_task=manager_replace.SOURCE1944_CUSTODY_TASK,
+                producer_task="meeting_open_audit.md",
+                producer_target="dw:57",
+                pending=True,
+            )
+            collab_path.write_bytes(
+                manager_replace.render_pending_items(
+                    collab_path.read_text(encoding="utf-8"),
+                    (manager_replace.SOURCE1944_CUSTODY_ITEM, manager_replace.SOURCE1947_CUSTODY_ITEM),
+                ).encode()
+            )
+            third = self.append_source1938_report_receipt(
+                root,
+                args,
+                "collab-pending-after-source1947",
+                receiver_task=manager_replace.SOURCE1944_CUSTODY_TASK,
+                producer_task="meeting_open_audit.md",
+                producer_target="dw:57",
+                pending=True,
+            )
+            current = collab_path.read_bytes()
+            artifacts, binding, transition_sources = manager_replace.source1938_watcher_child_reports(
+                args,
+                source_record,
+                manager_replace.SOURCE1944_CUSTODY_TASK,
+                source,
+                current,
+                {},
+                manager_replace.SOURCE1944_CHILD_DISPOSITION,
+            )
+
+            self.assertEqual((first, second, third), tuple(artifact.path for artifact in artifacts))
+            self.assertEqual(current, collab_path.read_bytes())
+            self.assertEqual((), transition_sources)
+            appended = binding["appended_receipts"]
+            self.assertIsInstance(appended, list)
+            assert isinstance(appended, list)
+            self.assertEqual(
+                [
+                    manager_replace.json_digest([]),
+                    manager_replace.json_digest([manager_replace.SOURCE1944_CUSTODY_ITEM]),
+                    manager_replace.json_digest(
+                        [manager_replace.SOURCE1944_CUSTODY_ITEM, manager_replace.SOURCE1947_CUSTODY_ITEM]
+                    ),
+                ],
+                [receipt["owner_queue_sha256"] for receipt in appended],
+            )
+            self.assertFalse(state.get("old_live", True))
+
+            third.write_bytes(third.read_bytes() + b"tampered\n")
+            with self.assertRaisesRegex(ReplaceError, "authenticated sequential report transfer"):
+                manager_replace.source1938_watcher_child_reports(
+                    args,
+                    source_record,
+                    manager_replace.SOURCE1944_CUSTODY_TASK,
+                    source,
+                    current,
+                    {},
+                    manager_replace.SOURCE1944_CHILD_DISPOSITION,
+                )
 
     def test_source1938_direct_child_watcher_ledger_is_reauthenticated_after_crash(self) -> None:
         class SimulatedCrash(BaseException):
@@ -4179,7 +4640,9 @@ class ManagerReplaceTests(unittest.TestCase):
                         replace(
                             child,
                             sha256=hashlib.sha256(child_data).hexdigest(),
-                            queue_sha256=manager_replace.json_digest(["Changed retained queue."]),
+                            queue_sha256=manager_replace.json_digest(
+                                list(parsed(child_path, root).pending_task_items)
+                            ),
                         )
                         if child.task == manager_replace.SOURCE1938_LIVE_SHARED_TASK
                         else child
@@ -4223,7 +4686,7 @@ class ManagerReplaceTests(unittest.TestCase):
                 try:
                     rebased = self.bind_source1938_current_rebase(rebased, state, protected, historical_sha)
                 except ReplaceError:
-                    if drift not in {"child", "todo"}:
+                    if drift not in {"child", "second-receipt", "todo"}:
                         raise
                     paths = manager_replace.markdown_paths(root)
                     rebased = replace(
