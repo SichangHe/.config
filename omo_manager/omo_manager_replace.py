@@ -39,6 +39,9 @@ from omo_manager.omo_task_status import (
     TODO_ROW_RE,
     active_child_task_refs,
     authoritative_active_target_task_paths,
+    cleared_pending_task_text,
+    current_target_task_paths,
+    has_pending_marker,
     root_membership_lock,
     update_frontmatter_status,
 )
@@ -175,6 +178,20 @@ SOURCE1938_HISTORICAL_SHA256 = "3b3ffbb286a2397ad2c422510be002e0e7bbba09c24f3c5d
 SOURCE1938_ARCHIVE_INDEX = "202608/old_todos.md"
 SOURCE1938_HISTORICAL_MANAGER = "dw:31"
 SOURCE1938_HISTORICAL_BLOCKER = "paused by direct human shutdown instruction routed to pending_task_items_0912.md; non-human pane dw:33 closed and task record preserved for explicit resume"
+SOURCE1938_STALE_TASK = "dw_fpr_new.md"
+SOURCE1938_STALE_MANAGER_SHA256 = "dbebec48a3b5cb3fac614c5ec307c39b994927f05464db5b04db41e14fcdfcbd"
+SOURCE1938_STALE_TARGET = "dw:14"
+SOURCE1938_STALE_MANAGER = "config:23"
+SOURCE1938_STALE_AUTHORITY = "202608/manager_mail/85c5dff58359-1624.txt"
+SOURCE1938_STALE_AUTHORITY_SHA256 = "ae9a6a4851883a80082aa0c139f0746cd44d02d3d673328344c900bb03750810"
+SOURCE1938_STALE_BLOCKER = (
+    "paused by direct human shutdown instruction routed to 202608/purge_agents_1624.md; non-human pane dw:14 closed and pending queue preserved for explicit resume; "
+    "authority 202608/manager_mail/85c5dff58359-1624.txt:3-24"
+)
+SOURCE1938_PARENT_HISTORICAL = (
+    ("202608/close_agents_1256.md", "66b2777e059e5663e6b40772d30f46b71833da4f1a265bef0c6ab8d6fd07f424"),
+    ("202608/unslop_skill_repair_1119.md", "02938b6dd5ec55b5fb3267872d90dc93563a43d756eb8f58faabd0d4c87c8c5c"),
+)
 # 🧑 Source `manager_mail/85c5dff58359-1938.txt:3-7`: "Replace this agent ... actually start those agents to handle those items."
 SOURCE1938_DIRECTIVE = (
     "Subject: Re: Accepted: DW status and collaborator-meeting follow-up — dw_gen_submgr.md\n\n"
@@ -289,6 +306,8 @@ class Args:
     historical_task: str = ""
     historical_sha256: str = ""
     archive_index_sha256: str = ""
+    stale_manager_task: str = ""
+    stale_manager_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -343,6 +362,10 @@ class Plan:
     historical_after: bytes | None = None
     archive_index: Snapshot | None = None
     archive_index_after: bytes | None = None
+    stale_manager: Snapshot | None = None
+    stale_manager_after: bytes | None = None
+    stale_manager_authority: Snapshot | None = None
+    stale_manager_queue: tuple[str, ...] = ()
     source1938_topology: dict[str, object] | None = None
 
 
@@ -403,6 +426,8 @@ class ParsedArgs(argparse.Namespace):
     historical_task: str = ""
     historical_sha256: str = ""
     archive_index_sha256: str = ""
+    stale_manager_task: str = ""
+    stale_manager_sha256: str = ""
 
 
 def digest(data: bytes) -> str:
@@ -543,6 +568,8 @@ def is_source1938_semantic_exception(args: Args) -> bool:
         and args.authority_envelope_sha256 == SOURCE1938_ENVELOPE_SHA256
         and args.historical_task == SOURCE1938_HISTORICAL_TASK
         and args.historical_sha256 == SOURCE1938_HISTORICAL_SHA256
+        and args.stale_manager_task == SOURCE1938_STALE_TASK
+        and args.stale_manager_sha256 == SOURCE1938_STALE_MANAGER_SHA256
         and SHA256_RE.fullmatch(args.archive_index_sha256) is not None
     )
 
@@ -702,6 +729,8 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--historical-task", default="")
     _ = parser.add_argument("--historical-sha256", default="")
     _ = parser.add_argument("--archive-index-sha256", default="")
+    _ = parser.add_argument("--stale-manager-task", default="")
+    _ = parser.add_argument("--stale-manager-sha256", default="")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     for value, label in (
         (parsed.old_sha256, "old task"),
@@ -719,6 +748,11 @@ def parse_args(argv: list[str]) -> Args:
         or SHA256_RE.fullmatch(parsed.archive_index_sha256) is None
     ):
         parser.error("historical reconciliation requires one canonical task and exact historical/archive SHA-256 bindings")
+    if any((parsed.stale_manager_task, parsed.stale_manager_sha256)) and (
+        TASK_REF_RE.fullmatch(parsed.stale_manager_task) is None
+        or SHA256_RE.fullmatch(parsed.stale_manager_sha256) is None
+    ):
+        parser.error("stale-manager reconciliation requires one canonical task and exact SHA-256 binding")
     if parsed.old_task == parsed.successor_task:
         parser.error("old and successor tasks must differ")
     if PANE_ID_RE.fullmatch(parsed.old_pane_id) is None or parsed.old_pane_pid <= 0 or parsed.old_pane_start_ticks <= 0:
@@ -791,6 +825,8 @@ def parse_args(argv: list[str]) -> Args:
         historical_task=parsed.historical_task,
         historical_sha256=parsed.historical_sha256,
         archive_index_sha256=parsed.archive_index_sha256,
+        stale_manager_task=parsed.stale_manager_task,
+        stale_manager_sha256=parsed.stale_manager_sha256,
     )
     try:
         validate_targets(result)
@@ -1534,6 +1570,9 @@ def source1938_archive_after(data: bytes) -> bytes:
     index = rows[0]
     ending = lines[index][len(lines[index].rstrip("\r\n")) :]
     lines[index] = f"dw_recon_live_mgr.md retired{ending}"
+    stale_rows = [line for line in lines if line.rstrip("\r\n") == f"{SOURCE1938_STALE_TASK} {SOURCE1938_STALE_TARGET}"]
+    if len(stale_rows) != 1:
+        raise ReplaceError("historical archive index lacks one exact stopped Pangram-manager row")
     return "".join(lines).encode()
 
 
@@ -1553,6 +1592,68 @@ def validate_source1938_historical(args: Args, historical: Snapshot, archive: Sn
     ):
         raise ReplaceError("Source-1938 historical record does not preserve the exact Human hold/evidence")
     return source1938_historical_after(args.root, historical.data), source1938_archive_after(archive.data)
+
+
+def validate_source1938_stale_manager(
+    args: Args,
+    stale: Snapshot,
+    authority: Snapshot,
+) -> tuple[bytes, tuple[str, ...]]:
+    """Close only the Human-stopped stale manager while retaining its queue in the audit."""
+
+    if (
+        args.stale_manager_sha256 != SOURCE1938_STALE_MANAGER_SHA256
+        or digest(stale.data) != SOURCE1938_STALE_MANAGER_SHA256
+        or digest(authority.data) != SOURCE1938_STALE_AUTHORITY_SHA256
+    ):
+        raise ReplaceError("Source-1938 stale-manager record or Human shutdown authority changed")
+    try:
+        authority_lines = authority.data.decode().splitlines()
+        stale_text = stale.data.decode()
+    except UnicodeDecodeError as exc:
+        raise ReplaceError(f"Source-1938 stale-manager evidence is not UTF-8: {exc}") from exc
+    if (
+        len(authority_lines) < 24
+        or authority_lines[2] != "Kill these agents immediately:"
+        or authority_lines[20] != f"{SOURCE1938_STALE_TASK} {SOURCE1938_STALE_TARGET}"
+        or authority_lines[23] != "If they are a manager, temporarily manage their workers, then rebalance workers after you kill them all"
+    ):
+        raise ReplaceError("Source-1938 stale-manager authority does not bind the exact Human shutdown")
+    value = metadata(stale.data, args.root, "Source-1938 stopped stale manager")
+    close_note = (
+        f"(manager closed Codex agent after human shutdown; tmux target `{SOURCE1938_STALE_TARGET}`; "
+        f"authority {SOURCE1938_STALE_AUTHORITY}:3-24)"
+    )
+    if (
+        value.version != TASK_FRONTMATTER_V1
+        or value.status != "blocked"
+        or value.blocked_on != SOURCE1938_STALE_BLOCKER
+        or value.runat != SOURCE1938_STALE_TARGET
+        or value.managerat != SOURCE1938_STALE_MANAGER
+        or value.tool != "codex"
+        or not value.is_manager
+        or not value.pending_task_items
+        or has_pending_marker(stale_text)
+        or close_note not in stale_text.splitlines()
+    ):
+        raise ReplaceError("Source-1938 stale-manager record does not preserve the exact stopped owner and queue")
+    if active_child_task_refs(args.root, stale.path, value.runat):
+        raise ReplaceError("Source-1938 stopped stale manager unexpectedly owns an active child")
+    cleared = cleared_pending_task_text(stale_text, args.root)
+    after = update_frontmatter_status(cleared, "done", "", args.root).encode()
+    closed = metadata(after, args.root, "Source-1938 stopped stale manager after image")
+    if (
+        closed.status != "done"
+        or closed.runat != value.runat
+        or closed.managerat != value.managerat
+        or closed.tool != value.tool
+        or closed.is_manager != value.is_manager
+        or closed.session_id != value.session_id
+        or closed.pending_task_items
+        or task_body(after) != task_body(stale.data)
+    ):
+        raise ReplaceError("Source-1938 stale-manager close would alter retained evidence")
+    return after, value.pending_task_items
 
 
 def require_source1485_umbrella_previous(root: Path, data: bytes) -> None:
@@ -1689,8 +1790,16 @@ def validate_targets(args: Args) -> None:
         raise ReplaceError("authority-envelope child alias is restricted to exact Source-1292 descendant mode")
     if args.authority_envelope_task == args.old_task and not is_source_only_semantic_exception(args):
         raise ReplaceError("authority-envelope old-task alias is restricted to an exact source-only mode")
-    if not is_source1938_semantic_exception(args) and any((args.historical_task, args.historical_sha256, args.archive_index_sha256)):
-        raise ReplaceError("historical duplicate reconciliation is accepted only for exact Source-1938")
+    if not is_source1938_semantic_exception(args) and any(
+        (
+            args.historical_task,
+            args.historical_sha256,
+            args.archive_index_sha256,
+            args.stale_manager_task,
+            args.stale_manager_sha256,
+        )
+    ):
+        raise ReplaceError("historical or stale duplicate reconciliation is accepted only for exact Source-1938")
     if is_source_only_semantic_exception(args) and len(Path(args.successor_task).name) >= 25:
         raise ReplaceError("source-only successor task filename must be shorter than 25 characters")
     if is_source1289_whole_tree(args) and (
@@ -1948,17 +2057,46 @@ def source1938_topology_binding(args: Args, plan: Plan) -> dict[str, object]:
     root = rows[0]
     if root.managerat != canonical_target(args.parent_target) or canonical_target(args.parent_target) in seen_targets:
         raise ReplaceError("Source-1938 successor reporting parent changed or creates a cycle")
-    parent = active_manager_owner_row(args.root, args.parent_target)
-    if parent is None or parent.task in seen_tasks or parent.managerat in seen_targets:
-        raise ReplaceError("Source-1938 successor lacks one acyclic active reporting-parent manager")
+    if current_target_task_paths(args.root, args.parent_target):
+        raise ReplaceError("Source-1938 main-manager parent unexpectedly has a current TODO task owner")
+    expected_parent_owners = tuple(
+        sorted(task_path(args.root, task).resolve() for task, _sha256 in SOURCE1938_PARENT_HISTORICAL)
+    )
+    if authoritative_active_target_task_paths(args.root, args.parent_target) != expected_parent_owners:
+        raise ReplaceError("Source-1938 main-manager parent historical owner set changed")
+    serialized_parent_history: list[dict[str, object]] = []
+    for task, expected_sha256 in SOURCE1938_PARENT_HISTORICAL:
+        snapshot = read_snapshot(task_path(args.root, task), f"Source-1938 preserved parent historical task {task}")
+        value = metadata(snapshot.data, args.root, f"Source-1938 preserved parent historical task {task}")
+        if (
+            digest(snapshot.data) != expected_sha256
+            or value.status != "blocked"
+            or canonical_target(value.runat) != canonical_target(args.parent_target)
+        ):
+            raise ReplaceError("Source-1938 preserved parent historical record changed")
+        serialized_parent_history.append(
+            {
+                "task": task,
+                "sha256": expected_sha256,
+                "status": value.status,
+                "managerat": value.managerat,
+                "is_manager": value.is_manager,
+                "queue_sha256": json_digest(list(value.pending_task_items)),
+            }
+        )
+    if plan.stale_manager is None:
+        raise ReplaceError("Source-1938 retained topology lost the stopped stale-manager record")
+    stale_value = metadata(plan.stale_manager.data, args.root, "Source-1938 topology stale manager")
+    stale_active = stale_value.status != "done"
     for row in rows[1:]:
         if row.runat == canonical_target(SOURCE1938_SHARED_TARGET):
             continue
         expected_path = task_path(args.root, row.task).resolve()
-        if authoritative_active_target_task_paths(args.root, row.runat) != (expected_path,):
+        expected_owners = {expected_path}
+        if row.runat == canonical_target(SOURCE1938_STALE_TARGET) and stale_active:
+            expected_owners.add(plan.stale_manager.path.resolve())
+        if set(authoritative_active_target_task_paths(args.root, row.runat)) != expected_owners:
             raise ReplaceError(f"Source-1938 retained target lacks exactly one authoritative owner: {row.task}")
-    if authoritative_active_target_task_paths(args.root, args.parent_target) != (task_path(args.root, parent.task).resolve(),):
-        raise ReplaceError("Source-1938 reporting parent lacks exactly one authoritative owner")
     if authoritative_active_target_task_paths(args.root, args.preparer) != (
         task_path(args.root, SOURCE1938_ENVELOPE_TASK).resolve(),
     ):
@@ -1986,16 +2124,11 @@ def source1938_topology_binding(args: Args, plan: Plan) -> dict[str, object]:
         }
         for row in rows
     ]
-    serialized_parent = {
-        "task": parent.task,
-        "sha256": parent.sha256,
-        "status": parent.status,
-        "runat": parent.runat,
-        "managerat": parent.managerat,
-        "tool": parent.tool,
-        "is_manager": parent.is_manager,
-        "session_id": parent.session_id,
-        "queue_sha256": parent.queue_sha256,
+    serialized_parent: dict[str, object] = {
+        "runat": canonical_target(args.parent_target),
+        "role": "task-file-free-live-main-manager-with-pinned-historical-blocked-records",
+        "current_task_owners": [],
+        "preserved_historical_blocked_owners": serialized_parent_history,
     }
     return {
         "root_task": args.successor_task,
@@ -2017,6 +2150,8 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
     authority_envelope_path = task_path(args.root, args.authority_envelope_task)
     historical_path = task_path(args.root, args.historical_task) if is_source1938_semantic_exception(args) else None
     archive_index_path = args.root / SOURCE1938_ARCHIVE_INDEX if is_source1938_semantic_exception(args) else None
+    stale_manager_path = task_path(args.root, args.stale_manager_task) if is_source1938_semantic_exception(args) else None
+    stale_manager_authority_path = task_path(args.root, SOURCE1938_STALE_AUTHORITY) if is_source1938_semantic_exception(args) else None
     if successor_path.exists() or successor_path.is_symlink():
         raise ReplaceError("successor task already exists; launch-before-proof is rejected")
     path_set = set(paths)
@@ -2025,6 +2160,8 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         required_paths.add(historical_path)
     if archive_index_path is not None:
         required_paths.add(archive_index_path)
+    if stale_manager_path is not None:
+        required_paths.add(stale_manager_path)
     if not required_paths.issubset(path_set):
         raise ReplaceError("old manager, TODO, or authority envelope is absent from the locked Markdown inventory")
     old = read_snapshot(old_path, "old manager task")
@@ -2033,10 +2170,24 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
     authority_envelope = read_snapshot(authority_envelope_path, "replacement authority envelope")
     historical = read_snapshot(historical_path, "Source-1938 historical shared-target task") if historical_path is not None else None
     archive_index = read_snapshot(archive_index_path, "Source-1938 historical archive index") if archive_index_path is not None else None
+    stale_manager = read_snapshot(stale_manager_path, "Source-1938 stopped stale manager") if stale_manager_path is not None else None
+    stale_manager_authority = (
+        read_snapshot(stale_manager_authority_path, "Source-1938 stale-manager Human shutdown authority")
+        if stale_manager_authority_path is not None
+        else None
+    )
     historical_after: bytes | None = None
     archive_index_after: bytes | None = None
+    stale_manager_after: bytes | None = None
+    stale_manager_queue: tuple[str, ...] = ()
     if historical is not None and archive_index is not None:
         historical_after, archive_index_after = validate_source1938_historical(args, historical, archive_index)
+    if stale_manager is not None and stale_manager_authority is not None:
+        stale_manager_after, stale_manager_queue = validate_source1938_stale_manager(
+            args,
+            stale_manager,
+            stale_manager_authority,
+        )
     source1601_authority = source1601_material(args)
     if digest(old.data) != args.old_sha256 or digest(todo.data) != args.todo_sha256:
         raise ReplaceError("old manager or TODO digest changed")
@@ -2078,6 +2229,8 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         }
         if historical_path.resolve() in todo_rows:
             raise ReplaceError("Source-1938 historical shared-target record unexpectedly appears in root TODO")
+        if stale_manager_path is None or stale_manager_path.resolve() in todo_rows:
+            raise ReplaceError("Source-1938 stopped stale manager unexpectedly appears in root TODO")
     if authoritative_active_target_task_paths(args.root, args.new_target):
         raise ReplaceError("new target already has an authoritative active owner; launch-before-proof is rejected")
     if active_child_task_refs(args.root, successor_path, args.new_target):
@@ -2167,6 +2320,10 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         historical_after=historical_after,
         archive_index=archive_index,
         archive_index_after=archive_index_after,
+        stale_manager=stale_manager,
+        stale_manager_after=stale_manager_after,
+        stale_manager_authority=stale_manager_authority,
+        stale_manager_queue=stale_manager_queue,
     )
     if source1601_authority is not None:
         plan = replace(plan, source1601_authority=source1601_authority)
@@ -2228,8 +2385,15 @@ def child_binding(args: Args) -> list[dict[str, str]]:
 def audit_record(args: Args, plan: Plan, secret: str, commitment: str) -> dict[str, object]:
     source1938_files: list[dict[str, object]] = []
     if is_source1938_semantic_exception(args):
-        if plan.historical is None or plan.historical_after is None or plan.archive_index is None or plan.archive_index_after is None:
-            raise ReplaceError("Source-1938 audit lost historical reconciliation images")
+        if (
+            plan.historical is None
+            or plan.historical_after is None
+            or plan.stale_manager is None
+            or plan.stale_manager_after is None
+            or plan.archive_index is None
+            or plan.archive_index_after is None
+        ):
+            raise ReplaceError("Source-1938 audit lost duplicate-manager reconciliation images")
         source1938_files = [
             {
                 "task": args.historical_task,
@@ -2237,6 +2401,13 @@ def audit_record(args: Args, plan: Plan, secret: str, commitment: str) -> dict[s
                 "after": encoded(plan.historical_after),
                 "mode": stat.S_IMODE(plan.historical.state.st_mode),
                 "gid": plan.historical.state.st_gid,
+            },
+            {
+                "task": args.stale_manager_task,
+                "before": encoded(plan.stale_manager.data),
+                "after": encoded(plan.stale_manager_after),
+                "mode": stat.S_IMODE(plan.stale_manager.state.st_mode),
+                "gid": plan.stale_manager.state.st_gid,
             },
             {
                 "task": SOURCE1938_ARCHIVE_INDEX,
@@ -2335,6 +2506,11 @@ def audit_record(args: Args, plan: Plan, secret: str, commitment: str) -> dict[s
                 "historical_task": args.historical_task,
                 "historical_sha256": args.historical_sha256,
                 "archive_index_sha256": args.archive_index_sha256,
+                "stale_manager_task": args.stale_manager_task,
+                "stale_manager_sha256": args.stale_manager_sha256,
+                "stale_manager_authority": SOURCE1938_STALE_AUTHORITY,
+                "stale_manager_authority_sha256": SOURCE1938_STALE_AUTHORITY_SHA256,
+                "stale_manager_queue_sha256": json_digest(list(plan.stale_manager_queue)),
                 "source1938_topology": plan.source1938_topology,
                 "source1938_topology_sha256": json_digest(plan.source1938_topology),
             }
@@ -2556,6 +2732,10 @@ def audit_binding(args: Args) -> dict[str, object]:
                 "historical_task": args.historical_task,
                 "historical_sha256": args.historical_sha256,
                 "archive_index_sha256": args.archive_index_sha256,
+                "stale_manager_task": args.stale_manager_task,
+                "stale_manager_sha256": args.stale_manager_sha256,
+                "stale_manager_authority": SOURCE1938_STALE_AUTHORITY,
+                "stale_manager_authority_sha256": SOURCE1938_STALE_AUTHORITY_SHA256,
             }
         )
     if args.closed_owner_audit is not None:
@@ -2603,7 +2783,7 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
     if is_source_only_semantic_exception(args):
         allowed.add("protected_inventory")
     if is_source1938_semantic_exception(args):
-        allowed.update({"source1938_topology", "source1938_topology_sha256"})
+        allowed.update({"source1938_topology", "source1938_topology_sha256", "stale_manager_queue_sha256"})
     if args.descendants:
         allowed.add("descendant_close_commitments")
         commitments = record.get("descendant_close_commitments")
@@ -2647,7 +2827,7 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
     expected_tasks = (
         args.old_task,
         *(child.task for child in args.children),
-        *((args.historical_task, SOURCE1938_ARCHIVE_INDEX) if is_source1938_semantic_exception(args) else ()),
+        *((args.historical_task, args.stale_manager_task, SOURCE1938_ARCHIVE_INDEX) if is_source1938_semantic_exception(args) else ()),
         "TODO.md",
         args.successor_task,
     )
@@ -2677,9 +2857,17 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
             raise ReplaceError(f"private replacement audit child before-image changed: {pin.task}")
     if is_source1938_semantic_exception(args):
         historical_entry = entries[1 + len(args.children)]
-        archive_entry = entries[2 + len(args.children)]
-        if digest(historical_entry.before or b"") != args.historical_sha256 or digest(archive_entry.before or b"") != args.archive_index_sha256:
-            raise ReplaceError("private replacement audit historical before-image changed")
+        stale_entry = entries[2 + len(args.children)]
+        archive_entry = entries[3 + len(args.children)]
+        if (
+            digest(historical_entry.before or b"") != args.historical_sha256
+            or digest(stale_entry.before or b"") != args.stale_manager_sha256
+            or digest(archive_entry.before or b"") != args.archive_index_sha256
+        ):
+            raise ReplaceError("private replacement audit duplicate-manager before-image changed")
+        stale_before = metadata(stale_entry.before or b"", args.root, "private replacement audit stale-manager before image")
+        if record.get("stale_manager_queue_sha256") != json_digest(list(stale_before.pending_task_items)):
+            raise ReplaceError("private replacement audit stale-manager queue binding changed")
     if uses_protected_inventory(args):
         protected_value = record.get("protected_inventory")
         if not isinstance(protected_value, list) or json_digest(protected_value) != args.protected_targets_sha256:
@@ -2797,18 +2985,26 @@ def recovery_plan(
     child_end = 1 + len(args.children)
     child_entries = entries[1:child_end]
     historical_entry = entries[child_end] if is_source1938_semantic_exception(args) else None
-    archive_entry = entries[child_end + 1] if is_source1938_semantic_exception(args) else None
+    stale_manager_entry = entries[child_end + 1] if is_source1938_semantic_exception(args) else None
+    archive_entry = entries[child_end + 2] if is_source1938_semantic_exception(args) else None
     todo_entry = entries[-2]
     old_path = task_path(args.root, args.old_task)
     todo_path = args.root / "TODO.md"
     snapshots = [read_snapshot(old_path, "recovery old manager")]
     snapshots.extend(read_snapshot(task_path(args.root, pin.task), f"recovery child {pin.task}") for pin in args.children)
     historical: Snapshot | None = None
+    stale_manager: Snapshot | None = None
+    stale_manager_authority: Snapshot | None = None
     archive_index: Snapshot | None = None
-    if historical_entry is not None and archive_entry is not None:
+    if historical_entry is not None and stale_manager_entry is not None and archive_entry is not None:
         historical = read_snapshot(task_path(args.root, args.historical_task), "recovery Source-1938 historical task")
+        stale_manager = read_snapshot(task_path(args.root, args.stale_manager_task), "recovery Source-1938 stopped stale manager")
+        stale_manager_authority = read_snapshot(
+            task_path(args.root, SOURCE1938_STALE_AUTHORITY),
+            "recovery Source-1938 stale-manager Human shutdown authority",
+        )
         archive_index = read_snapshot(args.root / SOURCE1938_ARCHIVE_INDEX, "recovery Source-1938 archive index")
-        snapshots.extend((historical, archive_index))
+        snapshots.extend((historical, stale_manager, archive_index))
     snapshots.append(read_snapshot(todo_path, "recovery TODO"))
     if any(stat.S_IMODE(snapshot.state.st_mode) != entry.mode or snapshot.state.st_gid != entry.gid for snapshot, entry in zip(snapshots, entries[:-1], strict=True)):
         raise ReplaceError("recovery found changed lifecycle file mode or group")
@@ -2866,17 +3062,37 @@ def recovery_plan(
     successor_path = task_path(args.root, args.successor_task)
     todo_after = todo_replacement(todo_entry.before, args.root, old_path, successor_path, args.old_target, args.new_target)
     historical_after: bytes | None = None
+    stale_manager_after: bytes | None = None
+    stale_manager_queue: tuple[str, ...] = ()
     archive_index_after: bytes | None = None
-    if historical_entry is not None and archive_entry is not None:
-        if historical_entry.before is None or archive_entry.before is None or historical is None or archive_index is None:
-            raise ReplaceError("private replacement audit lost Source-1938 historical before images")
+    if historical_entry is not None and stale_manager_entry is not None and archive_entry is not None:
+        if (
+            historical_entry.before is None
+            or stale_manager_entry.before is None
+            or archive_entry.before is None
+            or historical is None
+            or stale_manager is None
+            or stale_manager_authority is None
+            or archive_index is None
+        ):
+            raise ReplaceError("private replacement audit lost Source-1938 duplicate-manager before images")
         audited_historical = Snapshot(historical.path, historical_entry.before, historical.state)
+        audited_stale = Snapshot(stale_manager.path, stale_manager_entry.before, stale_manager.state)
         audited_archive = Snapshot(archive_index.path, archive_entry.before, archive_index.state)
         historical_after, archive_index_after = validate_source1938_historical(args, audited_historical, audited_archive)
+        stale_manager_after, stale_manager_queue = validate_source1938_stale_manager(
+            args,
+            audited_stale,
+            stale_manager_authority,
+        )
     canonical_after = (
         old_after,
         *child_after,
-        *((historical_after, archive_index_after) if historical_after is not None and archive_index_after is not None else ()),
+        *(
+            (historical_after, stale_manager_after, archive_index_after)
+            if historical_after is not None and stale_manager_after is not None and archive_index_after is not None
+            else ()
+        ),
         todo_after,
         successor_after,
     )
@@ -2945,6 +3161,10 @@ def recovery_plan(
         historical_after=historical_after,
         archive_index=archive_index,
         archive_index_after=archive_index_after,
+        stale_manager=stale_manager,
+        stale_manager_after=stale_manager_after,
+        stale_manager_authority=stale_manager_authority,
+        stale_manager_queue=stale_manager_queue,
     )
     if source1601_authority is not None:
         plan = replace(plan, source1601_authority=source1601_authority)
@@ -3019,14 +3239,16 @@ def after_snapshots(args: Args, entries: tuple[AuditEntry, ...]) -> tuple[Snapsh
 def split_after_snapshots(
     args: Args,
     snapshots: tuple[Snapshot, ...],
-) -> tuple[Snapshot, tuple[Snapshot, ...], Snapshot | None, Snapshot | None, Snapshot, Snapshot]:
+) -> tuple[Snapshot, tuple[Snapshot, ...], Snapshot | None, Snapshot | None, Snapshot | None, Snapshot, Snapshot]:
     child_end = 1 + len(args.children)
     historical: Snapshot | None = None
+    stale_manager: Snapshot | None = None
     archive: Snapshot | None = None
     if is_source1938_semantic_exception(args):
         historical = snapshots[child_end]
-        archive = snapshots[child_end + 1]
-    return snapshots[0], snapshots[1:child_end], historical, archive, snapshots[-2], snapshots[-1]
+        stale_manager = snapshots[child_end + 1]
+        archive = snapshots[child_end + 2]
+    return snapshots[0], snapshots[1:child_end], historical, stale_manager, archive, snapshots[-2], snapshots[-1]
 
 
 def recover_existing(
@@ -3357,9 +3579,16 @@ def require_preclose_eligibility(args: Args, plan: Plan) -> None:
     for child in plan.children:
         require_snapshot(child, f"pre-close active child {child.path.name}")
     if is_source1938_semantic_exception(args):
-        if plan.historical is None or plan.archive_index is None:
-            raise ReplaceError("Source-1938 pre-close proof lost historical reconciliation custody")
+        if (
+            plan.historical is None
+            or plan.stale_manager is None
+            or plan.stale_manager_authority is None
+            or plan.archive_index is None
+        ):
+            raise ReplaceError("Source-1938 pre-close proof lost duplicate-manager reconciliation custody")
         require_snapshot(plan.historical, "pre-close Source-1938 historical shared-target task")
+        require_snapshot(plan.stale_manager, "pre-close Source-1938 stopped stale manager")
+        require_snapshot(plan.stale_manager_authority, "pre-close Source-1938 stale-manager Human shutdown authority")
         require_snapshot(plan.archive_index, "pre-close Source-1938 historical archive index")
         live_shared_path = task_path(args.root, SOURCE1938_LIVE_SHARED_TASK)
         if set(authoritative_active_target_task_paths(args.root, SOURCE1938_SHARED_TARGET)) != {
@@ -3367,6 +3596,28 @@ def require_preclose_eligibility(args: Args, plan: Plan) -> None:
             plan.historical.path.resolve(),
         }:
             raise ReplaceError("Source-1938 shared-target owner set changed before guarded manager close")
+        topology_rows = plan.source1938_topology.get("rows") if plan.source1938_topology is not None else None
+        retained_refs = (
+            [
+                row.get("task")
+                for row in topology_rows
+                if isinstance(row, dict) and row.get("runat") == canonical_target(SOURCE1938_STALE_TARGET)
+            ]
+            if isinstance(topology_rows, list)
+            else []
+        )
+        retained_stale_target = (
+            task_path(args.root, retained_refs[0]).resolve()
+            if len(retained_refs) == 1 and isinstance(retained_refs[0], str)
+            else None
+        )
+        if retained_stale_target is None or set(authoritative_active_target_task_paths(args.root, SOURCE1938_STALE_TARGET)) != {
+            retained_stale_target,
+            plan.stale_manager.path.resolve(),
+        }:
+            raise ReplaceError("Source-1938 stopped stale-manager owner set changed before guarded manager close")
+        if active_child_task_refs(args.root, plan.stale_manager.path, SOURCE1938_STALE_TARGET):
+            raise ReplaceError("Source-1938 stopped stale manager gained an active child before guarded manager close")
     if authoritative_active_target_task_paths(args.root, args.old_target) != (plan.old.path.resolve(),):
         raise ReplaceError("old target ownership changed before guarded manager close")
     if authoritative_active_target_task_paths(args.root, args.new_target):
@@ -3476,6 +3727,7 @@ def prove_committed(
     old_after: Snapshot,
     child_after: tuple[Snapshot, ...],
     historical_after: Snapshot | None,
+    stale_manager_after: Snapshot | None,
     archive_after: Snapshot | None,
     todo_after: Snapshot,
     successor: Snapshot,
@@ -3495,12 +3747,28 @@ def prove_committed(
     for snapshot in child_after:
         require_snapshot(snapshot, f"committed child {snapshot.path.name}")
     if is_source1938_semantic_exception(args):
-        if historical_after is None or archive_after is None or plan.historical is None or plan.historical_after is None or plan.archive_index_after is None:
-            raise ReplaceError("Source-1938 commit proof lost historical reconciliation images")
+        if (
+            historical_after is None
+            or stale_manager_after is None
+            or archive_after is None
+            or plan.historical is None
+            or plan.historical_after is None
+            or plan.stale_manager is None
+            or plan.stale_manager_after is None
+            or plan.stale_manager_authority is None
+            or plan.archive_index_after is None
+        ):
+            raise ReplaceError("Source-1938 commit proof lost duplicate-manager reconciliation images")
         require_snapshot(historical_after, "committed Source-1938 historical shared-target task")
+        require_snapshot(stale_manager_after, "committed Source-1938 stopped stale manager")
+        require_snapshot(plan.stale_manager_authority, "committed Source-1938 stale-manager Human shutdown authority")
         require_snapshot(archive_after, "committed Source-1938 historical archive index")
-        if historical_after.data != plan.historical_after or archive_after.data != plan.archive_index_after:
-            raise ReplaceError("Source-1938 committed historical reconciliation differs from its reviewed images")
+        if (
+            historical_after.data != plan.historical_after
+            or stale_manager_after.data != plan.stale_manager_after
+            or archive_after.data != plan.archive_index_after
+        ):
+            raise ReplaceError("Source-1938 committed duplicate-manager reconciliation differs from its reviewed images")
         historical_metadata = metadata(historical_after.data, args.root, "committed Source-1938 historical task")
         if (
             historical_metadata.status != "blocked"
@@ -3514,7 +3782,25 @@ def prove_committed(
         live_shared_path = task_path(args.root, SOURCE1938_LIVE_SHARED_TASK)
         if authoritative_active_target_task_paths(args.root, SOURCE1938_SHARED_TARGET) != (live_shared_path.resolve(),):
             raise ReplaceError("Source-1938 shared target does not have exactly the retained live owner after reconciliation")
-    elif historical_after is not None or archive_after is not None:
+        stale_metadata = metadata(stale_manager_after.data, args.root, "committed Source-1938 stopped stale manager")
+        if (
+            stale_metadata.status != "done"
+            or stale_metadata.runat != SOURCE1938_STALE_TARGET
+            or stale_metadata.managerat != SOURCE1938_STALE_MANAGER
+            or stale_metadata.pending_task_items
+            or task_body(stale_manager_after.data) != task_body(plan.stale_manager.data)
+        ):
+            raise ReplaceError("Source-1938 stopped stale-manager evidence changed during reconciliation")
+        retained_stale_target = tuple(
+            row
+            for row in authoritative_active_target_task_paths(args.root, SOURCE1938_STALE_TARGET)
+            if row != plan.stale_manager.path.resolve()
+        )
+        if len(retained_stale_target) != 1:
+            raise ReplaceError("Source-1938 stopped stale-manager target lacks exactly one retained live owner")
+        if active_child_task_refs(args.root, plan.stale_manager.path, SOURCE1938_STALE_TARGET):
+            raise ReplaceError("Source-1938 stopped stale manager gained an active child during replacement")
+    elif historical_after is not None or stale_manager_after is not None or archive_after is not None:
         raise ReplaceError("unexpected historical reconciliation images outside Source-1938")
     if authoritative_active_target_task_paths(args.root, args.old_target):
         raise ReplaceError("old target retains an active owner after replacement")
@@ -3537,6 +3823,7 @@ def prove_committed(
             plan,
             child_after=tuple(snapshot.data for snapshot in child_after),
             successor_data=successor.data,
+            stale_manager=stale_manager_after,
         )
         if plan.source1938_topology is None or source1938_topology_binding(args, committed_plan) != plan.source1938_topology:
             raise ReplaceError("Source-1938 committed ownership graph differs from its reviewed retained topology")
@@ -3579,6 +3866,7 @@ def replace_manager(args: Args) -> str:
     authority_envelope_path = task_path(args.root, args.authority_envelope_task)
     source1601_path = task_path(args.root, SOURCE1601_FILE)
     empty_tree_authority_path = task_path(args.root, SOURCE1292_FILE)
+    source1938_stale_authority_path = task_path(args.root, SOURCE1938_STALE_AUTHORITY)
     close_authority_path, proof_path = closed_owner_evidence_paths(args.audit_output)
     source_evidence_paths = () if args.closed_owner_audit is None else (args.closed_owner_audit, *closed_owner_evidence_paths(args.closed_owner_audit))
     descendant_evidence = tuple(path for child in args.descendants for path in descendant_evidence_paths(args.audit_output, child))
@@ -3592,6 +3880,7 @@ def replace_manager(args: Args) -> str:
                 authority_envelope_path,
                 *((source1601_path,) if source1601_required(args) else ()),
                 *((empty_tree_authority_path,) if is_source1292_empty_tree(args) or is_source1292_descendant_tree(args) else ()),
+                *((source1938_stale_authority_path,) if is_source1938_semantic_exception(args) else ()),
                 args.audit_output,
                 close_authority_path,
                 proof_path,
@@ -3702,6 +3991,8 @@ def replace_manager(args: Args) -> str:
                 require_snapshot(plan.source1601_authority, "Source-1601 replacement authority")
             if plan.empty_tree_authority is not None:
                 require_snapshot(plan.empty_tree_authority, "Source-1292 replacement authority")
+            if plan.stale_manager_authority is not None:
+                require_snapshot(plan.stale_manager_authority, "Source-1938 stale-manager Human shutdown authority")
             record, audit_bytes = transition_audit(args.audit_output, audit_bytes, record, "mutating", completed=())
             # 🧑 "The agent failed. They did not run the experiment. Replace them. The replacement agent should finish the task."
             updated_old = replace_snapshot(plan.old, plan.old_after, "old manager")
@@ -3714,16 +4005,31 @@ def replace_manager(args: Args) -> str:
                 completed.append(pin.task)
                 record, audit_bytes = transition_audit(args.audit_output, audit_bytes, record, "mutating", completed=tuple(completed))
             updated_historical: Snapshot | None = None
+            updated_stale_manager: Snapshot | None = None
             updated_archive: Snapshot | None = None
             if is_source1938_semantic_exception(args):
-                if plan.historical is None or plan.historical_after is None or plan.archive_index is None or plan.archive_index_after is None:
-                    raise ReplaceError("Source-1938 mutation lost historical reconciliation images")
+                if (
+                    plan.historical is None
+                    or plan.historical_after is None
+                    or plan.stale_manager is None
+                    or plan.stale_manager_after is None
+                    or plan.archive_index is None
+                    or plan.archive_index_after is None
+                ):
+                    raise ReplaceError("Source-1938 mutation lost duplicate-manager reconciliation images")
                 updated_historical = replace_snapshot(
                     plan.historical,
                     plan.historical_after,
                     "Source-1938 historical shared-target task",
                 )
                 completed.append(args.historical_task)
+                record, audit_bytes = transition_audit(args.audit_output, audit_bytes, record, "mutating", completed=tuple(completed))
+                updated_stale_manager = replace_snapshot(
+                    plan.stale_manager,
+                    plan.stale_manager_after,
+                    "Source-1938 stopped stale manager",
+                )
+                completed.append(args.stale_manager_task)
                 record, audit_bytes = transition_audit(args.audit_output, audit_bytes, record, "mutating", completed=tuple(completed))
                 updated_archive = replace_snapshot(
                     plan.archive_index,
@@ -3749,6 +4055,7 @@ def replace_manager(args: Args) -> str:
                 updated_old,
                 tuple(updated_children),
                 updated_historical,
+                updated_stale_manager,
                 updated_archive,
                 updated_todo,
                 successor,
