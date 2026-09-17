@@ -155,13 +155,34 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             self.assertIsNotNone(build_completion_email(root, task, text, "pending item created", items=("🧑 finish review",)))
 
     def test_pending_item_notice_honors_explicit_no_contact(self) -> None:
+        for policy in (
+            "Never email the Human.",
+            "Never email the Human for Human- or agent-authored pending items.",
+            "Never email the Human for Human-originated or agent-authored pending items.",
+        ):
+            with self.subTest(policy=policy), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task = root / "task.md"
+                text = task_text(policy, human_report=False)
+                task.write_text(text, encoding="utf-8")
+
+                for outcome in ("pending item created", "pending item removed after verification"):
+                    with self.subTest(outcome=outcome):
+                        self.assertIsNone(build_completion_email(root, task, text, outcome, items=("🧑 finish review",)))
+
+    def test_pending_item_notice_ignores_agent_scoped_no_contact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task = root / "task.md"
-            text = task_text("Never email the Human.", human_report=False)
+            text = task_text(
+                "Human-authored pending items email the Human; agent-authored pending items must not email the Human.",
+                human_report=False,
+            )
             task.write_text(text, encoding="utf-8")
 
-            self.assertIsNone(build_completion_email(root, task, text, "pending item created", items=("🧑 finish review",)))
+            for outcome in ("pending item created", "pending item removed after verification"):
+                with self.subTest(outcome=outcome):
+                    self.assertIsNotNone(build_completion_email(root, task, text, outcome, items=("🧑 finish review",)))
 
     def test_pending_item_notice_rejects_agent_and_ambiguous_legacy_items(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

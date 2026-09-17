@@ -44,6 +44,14 @@ NO_CONTACT_RE = re.compile(
     r"\bsource[- ]985\b|\bno[- ]contact\b|\b(?:do not|must not|never) (?:send )?(?:any )?(?:human(?:-facing)? )?(?:email|mail|message|report|outreach|contact)\b|\b(?:do not|must not|never)\b[^.\n]{0,200}\b(?:send )?(?:any )?human (?:email|mail|message|report|outreach|contact)\b|\b(?:do not|must not|never)\b[^.\n]{0,100}\b(?:email|report|respond|write)\b[^.\n]{0,100}\bhuman\b|\b(?:no|forbid(?:s|den)?) human-facing reports?\b|\bhuman reporting (?:is )?(?:suppressed|forbidden|prohibited|paused)\b|\bwithout human email\b|\breport only privately\b|\bprivate reports? only\b",
     re.IGNORECASE,
 )
+AGENT_PENDING_NO_CONTACT_SCOPE_RE = re.compile(
+    r"\b(?:agent[- ]authored(?: pending)? items?|(?:pending )?items? (?:authored|originated|created) (?:by|from) agents?|ones? from agents?)\b",
+    re.IGNORECASE,
+)
+HUMAN_PENDING_AUTHOR_SCOPE_RE = re.compile(
+    r"\b(?:human[- ]+(?:authored|originated|created)(?:[- ]+or[- ]+agent[- ]+(?:authored|originated|created))?(?: pending)? items?|human[- ]+or[- ]+agent[- ]+(?:authored|originated|created)(?: pending)? items?|(?:pending )?items? (?:authored|originated|created) (?:by|from) (?:the )?human)\b",
+    re.IGNORECASE,
+)
 MANAGER_ONLY_RE = re.compile(r"\b(?:report|return) only\b[^.\n]{0,100}\b(?:manager|submanager)\b|\bmanager[- ]only reports?\b", re.IGNORECASE)
 DIRECT_HUMAN_REPORT_RE = re.compile(r"\b(?:email|report|respond|write)\b[^.\n]{0,100}\b(?:directly to )?(?:the )?human\b", re.IGNORECASE)
 # 🧑 Human source `manager_mail/85c5dff58359-1929.txt:6`: "Pending items originated from the human need emails, ones from agents do not."
@@ -53,6 +61,20 @@ PENDING_ITEM_NOTICE_OUTCOMES = {
     "pending item cancelled",
     "pending item removed after verification",
 }
+
+
+# 🧑 Human source `manager_mail/85c5dff58359-1929.txt:6`: "Pending items originated from the human need emails, ones from agents do not."
+def human_pending_notice_contact_forbidden(text: str) -> bool:
+    """Return whether policy contains a blanket, rather than agent-scoped, no-contact rule."""
+
+    for match in NO_CONTACT_RE.finditer(text):
+        clause_start = max(text.rfind(separator, 0, match.start()) for separator in ("\n", ";", ".")) + 1
+        clause_ends = [position for separator in ("\n", ";", ".") if (position := text.find(separator, match.end())) >= 0]
+        clause_end = min(clause_ends, default=len(text))
+        clause = text[clause_start:clause_end]
+        if AGENT_PENDING_NO_CONTACT_SCOPE_RE.search(clause) is None or HUMAN_PENDING_AUTHOR_SCOPE_RE.search(clause) is not None:
+            return True
+    return False
 
 
 # 🧑 Human source `manager_mail/85c5dff58359-1936.txt:3`: "pending item created/deleted messages should reuse subject of the agent’s previous email and be concise: just do like ..."
@@ -375,7 +397,9 @@ def build_completion_email(
     task_close = outcome == "task done"
     pending_item_notice = outcome in PENDING_ITEM_NOTICE_OUTCOMES
     human_pending_item_notice = pending_item_notice and bool(items) and human_authored_pending_items(items) == items
-    contact_forbidden = NO_CONTACT_RE.search(policy_text) is not None or (
+    contact_forbidden = (
+        human_pending_notice_contact_forbidden(policy_text) if human_pending_item_notice else NO_CONTACT_RE.search(policy_text) is not None
+    ) or (
         not human_pending_item_notice and MANAGER_ONLY_RE.search(policy_text) is not None and DIRECT_HUMAN_REPORT_RE.search(policy_text) is None
     )
     if (

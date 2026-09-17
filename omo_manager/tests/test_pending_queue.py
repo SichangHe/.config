@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import tempfile
 import unittest
@@ -12,6 +13,9 @@ from unittest.mock import patch
 from omo_manager.omo_agent_status import TaskFrontmatterError
 from omo_manager.omo_blocking import BlockingError
 from omo_manager.omo_pending import Args
+from omo_manager.omo_pending import REMOVAL_NOTICE_RECOVERIES
+from omo_manager.omo_pending import SOURCE1929_RECOVERY_ID
+from omo_manager.omo_pending import RemovalNoticeRecovery
 from omo_manager.omo_pending import parse_args
 from omo_manager.omo_pending import run
 from omo_manager.omo_task_context import infer_active_task
@@ -55,6 +59,10 @@ resolved_task_items: []
 ---
 work
 """
+
+
+def removal_recovery(path: Path, text: str, items: tuple[str, ...], evidence: str) -> RemovalNoticeRecovery:
+    return RemovalNoticeRecovery(path.name, hashlib.sha256(text.encode()).hexdigest(), items, evidence, "b" * 64)
 
 
 class PendingQueueTests(unittest.TestCase):
@@ -138,6 +146,32 @@ class PendingQueueTests(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "not confirmed delivered"):
                     run(Args("add", ("🧑 inspect failure",)), root)
             self.assertEqual(original, path.read_text(encoding="utf-8"))
+
+    def test_mixed_add_under_agent_scoped_no_contact_emails_only_human_items(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            path = root / "task.md"
+            path.write_text(
+                task_text() + "Agent-authored pending items must not email the Human.\n",
+                encoding="utf-8",
+            )
+            bodies: list[str] = []
+
+            def capture_email(command: list[str], check: bool) -> None:
+                bodies.append(Path(command[command.index("--message-file") + 1]).read_text(encoding="utf-8"))
+
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_pending.current_pending_task", return_value=path
+            ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=path), patch(
+                "omo_manager.omo_completion_email.subprocess.run", side_effect=capture_email
+            ):
+                self.assertEqual(0, run(Args("add", ("🧑 Human work", "agent work")), root))
+
+            self.assertEqual(["pending item created:\n- Human work\n"], bodies)
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("  - 🧑 Human work\n", text)
+            self.assertIn("  - agent work\n", text)
 
     def test_agent_add_mutates_without_mail_or_notice_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -352,6 +386,131 @@ class PendingQueueTests(unittest.TestCase):
             self.assertEqual(original, path.read_text(encoding="utf-8"))
             self.assertEqual(2, email.call_count)
 
+    def test_mixed_remove_under_agent_scoped_no_contact_emails_only_human_items(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            path = root / "task.md"
+            path.write_text(
+                task_text(items=("🧑 Human work", "agent work"))
+                + "Agent-authored pending items must not email the Human.\n",
+                encoding="utf-8",
+            )
+            bodies: list[str] = []
+
+            def capture_email(command: list[str], check: bool) -> None:
+                bodies.append(Path(command[command.index("--message-file") + 1]).read_text(encoding="utf-8"))
+
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_pending.current_pending_task", return_value=path
+            ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=path), patch(
+                "omo_manager.omo_completion_email.subprocess.run", side_effect=capture_email
+            ):
+                self.assertEqual(
+                    0,
+                    run(
+                        Args(
+                            "remove",
+                            ("🧑 Human work", "agent work"),
+                            evidence="both completed",
+                            completion_key="a" * 64,
+                        ),
+                        root,
+                    ),
+                )
+
+            self.assertEqual(["pending item deleted:\n- Human work\n"], bodies)
+            self.assertIn("pending_task_items: []", path.read_text(encoding="utf-8"))
+
+    def test_recover_removal_notice_is_evidence_bound_and_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            path = root / "task.md"
+            evidence = "reviewed result was already reported"
+            items = ("🧑 first request", "🧑 second request", "🧑 third request")
+            original = (
+                task_text()
+                + "Agent-authored pending items must not email the Human.\n"
+                + f"(verified removed pending items: {evidence})\n"
+            )
+            path.write_text(original, encoding="utf-8")
+            recovery = removal_recovery(path, original, items, evidence)
+            args = Args("recover-removal-notice", recovery_id="test-recovery")
+            bodies: list[str] = []
+
+            def capture_email(command: list[str], check: bool) -> None:
+                bodies.append(Path(command[command.index("--message-file") + 1]).read_text(encoding="utf-8"))
+
+            with patch.dict(REMOVAL_NOTICE_RECOVERIES, {"test-recovery": recovery}, clear=True), patch.dict(
+                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
+            ), patch(
+                "omo_manager.omo_pending.current_pending_task", return_value=path
+            ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=path), patch(
+                "omo_manager.omo_completion_email.subprocess.run", side_effect=capture_email
+            ):
+                self.assertEqual(0, run(args, root))
+                self.assertEqual(0, run(args, root))
+
+            self.assertEqual(["pending item deleted:\n- first request\n- second request\n- third request\n"], bodies)
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+
+    def test_recover_removal_notice_failure_keeps_completed_queue_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            path = root / "task.md"
+            evidence = "reviewed result was already reported"
+            original = task_text() + f"(verified removed pending item: {evidence})\n"
+            path.write_text(original, encoding="utf-8")
+            recovery = removal_recovery(path, original, ("🧑 request",), evidence)
+            args = Args("recover-removal-notice", recovery_id="test-recovery")
+            with patch.dict(REMOVAL_NOTICE_RECOVERIES, {"test-recovery": recovery}, clear=True), patch.dict(
+                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
+            ), patch(
+                "omo_manager.omo_pending.current_pending_task", return_value=path
+            ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=path), patch(
+                "omo_manager.omo_completion_email.subprocess.run", side_effect=OSError("mail unavailable")
+            ):
+                with self.assertRaisesRegex(OSError, "not confirmed delivered"):
+                    run(args, root)
+
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+
+    def test_recover_removal_notice_rejects_changed_or_blanket_no_contact_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            evidence = "reviewed result was already reported"
+            original = task_text() + "Never email the Human.\n" + f"(verified removed pending item: {evidence})\n"
+            path.write_text(original, encoding="utf-8")
+            recovery = removal_recovery(path, original, ("🧑 request",), evidence)
+            base = Args("recover-removal-notice", recovery_id="test-recovery")
+            with patch.dict(REMOVAL_NOTICE_RECOVERIES, {"test-recovery": recovery}, clear=True), patch(
+                "omo_manager.omo_pending.current_pending_task", return_value=path
+            ), patch(
+                "omo_manager.omo_completion_email.current_pending_task", return_value=path
+            ), patch("omo_manager.omo_completion_email.subprocess.run") as email:
+                with self.assertRaisesRegex(BlockingError, "removal evidence"):
+                    REMOVAL_NOTICE_RECOVERIES["test-recovery"] = removal_recovery(
+                        path, original, ("🧑 request",), "different evidence"
+                    )
+                    run(base, root)
+                REMOVAL_NOTICE_RECOVERIES["test-recovery"] = recovery
+                with self.assertRaisesRegex(BlockingError, "blanket no-contact"):
+                    run(base, root)
+                with self.assertRaisesRegex(BlockingError, "digest changed"):
+                    REMOVAL_NOTICE_RECOVERIES["test-recovery"] = RemovalNoticeRecovery(
+                        recovery.task_name,
+                        "e" * 64,
+                        recovery.items,
+                        recovery.evidence,
+                        recovery.completion_key,
+                    )
+                    run(base, root)
+            email.assert_not_called()
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+
     def test_remove_with_missing_completion_entrypoint_does_not_mutate_or_email(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -387,6 +546,19 @@ class PendingQueueTests(unittest.TestCase):
             parse_args(base)
         self.assertEqual("a" * 64, parse_args([*base, "--completion-key", "a" * 64]).completion_key)
         self.assertEqual("", parse_args(["remove", "--item", "legacy item", "--evidence", "done"]).completion_key)
+
+    def test_recover_removal_notice_requires_human_items_and_exact_digests(self) -> None:
+        base = ["recover-removal-notice", "--recovery-id", SOURCE1929_RECOVERY_ID]
+        args = parse_args(base)
+        self.assertEqual("recover-removal-notice", args.command)
+        self.assertEqual(SOURCE1929_RECOVERY_ID, args.recovery_id)
+        for changed in (
+            ["recover-removal-notice", "--recovery-id", "unknown"],
+            [*base, "--item", "🧑 forged item"],
+            [*base, "--completion-key", "a" * 64],
+        ):
+            with self.subTest(changed=changed), self.assertRaises(SystemExit):
+                parse_args(changed)
 
     def test_legacy_remove_no_email_preserves_evidence_without_mail_calls(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

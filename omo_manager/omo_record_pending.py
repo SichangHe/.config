@@ -23,7 +23,7 @@ from omo_manager.omo_blocking import load_yaml_mapping
 from omo_manager.omo_blocking import render_task
 from omo_manager.omo_blocking import split_task_text
 from omo_manager.omo_blocking import v2_enabled
-from omo_manager.omo_completion_email import NO_CONTACT_RE
+from omo_manager.omo_completion_email import human_pending_notice_contact_forbidden
 from omo_manager.omo_completion_email import completion_email_state_dir
 from omo_manager.omo_completion_email import exclusive_record
 from omo_manager.omo_completion_email import fsync_directory
@@ -384,7 +384,7 @@ def send_human_ack_once(
 
 def contact_forbidden(*texts: str) -> bool:
     """Preserve an explicit no-contact rule on either ingress or owner task."""
-    return any(NO_CONTACT_RE.search(text) is not None for text in texts)
+    return any(human_pending_notice_contact_forbidden(text) for text in texts)
 
 
 def record_locked(args: Args, pending_path: Path, target_path: Path, email_path: Path | None) -> str:

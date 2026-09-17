@@ -292,6 +292,21 @@ class RecordPendingTests(unittest.TestCase):
             send.assert_not_called()
             self.assertIn("🧑 finish review", task.read_text(encoding="utf-8"))
 
+    def test_ack_human_ignores_agent_scoped_no_contact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            task.write_text(
+                task_frontmatter()
+                + "Agent-authored pending items must not email the Human.\n(pending)\nPlease do it.\n",
+                encoding="utf-8",
+            )
+            line = task.read_text(encoding="utf-8").splitlines().index("(pending)") + 1
+            email = human_email(root)
+            with patch("omo_manager.omo_record_pending.subprocess.run") as send:
+                self.assertEqual(0, run(Args(root, Path("task.md"), line, Path("task.md"), ("🧑 finish review",), True, email)))
+            send.assert_called_once()
+
     def test_ack_human_honors_source_email_no_contact_without_mail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
