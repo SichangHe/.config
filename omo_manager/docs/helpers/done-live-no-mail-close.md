@@ -48,6 +48,8 @@ pane closure
   - exception: an exported consumed-closure attestation may bind the receipt module's exact historical watcher transition, worker allocation, commitment, envelope, transfer, and report; the older manager-acceptance bundle remains supported
   - the exception waives only the missing visible acceptance token; every pane, process, session, exit, capture, close-proof, and lifecycle check remains
 - exit Codex only after a fresh bound `/status` response identifies the expected session
+  - identical repeated panels may have several equivalent insertion positions; accept only one distinct added payload while preserving the prior capture or the existing exact panel-count and sequence checks
+  - unchanged captures, footer-only redraws, and different candidate payloads do not supply a fresh response
 - an authenticated consumed-report close may ignore quoted `Conversation interrupted` text only when no prior exact Codex UI marker exists
   - after exit, require either one exact interruption UI marker or one exact two-line clean-exit resume block with the matching session
   - reject prior, multiple, loose, or mismatched exit markers

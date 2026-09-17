@@ -3366,6 +3366,49 @@ $ """
         after = before.replace("v0.153.4", "v0.153.5").replace("ready", "redrawn")
         self.assertEqual("", submitted_status_response(before, after))
 
+    def test_query_status_session_id_repeats_identical_production_card_for_describe_close_retry(self) -> None:
+        response = (Path(__file__).with_name("fixtures") / "dw8_production_status_response.txt").read_text()
+        session_id = "01a07f0f-ffbd-7f13-89f1-4936c50be5c2"
+        card = f"/status\n{response}"
+        for redraw_footer in (False, True):
+            captures = [f"history\n{card * count}\n› Ask Codex to do anything\n  gpt-5.6-sol high · weekly {60 - count if redraw_footer else 60}% left\n" for count in range(4)]
+            with (
+                self.subTest(redraw_footer=redraw_footer),
+                patch("omo_manager.omo_codex_stop.capture", side_effect=[captures[0], captures[1], captures[1], captures[2], captures[2], captures[3]]) as capture,
+                patch("omo_manager.omo_codex_stop.paste_text") as paste_text,
+                patch("omo_manager.omo_codex_stop.tmux") as tmux,
+            ):
+                for operation in ("describe", "close", "retry"):
+                    with self.subTest(operation=operation):
+                        self.assertEqual(
+                            (session_id, response if redraw_footer else f"\n{response}"),
+                            query_status_session_id("cfg:1.0", 200, 0.0, strict_status_response=True),
+                        )
+                self.assertEqual(6, capture.call_count)
+                self.assertEqual([("cfg:1.0", "/status")] * 3, [call.args for call in paste_text.call_args_list])
+                self.assertEqual([["send-keys", "-t", "cfg:1.0", "Enter"]] * 3, [call.args[0] for call in tmux.call_args_list])
+
+    def test_query_status_session_id_rejects_stale_identical_production_cards(self) -> None:
+        response = (Path(__file__).with_name("fixtures") / "dw8_production_status_response.txt").read_text()
+        card = f"/status\n{response}"
+        before = f"history\n{card * 3}\n› Ask Codex to do anything\nold footer\n"
+        for after in (before, before.replace("old footer", "new footer")):
+            with (
+                self.subTest(redraw_footer=after != before),
+                patch("omo_manager.omo_codex_stop.capture", side_effect=[before, after]),
+                patch("omo_manager.omo_codex_stop.paste_text"),
+                patch("omo_manager.omo_codex_stop.tmux"),
+            ):
+                self.assertEqual(("", ""), query_status_session_id("cfg:1.0", 200, 0.0, strict_status_response=True))
+
+    def test_submitted_status_response_rejects_different_candidate_bytes_for_same_session(self) -> None:
+        response = (Path(__file__).with_name("fixtures") / "dw8_production_status_response.txt").read_text()
+        card = f"/status\n{response}"
+        changed_card = card.replace("58% left", "57% left")
+        before = f"history\n{card}\n› Ask Codex to do anything\nfooter\n"
+        after = f"history\n{card}{changed_card}{card}\n› Ask Codex to do anything\nfooter\n"
+        self.assertEqual("", submitted_status_response(before, after))
+
     def test_submitted_status_response_accepts_exact_production_card_across_composer_redraw(self) -> None:
         response = (Path(__file__).with_name("fixtures") / "dw8_production_status_response.txt").read_text()
         old_card = response.replace("58% left", "60% left")
