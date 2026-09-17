@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
@@ -43,6 +47,115 @@ def write_fake_tmux(bin_dir: Path, *, session: str = "cfg", window: str = "7", p
 
 
 class ReportHelperTests(unittest.TestCase):
+    def test_omo_report_authenticates_omnigent_producer_without_tmux(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            home = tmp_path / "home"
+            root = tmp_path / "logs"
+            work = tmp_path / "work"
+            root.mkdir()
+            work.mkdir()
+            session_id = "session-1"
+            thread_id = "thread-1"
+            bridge = home / ".omnigent" / "codex-native" / "bridge"
+            codex_home = bridge / "codex-home"
+            codex_home.mkdir(parents=True)
+            state = bridge / "state.json"
+            state.write_text(
+                json.dumps(
+                    {
+                        "active_turn_id": None,
+                        "codex_home": str(codex_home),
+                        "cwd": None,
+                        "session_id": session_id,
+                        "socket_path": "ws://127.0.0.1:9876",
+                        "thread_id": thread_id,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state.chmod(0o600)
+            target = f"omnigent://{session_id}"
+            (root / "TODO.md").write_text(f"current:\ntask.md {target}\n", encoding="utf-8")
+            (root / "task.md").write_text(task_frontmatter(runat=target), encoding="utf-8")
+            local_env = tmp_path / "local.env"
+            local_env.write_text(f"OMO_WORK_LOGS_ROOT={root}\nOMO_MANAGER_TMUX_TARGET=main:0.0\n", encoding="utf-8")
+
+            class Handler(BaseHTTPRequestHandler):
+                def do_GET(self) -> None:
+                    payload = (
+                        "{"
+                        f'"id":"{session_id}","external_session_id":"{thread_id}",'
+                        '"harness":"codex-native","runner_online":true,"host_online":true,'
+                        f'"workspace":{json.dumps(str(work))},'
+                        '"archived":false,"status":"idle"}'
+                    ).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+
+                def log_message(self, _format: str, *_args: object) -> None:
+                    return
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            launcher = tmp_path / "launcher.py"
+            launcher.write_text(
+                """from pathlib import Path
+import subprocess
+import sys
+helper = sys.argv[1]
+allocated = subprocess.run([helper, '--alloc-message-file'], text=True, capture_output=True, check=False)
+if allocated.returncode:
+    print(allocated.stderr, file=sys.stderr, end='')
+    raise SystemExit(allocated.returncode)
+message = Path(allocated.stdout.strip())
+message.write_text('omnigent report\\n', encoding='utf-8')
+submitted = subprocess.run([helper, '--status', 'blocked', '--agent', 'remote-owner', '--message-file', str(message)], text=True, capture_output=True, check=False)
+print(submitted.stdout, end='')
+print(submitted.stderr, file=sys.stderr, end='')
+raise SystemExit(submitted.returncode)
+""",
+                encoding="utf-8",
+            )
+            codex_executable = tmp_path / "codex"
+            codex_executable.symlink_to(Path(sys.executable).resolve())
+            env = {
+                **{key: value for key, value in os.environ.items() if key not in {"TMUX", "TMUX_PANE"}},
+                "CODEX_HOME": str(codex_home),
+                "HOME": str(home),
+                "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                "OMO_MANAGER_OMNIGENT_URL": f"http://127.0.0.1:{server.server_port}",
+                "XDG_STATE_HOME": str(tmp_path / "state"),
+            }
+            try:
+                result = subprocess.run(
+                    [
+                        str(codex_executable),
+                        str(launcher),
+                        str(OMO_DIR / "omo_report.sh"),
+                        "app-server",
+                        "--listen",
+                        "ws://127.0.0.1:9876",
+                    ],
+                    cwd=work,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    timeout=15,
+                    check=False,
+                )
+            finally:
+                server.shutdown()
+                thread.join()
+                server.server_close()
+            self.assertEqual(0, result.returncode, result.stderr)
+            manager_text = dated_manager_file(root).read_text(encoding="utf-8")
+            self.assertIn(f"(from agent {target} ", manager_text)
+
     def test_omo_report_large_snapshot_survives_successful_early_exit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -717,6 +830,7 @@ class ReportHelperTests(unittest.TestCase):
                     "OMO_MANAGER_LOCAL_ENV": str(local_env),
                     "PATH": f"{bin_dir}:{os.environ['PATH']}",
                     "TMUX_PANE": "%1701",
+                    "XDG_STATE_HOME": str(tmp_path / "state"),
                 }
                 alloc = subprocess.run(
                     [str(OMO_DIR / "omo_report.sh"), "--alloc-message-file"],

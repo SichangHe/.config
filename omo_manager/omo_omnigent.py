@@ -20,6 +20,8 @@ from omo_manager.omo_task_metadata import OMNIGENT_RUNAT_RE
 
 DEFAULT_SERVER_URL = "http://127.0.0.1:6767"
 DEFAULT_TIMEOUT_S = 30.0
+FULL_ACCESS_FLAG = "--dangerously-bypass-approvals-and-sandbox"
+FULL_ACCESS_LABEL = "omnigent.codex_native.bypass_sandbox"
 ManagerStatus = Literal["ready", "running", "error", "missing"]
 
 
@@ -198,11 +200,24 @@ def online_host_id(explicit_host_id: str = "") -> str:
 
 
 # 🧑 "Implement at least the launch, stop, messaging, status checks, how else would we be able to try it?"
-def launch_session(tool: str, workdir: Path, model: str, reasoning_effort: str, *, host_id: str = "", title: str = "", dry_run: bool = False) -> str:
+def launch_session(
+    tool: str,
+    workdir: Path,
+    model: str,
+    reasoning_effort: str,
+    *,
+    host_id: str = "",
+    title: str = "",
+    codex_flags: tuple[str, ...] = (),
+    dry_run: bool = False,
+) -> str:
     if tool not in {"codex", "cursor"}:
         raise RuntimeError("OmniGent launch currently supports the actual `codex` and `cursor` harnesses")
+    if codex_flags and (tool != "codex" or codex_flags != (FULL_ACCESS_FLAG,)):
+        raise RuntimeError(f"OmniGent launch supports only the exact Codex access flag `{FULL_ACCESS_FLAG}`")
     if dry_run:
-        print(f"would launch OmniGent-backed {tool} in {workdir}")
+        suffix = f" with {FULL_ACCESS_FLAG}" if codex_flags else ""
+        print(f"would launch OmniGent-backed {tool} in {workdir}{suffix}")
         return "omnigent://DRYRUN"
     payload = {
         "agent_id": agent_id_for_tool(tool),
@@ -211,6 +226,8 @@ def launch_session(tool: str, workdir: Path, model: str, reasoning_effort: str, 
         "title": title or None,
         "model_override": model or None,
         "reasoning_effort": reasoning_effort or None,
+        "terminal_launch_args": None,
+        **({"labels": {FULL_ACCESS_LABEL: "1"}} if codex_flags else {}),
     }
     value = require_mapping(request_json("POST", "/v1/sessions", payload), "session launch")
     return target_for_session(require_text(value.get("id"), "launched session id"))
@@ -228,6 +245,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     launch.add_argument("--reasoning-effort", required=True)
     launch.add_argument("--host-id", default="")
     launch.add_argument("--title", default="")
+    launch.add_argument("--codex-flag", action="append", default=[])
     send = commands.add_parser("send")
     send.add_argument("--message-file", type=Path, required=True)
     _ = commands.add_parser("status")
@@ -242,7 +260,18 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(sys.argv[1:] if argv is None else argv)
         if args.command == "launch":
-            print(launch_session(args.tool, args.workdir.resolve(), args.model, args.reasoning_effort, host_id=args.host_id, title=args.title, dry_run=args.dry_run))
+            print(
+                launch_session(
+                    args.tool,
+                    args.workdir.resolve(),
+                    args.model,
+                    args.reasoning_effort,
+                    host_id=args.host_id,
+                    title=args.title,
+                    codex_flags=tuple(args.codex_flag),
+                    dry_run=args.dry_run,
+                )
+            )
         elif args.command == "send":
             send_message(args.target, args.message_file.read_text(encoding="utf-8"), dry_run=args.dry_run)
         elif args.command == "stop":

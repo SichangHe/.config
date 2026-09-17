@@ -30,7 +30,7 @@ The shell executes an immutable byte snapshot. The receiver and imported depende
 
 When a workflow requires explicit batch and attempt bindings, include one unambiguous `batch: VALUE` line and one `attempt: VALUE` line in the private body. The helper binds their safe values in `report_context` without copying other body text; describe reports whether both migration bindings are available.
 
-`SOURCE` is the inferred worker tmux session/window, such as `vl:4`; submission fails if that producer identity is unavailable. The `/tmp` artifact stores a concise sent line, the message SHA-256, the owner-prefix binding, a `message:` separator, and the report body.
+`SOURCE` is the authenticated producer target, such as tmux `vl:4` or `omnigent://SESSION_ID`; submission fails if that producer identity is unavailable. A native OmniGent producer must match its owner-controlled bridge state, native app-server ancestry, socket, workspace, thread, and online session snapshot. The `/tmp` artifact stores a concise sent line, the message SHA-256, the owner-prefix binding, a `message:` separator, and the report body.
 
 The persistent task file stores no `[omo-message-source: ...]`, `(report manager ...)`, `[message-sha256: ...]`, `message-file: ...`, or report body lines for new agent-originated reports. It does not also push directly to the live manager; `omo_pending_watch.py` owns delivery from the durable Markdown block so the file remains the single source of manager notification.
 

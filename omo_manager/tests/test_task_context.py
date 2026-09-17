@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from subprocess import CompletedProcess
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from omo_manager.omo_agent_status import TaskFrontmatterError
@@ -31,6 +32,27 @@ BLOCKED_TASK = TASK.replace("status: running", "status: blocked\nblocked_on: pre
 
 
 class TaskContextTests(unittest.TestCase):
+    def test_omnigent_identity_resolves_active_task_without_tmux_or_actor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = "omnigent://session-1"
+            task = root / "task.md"
+            task.write_text(TASK.replace("runat: hcfg:1", f"runat: {target}"), encoding="utf-8")
+            (root / "TODO.md").write_text(f"current:\ntask.md {target}\nprevious:\n", encoding="utf-8")
+            with (
+                patch(
+                    "omo_manager.omo_task_context.current_tmux_target",
+                    side_effect=TaskFrontmatterError("current tmux pane cannot be identified"),
+                ),
+                patch(
+                    "omo_manager.omo_task_context.authenticate_current_omnigent",
+                    return_value=SimpleNamespace(target=target),
+                ),
+                patch("omo_manager.omo_blocking_actor.request") as actor,
+            ):
+                self.assertEqual(task, current_active_task(root))
+            actor.assert_not_called()
+
     def test_actor_recovers_owner_when_direct_tmux_is_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -465,8 +465,8 @@ Ownership migration:
         parser.error("--omnigent launch does not use Codex --session-id; the returned `runat` is the durable session identity.")
     if parsed.omnigent and parsed.tool not in {"codex", "cursor"}:
         parser.error("--omnigent supports --tool codex or --tool cursor.")
-    if parsed.omnigent and parsed.codex_flag:
-        parser.error("--codex-flag is not yet portable through OmniGent launch.")
+    if parsed.omnigent and parsed.codex_flag and tuple(parsed.codex_flag) != ("--dangerously-bypass-approvals-and-sandbox",):
+        parser.error("--omnigent accepts only one exact --codex-flag=--dangerously-bypass-approvals-and-sandbox token.")
     if parsed.omnigent_host_id and not parsed.omnigent:
         parser.error("--omnigent-host-id requires --omnigent.")
     if parsed.require_existing_tmux_session and parsed.allow_new_tmux_session:
@@ -1279,6 +1279,7 @@ def launch_omnigent_task(args: Args) -> tuple[Path, str]:
         args.reasoning_effort,
         host_id=args.omnigent_host_id,
         title=args.window_name or Path(args.task_file).stem,
+        codex_flags=args.codex_flags,
     )
     try:
         with task_target_lock(args.root, target):
@@ -2216,6 +2217,7 @@ def dry_run(args: Args) -> None:
             args.reasoning_effort,
             host_id=args.omnigent_host_id,
             title=args.window_name or path.stem,
+            codex_flags=args.codex_flags,
             dry_run=True,
         )
         print(f"task_file: {path}")

@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .omo_pending_digest import PENDING_CONTENT_CHAR_LIMIT
+from .omo_omnigent_identity import OmniGentIdentityError
+from .omo_omnigent_identity import authenticate_current_omnigent
 from .omo_task_lock import task_file_lock_at_path
 from .omo_task_lock import task_file_lock_path
 from .omo_task_lock import watcher_report_authority_is_live
@@ -52,11 +54,12 @@ AGENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 SAFE_VALUE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 ROUTE_KIND_RE = re.compile(r"^[a-z][a-z0-9-]{0,79}$")
 TARGET_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):(\d+)(?:\.(\d+))?$")
+OMNIGENT_TARGET_RE = re.compile(r"^omnigent://([A-Za-z0-9._-]+)$")
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 PANE_ID_RE = re.compile(r"^%[A-Za-z0-9_.-]+$")
 REPORT_CONTEXT_RE = re.compile(r"^(batch|attempt): ([A-Za-z0-9._-]+)$")
 SENT_LINE_RE = re.compile(
-    r"^\(sent from ([A-Za-z0-9_.-]+) via omo_report\.sh tmux=([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) "
+    r"^\(sent from ([A-Za-z0-9_.-]+) via omo_report\.sh tmux=((?:[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)|(?:omnigent://[A-Za-z0-9._-]+)) "
     r"time=\S+ task-file=([A-Za-z0-9_.-]+)\)$"
 )
 HASH_LINE_RE = re.compile(r"^\[message-sha256: ([0-9a-f]{64})\]$")
@@ -243,6 +246,13 @@ class Arguments:
     tmux_window_name: str
     selected_done_task: bool
     root_retained_evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | None = None
+    omnigent_session_id: str = ""
+    omnigent_thread_id: str = ""
+    omnigent_workspace: str = ""
+    omnigent_state_path: str = ""
+    omnigent_socket_path: str = ""
+    omnigent_app_server_pid: int = 0
+    omnigent_codex_home: str = ""
 
 
 @dataclass(frozen=True)
@@ -944,6 +954,13 @@ def parse_args(argv: list[str] | None = None) -> Arguments:
     _ = parser.add_argument("--tmux-pane-index", default="")
     _ = parser.add_argument("--tmux-pane-id", default="")
     _ = parser.add_argument("--tmux-window-name", default="")
+    _ = parser.add_argument("--omnigent-session-id", default="")
+    _ = parser.add_argument("--omnigent-thread-id", default="")
+    _ = parser.add_argument("--omnigent-workspace", default="")
+    _ = parser.add_argument("--omnigent-state-path", default="")
+    _ = parser.add_argument("--omnigent-socket-path", default="")
+    _ = parser.add_argument("--omnigent-app-server-pid", default=0, type=int)
+    _ = parser.add_argument("--omnigent-codex-home", default="")
     _ = parser.add_argument("--selected-done-task", action="store_true")
     _ = parser.add_argument("--root-retained-session-transcript", type=Path)
     _ = parser.add_argument("--root-retained-session-prefix-sha256", default="")
@@ -1029,6 +1046,13 @@ def parse_args(argv: list[str] | None = None) -> Arguments:
         parsed.tmux_window_name,
         parsed.selected_done_task,
         evidence,
+        parsed.omnigent_session_id,
+        parsed.omnigent_thread_id,
+        parsed.omnigent_workspace,
+        parsed.omnigent_state_path,
+        parsed.omnigent_socket_path,
+        parsed.omnigent_app_server_pid,
+        parsed.omnigent_codex_home,
     )
 
 
@@ -1069,6 +1093,13 @@ def canonical_target(value: str, *, required: bool, field: str) -> str:
     window = int(window_text)
     pane = int(pane_text or "0")
     return f"{session}:{window}" if pane == 0 else f"{session}:{window}.{pane}"
+
+
+def canonical_producer_target(value: str) -> str:
+    match = OMNIGENT_TARGET_RE.fullmatch(value)
+    if match is not None:
+        return f"omnigent://{match.group(1)}"
+    return canonical_target(value, required=True, field="producer target")
 
 
 def validate_text_field(value: str, field: str, *, max_length: int, allow_empty: bool = True) -> None:
@@ -1272,7 +1303,51 @@ def tmux_metadata(args: Arguments, producer_target: str) -> dict[str, object]:
         raise ReceiptError("tmux pane id is invalid")
     for key, value in raw.items():
         validate_text_field(value, f"tmux {key}", max_length=256)
+    if OMNIGENT_TARGET_RE.fullmatch(producer_target) is not None and supplied:
+        raise ReceiptError("OmniGent producer cannot supply tmux identity")
     return supplied
+
+
+def omnigent_metadata(args: Arguments, producer_target: str) -> dict[str, object]:
+    raw: dict[str, object] = {
+        "app_server_pid": args.omnigent_app_server_pid,
+        "codex_home": args.omnigent_codex_home,
+        "session_id": args.omnigent_session_id,
+        "socket_path": args.omnigent_socket_path,
+        "state_path": args.omnigent_state_path,
+        "thread_id": args.omnigent_thread_id,
+        "workspace": args.omnigent_workspace,
+    }
+    supplied = any(value for value in raw.values())
+    match = OMNIGENT_TARGET_RE.fullmatch(producer_target)
+    if match is None:
+        if supplied:
+            raise ReceiptError("tmux producer cannot supply OmniGent identity")
+        return {}
+    if not all(value for value in raw.values()) or match.group(1) != args.omnigent_session_id:
+        raise ReceiptError("OmniGent producer identity is incomplete")
+    for key, value in raw.items():
+        if key == "app_server_pid":
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 1:
+                raise ReceiptError("OmniGent app-server process identity is invalid")
+            continue
+        assert isinstance(value, str)
+        validate_text_field(value, f"OmniGent {key}", max_length=4096, allow_empty=False)
+    if args.mode != "verify-consumed":
+        try:
+            identity = authenticate_current_omnigent(
+                expected_target=producer_target,
+                expected_thread_id=args.omnigent_thread_id,
+                expected_workspace=args.omnigent_workspace,
+                expected_state_path=args.omnigent_state_path,
+                expected_socket_path=args.omnigent_socket_path,
+                expected_app_server_pid=args.omnigent_app_server_pid,
+            )
+        except OmniGentIdentityError as exc:
+            raise ReceiptError(f"OmniGent producer identity is not authenticated: {exc}") from exc
+        if identity.codex_home != args.omnigent_codex_home:
+            raise ReceiptError("OmniGent producer CODEX_HOME changed")
+    return raw
 
 
 def receipt_state_home() -> Path:
@@ -1508,6 +1583,23 @@ def manager_route_selection_matches(
 
 
 def validate_route_snapshot(plan: Plan, *, ignore: frozenset[Path] = frozenset()) -> None:
+    omnigent = plan.routing.get("omnigent")
+    if omnigent is not None and plan.mode != "verify-consumed":
+        if not isinstance(omnigent, dict):
+            raise ReceiptError("OmniGent routing identity is invalid")
+        try:
+            identity = authenticate_current_omnigent(
+                expected_target=str(plan.routing["producer_target"]),
+                expected_thread_id=str(omnigent.get("thread_id", "")),
+                expected_workspace=str(omnigent.get("workspace", "")),
+                expected_state_path=str(omnigent.get("state_path", "")),
+                expected_socket_path=str(omnigent.get("socket_path", "")),
+                expected_app_server_pid=int(omnigent.get("app_server_pid", 0)),
+            )
+        except (OmniGentIdentityError, TypeError, ValueError) as exc:
+            raise ReceiptError(f"OmniGent routing identity changed before acceptance: {exc}") from exc
+        if identity.codex_home != omnigent.get("codex_home"):
+            raise ReceiptError("OmniGent routing CODEX_HOME changed before acceptance")
     if plan.authenticated_done_retry:
         if not exact_done_previous_custody(plan):
             raise ReceiptError("done-task retry custody changed before acceptance")
@@ -1798,7 +1890,7 @@ def _build_plan_from_message(
         raise ReceiptError("moved recovery replay id is invalid")
     if AGENT_RE.fullmatch(args.agent) is None or args.agent in {".", ".."}:
         raise ReceiptError("agent is invalid")
-    producer_target = canonical_target(args.producer_target, required=True, field="producer target")
+    producer_target = canonical_producer_target(args.producer_target)
     requested_target = canonical_target(args.requested_manager_target, required=False, field="requested manager target")
     resolved_target = canonical_target(args.resolved_manager_target, required=False, field="resolved manager target")
     if ROUTE_KIND_RE.fullmatch(args.route_kind) is None:
@@ -1828,6 +1920,7 @@ def _build_plan_from_message(
     report_context = extract_report_context(message_text)
     input_info: dict[str, object] = {"sha256": hashlib.sha256(message).hexdigest(), "size_bytes": len(message)}
     tmux = tmux_metadata(args, producer_target)
+    omnigent = omnigent_metadata(args, producer_target)
     routing: dict[str, object] = {
         "agent": args.agent,
         "manager": str(manager),
@@ -1843,8 +1936,11 @@ def _build_plan_from_message(
         "task": str(task),
         "tmux": tmux,
     }
+    if omnigent:
+        routing["omnigent"] = omnigent
 
     dependency_paths = {
+        "omo_omnigent_identity": receiver_path.with_name("omo_omnigent_identity.py"),
         "omo_pending_digest": receiver_path.with_name("omo_pending_digest.py"),
         "omo_task_lock": receiver_path.with_name("omo_task_lock.py"),
     }
@@ -2700,7 +2796,9 @@ def validate_receipt_bytes(
     for key, value in replay_routing_identity(plan.routing).items():
         if routing.get(key) != value:
             raise ReceiptError("durable receipt routing is inconsistent")
-    if not isinstance(routing.get("tmux"), dict):
+    if not isinstance(routing.get("tmux"), dict) or (
+        "omnigent" in routing and not isinstance(routing.get("omnigent"), dict)
+    ):
         raise ReceiptError("durable receipt tmux metadata is invalid")
     if (
         routing.get("route_evidence") != routing_sources
@@ -4527,6 +4625,9 @@ def consumed_closure_export(
         "tmux_window_index": tmux.get("window_index", ""),
         "tmux_window_name": tmux.get("window_name", ""),
     }
+    omnigent = plan.routing.get("omnigent")
+    if isinstance(omnigent, dict):
+        verification.update({f"omnigent_{key}": value for key, value in omnigent.items()})
     if archived:
         verification["archived_task"] = True
         verification["archived_task_path"] = str(plan.archived_task)
@@ -4587,6 +4688,19 @@ def validate_consumed_closure_export(payload: bytes) -> dict[str, object]:
         "tmux_window_index", "tmux_window_name",
     }
     archived = verification.get("archived_task") is True
+    omnigent = "omnigent_session_id" in verification
+    if omnigent:
+        expected_context.update(
+            {
+                "omnigent_app_server_pid",
+                "omnigent_codex_home",
+                "omnigent_session_id",
+                "omnigent_socket_path",
+                "omnigent_state_path",
+                "omnigent_thread_id",
+                "omnigent_workspace",
+            }
+        )
     if archived:
         expected_context.update({"archived_task", "archived_task_path", "recovery_replay_id"})
     root_retained_evidence = "root_retained_session_transcript" in verification
@@ -4669,6 +4783,17 @@ def validate_consumed_closure_export(payload: bytes) -> dict[str, object]:
         "tmux_pane_index", "tmux_pane_id", "tmux_window_name",
     ):
         argv.extend((f"--{key.replace('_', '-')}", str(verification[key])))
+    if omnigent:
+        for key in (
+            "omnigent_session_id",
+            "omnigent_thread_id",
+            "omnigent_workspace",
+            "omnigent_state_path",
+            "omnigent_socket_path",
+            "omnigent_app_server_pid",
+            "omnigent_codex_home",
+        ):
+            argv.extend((f"--{key.replace('_', '-')}", str(verification[key])))
     if archived:
         argv.extend(("--archived-task", str(verification["archived_task_path"])))
         argv.extend(("--recover-moved", str(verification["recovery_replay_id"])))
@@ -8077,6 +8202,10 @@ def export_archived_consumed_report(
     route_kind = str(routing.get("route_kind", ""))
     manager_selection = "sole-active" if route_kind == "active-manager-task" else "not-applicable"
     manager_frontmatter_sha256 = "0" * 64 if route_kind == "active-manager-task" else "not-applicable"
+    omnigent = routing.get("omnigent")
+    if omnigent is not None and not isinstance(omnigent, dict):
+        raise ReceiptError("archived OmniGent routing identity is invalid")
+    omnigent = omnigent if isinstance(omnigent, dict) else {}
     helper_path = Path(str(getattr(sys.modules.get("omo_manager.omo_report_receipt"), "__executed_helper_path__", "")))
     arguments = Arguments(
         mode="verify-consumed",
@@ -8107,6 +8236,13 @@ def export_archived_consumed_report(
         tmux_window_name="",
         selected_done_task=False,
         root_retained_evidence=root_retained_evidence,
+        omnigent_session_id=str(omnigent.get("session_id", "")),
+        omnigent_thread_id=str(omnigent.get("thread_id", "")),
+        omnigent_workspace=str(omnigent.get("workspace", "")),
+        omnigent_state_path=str(omnigent.get("state_path", "")),
+        omnigent_socket_path=str(omnigent.get("socket_path", "")),
+        omnigent_app_server_pid=int(omnigent.get("app_server_pid", 0)),
+        omnigent_codex_home=str(omnigent.get("codex_home", "")),
     )
     verified_message, message_identity, message_fd = open_regular_file_snapshot(
         message_path,

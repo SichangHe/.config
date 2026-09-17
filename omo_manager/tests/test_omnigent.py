@@ -93,6 +93,7 @@ class OmniGentRuntimeTests(unittest.TestCase):
                     "title": "task",
                     "model_override": "gpt-5.6-sol",
                     "reasoning_effort": "high",
+                    "terminal_launch_args": None,
                 },
             ),
             request.call_args_list[-1],
@@ -108,6 +109,29 @@ class OmniGentRuntimeTests(unittest.TestCase):
         request.return_value = {"data": [{"id": "agent-codex", "name": "codex-native-ui", "harness": "cursor-native"}]}
         with self.assertRaisesRegex(RuntimeError, "`codex-native` harness"):
             launch_session("codex", Path("/work"), "gpt-5.6-sol", "high")
+
+    @patch("omo_manager.omo_omnigent.request_json")
+    def test_launch_portably_passes_exact_full_access_opt_in(self, request) -> None:
+        request.side_effect = [
+            {"data": [{"id": "agent-codex", "name": "codex-native-ui", "harness": "codex-native"}]},
+            {"hosts": [{"host_id": "host-1", "status": "online"}]},
+            {"id": "session-1"},
+        ]
+        launch_session(
+            "codex",
+            Path("/work"),
+            "gpt-6-astra",
+            "low",
+            codex_flags=("--dangerously-bypass-approvals-and-sandbox",),
+        )
+        payload = request.call_args_list[-1].args[2]
+        self.assertEqual({"omnigent.codex_native.bypass_sandbox": "1"}, payload["labels"])
+        self.assertIsNone(payload["terminal_launch_args"])
+
+    def test_launch_rejects_other_or_duplicate_raw_flags(self) -> None:
+        for flags in (("--profile",), ("--dangerously-bypass-approvals-and-sandbox",) * 2):
+            with self.subTest(flags=flags), self.assertRaisesRegex(RuntimeError, "only the exact"):
+                launch_session("codex", Path("/work"), "gpt-6-astra", "low", codex_flags=flags)
 
 
 if __name__ == "__main__":

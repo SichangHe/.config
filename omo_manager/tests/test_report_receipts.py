@@ -1269,7 +1269,13 @@ print(push.call_args.args[3])
 def copy_report_helper(tmp_path: Path) -> Path:
     package = tmp_path / "copied-config" / "omo_manager"
     package.mkdir(parents=True)
-    for name in ("omo_pending_digest.py", "omo_report.sh", "omo_report_receipt.py", "omo_task_lock.py"):
+    for name in (
+        "omo_omnigent_identity.py",
+        "omo_pending_digest.py",
+        "omo_report.sh",
+        "omo_report_receipt.py",
+        "omo_task_lock.py",
+    ):
         shutil.copy2(OMO_DIR / name, package / name)
     report = package / "omo_report.sh"
     report.chmod(0o700)
@@ -1404,6 +1410,55 @@ def side_effect_paths(effects: dict[str, object]) -> set[str]:
 
 
 class ReportReceiptTests(unittest.TestCase):
+    def test_archived_omnigent_identity_is_commitment_bound_without_live_process(self) -> None:
+        metadata = SimpleNamespace(
+            mode="verify-consumed",
+            omnigent_app_server_pid=301,
+            omnigent_codex_home="/tmp/bridge/codex-home",
+            omnigent_session_id="a" * 32,
+            omnigent_socket_path="ws://127.0.0.1:39001",
+            omnigent_state_path="/tmp/bridge/session.json",
+            omnigent_thread_id="thread-1",
+            omnigent_workspace="/tmp/work",
+        )
+        with patch.object(
+            omo_report_receipt,
+            "authenticate_current_omnigent",
+            side_effect=AssertionError("archived verification must not require the retired process"),
+        ) as authenticate:
+            result = omo_report_receipt.omnigent_metadata(metadata, f"omnigent://{'a' * 32}")
+
+        authenticate.assert_not_called()
+        self.assertEqual("thread-1", result["thread_id"])
+
+    def test_archived_omnigent_route_validation_does_not_reauthenticate_live_process(self) -> None:
+        plan = SimpleNamespace(
+            authenticated_done_retry=False,
+            mode="verify-consumed",
+            route_evidence=(),
+            routing={
+                "omnigent": {
+                    "app_server_pid": 301,
+                    "codex_home": "/tmp/bridge/codex-home",
+                    "session_id": "a" * 32,
+                    "socket_path": "ws://127.0.0.1:39001",
+                    "state_path": "/tmp/bridge/session.json",
+                    "thread_id": "thread-1",
+                    "workspace": "/tmp/work",
+                },
+                "producer_target": f"omnigent://{'a' * 32}",
+                "route_local_date": datetime.now().astimezone().strftime("%Y-%m-%d"),
+            },
+        )
+        with patch.object(
+            omo_report_receipt,
+            "authenticate_current_omnigent",
+            side_effect=AssertionError("archived verification must not require the retired process"),
+        ) as authenticate:
+            omo_report_receipt.validate_route_snapshot(plan)
+
+        authenticate.assert_not_called()
+
     def test_consumed_export_recovery_rechecks_links_after_temporary_retirement(self) -> None:
         for defect in ("hard link", "mode"):
             with self.subTest(defect=defect), tempfile.TemporaryDirectory() as tmp:

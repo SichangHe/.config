@@ -42,9 +42,27 @@ first migration step
 - do not auto-unstick OmniGent sessions
 - leave every tmux launch, delivery, status, and stop path unchanged
 
+Codex access
+
+- an OmniGent Codex launch accepts the exact singleton `--codex-flag=--dangerously-bypass-approvals-and-sandbox`
+  - the session request records OmniGent's native per-session bypass label
+  - every other raw OmniGent Codex flag remains rejected
+- this launch option does not change an already-running thread
+  - the installed Codex settings API has no conditional-update or exclusive-owner operation
+  - a live repair requiring concurrent-change rejection must remain blocked until that capability exists
+
+private reports
+
+- `omo_report.sh` supports both tmux and native OmniGent producers
+- OmniGent authentication binds the current `CODEX_HOME` bridge state, native app-server ancestor, socket, workspace, thread, and online session snapshot
+- submission rechecks that identity before acceptance
+- archived consumed-report verification trusts the immutable commitment identity and does not require the retired producer process
+- tmux producer inference and routing are unchanged
+
 current boundary
 
 - `managerat` remains tmux-only
+- native producer authentication currently requires Linux process metadata under `/proc`
 - launch supports the installed native `codex` and `cursor` harnesses
 - the server URL, bearer token, and explicit host may be configured with `OMO_MANAGER_OMNIGENT_URL`, `OMO_MANAGER_OMNIGENT_TOKEN`, and `OMO_MANAGER_OMNIGENT_HOST_ID`
 - task completion stops but does not delete OmniGent history

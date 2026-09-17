@@ -163,7 +163,27 @@ class OmoTaskTests(unittest.TestCase):
             self.assertEqual("codex", metadata.tool)
             self.assertIn("x.md omnigent://session-123", (root / "TODO.md").read_text(encoding="utf-8"))
             self.assertIn('<manager_delegation from="mgr:1">', send.call_args.args[1])
-            launch.assert_called_once_with("codex", root, "gpt-5.6-sol", "high", host_id="", title="task")
+            launch.assert_called_once_with("codex", root, "gpt-5.6-sol", "high", host_id="", title="task", codex_flags=())
+
+    def test_parse_omnigent_accepts_only_one_full_access_codex_flag(self) -> None:
+        base = [
+            "--task-file",
+            "x.md",
+            "--omnigent",
+            "--tool",
+            "codex",
+            "--workdir",
+            "/work",
+            "--model",
+            "gpt-6-astra",
+            "--reasoning-effort",
+            "low",
+        ]
+        parsed = parse_args([*base, "--codex-flag=--dangerously-bypass-approvals-and-sandbox"])
+        self.assertEqual(("--dangerously-bypass-approvals-and-sandbox",), parsed.codex_flags)
+        for flags in (("--codex-flag=--profile",), ("--codex-flag=--dangerously-bypass-approvals-and-sandbox",) * 2):
+            with self.subTest(flags=flags), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                parse_args([*base, *flags])
 
     @patch("omo_manager.omo_task.send_omnigent_message")
     @patch("omo_manager.omo_task.launch_omnigent_session", return_value="omnigent://session-123")

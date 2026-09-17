@@ -284,7 +284,8 @@ if [ "$validate_consumed_export_requested" -ne 0 ] || [ "$validate_consumed_expo
   receiver_path="$(dirname "$helper_path")/omo_report_receipt.py"
   pending_digest_path="$(dirname "$helper_path")/omo_pending_digest.py"
   task_lock_path="$(dirname "$helper_path")/omo_task_lock.py"
-  exec env OMO_REPORT_RECEIVER_BOOTSTRAP=1 PYTHONDONTWRITEBYTECODE=1 python3 -I -S - "$receiver_path" "$pending_digest_path" "$task_lock_path" "$helper_path" \
+  omnigent_identity_path="$(dirname "$helper_path")/omo_omnigent_identity.py"
+  exec env OMO_REPORT_RECEIVER_BOOTSTRAP=1 PYTHONDONTWRITEBYTECODE=1 python3 -I -S - "$receiver_path" "$pending_digest_path" "$task_lock_path" "$omnigent_identity_path" "$helper_path" \
     --validate-consumed-export "$validate_consumed_export" "$validate_consumed_export_sha256" <<'PY'
 from __future__ import annotations
 
@@ -329,14 +330,16 @@ def load_module(name: str, path: Path, payload: bytes) -> types.ModuleType:
 receiver_path, receiver_payload = source_bytes(sys.argv[1])
 pending_path, pending_payload = source_bytes(sys.argv[2])
 lock_path, lock_payload = source_bytes(sys.argv[3])
-helper_path = Path(sys.argv[4]).resolve(strict=True)
-receiver_arguments = sys.argv[5:]
+identity_path, identity_payload = source_bytes(sys.argv[4])
+helper_path = Path(sys.argv[5]).resolve(strict=True)
+receiver_arguments = sys.argv[6:]
 package = types.ModuleType("omo_manager")
 package.__package__ = "omo_manager"
 package.__path__ = []
 sys.modules["omo_manager"] = package
 load_module("omo_manager.omo_pending_digest", pending_path, pending_payload)
 load_module("omo_manager.omo_task_lock", lock_path, lock_payload)
+load_module("omo_manager.omo_omnigent_identity", identity_path, identity_payload)
 receiver = load_module("omo_manager.omo_report_receipt", receiver_path, receiver_payload)
 receiver.__executed_helper_path__ = str(helper_path)
 receiver.__executed_helper_sha256__ = os.environ.get("OMO_REPORT_HELPER_SHA256", "")
@@ -354,13 +357,14 @@ if [ "$export_archived_consumed_requested" -ne 0 ]; then
   receiver_path="$(dirname "$helper_path")/omo_report_receipt.py"
   pending_digest_path="$(dirname "$helper_path")/omo_pending_digest.py"
   task_lock_path="$(dirname "$helper_path")/omo_task_lock.py"
+  omnigent_identity_path="$(dirname "$helper_path")/omo_omnigent_identity.py"
   root_retained_arguments=()
   if [ "$evidence_requested" -eq 4 ]; then
     root_retained_arguments=("$root_retained_session_transcript" "$root_retained_lifecycle_transcript" "$ownership_acknowledgment_message_id" "$published_result_commit")
   elif [ "$evidence_requested" -eq 1 ]; then
     root_retained_arguments=("$root_retained_no_mail_transcript")
   fi
-  exec env OMO_REPORT_RECEIVER_BOOTSTRAP=1 PYTHONDONTWRITEBYTECODE=1 python3 -I -S - "$receiver_path" "$pending_digest_path" "$task_lock_path" "$helper_path" \
+  exec env OMO_REPORT_RECEIVER_BOOTSTRAP=1 PYTHONDONTWRITEBYTECODE=1 python3 -I -S - "$receiver_path" "$pending_digest_path" "$task_lock_path" "$omnigent_identity_path" "$helper_path" \
     --export-archived-consumed "$export_archived_consumed" "$consumed_attestation_output" "${root_retained_arguments[@]}" <<'PY'
 from __future__ import annotations
 
@@ -405,14 +409,16 @@ def load_module(name: str, path: Path, payload: bytes) -> types.ModuleType:
 receiver_path, receiver_payload = source_bytes(sys.argv[1])
 pending_path, pending_payload = source_bytes(sys.argv[2])
 lock_path, lock_payload = source_bytes(sys.argv[3])
-helper_path = Path(sys.argv[4]).resolve(strict=True)
-receiver_arguments = sys.argv[5:]
+identity_path, identity_payload = source_bytes(sys.argv[4])
+helper_path = Path(sys.argv[5]).resolve(strict=True)
+receiver_arguments = sys.argv[6:]
 package = types.ModuleType("omo_manager")
 package.__package__ = "omo_manager"
 package.__path__ = []
 sys.modules["omo_manager"] = package
 load_module("omo_manager.omo_pending_digest", pending_path, pending_payload)
 load_module("omo_manager.omo_task_lock", lock_path, lock_payload)
+load_module("omo_manager.omo_omnigent_identity", identity_path, identity_payload)
 receiver = load_module("omo_manager.omo_report_receipt", receiver_path, receiver_payload)
 receiver.__executed_helper_path__ = str(helper_path)
 receiver.__executed_helper_sha256__ = os.environ.get("OMO_REPORT_HELPER_SHA256", "")
@@ -424,6 +430,33 @@ if [ "$alloc_message_file" -eq 0 ] && { [ -z "$status" ] || [ -z "$message_file"
 if [ -n "$recover_moved" ] && [ "$agent_explicit" -ne 1 ]; then echo "--recover-moved requires explicit --agent" >&2; exit 2; fi
 root_real=$(python3 -I -S -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$root")
 task_root_real="$root_real"
+omnigent_identity_path="$(dirname "${OMO_REPORT_HELPER_PATH:?}")/omo_omnigent_identity.py"
+omnigent_identity_output=""
+case "${CODEX_HOME:-}" in
+  */.omnigent/codex-native/*/codex-home)
+    omnigent_identity_output=$(python3 -I -S "$omnigent_identity_path")
+    ;;
+esac
+omnigent_session_id=""
+omnigent_thread_id=""
+omnigent_workspace=""
+omnigent_state_path=""
+omnigent_socket_path=""
+omnigent_app_server_pid=""
+omnigent_codex_home=""
+if [ -n "$omnigent_identity_output" ]; then
+  mapfile -t omnigent_identity_fields <<<"$omnigent_identity_output"
+  if [ "${#omnigent_identity_fields[@]}" -ne 8 ]; then echo "OmniGent identity returned incomplete evidence" >&2; exit 2; fi
+  producer_target="${omnigent_identity_fields[0]}"
+  omnigent_session_id="${omnigent_identity_fields[1]}"
+  omnigent_thread_id="${omnigent_identity_fields[2]}"
+  omnigent_workspace="${omnigent_identity_fields[3]}"
+  omnigent_state_path="${omnigent_identity_fields[4]}"
+  omnigent_socket_path="${omnigent_identity_fields[5]}"
+  omnigent_app_server_pid="${omnigent_identity_fields[6]}"
+  omnigent_codex_home="${omnigent_identity_fields[7]}"
+fi
+export OMO_REPORT_OMNIGENT_TARGET="$producer_target"
 if [ -z "$task_file" ]; then
   inferred_task=$(python3 -I -S - "$root_real" "$HOME/work_logs" "$done_task_file" <<'PY'
 from __future__ import annotations
@@ -453,7 +486,8 @@ TASK_SECTIONS = {"current", "human pending", "low priority", "previous"}
 ACTIVE_TASK_STATUSES = {"running", "long_running", "blocked"}
 RUNNING_TASK_STATUSES = {"running", "long_running"}
 TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
-TARGET_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?![A-Za-z0-9_.-])")
+OMNIGENT_TARGET_RE = re.compile(r"^omnigent://[A-Za-z0-9._-]+$")
+TARGET_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_./-])((?:[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)|(?:omnigent://[A-Za-z0-9._-]+))(?![A-Za-z0-9_.-])")
 CLOSE_NOTE_RE = re.compile(
     r"^\(manager closed Codex agent \d{2}-\d{2} \d{2}:\d{2} [A-Za-z0-9_+\-]+; "
     r"tmux target `([^`\r\n]+)`; "
@@ -523,6 +557,8 @@ def canonical_tmux_target(target: str) -> tuple[str, int, int] | None:
     return session, int(window), int(pane) if dot else 0
 
 def same_tmux_target(left: str, right: str) -> bool:
+    if OMNIGENT_TARGET_RE.fullmatch(left) is not None or OMNIGENT_TARGET_RE.fullmatch(right) is not None:
+        return left == right and OMNIGENT_TARGET_RE.fullmatch(left) is not None
     left_target = canonical_tmux_target(left)
     return left_target is not None and left_target == canonical_tmux_target(right)
 
@@ -642,7 +678,7 @@ def exact_done_previous_candidates(root: Path, current: str) -> tuple[list[Path]
         if metadata is None or metadata.get("status") != "done":
             continue
         runat = metadata.get("runat", "")
-        if TARGET_RE.fullmatch(runat) is None or not same_tmux_target(runat, current):
+        if (TARGET_RE.fullmatch(runat) is None and OMNIGENT_TARGET_RE.fullmatch(runat) is None) or not same_tmux_target(runat, current):
             continue
         relative = candidate.relative_to(root).as_posix()
         expected = f"{relative} {runat}"
@@ -672,9 +708,9 @@ def exact_done_previous_candidates(root: Path, current: str) -> tuple[list[Path]
         candidates.append(candidate)
     return candidates, reassigned, closed, invalid
 
-current = current_tmux_target()
+current = os.environ.get("OMO_REPORT_OMNIGENT_TARGET", "").strip() or current_tmux_target()
 if not current:
-    print("current tmux pane/window could not be identified; cannot infer report task", file=sys.stderr)
+    print("current tmux or OmniGent runtime could not be identified; cannot infer report task", file=sys.stderr)
     raise SystemExit(2)
 if selected_done_path is not None:
     for root in roots:
@@ -685,7 +721,7 @@ if selected_done_path is not None:
             if metadata is None or metadata.get("status") not in ACTIVE_TASK_STATUSES:
                 continue
             runat = metadata.get("runat", "")
-            if TARGET_RE.fullmatch(runat) and same_tmux_target(runat, current):
+            if (TARGET_RE.fullmatch(runat) or OMNIGENT_TARGET_RE.fullmatch(runat)) and same_tmux_target(runat, current):
                 print("--done-task-file cannot select a done task while this pane has an active task", file=sys.stderr)
                 raise SystemExit(2)
 for root in roots:
@@ -704,7 +740,7 @@ for root in roots:
         if status not in ACTIVE_TASK_STATUSES:
             continue
         runat = metadata.get("runat", "")
-        if TARGET_RE.fullmatch(runat) and same_tmux_target(runat, current):
+        if (TARGET_RE.fullmatch(runat) or OMNIGENT_TARGET_RE.fullmatch(runat)) and same_tmux_target(runat, current):
             matches.append(candidate)
             if status in RUNNING_TASK_STATUSES:
                 running_matches.append(candidate)
@@ -757,7 +793,8 @@ for root in roots:
 if selected_done_path is not None:
     print("--done-task-file is not an exact done task on the current target", file=sys.stderr)
     raise SystemExit(2)
-print(f"could not infer task file for tmux target {current}", file=sys.stderr)
+kind = "OmniGent" if OMNIGENT_TARGET_RE.fullmatch(current) is not None else "tmux"
+print(f"could not infer task file for {kind} target {current}", file=sys.stderr)
 raise SystemExit(2)
 PY
   )
@@ -1054,10 +1091,32 @@ if [ -n "$tmux_info" ]; then
 $tmux_info
 EOF
 fi
+omnigent_args=()
+if [ -n "$omnigent_session_id" ]; then
+  fresh_omnigent_identity=$(python3 -I -S "$omnigent_identity_path")
+  if [ "$fresh_omnigent_identity" != "$omnigent_identity_output" ]; then
+    echo "OmniGent producer identity changed during report routing" >&2
+    exit 2
+  fi
+  if [ -n "$tmux_session$tmux_window_index$tmux_pane_index$tmux_pane_id$tmux_window_name" ]; then
+    echo "OmniGent producer unexpectedly supplied tmux identity" >&2
+    exit 2
+  fi
+  omnigent_args=(
+    --omnigent-session-id "$omnigent_session_id"
+    --omnigent-thread-id "$omnigent_thread_id"
+    --omnigent-workspace "$omnigent_workspace"
+    --omnigent-state-path "$omnigent_state_path"
+    --omnigent-socket-path "$omnigent_socket_path"
+    --omnigent-app-server-pid "$omnigent_app_server_pid"
+    --omnigent-codex-home "$omnigent_codex_home"
+  )
+fi
 helper_path="${OMO_REPORT_HELPER_PATH:?}"
 receiver_path="$(dirname "$helper_path")/omo_report_receipt.py"
 pending_digest_path="$(dirname "$helper_path")/omo_pending_digest.py"
 task_lock_path="$(dirname "$helper_path")/omo_task_lock.py"
+omnigent_identity_path="$(dirname "$helper_path")/omo_omnigent_identity.py"
 mode="submit"
 if [ "$describe" -eq 1 ]; then mode="describe"; fi
 if [ "$verify_consumed" -eq 1 ]; then mode="verify-consumed"; fi
@@ -1067,7 +1126,7 @@ if [ "$describe" -eq 1 ]; then
 fi
 selected_done_args=()
 if [ -n "$done_task_file" ]; then selected_done_args+=(--selected-done-task); fi
-exec env "${receiver_environment[@]}" python3 -I -S - "$receiver_path" "$pending_digest_path" "$task_lock_path" "$helper_path" \
+exec env "${receiver_environment[@]}" python3 -I -S - "$receiver_path" "$pending_digest_path" "$task_lock_path" "$omnigent_identity_path" "$helper_path" \
   --mode "$mode" \
   --helper "$helper_path" \
   --root "$task_root_real" \
@@ -1093,6 +1152,7 @@ exec env "${receiver_environment[@]}" python3 -I -S - "$receiver_path" "$pending
   --tmux-pane-index "$tmux_pane_index" \
   --tmux-pane-id "$tmux_pane_id" \
   --tmux-window-name "$tmux_window_name" \
+  "${omnigent_args[@]}" \
   "${selected_done_args[@]}" <<'PY'
 from __future__ import annotations
 
@@ -1145,14 +1205,16 @@ def load_module(name: str, path: Path, payload: bytes) -> types.ModuleType:
 receiver_path, receiver_payload = source_bytes(sys.argv[1])
 pending_path, pending_payload = source_bytes(sys.argv[2])
 lock_path, lock_payload = source_bytes(sys.argv[3])
-helper_path = Path(sys.argv[4]).resolve(strict=True)
-receiver_arguments = sys.argv[5:]
+identity_path, identity_payload = source_bytes(sys.argv[4])
+helper_path = Path(sys.argv[5]).resolve(strict=True)
+receiver_arguments = sys.argv[6:]
 package = types.ModuleType("omo_manager")
 package.__package__ = "omo_manager"
 package.__path__ = []
 sys.modules["omo_manager"] = package
 load_module("omo_manager.omo_pending_digest", pending_path, pending_payload)
 load_module("omo_manager.omo_task_lock", lock_path, lock_payload)
+load_module("omo_manager.omo_omnigent_identity", identity_path, identity_payload)
 receiver = load_module("omo_manager.omo_report_receipt", receiver_path, receiver_payload)
 receiver.__executed_helper_path__ = str(helper_path)
 receiver.__executed_helper_sha256__ = os.environ.get("OMO_REPORT_HELPER_SHA256", "")

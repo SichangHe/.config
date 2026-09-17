@@ -13,6 +13,9 @@ from omo_manager.omo_agent_status import parse_task_lines
 from omo_manager.omo_agent_status import read_task_metadata
 from omo_manager.omo_agent_status import resolve_task_path
 from omo_manager.omo_agent_status import same_tmux_target
+from omo_manager.omo_omnigent_identity import NotOmniGentEnvironment
+from omo_manager.omo_omnigent_identity import OmniGentIdentityError
+from omo_manager.omo_omnigent_identity import authenticate_current_omnigent
 
 RUNNING_STATUSES = {"running", "long_running"}
 ACTIVE_STATUSES = RUNNING_STATUSES | {"blocked"}
@@ -85,13 +88,19 @@ def infer_pending_task(root: Path, target: str) -> Path:
 
 
 def _current_task(root: Path, infer: Callable[[Path, str], Path], operation: str) -> Path:
-    """Resolve and authenticate the current pane with one task-selection rule."""
+    """Resolve and authenticate the current runtime with one task-selection rule."""
 
     try:
         return infer(root, current_tmux_target())
     except TaskFrontmatterError as direct_error:
         if str(direct_error) != "current tmux pane cannot be identified":
             raise
+        try:
+            return infer(root, authenticate_current_omnigent().target)
+        except NotOmniGentEnvironment:
+            pass
+        except OmniGentIdentityError as exc:
+            raise TaskFrontmatterError(f"current OmniGent identity cannot be authenticated: {exc}") from exc
         # A sandboxed owner may inherit the correct TMUX_PANE while being unable
         # to open tmux's socket.  The watcher actor authenticates the Unix peer,
         # pane process ancestry, and sole live task using its trusted connection.
