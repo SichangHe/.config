@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -224,6 +225,8 @@ ACTIVE_TASK_TREE_BLOCKER = "Supported exact closure is unavailable: complete-liv
 ACTIVE_TASK_TREE_AUTHORITY_LOCATOR = "manager_mail/85c5dff58359-1298.txt:3-4"
 ACTIVE_TASK_TREE_AUTHORITY_TEXT = "No idea what this is, but close it\nUse raw tmux command if needed"
 ACTIVE_TASK_TREE_NO_MAIL_INTENT = "close-active-task-tree-without-human-mail"
+REPLACEMENT_CUSTODY_AUDIT_SHA256 = "644b3e50fb09fd9c06b8fa4b11636b2e63e531ff6e2b0edbd39af27bc427ce57"
+REPLACEMENT_CUSTODY_COMMIT = "19341d567ea93848fd5573e595310c89bc2c1bfd"
 
 
 def root_membership_lock(root: Path):
@@ -241,6 +244,7 @@ class Args:
     session_id: str = ""
     finish_replaced_done: bool = False
     replacement_task: Path | None = None
+    replacement_custody_audit: Path | None = None
     stale_target: str = ""
     replacement_target: str = ""
     stale_sha256: str = ""
@@ -317,6 +321,7 @@ class ParsedArgs(argparse.Namespace):
     session_id: str = ""
     finish_replaced_done: bool = False
     replacement_task: Path | None = None
+    replacement_custody_audit: Path | None = None
     stale_target: str = ""
     replacement_target: str = ""
     stale_sha256: str = ""
@@ -463,6 +468,7 @@ shutdown.""",
     )
     _ = parser.add_argument("--session-id", default="", help="Session id captured by the prior close, if available.")
     _ = parser.add_argument("--replacement-task", type=Path, help="Active replacement task file; required with --finish-replaced-done.")
+    _ = parser.add_argument("--replacement-custody-audit", type=Path, help="Accepted Source-1938 audit proving the exact dw:32/dw:33 custody history; only with --finish-replaced-done.")
     _ = parser.add_argument("--stale-target", help="Exact stopped target recorded by the stale task; required with --finish-replaced-done.")
     _ = parser.add_argument("--replacement-target", help="Exact live target recorded by the successor task; required with --finish-replaced-done.")
     _ = parser.add_argument("--stale-sha256", help="Expected SHA-256 of the stale task bytes; required with --finish-replaced-done.")
@@ -587,6 +593,12 @@ shutdown.""",
     )
     if sum(recovery_modes) > 1:
         parser.error("finish and recovery modes are mutually exclusive.")
+    if parsed.replacement_custody_audit is not None and (
+        not parsed.finish_replaced_done
+        or not parsed.replacement_custody_audit.is_absolute()
+        or parsed.replacement_custody_audit.resolve(strict=False) != parsed.replacement_custody_audit
+    ):
+        parser.error("--replacement-custody-audit requires --finish-replaced-done and a canonical absolute audit path.")
     if parsed.dangerously_ignore_checks and (parsed.status != "done" or any(recovery_modes)):
         parser.error("--dangerously-ignore-checks is valid only for a normal done transition.")
     if parsed.dependency_sha256 and not parsed.reconcile_dependency_blocked_current:
@@ -1564,6 +1576,7 @@ shutdown.""",
             parsed.blocked_on.strip(),
             finish_replaced_done=True,
             replacement_task=parsed.replacement_task.expanduser().resolve(strict=False),
+            replacement_custody_audit=parsed.replacement_custody_audit,
             stale_target=parsed.stale_target.strip(),
             replacement_target=parsed.replacement_target.strip(),
             stale_sha256=parsed.stale_sha256.strip(),
@@ -5428,10 +5441,10 @@ def reserve_private_audit(path: Path, text: str) -> None:
         raise TaskFrontmatterError(f"cannot reserve private audit output: {exc}") from exc
 
 
-def read_private_audit(path: Path) -> str | None:
-    """Read one existing owner-private regular audit file without following links."""
+def read_private_audit(path: Path, *, max_bytes: int = MAX_AUTHORITY_BYTES) -> str | None:
+    """Read bounded exact UTF-8 bytes from one owner-private regular audit."""
 
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(path, flags)
     except FileNotFoundError:
@@ -5442,15 +5455,16 @@ def read_private_audit(path: Path) -> str | None:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
             raise TaskFrontmatterError("private lifecycle audit lost its owner-private file binding.")
-        with os.fdopen(os.dup(fd), "r", encoding="utf-8") as output:
-            text = output.read(MAX_AUTHORITY_BYTES + 1)
-    except UnicodeDecodeError as exc:
-        raise TaskFrontmatterError("private lifecycle audit is not UTF-8.") from exc
+        with os.fdopen(os.dup(fd), "rb") as output:
+            payload = output.read(max_bytes + 1)
     finally:
         os.close(fd)
-    if len(text.encode()) > MAX_AUTHORITY_BYTES:
+    if len(payload) > max_bytes:
         raise TaskFrontmatterError("private lifecycle audit is oversized.")
-    return text
+    try:
+        return payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise TaskFrontmatterError("private lifecycle audit is not UTF-8.") from exc
 
 
 def replace_private_audit(path: Path, expected: str, updated: str) -> None:
@@ -7026,12 +7040,110 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
     return args.active_target, args.expected_session_id
 
 
+def replacement_custody_history(args: Args, stale_path: Path, stale_text: str, replacement_text: str) -> os.stat_result:
+    """Bind the exact retained stale record through two accepted manager transfers.
+
+    The fixed Git transition authenticates the stale task's former shared
+    parent. The independently accepted audit authenticates the later successor
+    transfer; its self-reported integrity hash alone grants no authority.
+    """
+    audit_path = args.replacement_custody_audit
+    if audit_path is None or args.replacement_task is None:
+        raise TaskFrontmatterError("replacement ownership mismatch requires the accepted custody audit.")
+    if (
+        stale_path != args.root / "dw_gen_submgr.md"
+        or args.replacement_task != args.root / "dw_cleanup_mgr.md"
+        or (args.stale_target, args.replacement_target) != ("dw:32", "dw:33")
+        or not audit_path.is_absolute()
+        or audit_path.resolve(strict=True) != audit_path
+    ):
+        raise TaskFrontmatterError("replacement custody history does not name the exact supported tasks and targets.")
+    if stale_path.read_bytes() != stale_text.encode("utf-8") or args.replacement_task.read_bytes() != replacement_text.encode("utf-8"):
+        raise TaskFrontmatterError("replacement custody task bytes differ from the digest-bound text.")
+    audit_before = audit_path.lstat()
+    if not stat.S_ISREG(audit_before.st_mode):
+        raise TaskFrontmatterError("replacement custody audit must be a regular file.")
+    parent = audit_path.parent.stat()
+    if parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) & 0o077:
+        raise TaskFrontmatterError("replacement custody audit directory must be owner-private.")
+    audit_text = read_private_audit(audit_path, max_bytes=8 * 1024 * 1024)
+    if audit_text is None or hashlib.sha256(audit_text.encode()).hexdigest() != REPLACEMENT_CUSTODY_AUDIT_SHA256:
+        raise TaskFrontmatterError("replacement custody audit is not the independently accepted Source-1938 transaction.")
+    audit = json.loads(audit_text)
+    if not isinstance(audit, dict) or any(
+        audit.get(key) != value
+        for key, value in {
+            "operation": "manager-replace", "state": "committed", "root": str(args.root),
+            "old_task": "new_dw_manager.md", "old_target": "dw:0", "successor_task": "dw_manager_new.md", "new_target": "dw:59",
+        }.items()
+    ):
+        raise TaskFrontmatterError("replacement custody audit has different transaction ownership.")
+
+    def task_row(rows: object, task: str) -> dict[str, object]:
+        if not isinstance(rows, list):
+            raise TaskFrontmatterError("replacement custody audit has no task records.")
+        matches = [row for row in rows if isinstance(row, dict) and row.get("task") == task]
+        if len(matches) != 1:
+            raise TaskFrontmatterError("replacement custody audit lacks one exact task record.")
+        return matches[0]
+
+    topology = audit.get("source1938_topology")
+    if not isinstance(topology, dict):
+        raise TaskFrontmatterError("replacement custody audit has no retained topology.")
+    stale_row = task_row(topology.get("rows"), stale_path.name)
+    successor_row = task_row(topology.get("rows"), args.replacement_task.name)
+    change = task_row(audit.get("files"), args.replacement_task.name)
+    try:
+        successor_before = base64.b64decode(str(change.get("before")), validate=True).decode("utf-8")
+        successor_after = base64.b64decode(str(change.get("after")), validate=True).decode("utf-8")
+        repository = subprocess.run(["git", "-C", str(args.root), "rev-parse", "--show-toplevel"], check=True, capture_output=True, text=True, timeout=10).stdout.strip()
+        if Path(repository).resolve() != args.root:
+            raise TaskFrontmatterError("replacement custody Git evidence is not rooted at the task repository.")
+        historical = tuple(
+            subprocess.run(
+                ["git", "-C", str(args.root), "show", f"{REPLACEMENT_CUSTODY_COMMIT}{suffix}:{stale_path.name}"],
+                check=True, capture_output=True, timeout=10,
+            ).stdout.decode("utf-8")
+            for suffix in ("^", "")
+        )
+    except (ValueError, subprocess.SubprocessError) as exc:
+        raise TaskFrontmatterError(f"replacement custody transition evidence is unavailable: {exc}") from exc
+    if (
+        historical[1] != stale_text
+        or historical[0].count("\nmanagerat: dw:0\n") != 1
+        or historical[0].replace("\nmanagerat: dw:0\n", "\nmanagerat: dw:33\n", 1) != historical[1]
+        or successor_before.count("\nmanagerat: dw:0\n") != 1
+        or successor_before.replace("\nmanagerat: dw:0\n", "\nmanagerat: dw:59\n", 1) != successor_after
+        or stale_row.get("sha256") != hashlib.sha256(stale_text.encode()).hexdigest()
+        or successor_row.get("sha256") != hashlib.sha256(successor_after.encode()).hexdigest()
+    ):
+        raise TaskFrontmatterError("replacement custody history does not prove the exact manager-only transitions.")
+    stale = parse_task_metadata(stale_text, args.root)
+    successor = parse_task_metadata(successor_after, args.root)
+    current = parse_task_metadata(replacement_text, args.root)
+    if (
+        stale is None or successor is None or current is None
+        or (stale.runat, stale.managerat, stale.status, stale.is_manager) != ("dw:32", "dw:33", "blocked", True)
+        or (successor.runat, successor.managerat, successor.status, successor.is_manager) != ("dw:33", "dw:59", "long_running", True)
+        or replace(current, blocked_on=successor.blocked_on) != successor
+    ):
+        raise TaskFrontmatterError("replacement custody history lost the retained ownership, role, or ordered queue.")
+    _, historical_body = split_task_text(successor_after)
+    _, current_body = split_task_text(replacement_text)
+    authority_prefix, authority_end, _ = historical_body.partition("</human_instruction>")
+    if not authority_end or not current_body.startswith(authority_prefix + authority_end):
+        raise TaskFrontmatterError("replacement custody history lost the original successor instructions.")
+    if not same_file_generation(audit_before, audit_path.lstat()) or read_private_audit(audit_path, max_bytes=8 * 1024 * 1024) != audit_text:
+        raise TaskFrontmatterError("replacement custody audit changed during validation.")
+    return audit_before
+
+
 def replacement_task_text(
     args: Args,
     stale_path: Path,
     stale_text: str,
     stale_before: os.stat_result,
-) -> tuple[str, TaskMetadata, TaskMetadata, str, os.stat_result, str]:
+) -> tuple[str, TaskMetadata, TaskMetadata, str, os.stat_result, str, os.stat_result | None]:
     replacement_path = args.replacement_task
     if replacement_path is None or replacement_path == stale_path:
         raise TaskFrontmatterError("replacement task must be a distinct explicit file.")
@@ -7076,7 +7188,12 @@ def replacement_task_text(
         raise TaskFrontmatterError("replacement task must be listed in the current TODO section.")
     if same_tmux_target(stale.runat, replacement.runat):
         raise TaskFrontmatterError("replacement task must use a different target from the stopped stale task.")
-    if (stale.managerat, stale.tool, stale.is_manager) != (replacement.managerat, replacement.tool, replacement.is_manager):
+    if (stale.tool, stale.is_manager) != (replacement.tool, replacement.is_manager):
+        raise TaskFrontmatterError("replacement task ownership or role does not match the stale task.")
+    custody_before = None
+    if args.replacement_custody_audit is not None:
+        custody_before = replacement_custody_history(args, stale_path, stale_text, replacement_text)
+    elif stale.managerat != replacement.managerat:
         raise TaskFrontmatterError("replacement task ownership or role does not match the stale task.")
     owners = authoritative_active_target_task_paths(args.root, replacement.runat)
     if owners != (replacement_path,):
@@ -7096,7 +7213,7 @@ def replacement_task_text(
         raise TaskFrontmatterError("stale task changed while replacement evidence was being checked; retry.")
     if not same_file_state(replacement_before, replacement_path.stat()) or replacement_path.read_text(encoding="utf-8") != replacement_text:
         raise TaskFrontmatterError("replacement task changed while evidence was being checked; retry.")
-    return update_frontmatter_status(stale_text, "done", "", args.root), stale, replacement, replacement_text, replacement_before, pane_id
+    return update_frontmatter_status(stale_text, "done", "", args.root), stale, replacement, replacement_text, replacement_before, pane_id, custody_before
 
 
 def finish_closed_done(args: Args, path: Path, text: str, before: os.stat_result) -> tuple[str, str]:
@@ -7515,15 +7632,25 @@ def finish_replaced_done(args: Args, path: Path, text: str, before: os.stat_resu
     targets = sorted({initial.runat, args.replacement_target})
     todo = args.root / "TODO.md"
     with ExitStack() as locks:
+        locks.enter_context(root_membership_lock(args.root))
         for target in targets:
             locks.enter_context(task_target_lock(args.root, target))
-        for locked_path in sorted({path, replacement_path, todo}, key=lambda candidate: str(candidate)):
+        locked_paths = {path, replacement_path, todo}
+        if args.replacement_custody_audit is not None:
+            locked_paths.add(args.replacement_custody_audit)
+        for locked_path in sorted(locked_paths, key=lambda candidate: str(candidate)):
             locks.enter_context(task_file_lock(locked_path))
         current_before = path.stat()
         current_text = path.read_text(encoding="utf-8")
         if not same_file_state(before, current_before) or current_text != text:
             raise TaskFrontmatterError("stale task changed before replacement closure acquired its locks; retry.")
-        updated, stale, replacement, replacement_text, replacement_before, replacement_pane_id = replacement_task_text(args, path, current_text, current_before)
+        updated, stale, replacement, replacement_text, replacement_before, replacement_pane_id, custody_before = replacement_task_text(args, path, current_text, current_before)
+        todo_before = todo.stat()
+        todo_text = todo.read_text(encoding="utf-8")
+        prepared_todo = None
+        if custody_before is not None:
+            prepared_todo = reconcile_todo_text(args.root, path, todo_text, stale.runat, "previous", ("previous",))
+            _ = reconcile_todo_text(args.root, replacement_path, todo_text, replacement.runat, "current", ("current",))
         prepared = "\n".join(
             (
                 "operation: finish-replaced-done",
@@ -7538,6 +7665,14 @@ def finish_replaced_done(args: Args, path: Path, text: str, before: os.stat_resu
                 f"stopped-evidence-sha256: {hashlib.sha256(args.stopped_evidence.encode()).hexdigest()}",
                 f"replacement-pane-evidence-sha256: {hashlib.sha256(args.replacement_pane_evidence.encode()).hexdigest()}",
                 f"manager-target: {stale.managerat}",
+                *(
+                    (
+                        f"replacement-manager-target: {replacement.managerat}",
+                        f"replacement-custody-audit: {args.replacement_custody_audit}",
+                        f"replacement-custody-audit-sha256: {REPLACEMENT_CUSTODY_AUDIT_SHA256}",
+                        f"replacement-custody-commit: {REPLACEMENT_CUSTODY_COMMIT}",
+                    ) if custody_before is not None else ()
+                ),
                 f"tool: {stale.tool}",
                 f"is-manager: {str(stale.is_manager).lower()}",
                 "completion: unknown-until-finalized",
@@ -7548,6 +7683,13 @@ def finish_replaced_done(args: Args, path: Path, text: str, before: os.stat_resu
         try:
             if replacement_path.read_text(encoding="utf-8") != replacement_text or not same_file_state(replacement_before, replacement_path.stat()):
                 raise TaskFrontmatterError("replacement task changed immediately before stale lifecycle mutation; retry.")
+            if custody_before is not None:
+                current_custody = replacement_custody_history(args, path, current_text, replacement_text)
+                if not same_file_generation(custody_before, current_custody):
+                    raise TaskFrontmatterError("replacement custody audit changed after reservation; retry.")
+                ensure_manager_has_no_active_children(args.root, path, stale)
+                if authoritative_active_target_task_paths(args.root, replacement.runat) != (replacement_path,):
+                    raise TaskFrontmatterError("replacement ownership changed after reservation; retry.")
             if exact_pane_id(stale.runat):
                 raise TaskFrontmatterError("stale target became live after audit reservation; retry.")
             if exact_pane_id(replacement.runat) != replacement_pane_id:
@@ -7558,7 +7700,20 @@ def finish_replaced_done(args: Args, path: Path, text: str, before: os.stat_resu
                 raise TaskFrontmatterError("replacement pane changed while post-reservation evidence was checked; retry.")
             if exact_pane_id(stale.runat):
                 raise TaskFrontmatterError("stale target became live while post-reservation evidence was checked; retry.")
-            finish_done_transaction(args.root, path, updated, current_before, locked=True)
+            if custody_before is not None:
+                assert args.replacement_custody_audit is not None
+                if not same_file_generation(custody_before, args.replacement_custody_audit.lstat()):
+                    raise TaskFrontmatterError("replacement custody audit changed during pane validation; retry.")
+                if not same_file_state(replacement_before, replacement_path.stat()) or replacement_path.read_bytes() != replacement_text.encode("utf-8"):
+                    raise TaskFrontmatterError("replacement task changed during post-reservation validation; retry.")
+                if not same_file_generation(current_before, path.stat()) or path.read_bytes() != current_text.encode("utf-8"):
+                    raise TaskFrontmatterError("stale task changed during post-reservation validation; retry.")
+            finish_done_transaction(
+                args.root, path, updated, current_before, locked=True,
+                todo_text=todo_text if custody_before is not None else None,
+                prepared_todo=prepared_todo,
+                todo_before=todo_before if custody_before is not None else None,
+            )
         except Exception as mutation_error:
             try:
                 finish_private_audit(audit_path, prepared, "not-completed")

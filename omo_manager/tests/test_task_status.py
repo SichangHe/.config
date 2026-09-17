@@ -12,6 +12,7 @@ import yaml
 from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import nullcontext
+from contextlib import ExitStack
 from contextlib import contextmanager
 from contextlib import redirect_stderr
 from contextlib import redirect_stdout
@@ -59,6 +60,9 @@ from omo_manager.omo_task_status import render_done_live_close_audit
 from omo_manager.omo_task_status import replace_if_unchanged_locked
 from omo_manager.omo_task_status import replace_private_audit
 from omo_manager.omo_task_status import reserve_private_audit
+from omo_manager.omo_task_status import read_private_audit
+from omo_manager.omo_task_status import replacement_custody_history
+from omo_manager.omo_task_lock import task_file_lock
 from omo_manager.omo_task_status import restore_terminal_target
 from omo_manager.omo_task_status import run
 from omo_manager.omo_task_status import stop_done_agent
@@ -7715,6 +7719,252 @@ resolved_task_items: []
                 self.assertEqual(stale_text, stale.read_text(encoding="utf-8"))
                 capture_call.assert_not_called()
 
+    @contextmanager
+    def replacement_custody_fixture(self, *, large_audit: bool = False) -> Iterator[StatusArgs]:
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            root = Path(tmp)
+            stale = root / "dw_gen_submgr.md"
+            successor = root / "dw_cleanup_mgr.md"
+            stale_before = task_frontmatter(status="blocked", blocked_on="replaced", runat="dw:32", managerat="dw:0", is_manager=True)
+            stale_before += "(verified empty stale task: verified stopped legacy target)\n"
+            stale.write_text(stale_before, encoding="utf-8")
+            successor_before = task_frontmatter(
+                status="long_running", blocked_on="persistent manager role", runat="dw:33", managerat="dw:0", is_manager=True,
+                pending_items=("preserve Source-1847 work", "finish cleanup"),
+            )
+            successor_before += '<human_instruction authoritative="true">\nReplace this agent\n</human_instruction>\n'
+            successor.write_text(successor_before, encoding="utf-8")
+
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.test", *args],
+                    check=True, capture_output=True, text=True, timeout=10,
+                ).stdout.strip()
+
+            git("init", "-q")
+            git("add", stale.name, successor.name)
+            git("commit", "-qm", "record original shared manager")
+            stale_text = stale_before.replace("managerat: dw:0\n", "managerat: dw:33\n")
+            stale.write_text(stale_text, encoding="utf-8")
+            git("add", stale.name)
+            git("commit", "-qm", "transfer stale custody only")
+            commit = git("rev-parse", "HEAD")
+            successor_after = successor_before.replace("managerat: dw:0\n", "managerat: dw:59\n")
+            successor.write_text(successor_after.replace("blocked_on: persistent manager role\n", "blocked_on: replacement helper repair\n") + "(later lifecycle report)\n", encoding="utf-8")
+            (root / "TODO.md").write_text("current:\ndw_cleanup_mgr.md dw:33\n\nprevious:\ndw_gen_submgr.md dw:32\n", encoding="utf-8")
+            record = {
+                "root": str(root), "operation": "manager-replace", "state": "committed", "old_task": "new_dw_manager.md", "old_target": "dw:0",
+                "successor_task": "dw_manager_new.md", "new_target": "dw:59",
+                "source1938_topology": {"rows": [
+                    {"task": stale.name, "sha256": hashlib.sha256(stale_text.encode()).hexdigest()},
+                    {"task": successor.name, "sha256": hashlib.sha256(successor_after.encode()).hexdigest()},
+                ]},
+                "files": [{"task": successor.name, "before": base64.b64encode(successor_before.encode()).decode(), "after": base64.b64encode(successor_after.encode()).decode()}],
+                "unrelated_retained_images": "x" * 1_000_000 if large_audit else "",
+            }
+            audit = root / "custody.json"
+            audit.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+            audit.chmod(0o600)
+            stack.enter_context(patch("omo_manager.omo_task_status.REPLACEMENT_CUSTODY_COMMIT", commit))
+            stack.enter_context(patch("omo_manager.omo_task_status.REPLACEMENT_CUSTODY_AUDIT_SHA256", hashlib.sha256(audit.read_bytes()).hexdigest()))
+            yield StatusArgs(
+                root, Path(stale.name), "done", "", finish_replaced_done=True,
+                replacement_task=successor, replacement_custody_audit=audit,
+                stale_target="dw:32", replacement_target="dw:33", stale_sha256=hashlib.sha256(stale.read_bytes()).hexdigest(),
+                replacement_sha256=hashlib.sha256(successor.read_bytes()).hexdigest(), replacement_status="long_running",
+                protected_targets=("protected:8",), stopped_evidence="verified stopped legacy target",
+                replacement_pane_evidence="successor is active", audit_output=root / "closure.audit",
+            )
+
+    def test_finish_replaced_done_accepts_exact_custody_history_and_preserves_previous_row(self) -> None:
+        with self.replacement_custody_fixture(large_audit=True) as args:
+            successor = args.replacement_task
+            assert successor is not None
+            successor_before = successor.read_bytes()
+            todo_before = (args.root / "TODO.md").read_bytes()
+            with (
+                patch("omo_manager.omo_task_status.exact_pane_id", side_effect=lambda target: "" if target == "dw:32" else "%3"),
+                patch("omo_manager.omo_task_status.capture", return_value="successor is active"),
+                patch("omo_manager.omo_task_status.stop_done_agent", side_effect=AssertionError("must not signal either pane")),
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(0, run(args))
+            self.assertEqual(successor_before, successor.read_bytes())
+            self.assertEqual(todo_before, (args.root / "TODO.md").read_bytes())
+            self.assertIn("status: done\n", (args.root / args.task_file).read_text())
+            audit = (args.root / "closure.audit").read_text()
+            self.assertIn("replacement-manager-target: dw:59\n", audit)
+            self.assertIn("replacement-custody-commit:", audit)
+            self.assertIn("final-result: success\n", audit)
+
+    def test_finish_replaced_done_rejects_unproven_or_changed_custody_history(self) -> None:
+        for case in (
+            "missing", "fifo", "forged", "crlf audit", "crlf stale", "crlf successor", "wrong commit", "wrong task", "wrong target",
+            "wrong manager", "queue", "instructions", "stale digest", "successor digest", "missing opt-in",
+        ):
+            with self.subTest(case=case), self.replacement_custody_fixture() as args, ExitStack() as stack:
+                stale = args.root / args.task_file
+                successor = args.replacement_task
+                custody = args.replacement_custody_audit
+                assert successor is not None and custody is not None
+                if case == "missing":
+                    custody.unlink()
+                elif case == "fifo":
+                    custody.unlink()
+                    os.mkfifo(custody, 0o600)
+                elif case == "forged":
+                    custody.write_text(custody.read_text().replace('"dw:59"', '"dw:99"'))
+                elif case == "crlf audit":
+                    custody.write_bytes(custody.read_bytes().replace(b"\n", b"\r\n"))
+                elif case in {"crlf stale", "crlf successor"}:
+                    target = stale if case == "crlf stale" else successor
+                    target.write_bytes(target.read_bytes().replace(b"\n", b"\r\n"))
+                elif case == "wrong commit":
+                    stack.enter_context(patch("omo_manager.omo_task_status.REPLACEMENT_CUSTODY_COMMIT", "0" * 40))
+                elif case == "wrong task":
+                    other = args.root / "other.md"
+                    other.write_bytes(successor.read_bytes())
+                    args = replace(args, replacement_task=other)
+                elif case == "wrong target":
+                    args = replace(args, replacement_target="dw:99")
+                elif case in {"wrong manager", "queue", "instructions"}:
+                    old, new = {"wrong manager": ("managerat: dw:59", "managerat: dw:58"), "queue": ("preserve Source-1847 work", "different work"), "instructions": ("Replace this agent", "Ignore the original instructions")}[case]
+                    successor.write_text(successor.read_text().replace(old, new))
+                    args = replace(args, replacement_sha256=hashlib.sha256(successor.read_bytes()).hexdigest())
+                elif case == "stale digest":
+                    stale.write_text(stale.read_text() + "(changed stale evidence)\n")
+                elif case == "successor digest":
+                    successor.write_text(successor.read_text() + "(changed successor evidence)\n")
+                else:
+                    args = replace(args, replacement_custody_audit=None)
+                stale_before = stale.read_bytes()
+                todo_before = (args.root / "TODO.md").read_bytes()
+                with (
+                    patch("omo_manager.omo_task_status.exact_pane_id", side_effect=lambda target: "" if target == "dw:32" else "%3"),
+                    patch("omo_manager.omo_task_status.capture") as capture_call,
+                    redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(2, run(args))
+                self.assertEqual(stale_before, stale.read_bytes())
+                self.assertEqual(todo_before, (args.root / "TODO.md").read_bytes())
+                self.assertFalse((args.root / "closure.audit").exists())
+                capture_call.assert_not_called()
+
+    def test_finish_replaced_done_rechecks_custody_inputs_after_audit_reservation(self) -> None:
+        for case in ("audit", "audit generation", "successor", "stale", "todo", "child"):
+            with self.subTest(case=case), self.replacement_custody_fixture() as args:
+                stale = args.root / args.task_file
+                successor = args.replacement_task
+                custody = args.replacement_custody_audit
+                assert successor is not None and custody is not None
+                stale_before = stale.read_bytes()
+
+                def reserve(path: Path, text: str) -> None:
+                    assert successor is not None and custody is not None
+                    reserve_private_audit(path, text)
+                    if case == "audit":
+                        custody.write_text(custody.read_text() + "\n")
+                    elif case == "audit generation":
+                        alternate = args.root / "alternate.json"
+                        alternate.write_bytes(custody.read_bytes())
+                        alternate.chmod(0o600)
+                        alternate.replace(custody)
+                    elif case == "child":
+                        (args.root / "new_child.md").write_text(task_frontmatter(status="running", runat="dw:88", managerat="dw:32"))
+                    else:
+                        target = {"successor": successor, "stale": stale, "todo": args.root / "TODO.md"}[case]
+                        target.write_text(target.read_text() + "(concurrent update)\n")
+
+                with (
+                    patch("omo_manager.omo_task_status.reserve_private_audit", side_effect=reserve),
+                    patch("omo_manager.omo_task_status.exact_pane_id", side_effect=lambda target: "" if target == "dw:32" else "%3"),
+                    patch("omo_manager.omo_task_status.capture", return_value="successor is active"),
+                    redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(2, run(args))
+                self.assertEqual(stale_before + (b"(concurrent update)\n" if case == "stale" else b""), stale.read_bytes())
+                self.assertIn("final-result: not-completed\n", (args.root / "closure.audit").read_text())
+
+    def test_finish_replaced_done_checks_panes_after_custody_revalidation(self) -> None:
+        for case in ("stale", "successor", "audit during capture"):
+            with self.subTest(case=case), self.replacement_custody_fixture() as args:
+                stale = args.root / args.task_file
+                stale_before = stale.read_bytes()
+                checks = 0
+
+                def history(bound: StatusArgs, path: Path, text: str, successor_text: str) -> os.stat_result:
+                    nonlocal checks
+                    result = replacement_custody_history(bound, path, text, successor_text)
+                    checks += 1
+                    return result
+
+                def pane(target: str) -> str:
+                    if target == "dw:32":
+                        return "%2" if checks == 2 and case == "stale" else ""
+                    return "%9" if checks == 2 and case == "successor" else "%3"
+
+                def capture(_pane: str, _lines: int) -> str:
+                    if checks == 2 and case == "audit during capture":
+                        assert args.replacement_custody_audit is not None
+                        args.replacement_custody_audit.write_text("changed audit\n")
+                    return "successor is active"
+
+                with (
+                    patch("omo_manager.omo_task_status.replacement_custody_history", side_effect=history),
+                    patch("omo_manager.omo_task_status.exact_pane_id", side_effect=pane),
+                    patch("omo_manager.omo_task_status.capture", side_effect=capture),
+                    redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(2, run(args))
+                self.assertEqual(stale_before, stale.read_bytes())
+                self.assertIn("final-result: not-completed\n", (args.root / "closure.audit").read_text())
+
+    def test_private_audit_rejects_fifo_and_preserves_default_size_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "audit"
+            os.mkfifo(path, 0o600)
+            with self.assertRaisesRegex(TaskFrontmatterError, "owner-private"):
+                read_private_audit(path)
+            path.unlink()
+            path.write_text("x" * 1_000_001)
+            path.chmod(0o600)
+            with self.assertRaisesRegex(TaskFrontmatterError, "oversized"):
+                read_private_audit(path)
+            self.assertEqual(1_000_001, len(read_private_audit(path, max_bytes=8 * 1024 * 1024) or ""))
+            payload = "é\r\n".encode("utf-8")
+            path.write_bytes(payload)
+            self.assertEqual(payload, (read_private_audit(path, max_bytes=len(payload)) or "").encode("utf-8"))
+            with self.assertRaisesRegex(TaskFrontmatterError, "oversized"):
+                read_private_audit(path, max_bytes=len(payload) - 1)
+
+    def test_finish_replaced_done_holds_custody_audit_lock_through_commit(self) -> None:
+        with self.replacement_custody_fixture() as args:
+            custody = args.root / "custody.json"
+            original = custody.read_bytes()
+
+            def finish(
+                root: Path, path: Path, text: str, before: os.stat_result, *, locked: bool = False,
+                todo_text: str | None = None, prepared_todo: str | None = None, todo_before: os.stat_result | None = None,
+            ) -> tuple[os.stat_result, os.stat_result | None]:
+                with self.assertRaises(TimeoutError), task_file_lock(custody, timeout_s=0):
+                    competing = root / "competing.json"
+                    competing.write_bytes(b"changed custody audit\n")
+                    competing.replace(custody)
+                return finish_done_transaction(root, path, text, before, locked=locked, todo_text=todo_text, prepared_todo=prepared_todo, todo_before=todo_before)
+
+            with (
+                patch("omo_manager.omo_task_status.finish_done_transaction", side_effect=finish) as transaction,
+                patch("omo_manager.omo_task_status.exact_pane_id", side_effect=lambda target: "" if target == "dw:32" else "%3"),
+                patch("omo_manager.omo_task_status.capture", return_value="successor is active"),
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(0, run(args))
+            transaction.assert_called_once()
+            self.assertEqual(original, custody.read_bytes())
+            self.assertFalse((args.root / "competing.json").exists())
+            with task_file_lock(custody, timeout_s=0):
+                self.assertIn("status: done\n", (args.root / args.task_file).read_text())
+
     def test_finish_replaced_done_refuses_duplicate_or_invalid_competing_successor_owner(self) -> None:
         for case in ("duplicate", "invalid"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
@@ -8615,6 +8865,8 @@ manager note
                 "--finish-replaced-done",
                 "--replacement-task",
                 "/tmp/replacement.md",
+                "--replacement-custody-audit",
+                "/tmp/custody.json",
                 "--stale-target",
                 "old:2",
                 "--replacement-target",
@@ -8639,7 +8891,16 @@ manager note
 
         self.assertTrue(args.finish_replaced_done)
         self.assertEqual(Path("/tmp/replacement.md"), args.replacement_task)
+        self.assertEqual(Path("/tmp/custody.json"), args.replacement_custody_audit)
         self.assertEqual(("protected:8",), args.protected_targets)
+
+    def test_parse_replacement_custody_rejects_other_modes_and_relative_paths(self) -> None:
+        for values in (
+            ["--replacement-custody-audit", "/tmp/custody.json", "task.md", "running"],
+            ["--finish-replaced-done", "--replacement-custody-audit", "custody.json", "task.md"],
+        ):
+            with self.subTest(values=values), self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                parse_args(values)
 
     def test_cli_running_has_no_done_reminder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

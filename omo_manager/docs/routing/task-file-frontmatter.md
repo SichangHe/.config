@@ -138,6 +138,22 @@ omo_task_status.py --root ROOT --finish-replaced-done \
 
 `--replacement-status` also accepts `long_running`. Repeat `--protected-target` for the authoritative protected set. The stale task must contain the exact line `(verified empty stale task: EXACT EMPTY-STALE EVIDENCE)`. Both target values must exactly match their task frontmatter, both digests must match the current task bytes, the stale target must remain absent, and the different successor target must remain live with the supplied pane evidence. The helper rejects `h*` and alias-equivalent protected targets before pane capture. The successor must be current, have a nonempty queue, be the sole authoritative active owner of its target, and preserve the stale record's manager owner, tool, and manager role. The audit parent directory must be owner-private and the audit file must not exist. The helper locks and rechecks both task files and targets, never signals either pane, preserves successor bytes, and rolls `TODO.md` back if stale-task replacement fails. A reserved audit says completion is unknown until its final result is durably appended, so an audit-finalization failure cannot falsely claim that mutation did or did not complete.
 
+replacement custody history
+
+- add `--replacement-custody-audit PRIVATE_SOURCE1938_AUDIT` only for retained `dw_gen_submgr.md` at absent `dw:32` and live `dw_cleanup_mgr.md` at `dw:33`
+- require the independently accepted audit digest `644b3e50fb09fd9c06b8fa4b11636b2e63e531ff6e2b0edbd39af27bc427ce57` and Git transition `19341d567ea93848fd5573e595310c89bc2c1bfd`
+  - the Git before/after images prove only the stale record's parent changed from `dw:0` to `dw:33`
+  - the audit binds unchanged stale bytes and the successor's parent-only transfer from `dw:0` to `dw:59`
+  - the audit's internal checksum and task comments alone grant no authority
+- bind current task bytes with the ordinary explicit digests
+  - hash exact audit bytes and require exact UTF-8 task/Git bytes; newline conversion never preserves an accepted identity
+  - require all successor metadata except its blocker to match the audited after image, including the ordered Source-1847/cleanup queue
+  - retain the exact original body prefix through the Human instruction envelope; later body bookkeeping grants no authority
+- require exactly one stale `previous` row and one successor `current` row
+- revalidate custody evidence, file generations, TODO bytes, child ownership, and live pane evidence under membership, target, task, and custody-audit locks before closure
+  - retain the audit lock through lifecycle commit so a cooperating audit writer cannot replace evidence after its final check
+- record both manager targets and the accepted history identities in the new private closure audit; preserve the existing stale TODO row and successor bytes
+
 `omo_task.py` creates new task files with correct placeholder frontmatter. Ordinary workers start `running`; `--is-manager` tasks start `long_running`. `managerat` is the current tmux window; `runat`, `tool`, and `is_manager` are mandatory; `pending_task_items` is empty. Each agent then manages its own queue with `omo_pending.py`, without receiving the task path.
 
 `omo_task_edit.py summary TASK.md [TASK.md ...]` gives managers an overview without reading task bodies. With multiple files, it sorts by `managerat`, then the path-derived `task_file` label. Managers read task files directly only for overview or troubleshooting; routine mutations go through `omo_task_edit.py`, `omo_record_pending.py`, or `omo_task_status.py`.
