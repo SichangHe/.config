@@ -1,10 +1,13 @@
 # task file edit helpers
 
+(authored by agents unless marked 🧑)
+
 Goal: managers own task lifecycle and cross-task bookkeeping, while every agent
 maintains its own pending queue through a path-opaque helper.
 
-Workers use only `omo_pending.py list|add|replace|remove`; they never receive a
-task path or backing-file details. Workers report with `omo_report.sh`.
+Workers use only `omo_pending.py list|add|replace|remove|recover-removal-notice`;
+they never receive a task path or backing-file details. Workers report with
+`omo_report.sh`.
 
 ## agent pending queue
 
@@ -17,8 +20,9 @@ the explicit `🧑` Human-authorship marker; a retry after delivery completes th
 queue mutation without replaying the notice. `replace` keeps authorship unchanged.
 `remove` requires one-line completion or cancellation evidence and sends one
 durable closure notice only for `🧑` items. Unmarked legacy items are ambiguous
-and remain silent, as do agent-authored items. Explicit no-contact rules suppress
-both Human-item notices. Legacy `remove --no-email` also suppresses a closure
+and remain silent, as do agent-authored items. A blanket no-contact rule suppresses
+Human-item notices; a rule scoped to agent-authored items does not. Legacy
+`remove --no-email` also suppresses a closure
 notice; it is only for recovery after a separate completion email whose Sent-Mail
 evidence will be reconciled before task closure. Output never includes a task
 filename, `runat`, or `managerat`.
@@ -27,6 +31,16 @@ Each Human-item notice reuses the responsible agent's newest verified Human
 email thread. Its body contains only `pending item created:` or `pending item
 deleted:` and the item list. Missing or ambiguous prior-thread identity blocks
 delivery and leaves the queue mutation unfinished.
+
+`recover-removal-notice --recovery-id ID` is the no-mutation recovery for one
+reviewed deletion already recorded without its required Human notice. The fixed
+record pins the task name and digest, exact ordered `🧑` items, removal evidence,
+and original completion key. The live queue must be empty and contain the exact
+evidence record once. Recovery uses the normal owner-authenticated, same-session
+completion path, and retries reuse its delivery receipt. Unknown records,
+changed bytes, missing evidence, a nonempty queue, invalid provenance, or a
+blanket no-contact rule fail before mail. Recovery never re-adds or removes an
+item.
 
 Queue-transfer transactions may move `🧑` items without changing their
 authorship. They reject terminal dispositions for those items; the responsible

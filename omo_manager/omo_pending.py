@@ -60,6 +60,35 @@ class Args:
     answer_message_file: Path | None = None
     no_email: bool = False
     completion_key: str = ""
+    recovery_id: str = ""
+
+
+@dataclass(frozen=True)
+class RemovalNoticeRecovery:
+    task_name: str
+    task_sha256: str
+    items: tuple[str, ...]
+    evidence: str
+    completion_key: str
+
+
+SOURCE1929_RECOVERY_ID = "source-1929-1936-1942"
+REMOVAL_NOTICE_RECOVERIES = {
+    SOURCE1929_RECOVERY_ID: RemovalNoticeRecovery(
+        task_name="pending_auth_mail.md",
+        task_sha256="8093c2111d29672f002c5899d0bc42eb4e1452f3403508073c60099357f54d5e",
+        items=(
+            "🧑 Source-1929 (manager_mail/85c5dff58359-1929.txt): pending items authored by the Human must email the Human on creation and closure; pending items authored by agents must not email the Human on either event. Correct Source-1926 behavior and verify both authorship paths.",
+            "🧑 Source-1936 (manager_mail/85c5dff58359-1936.txt): pending-item created/deleted emails must reuse the subject of the agent previous email and be concise, formatted as an event label followed by the item list.",
+            "🧑 Source-1942 (manager_mail/85c5dff58359-1942.txt): explain the delay, acknowledge acceptance immediately, record this Human-authored item, and complete the combined pending-notice correction.",
+        ),
+        evidence=(
+            "Deployed reviewed commits dcdf3c1 and c762b98; focused live checks passed; combined Human report verified in Gmail "
+            "Sent Mail as Message-ID <178960835463.274793.18164703339367696389@gmail.com>."
+        ),
+        completion_key="cce588d2db12689862a5981a619d17bc9c27e73c4c7593dd1d3473966c9fa070",
+    )
+}
 
 
 def pending_item_state(item: PendingTaskItem) -> str:
@@ -116,6 +145,11 @@ def parse_args(argv: list[str]) -> Args:
     )
     remove.add_argument("--answer-subject-file", type=Path, help="One-line email subject for the combined human answer.")
     remove.add_argument("--answer-message-file", type=Path, help="Email body for the combined human answer.")
+    recover = sub.add_parser(
+        "recover-removal-notice",
+        help="Send one missing Human deletion notice without changing the completed queue.",
+    )
+    recover.add_argument("--recovery-id", choices=sorted(REMOVAL_NOTICE_RECOVERIES), required=True)
     wake_ack = sub.add_parser("wake-ack", help="Acknowledge one durable ready-item notice.")
     wake_ack.add_argument("--notice-id", required=True)
     parsed = parser.parse_args(argv)
@@ -157,6 +191,8 @@ def parse_args(argv: list[str]) -> Args:
             no_email=parsed.no_email,
             completion_key=parsed.completion_key,
         )
+    if parsed.command == "recover-removal-notice":
+        return Args("recover-removal-notice", recovery_id=parsed.recovery_id)
     if parsed.command == "wake-ack":
         return Args("wake-ack", notice_id=parsed.notice_id)
     return Args("list")
@@ -276,6 +312,49 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
                     print(item)
             return 0
         answer_subject, answer_body = human_answer(args)
+        if args.command == "recover-removal-notice":
+            recovery = REMOVAL_NOTICE_RECOVERIES.get(args.recovery_id)
+            if recovery is None:
+                raise BlockingError("removal-notice recovery id is not supported")
+            if current.version != "v1.0.0":
+                raise BlockingError("removal-notice recovery requires a legacy queue")
+            if path.name != recovery.task_name:
+                raise BlockingError("removal-notice recovery task does not match")
+            if hashlib.sha256(text.encode()).hexdigest() != recovery.task_sha256:
+                raise BlockingError("removal-notice recovery task digest changed")
+            if current.pending_task_items:
+                raise BlockingError("removal-notice recovery requires the completed queue to remain empty")
+            if human_authored_pending_items(recovery.items) != recovery.items or len(set(recovery.items)) != len(recovery.items):
+                raise BlockingError("removal-notice recovery record has invalid item provenance")
+            evidence_line = f"({pending_remove_evidence_comment(len(recovery.items), recovery.evidence)})"
+            if text.splitlines().count(evidence_line) != 1:
+                raise BlockingError("removal-notice recovery requires one exact removal evidence record")
+            email = plan_completion_email(
+                root,
+                path,
+                text,
+                "pending item removed after verification",
+                items=recovery.items,
+                evidence=recovery.evidence,
+                semantic_key=recovery.completion_key,
+                pending_item_owner=True,
+            )
+            if email is None:
+                raise BlockingError("removal-notice recovery is forbidden by an explicit blanket no-contact rule")
+            if not require_owner_completion(
+                root,
+                path,
+                text,
+                "pending item removed after verification",
+                items=recovery.items,
+                evidence=recovery.evidence,
+                owner_may_mutate_after_delivery=True,
+                semantic_key=recovery.completion_key,
+                pending_item_owner=True,
+            ):
+                raise BlockingError("responsible-owner deletion notice requested; retry recovery after owner delivery")
+            print(f"recovered deletion notice for {len(recovery.items)} completed pending item(s)")
+            return 0
         if current.version == "v1.0.0" and v2_enabled(root):
             raise BlockingError("v1 pending writes are disabled after v2 enablement")
         if current.version == "v2.0.0":
