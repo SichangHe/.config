@@ -159,6 +159,7 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             "Never email the Human.",
             "Never email the Human for Human- or agent-authored pending items.",
             "Never email the Human for Human-originated or agent-authored pending items.",
+            "Without weakening the no-contact rule, do not email the Human under that policy.",
         ):
             with self.subTest(policy=policy), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
@@ -176,6 +177,20 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             task = root / "task.md"
             text = task_text(
                 "Human-authored pending items email the Human; agent-authored pending items must not email the Human.",
+                human_report=False,
+            )
+            task.write_text(text, encoding="utf-8")
+
+            for outcome in ("pending item created", "pending item removed after verification"):
+                with self.subTest(outcome=outcome):
+                    self.assertIsNotNone(build_completion_email(root, task, text, outcome, items=("🧑 finish review",)))
+
+    def test_pending_item_notice_ignores_no_contact_safeguard_meta_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_text(
+                "Implement the correction without weakening explicit no-contact or delivery safeguards.",
                 human_report=False,
             )
             task.write_text(text, encoding="utf-8")
