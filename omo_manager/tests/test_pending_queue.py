@@ -432,6 +432,7 @@ class PendingQueueTests(unittest.TestCase):
             original = (
                 task_text()
                 + "Agent-authored pending items must not email the Human.\n"
+                + "Implement the correction without weakening explicit no-contact or delivery safeguards.\n"
                 + f"(verified removed pending items: {evidence})\n"
             )
             path.write_text(original, encoding="utf-8")

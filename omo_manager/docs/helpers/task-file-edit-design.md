@@ -22,7 +22,8 @@ queue mutation without replaying the notice. `replace` keeps authorship unchange
 durable closure notice only for `🧑` items. Unmarked legacy items are ambiguous
 and remain silent, as do agent-authored items. A blanket no-contact rule suppresses
 Human-item notices; a rule scoped to agent-authored items does not. Legacy
-`remove --no-email` also suppresses a closure
+meta text about preserving no-contact safeguards is not itself a no-contact
+instruction. Legacy `remove --no-email` also suppresses a closure
 notice; it is only for recovery after a separate completion email whose Sent-Mail
 evidence will be reconciled before task closure. Output never includes a task
 filename, `runat`, or `managerat`.

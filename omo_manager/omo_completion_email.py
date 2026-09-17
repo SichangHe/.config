@@ -52,6 +52,10 @@ HUMAN_PENDING_AUTHOR_SCOPE_RE = re.compile(
     r"\b(?:human[- ]+(?:authored|originated|created)(?:[- ]+or[- ]+agent[- ]+(?:authored|originated|created))?(?: pending)? items?|human[- ]+or[- ]+agent[- ]+(?:authored|originated|created)(?: pending)? items?|(?:pending )?items? (?:authored|originated|created) (?:by|from) (?:the )?human)\b",
     re.IGNORECASE,
 )
+NO_CONTACT_META_RE = re.compile(
+    r"\bwithout (?:weakening|changing|removing)\b[^.;\n]{0,120}\bno[- ]contact\b[^.;\n]{0,120}?\b(?:rule|policy|safeguard)s?\b",
+    re.IGNORECASE,
+)
 MANAGER_ONLY_RE = re.compile(r"\b(?:report|return) only\b[^.\n]{0,100}\b(?:manager|submanager)\b|\bmanager[- ]only reports?\b", re.IGNORECASE)
 DIRECT_HUMAN_REPORT_RE = re.compile(r"\b(?:email|report|respond|write)\b[^.\n]{0,100}\b(?:directly to )?(?:the )?human\b", re.IGNORECASE)
 # 🧑 Human source `manager_mail/85c5dff58359-1929.txt:6`: "Pending items originated from the human need emails, ones from agents do not."
@@ -67,11 +71,14 @@ PENDING_ITEM_NOTICE_OUTCOMES = {
 def human_pending_notice_contact_forbidden(text: str) -> bool:
     """Return whether policy contains a blanket, rather than agent-scoped, no-contact rule."""
 
-    for match in NO_CONTACT_RE.finditer(text):
-        clause_start = max(text.rfind(separator, 0, match.start()) for separator in ("\n", ";", ".")) + 1
-        clause_ends = [position for separator in ("\n", ";", ".") if (position := text.find(separator, match.end())) >= 0]
-        clause_end = min(clause_ends, default=len(text))
-        clause = text[clause_start:clause_end]
+    policy_text = NO_CONTACT_META_RE.sub("", text)
+    for match in NO_CONTACT_RE.finditer(policy_text):
+        clause_start = max(policy_text.rfind(separator, 0, match.start()) for separator in ("\n", ";", ".")) + 1
+        clause_ends = [
+            position for separator in ("\n", ";", ".") if (position := policy_text.find(separator, match.end())) >= 0
+        ]
+        clause_end = min(clause_ends, default=len(policy_text))
+        clause = policy_text[clause_start:clause_end]
         if AGENT_PENDING_NO_CONTACT_SCOPE_RE.search(clause) is None or HUMAN_PENDING_AUTHOR_SCOPE_RE.search(clause) is not None:
             return True
     return False
