@@ -1222,6 +1222,108 @@ class EmailMeTests(unittest.TestCase):
             self.assertIn("current agent session identity", stderr.getvalue())
             lookup.assert_not_called()
 
+    def test_pending_deletion_notice_without_agent_session_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            body = Path(tmp) / "body.md"
+            body.write_text("pending item deleted:\n- review\n", encoding="utf-8")
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "EMAIL_ME_FAKE_SEND_LOG": str(Path(tmp) / "sent.txt"),
+                        "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
+                        "OMO_MANAGER_TMUX_TARGET": "wl:1",
+                        "CODEX_SESSION_ID": "",
+                        "CODEX_THREAD_ID": "",
+                    },
+                    clear=False,
+                ),
+                patch.object(email_me, "validate_completion_authorization", return_value={}),
+                patch.object(email_me, "prepare_latest_thread_for_tmux_target") as lookup,
+                patch("sys.stderr", new_callable=StringIO) as stderr,
+            ):
+                result = email_me.main(
+                    ["--manager-human", "--completion-authorization", "a" * 64, "--message-file", str(body)]
+                )
+            self.assertEqual(2, result)
+            self.assertIn("current agent session identity", stderr.getvalue())
+            lookup.assert_not_called()
+
+    def assert_pending_notice_rejects_another_agent_session_thread(self, body_text: str, argv: list[str]) -> None:
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        class FakeClient:
+            def __init__(self, _host: str, timeout: float) -> None:
+                self.timeout = timeout
+
+            def login(self, _user: str, _password: str) -> None:
+                return None
+
+            def select(self, _mailbox: str, readonly: bool) -> tuple[str, list[bytes]]:
+                if not readonly:
+                    raise AssertionError("thread lookup must be readonly")
+                return "OK", []
+
+            def uid(self, command: str, *_args: str) -> tuple[str, list[bytes]]:
+                return ("OK", [b"1"]) if command == "search" else ("OK", [b""])
+
+            def logout(self) -> None:
+                return None
+
+        with tempfile.TemporaryDirectory() as tmp:
+            body = Path(tmp) / "body.md"
+            body.write_text(body_text, encoding="utf-8")
+            current_session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+            other_session_thread = omo_email_subject.RecentHeader(
+                "agent@example.test",
+                "Re: exact other agent thread",
+                email_me.datetime.now().astimezone(),
+                "<other@example.test>",
+                "",
+                "human@example.test",
+                agent_session="01a0369c-7895-70f2-ae4b-5f59d920e99b",
+            )
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "EMAIL_ME_FAKE_SEND_LOG": str(Path(tmp) / "sent.txt"),
+                        "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
+                        "OMO_MANAGER_TMUX_TARGET": "wl:1",
+                        "CODEX_SESSION_ID": current_session,
+                        "CODEX_THREAD_ID": "",
+                        "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "86400",
+                    },
+                    clear=False,
+                ),
+                patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(email_me, "validate_completion_authorization", return_value={}),
+                patch.object(omo_email_subject, "configured_agent_mail", return_value=Settings()),
+                patch.object(omo_email_subject.imaplib, "IMAP4_SSL", FakeClient),
+                patch.object(omo_email_subject, "fetch_recent_headers", return_value=[other_session_thread]),
+                patch("sys.stderr", new_callable=StringIO) as stderr,
+            ):
+                result = email_me.main([*argv, "--message-file", str(body)])
+            self.assertEqual(2, result)
+            self.assertIn("no exact email thread", stderr.getvalue())
+            self.assertFalse((Path(tmp) / "sent.txt").exists())
+
+    def test_pending_creation_notice_rejects_another_agent_session_thread(self) -> None:
+        self.assert_pending_notice_rejects_another_agent_session_thread(
+            "pending item created:\n- review\n",
+            ["--manager-human", "--non-completion", "--pending-notice-key", "a" * 64],
+        )
+
+    def test_pending_deletion_notice_rejects_another_agent_session_thread(self) -> None:
+        self.assert_pending_notice_rejects_another_agent_session_thread(
+            "pending item deleted:\n- review\n",
+            ["--manager-human", "--completion-authorization", "a" * 64],
+        )
+
     def test_pending_notice_requires_active_manager_owner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             body = Path(tmp) / "body.md"
