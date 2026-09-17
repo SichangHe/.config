@@ -9,6 +9,7 @@ from omo_manager.omo_email_subject import (
     RecentHeader,
     SubjectInputError,
     authenticated_referenced_thread_target,
+    find_recent_thread_for_tmux_target,
     find_recent_thread_matching,
     prepare_latest_thread_for_tmux_target,
     prepare_subject_and_headers,
@@ -207,6 +208,44 @@ class EmailSubjectRouteContinuityTests(unittest.TestCase):
             "config:24",
             authenticated_referenced_thread_target(object(), root, [root], []),  # type: ignore[arg-type]
         )
+
+    def test_session_bound_lookup_accepts_an_untagged_subject(self) -> None:
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        header = RecentHeader(
+            "agent@example.test",
+            "Re: Request",
+            datetime.now().astimezone(),
+            "<sent@example.test>",
+            recipient="human@example.test",
+            agent_session=session,
+        )
+        with patch("omo_manager.omo_email_subject.find_recent_thread_matching", return_value=header) as lookup:
+            self.assertEqual(
+                header,
+                find_recent_thread_for_tmux_target("wl:1", self.profile, required_agent_session=session),
+            )
+        self.assertTrue(lookup.call_args.args[0](header))
+        self.assertEqual((), lookup.call_args.args[1:])
+        self.assertEqual(session, lookup.call_args.kwargs["required_agent_session"])
+
+    def test_session_bound_latest_thread_preserves_exact_subject(self) -> None:
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        header = RecentHeader(
+            "agent@example.test",
+            " Re: [omo] exact Human wording ",
+            datetime.now().astimezone(),
+            "<sent@example.test>",
+            recipient="human@example.test",
+            agent_session=session,
+        )
+        with patch("omo_manager.omo_email_subject.verified_recent_thread_header", return_value=header):
+            subject, reply_headers = prepare_latest_thread_for_tmux_target(
+                "wl:1",
+                route_profile=self.profile,
+                required_agent_session=session,
+            )
+        self.assertEqual(header.subject, subject)
+        self.assertEqual(header.message_id, reply_headers["In-Reply-To"])
 
     def test_omitted_subject_rejects_retag_against_recovered_first_target(self) -> None:
         latest = RecentHeader(

@@ -743,6 +743,21 @@ class TaskEditTests(unittest.TestCase):
             self.assertEqual(0, exit_code)
             self.assertEqual(task_frontmatter(pending_items=("finish review", "email human")) + "body\n", task.read_text(encoding="utf-8"))
 
+    def test_manager_add_rejects_human_item_without_verified_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            original = task_frontmatter() + "body\n"
+            task.write_text(original, encoding="utf-8")
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = run(Args(root, Path("task.md"), "pending-add", items=("🧑 Human request",)))
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual(original, task.read_text(encoding="utf-8"))
+            self.assertIn("without a verified Human thread", stderr.getvalue())
+
     def test_adds_pending_items_to_long_running_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -805,7 +820,7 @@ class TaskEditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task = root / "task.md"
-            task.write_text(task_frontmatter(pending_items=("finish review",)) + "body\n", encoding="utf-8")
+            task.write_text(task_frontmatter(pending_items=("🧑 finish review",)) + "body\n", encoding="utf-8")
             stdout = io.StringIO()
 
             email = object()
@@ -815,14 +830,32 @@ class TaskEditTests(unittest.TestCase):
                 patch("omo_manager.omo_task_edit.send_completion_email", return_value=True) as send,
                 redirect_stdout(stdout),
             ):
-                exit_code = run(Args(root, Path("task.md"), "pending-remove", items=("finish review",), evidence="review passed"))
+                exit_code = run(Args(root, Path("task.md"), "pending-remove", items=("🧑 finish review",), evidence="review passed"))
 
             self.assertEqual(0, exit_code)
             self.assertEqual(task_frontmatter() + "body\n(verified removed pending item: review passed)\n", task.read_text(encoding="utf-8"))
             self.assertIn(REMOVE_REMINDER, stdout.getvalue())
             self.assertIn("evaluator agents", stdout.getvalue())
-            self.assertEqual(("finish review",), plan.call_args.kwargs["items"])
+            self.assertEqual(("🧑 finish review",), plan.call_args.kwargs["items"])
             send.assert_called_once_with(email)
+
+    def test_mixed_pending_remove_emails_only_human_items(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            items = ("🧑 answer request", "agent cleanup")
+            task.write_text(task_frontmatter(pending_items=items) + "body\n", encoding="utf-8")
+
+            with (
+                patch("omo_manager.omo_task_edit.require_owner_completion", return_value=True) as require,
+                patch("omo_manager.omo_task_edit.plan_completion_email", return_value=None) as plan,
+                patch("omo_manager.omo_task_edit.send_completion_email", return_value=False) as send,
+            ):
+                self.assertEqual(0, run(Args(root, Path("task.md"), "pending-remove", items=items, evidence="verified")))
+
+            self.assertEqual(("🧑 answer request",), require.call_args.kwargs["items"])
+            self.assertEqual(("🧑 answer request",), plan.call_args.kwargs["items"])
+            send.assert_called_once_with(None)
 
     def test_manager_pending_remove_owner_callback_then_retry_mutates_once(self) -> None:
         from omo_manager.omo_completion_email import build_completion_email
@@ -833,13 +866,13 @@ class TaskEditTests(unittest.TestCase):
             state = root / "state"
             task = root / "task.md"
             manager = root / "manager.md"
-            original = task_frontmatter(pending_items=("finish review",)) + "body\n"
+            original = task_frontmatter(pending_items=("🧑 finish review",)) + "body\n"
             task.write_text(original, encoding="utf-8")
             args = Args(
                 root,
                 Path("task.md"),
                 "pending-remove",
-                items=("finish review",),
+                items=("🧑 finish review",),
                 evidence="review passed",
                 completion_key="e" * 64,
             )
@@ -857,7 +890,7 @@ class TaskEditTests(unittest.TestCase):
                         task,
                         original,
                         "pending item removed after verification",
-                        items=("finish review",),
+                        items=("🧑 finish review",),
                         evidence="review passed",
                         semantic_key="e" * 64,
                     )
@@ -873,7 +906,7 @@ class TaskEditTests(unittest.TestCase):
                                 "--outcome",
                                 "pending item removed after verification",
                                 "--item",
-                                "finish review",
+                                "🧑 finish review",
                                 "--evidence",
                                 "review passed",
                                 "--semantic-key",

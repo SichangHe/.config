@@ -498,19 +498,10 @@ def find_recent_thread_matching(
             if len(sent_dates) != len(sent):
                 raise SubjectInputError("agent's last email thread has an ambiguous timestamp")
             latest_sent_at = max(sent_dates, default=None)
-            latest_roots = {
-                thread_root_message_id(header) for header in sent if header.date == latest_sent_at
-            }
-            if len(latest_roots) > 1:
+            latest_sent = [header for header in sent if header.date == latest_sent_at]
+            if len(latest_sent) > 1:
                 raise SubjectInputError("agent's last email thread is ambiguous")
-            candidates = [header for header in candidates if thread_root_message_id(header) in latest_roots]
-            if any(header.date is None for header in candidates):
-                raise SubjectInputError("agent's last email thread has an ambiguous timestamp")
-            if candidates:
-                newest_at = max(header.date for header in candidates if header.date is not None)
-                newest_ids = {header.message_id.strip() for header in candidates if header.date == newest_at}
-                if len(newest_ids) > 1:
-                    raise SubjectInputError("agent's last email thread has no unique newest message")
+            candidates = latest_sent
         if reject_ambiguous and route_profile is not None and route_profile.parent_message_ids is not None and len(candidates) > 1:
             raise SubjectInputError(f"verified email thread lookup matched {len(candidates)} open parent messages")
         selected = select_recent_thread(candidates, reject_ambiguous=reject_ambiguous)
@@ -552,6 +543,14 @@ def find_recent_thread_for_tmux_target(
 ) -> RecentHeader | None:
     target = canonical_tmux_target(tmux_target)
     prefix_re = GUEST_REPLY_PREFIX_RE if route_profile is not None and route_profile.route_kind == "guest-hees" else RE_PREFIX_RE
+
+    if required_agent_session is not None:
+        return find_recent_thread_matching(
+            lambda _header: True,
+            route_profile=route_profile,
+            reject_ambiguous=reject_ambiguous,
+            required_agent_session=required_agent_session,
+        )
 
     def has_exact_leading_target(header: RecentHeader) -> bool:
         text = header.subject.strip()
@@ -774,10 +773,12 @@ def prepare_latest_thread_for_tmux_target(
         )
     if header is None:
         raise SubjectInputError(f"no recent email thread found for tmux target {canonical_tmux_target(tmux_target)}; pass --subject or --subject-file")
+    if required_agent_session is not None:
+        return header.subject, reply_headers_from_recent_header(header)
     if required_agent_session is None:
         require_reply_target_continuity(header, tmux_target, route_profile)
-    guest_hees = route_profile is not None and route_profile.route_kind == "guest-hees"
-    return manager_subject_w_target(subject_base(header.subject, guest_hees=guest_hees), tmux_target, True), reply_headers_from_recent_header(header)
+    validate_subject(header.subject)
+    return header.subject.strip(), reply_headers_from_recent_header(header)
 
 
 def fallback_subject(subject: str, tmux_target: str = "") -> str:

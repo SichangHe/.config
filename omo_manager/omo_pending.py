@@ -37,6 +37,7 @@ from omo_manager.omo_task_edit import replace_if_unchanged
 from omo_manager.omo_task_lock import task_target_lock
 from omo_manager.omo_task_metadata import PendingTaskItem
 from omo_manager.omo_task_metadata import PENDING_ITEM_PROVENANCE_HELP
+from omo_manager.omo_task_metadata import human_authored_pending_items
 from omo_manager.omo_task_metadata import pending_items_with_origin
 from omo_manager.omo_task_metadata import pending_replacement_with_origin
 from omo_manager.omo_blocking_actor import request as blocking_request
@@ -134,11 +135,17 @@ def parse_args(argv: list[str]) -> Args:
             parser.error("--no-email is supported only for legacy --item removal.")
         if parsed.no_email and (parsed.answer_subject_file or parsed.answer_message_file):
             parser.error("--no-email cannot be combined with answer-email options.")
-        if not parsed.no_email and re.fullmatch(r"[0-9a-f]{64}", parsed.completion_key or "") is None:
-            parser.error("emailing remove requires --completion-key as a lowercase SHA-256 digest.")
+        if parsed.completion_key and re.fullmatch(r"[0-9a-f]{64}", parsed.completion_key) is None:
+            parser.error("--completion-key must be a lowercase SHA-256 digest.")
         if bool(parsed.answer_subject_file) != bool(parsed.answer_message_file):
             parser.error("remove requires both --answer-subject-file and --answer-message-file when either is used.")
+        if parsed.answer_subject_file:
+            parser.error("pending-item notices cannot be combined with another Human answer.")
         items = normalized_items(tuple(parsed.item or ()))
+        if parsed.no_email and human_authored_pending_items(items):
+            parser.error("--no-email cannot remove Human-authored pending items.")
+        if items and human_authored_pending_items(items) and not parsed.no_email and not parsed.completion_key:
+            parser.error("Human-authored item removal requires --completion-key as a lowercase SHA-256 digest.")
         return Args(
             "remove",
             items,
@@ -235,9 +242,19 @@ def require_pending_add_notice(root: Path, path: Path, text: str, items: tuple[s
     return email is not None
 
 
+def require_human_completion_key(items: tuple[str, ...], completion_key: str) -> None:
+    """Require replay identity only for a Human-authored pending closure."""
+    if items and not completion_key:
+        raise BlockingError("Human-authored item removal requires --completion-key")
+
+
 def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
     if args.no_email and (args.item_id or args.answer_subject_file or args.answer_message_file):
         raise ValueError("--no-email requires legacy --item removal without answer-email options")
+    if args.no_email and human_authored_pending_items(args.items):
+        raise ValueError("--no-email cannot remove Human-authored pending items")
+    if args.answer_subject_file or args.answer_message_file:
+        raise ValueError("pending-item notices cannot be combined with another Human answer")
     path = current_pending_task(root)
     metadata = read_task_metadata(path, root)
     if metadata is None:
@@ -272,20 +289,28 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
                 if len(set(args.items)) != len(args.items):
                     raise BlockingError("pending item text is repeated in this request")
                 missing_items = tuple(item for item in args.items if item not in existing)
-                semantic_key, delivered = delivered_pending_add_notice(root, path, text, args.items)
-                notice_items = args.items
+                requested_notice_items = human_authored_pending_items(args.items)
+                semantic_key, delivered = (
+                    delivered_pending_add_notice(root, path, text, requested_notice_items)
+                    if requested_notice_items
+                    else ("", False)
+                )
+                notice_items = requested_notice_items
                 if not delivered:
                     if not missing_items:
                         print("added 0 pending item(s)")
                         return 0
                     if len(missing_items) != len(args.items):
                         raise BlockingError("pending item text already exists")
-                    notice_items = missing_items
-                    semantic_key = pending_add_key(root, path, text, notice_items)
-                    emailed = require_pending_add_notice(root, path, text, notice_items)
+                    notice_items = human_authored_pending_items(missing_items)
+                    if notice_items:
+                        semantic_key = pending_add_key(root, path, text, notice_items)
+                        emailed = require_pending_add_notice(root, path, text, notice_items)
+                    else:
+                        emailed = False
                 else:
                     emailed = False
-                comment = pending_add_notice_comment(notice_items, semantic_key)
+                comment = pending_add_notice_comment(notice_items, semantic_key) if notice_items and (delivered or emailed) else ""
                 if missing_items:
                     item_ids = add_items(document, missing_items, body_comment=comment)
                 else:
@@ -318,12 +343,21 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
                 matching = [item for item in current.pending_items if item.id == args.item_id]
                 if len(matching) != 1:
                     raise BlockingError("pending item was not found exactly once")
+                notice_items = human_authored_pending_items((matching[0].text,))
+                require_human_completion_key(notice_items, args.completion_key)
+                if answer_subject and not notice_items:
+                    raise BlockingError("combined human answer requires a Human-authored pending item")
+                if not notice_items:
+                    resolve_item(document, args.item_id, args.outcome, args.evidence)
+                    _ = blocking_request(root, {"operation": "reconcile"})
+                    print(f"resolved pending item {args.item_id} as {args.outcome}")
+                    return 0
                 email = plan_completion_email(
                     root,
                     path,
                     text,
                     f"pending item {args.outcome}",
-                    items=(matching[0].text,),
+                    items=notice_items,
                     evidence=args.evidence,
                     human_subject=answer_subject,
                     human_body=answer_body,
@@ -337,7 +371,7 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
                     path,
                     text,
                     f"pending item {args.outcome}",
-                    items=(matching[0].text,),
+                    items=notice_items,
                     evidence=args.evidence,
                     human_subject=answer_subject,
                     human_body=answer_body,
@@ -364,21 +398,30 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
                 raise BlockingError("pending item text is repeated in this request")
             existing = set(current.pending_task_items)
             added_items = tuple(item for item in args.items if item not in existing)
-            semantic_key, delivered = delivered_pending_add_notice(root, path, text, args.items)
+            requested_notice_items = human_authored_pending_items(args.items)
+            semantic_key, delivered = (
+                delivered_pending_add_notice(root, path, text, requested_notice_items)
+                if requested_notice_items
+                else ("", False)
+            )
             if not added_items:
                 if delivered:
-                    updated = append_comment(text, pending_add_notice_comment(args.items, semantic_key))
+                    updated = append_comment(text, pending_add_notice_comment(requested_notice_items, semantic_key))
                     replace_if_unchanged(path, updated, before)
                 print("added 0 pending item(s)")
                 return 0
             updated, count = add_pending_items(text, added_items)
-            notice_items = args.items if delivered else added_items
+            notice_items = requested_notice_items if delivered else human_authored_pending_items(added_items)
             if not delivered:
-                semantic_key = pending_add_key(root, path, text, notice_items)
-                emailed = require_pending_add_notice(root, path, text, notice_items)
+                if notice_items:
+                    semantic_key = pending_add_key(root, path, text, notice_items)
+                    emailed = require_pending_add_notice(root, path, text, notice_items)
+                else:
+                    emailed = False
             else:
                 emailed = False
-            updated = append_comment(updated, pending_add_notice_comment(notice_items, semantic_key))
+            if notice_items and (delivered or emailed):
+                updated = append_comment(updated, pending_add_notice_comment(notice_items, semantic_key))
             replace_if_unchanged(path, updated, before)
             print(f"added {count} pending item(s)")
             if emailed:
@@ -395,12 +438,20 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
             replace_if_unchanged(path, updated, before)
             print(f"removed {count} pending item(s) without email; verify each item was actually done or cancelled")
             return 0
+        notice_items = human_authored_pending_items(args.items)
+        require_human_completion_key(notice_items, args.completion_key)
+        if answer_subject and not notice_items:
+            raise BlockingError("combined human answer requires a Human-authored pending item")
+        if not notice_items:
+            replace_if_unchanged(path, updated, before)
+            print(f"removed {count} pending item(s); verify each item was actually done or cancelled")
+            return 0
         email = plan_completion_email(
             root,
             path,
             text,
             "pending item removed after verification",
-            items=args.items,
+            items=notice_items,
             evidence=args.evidence,
             human_subject=answer_subject,
             human_body=answer_body,
@@ -414,7 +465,7 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
             path,
             text,
             "pending item removed after verification",
-            items=args.items,
+            items=notice_items,
             evidence=args.evidence,
             human_subject=answer_subject,
             human_body=answer_body,

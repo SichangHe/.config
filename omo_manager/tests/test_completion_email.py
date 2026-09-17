@@ -116,18 +116,34 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             assert plan is not None
             self.assertEqual("Closed cfg:2\n", plan.body)
 
-    def test_non_close_notice_keeps_explicit_subject_and_details(self) -> None:
+    def test_pending_notice_reuses_thread_and_has_exact_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task = root / "task.md"
             text = task_text()
             task.write_text(text, encoding="utf-8")
 
-            plan = build_completion_email(root, task, text, "pending item completed")
+            plan = build_completion_email(root, task, text, "pending item completed", items=("🧑 finish review",))
 
             assert plan is not None
-            self.assertEqual("task.md: pending item completed", plan.subject)
-            self.assertEqual("Task: task.md\nOutcome: pending item completed\n", plan.body)
+            self.assertEqual("", plan.subject)
+            self.assertEqual("pending item deleted:\n- finish review\n", plan.body)
+
+    def test_pending_notice_multiple_item_bodies_are_exact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_text(human_report=False)
+            task.write_text(text, encoding="utf-8")
+
+            created = build_completion_email(root, task, text, "pending item created", items=("🧑 first", "🧑 second"))
+            deleted = build_completion_email(root, task, text, "pending item cancelled", items=("🧑 first", "🧑 second"))
+
+            assert created is not None and deleted is not None
+            self.assertEqual("pending item created:\n- first\n- second\n", created.body)
+            self.assertEqual("pending item deleted:\n- first\n- second\n", deleted.body)
+            self.assertEqual("", created.subject)
+            self.assertEqual("", deleted.subject)
 
     def test_pending_item_notice_does_not_require_general_human_reporting(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -136,7 +152,7 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             text = task_text("Return only a concise report to your manager.", human_report=False)
             task.write_text(text, encoding="utf-8")
 
-            self.assertIsNotNone(build_completion_email(root, task, text, "pending item created"))
+            self.assertIsNotNone(build_completion_email(root, task, text, "pending item created", items=("🧑 finish review",)))
 
     def test_pending_item_notice_honors_explicit_no_contact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -145,7 +161,18 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             text = task_text("Never email the Human.", human_report=False)
             task.write_text(text, encoding="utf-8")
 
-            self.assertIsNone(build_completion_email(root, task, text, "pending item created"))
+            self.assertIsNone(build_completion_email(root, task, text, "pending item created", items=("🧑 finish review",)))
+
+    def test_pending_item_notice_rejects_agent_and_ambiguous_legacy_items(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_text(human_report=False)
+            task.write_text(text, encoding="utf-8")
+
+            for items in (("agent work",), ("legacy work",), ("🧑 Human work", "agent work"), ()):
+                with self.subTest(items=items):
+                    self.assertIsNone(build_completion_email(root, task, text, "pending item created", items=items))
 
     def test_task_close_rejects_answer_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -216,7 +243,7 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
                     task,
                     text,
                     "pending item completed",
-                    items=("finish review",),
+                    items=("🧑 finish review",),
                     pending_item_owner=True,
                 )
 
@@ -496,7 +523,14 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
                 "omo_manager.omo_completion_email.current_active_task", return_value=task
             ):
-                old_plan = plan_completion_email(root, task, before, "pending item completed", semantic_key=semantic_key)
+                old_plan = plan_completion_email(
+                    root,
+                    task,
+                    before,
+                    "pending item completed",
+                    items=("🧑 finish review",),
+                    semantic_key=semantic_key,
+                )
                 assert old_plan is not None
                 with patch("omo_manager.omo_completion_email.os.replace", side_effect=OSError("crash before claim")):
                     with self.assertRaisesRegex(OSError, "crash before claim"):
@@ -585,10 +619,8 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
                     task,
                     initial,
                     "pending item completed",
-                    items=("finish review",),
+                    items=("🧑 finish review",),
                     evidence="review passed",
-                    human_subject="Reviewed work complete",
-                    human_body="The pending item is complete.",
                     semantic_key=semantic_key,
                 )
                 assert pending_plan is not None
@@ -662,7 +694,7 @@ managerat: cfg:1
 is_manager: false
 pending_task_items:
   - id: pi_019f0000-0000-7000-8000-000000000002
-    text: finish review
+    text: 🧑 finish review
     blocked_on: []
     notices: []
 resolved_task_items: []
@@ -676,13 +708,13 @@ work
                 task,
                 initial,
                 "pending item completed",
-                items=("finish review",),
+                items=("🧑 finish review",),
                 evidence="review passed",
                 semantic_key="a" * 64,
             )
             finished = initial.replace(
                 "pending_task_items:\n  - id: pi_019f0000-0000-7000-8000-000000000002\n"
-                "    text: finish review\n    blocked_on: []\n    notices: []",
+                "    text: 🧑 finish review\n    blocked_on: []\n    notices: []",
                 "pending_task_items: []",
             )
             task.write_text(finished, encoding="utf-8")
@@ -739,12 +771,12 @@ work
             ), patch("omo_manager.omo_tmux_send.send_system_to_codex") as queue:
                 self.assertFalse(
                     require_owner_completion(
-                        root, task, text, "pending item completed", items=("finish review",), evidence="passed", semantic_key="d" * 64
+                        root, task, text, "pending item completed", items=("🧑 finish review",), evidence="passed", semantic_key="d" * 64
                     )
                 )
                 self.assertFalse(
                     require_owner_completion(
-                        root, task, text, "pending item completed", items=("finish review",), evidence="passed", semantic_key="d" * 64
+                        root, task, text, "pending item completed", items=("🧑 finish review",), evidence="passed", semantic_key="d" * 64
                     )
                 )
             queue.assert_called_once()
@@ -753,7 +785,7 @@ work
             target, message = queue.call_args.args
             self.assertEqual("cfg:2", target)
             self.assertIn(str(Path(__file__).parents[1] / "omo_completion_email.py"), message)
-            self.assertIn("--item 'finish review'", message)
+            self.assertIn("--item '🧑 finish review'", message)
             self.assertIn("--evidence passed", message)
 
     def test_evidence_bound_receipt_reconciles_without_pane_or_task_mutation(self) -> None:
@@ -1172,31 +1204,23 @@ work
             authorization = state / "completion-email-authorizations" / plan.key
             self.assertTrue(authorization.is_file())
 
-    def test_combined_answer_is_one_email_with_exact_completion_context(self) -> None:
+    def test_pending_notice_rejects_combined_answer_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task = root / "task.md"
             text = task_text()
             task.write_text(text, encoding="utf-8")
-            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task):
-                plan = plan_completion_email(
+            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), self.assertRaisesRegex(ValueError, "exact thread or body"):
+                plan_completion_email(
                     root,
                     task,
                     text,
                     "pending item removed after verification",
-                    items=("answer question",),
+                    items=("🧑 answer question",),
                     evidence="answered",
                     human_subject="Re: Original question",
                     human_body="The concise answer.\n",
                 )
-            self.assertIsNotNone(plan)
-            assert plan is not None
-            self.assertEqual("Re: Original question", plan.subject)
-            self.assertTrue(plan.body.startswith("The concise answer.\n\nCompletion record:\n"))
-            self.assertIn("Task: task.md", plan.body)
-            self.assertIn("Outcome: pending item removed after verification", plan.body)
-            self.assertIn("- answer question", plan.body)
-            self.assertIn("Evidence: answered", plan.body)
 
     def test_combined_answer_claim_distinguishes_subject_and_resolved_item(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

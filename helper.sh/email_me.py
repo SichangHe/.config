@@ -93,6 +93,7 @@ class CliArgs:
     non_completion: bool
     completion_authorization: str
     digest_authorization: str
+    pending_notice_key: str
 
 
 class ParsedArgs(argparse.Namespace):
@@ -111,6 +112,7 @@ class ParsedArgs(argparse.Namespace):
     non_completion: bool = False
     completion_authorization: str = ""
     digest_authorization: str = ""
+    pending_notice_key: str = ""
 
 
 def parse_args(argv: list[str]) -> CliArgs:
@@ -140,6 +142,7 @@ def parse_args(argv: list[str]) -> CliArgs:
     _ = classification.add_argument("--non-completion", action="store_true", help=argparse.SUPPRESS)
     _ = classification.add_argument("--completion-authorization", default="", help=argparse.SUPPRESS)
     _ = classification.add_argument("--digest-authorization", default="", help=argparse.SUPPRESS)
+    _ = parser.add_argument("--pending-notice-key", default="", help=argparse.SUPPRESS)
     _ = parser.add_argument("--guest-hees", action="store_true", help=argparse.SUPPRESS)
     _ = parser.add_argument("--guest-image-reference", action="append", default=[], help=argparse.SUPPRESS)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
@@ -193,6 +196,22 @@ def parse_args(argv: list[str]) -> CliArgs:
         parser.error("--completion-authorization must be a lowercase SHA-256 digest.")
     if parsed.digest_authorization and re.fullmatch(r"[0-9a-f]{64}", parsed.digest_authorization) is None:
         parser.error("--digest-authorization must be a lowercase SHA-256 digest.")
+    if parsed.pending_notice_key and re.fullmatch(r"[0-9a-f]{64}", parsed.pending_notice_key) is None:
+        parser.error("--pending-notice-key must be a lowercase SHA-256 digest.")
+    if parsed.pending_notice_key and (not parsed.manager_human or not parsed.non_completion):
+        parser.error("--pending-notice-key requires --manager-human --non-completion.")
+    if parsed.pending_notice_key and title is not None:
+        parser.error("--pending-notice-key must reuse the latest verified thread; omit --subject and --subject-file.")
+    pending_notice_lines = content.splitlines()
+    if parsed.pending_notice_key and not (
+        content.endswith("\n")
+        and not content.endswith("\n\n")
+        and pending_notice_lines
+        and pending_notice_lines[0] == "pending item created:"
+        and len(pending_notice_lines) > 1
+        and all(line.startswith("- ") and len(line) > 2 for line in pending_notice_lines[1:])
+    ):
+        parser.error("--pending-notice-key requires an exact pending-item creation body.")
     if any(re.fullmatch(r"<[^<>\s]+>", value) is None for value in parsed.supersedes_message_id):
         parser.error("--supersedes-message-id must be an exact RFC Message-ID enclosed in angle brackets.")
     if len(set(parsed.supersedes_message_id)) != len(parsed.supersedes_message_id):
@@ -210,6 +229,7 @@ def parse_args(argv: list[str]) -> CliArgs:
         non_completion=parsed.non_completion,
         completion_authorization=parsed.completion_authorization,
         digest_authorization=parsed.digest_authorization,
+        pending_notice_key=parsed.pending_notice_key,
     )
 
 
@@ -953,6 +973,8 @@ def validate_manager_operational_reply(reply_headers: dict[str, str], content: s
         ["Acknowledged: I handled your request without adding a pending item."],
     ]:
         return
+    if lines and lines[0] == "pending item created:" and len(lines) > 1 and all(line.startswith("- ") and len(line) > 2 for line in lines[1:]):
+        return
     if len(lines) == 1 and re.fullmatch(
         r"Question: (?:what|which|who|whose|where|when|why|how|is|are|was|were|do|does|did|can|could|should|would|will|may|must) [^.!;:\r\n]{1,450}\?",
         lines[0],
@@ -1500,6 +1522,8 @@ def main(argv: list[str]) -> int:
             non_completion_manager = validate_non_completion_owner(subject_tmux_target)
         if args.digest_authorization and not non_completion_manager and fake_send_log_path() is None:
             raise ValueError("digest authorization requires an exact active manager owner")
+        if args.pending_notice_key and not non_completion_manager and fake_send_log_path() is None:
+            raise ValueError("pending-item creation notice requires an exact active manager owner")
         if args.guest_image_references and not args.guest_hees:
             raise ValueError("--guest-image-reference requires a guest_hees producer target.")
         try:
@@ -1535,13 +1559,23 @@ def main(argv: list[str]) -> int:
                 raise ValueError("email without a subject requires an inferred tmux target.")
             if prepare_latest_thread_for_tmux_target is None:
                 raise ValueError("email thread lookup is unavailable; pass --subject or --subject-file.")
+            session_bound_thread = bool(args.completion_authorization or args.pending_notice_key)
+            required_agent_session = agent_session_id() if session_bound_thread else None
+            if session_bound_thread and not required_agent_session:
+                raise ValueError("email thread lookup requires the current agent session identity")
             if route_profile is None:
-                subject, reply_headers = prepare_latest_thread_for_tmux_target(subject_tmux_target)
+                if required_agent_session is None:
+                    subject, reply_headers = prepare_latest_thread_for_tmux_target(subject_tmux_target)
+                else:
+                    subject, reply_headers = prepare_latest_thread_for_tmux_target(
+                        subject_tmux_target,
+                        required_agent_session=required_agent_session,
+                    )
             else:
                 subject, reply_headers = prepare_latest_thread_for_tmux_target(
                     subject_tmux_target,
                     route_profile=route_profile,
-                    required_agent_session=agent_session_id() if args.completion_authorization else None,
+                    required_agent_session=required_agent_session,
                 )
             title = subject
         elif args.digest_authorization:
@@ -1556,7 +1590,7 @@ def main(argv: list[str]) -> int:
         else:
             subject, reply_headers = normalize_subject(args.title, subject_tmux_target or ""), {}
             title = args.title
-        if args.manager_human:
+        if args.manager_human and not (args.title is None and (args.completion_authorization or args.pending_notice_key)):
             try:
                 validate_manager_human_subject(subject)
             except ValueError:
@@ -1602,10 +1636,11 @@ def main(argv: list[str]) -> int:
         body = append_pwd_footer(args.content, tmux_target=subject_tmux_target, require_unquoted_footer=args.manager_human) if add_pwd_footer else args.content
         print(f"dry-run: email not sent; subject={subject}; body-bytes={len(body.encode())}")
         return 0
-    dedupe_subject = normalized_subject_key(title) if args.manager_human and normalized_subject_key is not None else subject
+    dedupe_subject = args.pending_notice_key or (normalized_subject_key(title) if args.manager_human and normalized_subject_key is not None else subject)
     dedupe_content = args.content + "\0" + "\0".join(args.guest_image_references)
     state_scope = "guest-hees" if args.guest_hees else "human"
     exact_once = args.manager_human and (args.non_completion or bool(args.digest_authorization)) and not args.guest_hees
+    delivery_state_subject = normalize_subject("pending item notice", subject_tmux_target or "") if args.pending_notice_key else subject
     if fake_log := fake_send_log_path():
         if args.guest_hees:
             print("EMAIL_ME_FAKE_SEND_LOG cannot verify a guest reply", file=sys.stderr)
@@ -1627,7 +1662,7 @@ def main(argv: list[str]) -> int:
             try:
                 claim_state = claim_email_delivery(
                     dedupe_subject,
-                    subject,
+                    delivery_state_subject,
                     dedupe_content,
                     state_scope,
                     subject_tmux_target or "",
@@ -1650,7 +1685,7 @@ def main(argv: list[str]) -> int:
             else:
                 release_email_delivery(
                     dedupe_subject,
-                    subject,
+                    delivery_state_subject,
                     dedupe_content,
                     state_scope,
                     subject_tmux_target or "",
@@ -1660,7 +1695,7 @@ def main(argv: list[str]) -> int:
         if exact_once:
             try:
                 mark_exact_once_email_delivered(
-                    dedupe_subject, subject, dedupe_content, subject_tmux_target or ""
+                    dedupe_subject, delivery_state_subject, dedupe_content, subject_tmux_target or ""
                 )
             except (OSError, ValueError) as exc:
                 print(f"Human email was submitted but its exact-once receipt failed: {exc}", file=sys.stderr)
@@ -1772,7 +1807,7 @@ def main(argv: list[str]) -> int:
         try:
             claim_state = claim_email_delivery(
                 dedupe_subject,
-                subject,
+                delivery_state_subject,
                 dedupe_content,
                 state_scope,
                 subject_tmux_target or "",
@@ -1803,7 +1838,7 @@ def main(argv: list[str]) -> int:
         if email_claimed and not smtp_delivery_attempted:
             release_email_delivery(
                 dedupe_subject,
-                subject,
+                delivery_state_subject,
                 dedupe_content,
                 state_scope,
                 subject_tmux_target or "",
@@ -1827,7 +1862,7 @@ def main(argv: list[str]) -> int:
             if email_claimed:
                 release_email_delivery(
                     dedupe_subject,
-                    subject,
+                    delivery_state_subject,
                     dedupe_content,
                     state_scope,
                     subject_tmux_target or "",
@@ -1867,7 +1902,7 @@ def main(argv: list[str]) -> int:
     if exact_once:
         try:
             mark_exact_once_email_delivered(
-                dedupe_subject, subject, dedupe_content, subject_tmux_target or ""
+                dedupe_subject, delivery_state_subject, dedupe_content, subject_tmux_target or ""
             )
         except (OSError, ValueError) as exc:
             print(f"Human email was submitted but its exact-once receipt failed: {exc}", file=sys.stderr)

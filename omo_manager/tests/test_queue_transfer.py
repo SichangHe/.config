@@ -25,7 +25,7 @@ from omo_manager.omo_task_lock import task_target_lock
 
 
 def task_text(target: str, items: tuple[str, ...], body: str) -> str:
-    pending = "pending_task_items: []\n" if not items else "pending_task_items:\n" + "".join(f"  - {json.dumps(item)}\n" for item in items)
+    pending = "pending_task_items: []\n" if not items else "pending_task_items:\n" + "".join(f"  - {json.dumps(item, ensure_ascii=False)}\n" for item in items)
     return f"---\nversion: v1.0.0\nstatus: running\nrunat: {target}\ntool: codex\nmanagerat: mgr:0\nis_manager: false\n{pending}---\n{body}\n"
 
 
@@ -58,6 +58,28 @@ def write_request(root: Path, data: bytes) -> tuple[Path, str, Path]:
 
 
 class QueueTransferTests(unittest.TestCase):
+    def test_terminal_human_item_is_rejected_before_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            source_items = ("🧑 answer request", "agent cleanup")
+            source = write_task(root, "source.md", "src:0", source_items)
+            destination = write_task(root, "destination.md", "dst:0", ())
+            data = request_data(
+                source,
+                source_items,
+                (destination,),
+                [
+                    {"source_index": 0, "kind": "completed", "destination": "", "evidence": "answered"},
+                    {"source_index": 1, "kind": "transfer", "destination": destination.name, "evidence": ""},
+                ],
+            )
+            request, request_sha256, manifest_path = write_request(root, data)
+
+            with self.assertRaisesRegex(QueueTransferError, "completion-email path"):
+                prepare_transfer(PrepareArgs(root, request, request_sha256, manifest_path))
+
+            self.assertFalse(manifest_path.exists())
+
     def test_complete_queue_transfer_commits_ordered_manifest_and_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()

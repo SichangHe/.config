@@ -1103,7 +1103,7 @@ class EmailMeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             body = Path(tmp) / "body.md"
             body.write_text("Closed wl:1\n", encoding="utf-8")
-            prepared = ("Re: [wl:1] Existing topic", {"In-Reply-To": "<prior@example.test>"})
+            prepared = ("Re: Re: exact prior Human wording", {"In-Reply-To": "<prior@example.test>"})
             with (
                 patch.dict(
                     os.environ,
@@ -1128,6 +1128,188 @@ class EmailMeTests(unittest.TestCase):
                 "01a0369c-7895-70f2-ae4b-5f59d920e99a",
                 prepare.call_args.kwargs["required_agent_session"],
             )
+            self.assertEqual("Re: Re: exact prior Human wording\nClosed wl:1\n", (Path(tmp) / "sent.txt").read_text(encoding="utf-8"))
+
+    def test_pending_notice_without_subject_requires_same_agent_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            body = Path(tmp) / "body.md"
+            body.write_text("pending item created:\n- review\n", encoding="utf-8")
+            prepared = ("Re: Re: exact prior Human wording", {"In-Reply-To": "<prior@example.test>"})
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "EMAIL_ME_FAKE_SEND_LOG": str(Path(tmp) / "sent.txt"),
+                        "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
+                        "OMO_MANAGER_TMUX_TARGET": "wl:1",
+                        "CODEX_SESSION_ID": "01a0369c-7895-70f2-ae4b-5f59d920e99a",
+                    },
+                    clear=False,
+                ),
+                patch.object(email_me, "validate_non_completion_owner"),
+                patch.object(email_me, "validate_non_completion_thread"),
+                patch.object(email_me, "prepare_latest_thread_for_tmux_target", return_value=prepared) as prepare,
+                patch.object(email_me, "maybe_print_thread_reminder"),
+            ):
+                result = email_me.main(
+                    [
+                        "--manager-human",
+                        "--non-completion",
+                        "--pending-notice-key",
+                        "a" * 64,
+                        "--message-file",
+                        str(body),
+                    ]
+                )
+            self.assertEqual(0, result)
+            self.assertEqual(
+                "01a0369c-7895-70f2-ae4b-5f59d920e99a",
+                prepare.call_args.kwargs["required_agent_session"],
+            )
+            self.assertEqual("Re: Re: exact prior Human wording\npending item created:\n- review\n", (Path(tmp) / "sent.txt").read_text(encoding="utf-8"))
+
+    def test_pending_notice_rejects_explicit_subject(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            body = Path(tmp) / "body.md"
+            body.write_text("pending item created:\n- review\n", encoding="utf-8")
+            with patch("sys.stderr", new_callable=StringIO) as stderr:
+                with self.assertRaises(SystemExit) as exit_status:
+                    email_me.main(
+                        [
+                            "--manager-human",
+                            "--non-completion",
+                            "--pending-notice-key",
+                            "a" * 64,
+                            "--subject",
+                            "older thread",
+                            "--message-file",
+                            str(body),
+                        ]
+                    )
+            self.assertEqual(2, exit_status.exception.code)
+            self.assertIn("reuse the latest verified thread", stderr.getvalue())
+
+    def test_pending_notice_without_agent_session_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            body = Path(tmp) / "body.md"
+            body.write_text("pending item created:\n- review\n", encoding="utf-8")
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "EMAIL_ME_FAKE_SEND_LOG": str(Path(tmp) / "sent.txt"),
+                        "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
+                        "OMO_MANAGER_TMUX_TARGET": "wl:1",
+                        "CODEX_SESSION_ID": "",
+                        "CODEX_THREAD_ID": "",
+                    },
+                    clear=False,
+                ),
+                patch.object(email_me, "prepare_latest_thread_for_tmux_target") as lookup,
+                patch("sys.stderr", new_callable=StringIO) as stderr,
+            ):
+                result = email_me.main(
+                    [
+                        "--manager-human",
+                        "--non-completion",
+                        "--pending-notice-key",
+                        "a" * 64,
+                        "--message-file",
+                        str(body),
+                    ]
+                )
+            self.assertEqual(2, result)
+            self.assertIn("current agent session identity", stderr.getvalue())
+            lookup.assert_not_called()
+
+    def test_pending_notice_requires_active_manager_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            body = Path(tmp) / "body.md"
+            body.write_text("pending item created:\n- review\n", encoding="utf-8")
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "OMO_MANAGER_TMUX_TARGET": "wl:1",
+                        "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
+                    },
+                    clear=False,
+                ),
+                patch.object(email_me, "validate_non_completion_owner", return_value=False),
+                patch("sys.stderr", new_callable=StringIO) as stderr,
+            ):
+                result = email_me.main(
+                    [
+                        "--manager-human",
+                        "--non-completion",
+                        "--pending-notice-key",
+                        "a" * 64,
+                        "--message-file",
+                        str(body),
+                    ]
+                )
+            self.assertEqual(2, result)
+            self.assertIn("exact active manager owner", stderr.getvalue())
+
+    def test_pending_notice_rejects_trailing_blank_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            body = Path(tmp) / "body.md"
+            body.write_text("pending item created:\n- review\n\n", encoding="utf-8")
+            with patch("sys.stderr", new_callable=StringIO) as stderr:
+                with self.assertRaises(SystemExit) as exit_status:
+                    email_me.main(
+                        [
+                            "--manager-human",
+                            "--non-completion",
+                            "--pending-notice-key",
+                            "a" * 64,
+                            "--message-file",
+                            str(body),
+                        ]
+                    )
+            self.assertEqual(2, exit_status.exception.code)
+            self.assertIn("exact pending-item creation body", stderr.getvalue())
+
+    def test_pending_notice_retry_is_idempotent_when_latest_subject_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            body = Path(tmp) / "body.md"
+            sent = Path(tmp) / "sent.txt"
+            body.write_text("pending item created:\n- review\n", encoding="utf-8")
+            prepared = iter(
+                [
+                    ("Re: [wl:1] first subject", {"In-Reply-To": "<first@example.test>"}),
+                    ("Re: [wl:1] newer subject", {"In-Reply-To": "<newer@example.test>"}),
+                ]
+            )
+            argv = [
+                "--manager-human",
+                "--non-completion",
+                "--pending-notice-key",
+                "a" * 64,
+                "--message-file",
+                str(body),
+            ]
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "EMAIL_ME_FAKE_SEND_LOG": str(sent),
+                        "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
+                        "OMO_MANAGER_TMUX_TARGET": "wl:1",
+                        "CODEX_SESSION_ID": "01a0369c-7895-70f2-ae4b-5f59d920e99a",
+                    },
+                    clear=False,
+                ),
+                patch.object(email_me, "validate_non_completion_owner"),
+                patch.object(email_me, "validate_non_completion_thread"),
+                patch.object(email_me, "prepare_latest_thread_for_tmux_target", side_effect=lambda *_args, **_kwargs: next(prepared)),
+                patch.object(email_me, "maybe_print_thread_reminder"),
+            ):
+                self.assertEqual(0, email_me.main(argv))
+                first = sent.read_text(encoding="utf-8")
+                self.assertEqual(0, email_me.main(argv))
+            self.assertEqual("Re: [wl:1] first subject\npending item created:\n- review\n", first)
+            self.assertEqual(first, sent.read_text(encoding="utf-8"))
 
     def test_agent_used_thread_may_have_an_older_target_ancestor(self) -> None:
         session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
@@ -1156,6 +1338,56 @@ class EmailMeTests(unittest.TestCase):
             self.assertRaisesRegex(omo_email_subject.SubjectInputError, "wl:1; wl:7 may not retag"),
         ):
             omo_email_subject.prepare_latest_thread_for_tmux_target("wl:7", profile)
+
+    def test_completion_thread_reuses_exact_latest_subject(self) -> None:
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        profile = omo_email_subject.MailRouteProfile("agent@example.test", "human@example.test", "primary")
+        header = omo_email_subject.RecentHeader(
+            "agent@example.test",
+            "Re: Re: exact Human wording",
+            email_me.datetime.now().astimezone(),
+            "<current@example.test>",
+            "<older@example.test>",
+            "human@example.test",
+            thread_target="wl:1",
+            agent_session=session,
+        )
+        with patch.object(omo_email_subject, "verified_recent_thread_header", return_value=header):
+            subject, reply_headers = omo_email_subject.prepare_latest_thread_for_tmux_target(
+                "wl:1", profile, required_agent_session=session
+            )
+        self.assertEqual(header.subject, subject)
+        self.assertEqual("<current@example.test>", reply_headers["In-Reply-To"])
+
+    def test_completion_missing_or_ambiguous_previous_thread_fails_before_delivery(self) -> None:
+        for detail in (
+            "no recent email thread found for tmux target wl:1",
+            "email thread lookup is ambiguous for the selected route",
+        ):
+            with self.subTest(detail=detail), tempfile.TemporaryDirectory() as tmp:
+                body = Path(tmp) / "body.md"
+                body.write_text("pending item created:\n- review\n", encoding="utf-8")
+                with (
+                    patch.dict(
+                        os.environ,
+                        {
+                            "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
+                            "OMO_MANAGER_TMUX_TARGET": "wl:1",
+                            "CODEX_SESSION_ID": "01a0369c-7895-70f2-ae4b-5f59d920e99a",
+                        },
+                        clear=False,
+                    ),
+                    patch.object(email_me, "validate_completion_authorization", return_value={}),
+                    patch.object(email_me, "prepare_latest_thread_for_tmux_target", side_effect=email_me.SubjectInputError(detail)),
+                    patch.object(email_me.smtplib, "SMTP_SSL") as smtp,
+                    patch("sys.stderr", new_callable=StringIO) as stderr,
+                ):
+                    result = email_me.main(
+                        ["--manager-human", "--completion-authorization", "a" * 64, "--message-file", str(body)]
+                    )
+                self.assertEqual(2, result)
+                self.assertIn(detail.split()[0], stderr.getvalue())
+                smtp.assert_not_called()
 
     def test_omitted_subject_fails_when_no_thread_exists(self) -> None:
         with (
@@ -1561,7 +1793,7 @@ class EmailMeTests(unittest.TestCase):
         self.assertTrue(any(call[0] == "search" and '"human@example.test"' in call for call in calls))
         self.assertFalse(any(call[0] == "search" and '"46496337@qq.com"' in call for call in calls))
 
-    def test_agent_used_thread_lookup_selects_latest_member_and_rejects_inbound_only(self) -> None:
+    def test_agent_used_thread_lookup_selects_latest_same_session_agent_mail(self) -> None:
         class Settings:
             agent_address = "agent@example.test"
             human_address = "human@example.test"
@@ -1641,7 +1873,7 @@ class EmailMeTests(unittest.TestCase):
                 reject_ambiguous=True,
                 required_agent_session="01a0369c-7895-70f2-ae4b-5f59d920e99a",
             )
-        self.assertEqual(inbound, selected)
+        self.assertEqual(sent, selected)
         with (
             patch.object(omo_email_subject, "configured_agent_mail", return_value=Settings()),
             patch.object(omo_email_subject.imaplib, "IMAP4_SSL", FakeClient),
@@ -1673,10 +1905,7 @@ class EmailMeTests(unittest.TestCase):
                 required_agent_session="01a0369c-7895-70f2-ae4b-5f59d920e99a",
             )
 
-        for headers in (
-            [omo_email_subject.RecentHeader(**{**sent.__dict__, "date": None})],
-            [sent, omo_email_subject.RecentHeader(**{**inbound.__dict__, "date": None})],
-        ):
+        for headers in ([omo_email_subject.RecentHeader(**{**sent.__dict__, "date": None})],):
             with (
                 self.subTest(headers=headers),
                 patch.object(omo_email_subject, "configured_agent_mail", return_value=Settings()),
@@ -1698,14 +1927,14 @@ class EmailMeTests(unittest.TestCase):
             patch.object(omo_email_subject.imaplib, "IMAP4_SSL", FakeClient),
             patch.object(omo_email_subject, "fetch_recent_headers", return_value=[sent, tied_reply]),
             patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "86400"}, clear=False),
-            self.assertRaisesRegex(omo_email_subject.SubjectInputError, "no unique newest message"),
         ):
-            omo_email_subject.find_recent_thread_for_tmux_target(
+            selected = omo_email_subject.find_recent_thread_for_tmux_target(
                 "wl:1",
                 profile,
                 reject_ambiguous=True,
                 required_agent_session="01a0369c-7895-70f2-ae4b-5f59d920e99a",
             )
+        self.assertEqual(sent, selected)
 
         other_session = omo_email_subject.RecentHeader(
             **{**sent.__dict__, "agent_session": "01a0369c-7895-70f2-ae4b-5f59d920e99b"}
@@ -2393,6 +2622,7 @@ class EmailMeTests(unittest.TestCase):
             "References": "<earlier@example.test> <human@example.test>",
         }
         email_me.validate_manager_operational_reply(headers, "Acknowledged: I accepted this request.\n")
+        email_me.validate_manager_operational_reply(headers, "pending item created:\n- first\n- second\n")
         email_me.validate_manager_operational_reply(headers, "Question: Which worker should own this?\n")
         with self.assertRaisesRegex(ValueError, "responsible worker reports"):
             email_me.validate_manager_operational_reply(headers, "The worker result is complete.\n")
