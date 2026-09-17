@@ -185,6 +185,7 @@ SOURCE1938_SUCCESSOR_TARGET = "dw:59"
 SOURCE1938_PARENT_TARGET = "wl:1"
 SOURCE1938_PREPARER = "config:24"
 SOURCE1938_ENVELOPE_TASK = "dw_mgr_replace.md"
+SOURCE1938_CLOSED_OWNER_ENVELOPE_SHA256 = "78853b55d9a5973838bfec04976aff8825016fd164c934327ed4690dbf05e118"
 SOURCE1938_ENVELOPE_SHA256 = "51780e08205fd60f0a065865e2eafe0bf0fa970e1ba4b1549c05b216c2d87a8e"
 SOURCE1938_LIVE_SHARED_TASK = "dw_cleanup_mgr.md"
 SOURCE1938_SHARED_TARGET = "dw:33"
@@ -606,7 +607,8 @@ def is_source1938_semantic_exception(args: Args) -> bool:
         and args.authority_lines == LineRange(*SOURCE1938_LINES)
         and args.successor_item_lines == (LineRange(*SOURCE1938_ITEM_LINES),)
         and args.authority_envelope_task == SOURCE1938_ENVELOPE_TASK
-        and args.authority_envelope_sha256 == SOURCE1938_ENVELOPE_SHA256
+        and args.authority_envelope_sha256
+        in {SOURCE1938_CLOSED_OWNER_ENVELOPE_SHA256, SOURCE1938_ENVELOPE_SHA256}
         and args.historical_task == SOURCE1938_HISTORICAL_TASK
         and args.historical_sha256 == SOURCE1938_HISTORICAL_SHA256
         and args.stale_manager_task == SOURCE1938_STALE_TASK
@@ -3650,19 +3652,24 @@ def authenticate_closed_owner_source(
         raise ReplaceError("closed-owner replacement audit has invalid review identities")
     source_protected_targets_tuple = args.protected_targets
     source_protected_digest = args.protected_targets_sha256
+    source_authority_envelope_sha256 = args.authority_envelope_sha256
     if is_source1938_semantic_exception(args):
         source_protected_targets = loaded.get("protected_targets")
         source_protected_sha256 = loaded.get("protected_targets_sha256")
+        source_envelope_sha256 = loaded.get("authority_envelope_sha256")
         if (
             not isinstance(source_protected_targets, list)
             or not source_protected_targets
             or not all(isinstance(target, str) and canonical_target(target) == target for target in source_protected_targets)
             or len(set(source_protected_targets)) != len(source_protected_targets)
             or SHA256_RE.fullmatch(str(source_protected_sha256)) is None
+            or source_envelope_sha256
+            not in {SOURCE1938_CLOSED_OWNER_ENVELOPE_SHA256, SOURCE1938_ENVELOPE_SHA256}
         ):
-            raise ReplaceError("Source-1938 closed-owner source protected inventory binding is malformed")
+            raise ReplaceError("Source-1938 closed-owner source inventory or envelope binding is malformed")
         source_protected_targets_tuple = tuple(source_protected_targets)
         source_protected_digest = str(source_protected_sha256)
+        source_authority_envelope_sha256 = str(source_envelope_sha256)
     source_children = source1938_source_children(args, loaded)
     source_args = replace(
         args,
@@ -3671,6 +3678,7 @@ def authenticate_closed_owner_source(
         children=source_children,
         protected_targets=source_protected_targets_tuple,
         protected_targets_sha256=source_protected_digest,
+        authority_envelope_sha256=source_authority_envelope_sha256,
         audit_output=source_path,
         preparer=source_preparer,
         reviewer=source_reviewer,

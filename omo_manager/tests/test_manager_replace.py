@@ -960,6 +960,7 @@ class ManagerReplaceTests(unittest.TestCase):
         args: Args,
         protected: tuple[PaneIdentity, ...],
         historical_sha: str,
+        source_envelope_sha256: str | None = None,
     ) -> contextlib.ExitStack:
         def inventory() -> dict[str, PaneIdentity]:
             result = {identity.target: identity for identity in protected}
@@ -988,6 +989,13 @@ class ManagerReplaceTests(unittest.TestCase):
         stack = contextlib.ExitStack()
         stack.enter_context(patch.object(manager_replace, "SOURCE1938_HISTORICAL_SHA256", historical_sha))
         stack.enter_context(patch.object(manager_replace, "SOURCE1938_STALE_MANAGER_SHA256", args.stale_manager_sha256))
+        stack.enter_context(
+            patch.object(
+                manager_replace,
+                "SOURCE1938_CLOSED_OWNER_ENVELOPE_SHA256",
+                source_envelope_sha256 or args.authority_envelope_sha256,
+            )
+        )
         stack.enter_context(
             patch.object(
                 manager_replace,
@@ -2922,9 +2930,15 @@ class ManagerReplaceTests(unittest.TestCase):
             with (
                 patch.object(manager_replace, "SOURCE1938_HISTORICAL_SHA256", historical_sha),
                 patch.object(manager_replace, "SOURCE1938_STALE_MANAGER_SHA256", args.stale_manager_sha256),
+                patch.object(manager_replace, "SOURCE1938_CLOSED_OWNER_ENVELOPE_SHA256", "f" * 64),
                 patch.object(manager_replace, "SOURCE1938_ENVELOPE_SHA256", args.authority_envelope_sha256),
             ):
                 self.assertTrue(manager_replace.is_source1938_semantic_exception(args))
+                self.assertTrue(
+                    manager_replace.is_source1938_semantic_exception(
+                        replace(args, authority_envelope_sha256="f" * 64)
+                    )
+                )
                 variants = (
                     {"old_task": "other.md"},
                     {"successor_task": "other_successor.md"},
@@ -3453,6 +3467,63 @@ class ManagerReplaceTests(unittest.TestCase):
             self.assertEqual(manager_replace.SOURCE1938_REBASE_KIND, record["closed_owner_rebase_kind"])
             self.assertEqual(args.old_sha256, record["closed_owner_source_old_sha256"])
             self.assertEqual(rebased.old_sha256, record["closed_owner_current_old_sha256"])
+
+    def test_source1938_closed_owner_rebase_authenticates_prior_envelope_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            source_envelope_sha256 = args.authority_envelope_sha256
+            state = self.source1938_stop_failed(args, protected, historical_sha)
+            source_audit = args.audit_output.read_bytes()
+            self.append_source1938_report_receipt(root, args, "envelope-old")
+            self.append_source1938_report_receipt(
+                root,
+                args,
+                "envelope-child",
+                receiver_task=manager_replace.SOURCE1938_LIVE_SHARED_TASK,
+                producer_task="source1847_cc_rebuild.md",
+                producer_target="cc-through-july-2026:1",
+            )
+            envelope = root / args.authority_envelope_task
+            envelope.write_bytes(
+                envelope.read_bytes()
+                + b"(verified removed pending item: Exact infrastructure disposition preserved.)\n"
+            )
+            current_old = (root / args.old_task).read_bytes()
+            current_child = (root / manager_replace.SOURCE1938_LIVE_SHARED_TASK).read_bytes()
+            rebased = replace(
+                args,
+                old_sha256=hashlib.sha256(current_old).hexdigest(),
+                children=tuple(
+                    replace(child, sha256=hashlib.sha256(current_child).hexdigest())
+                    if child.task == manager_replace.SOURCE1938_LIVE_SHARED_TASK
+                    else child
+                    for child in args.children
+                ),
+                authority_envelope_sha256=hashlib.sha256(envelope.read_bytes()).hexdigest(),
+                audit_output=args.audit_output.with_name("source1938-envelope-rebased.json"),
+                closed_owner_audit=args.audit_output,
+                closed_owner_audit_sha256=hashlib.sha256(source_audit).hexdigest(),
+            )
+            rebased = self.bind_source1938_current_rebase(rebased, state, protected, historical_sha)
+
+            with (
+                self.source1938_runtime(
+                    state,
+                    rebased,
+                    protected,
+                    historical_sha,
+                    source_envelope_sha256,
+                ),
+                patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                patch.object(manager_replace, "stop") as stop_mock,
+            ):
+                result = replace_manager(rebased)
+
+            stop_mock.assert_not_called()
+            self.assertIn("sole ownership", result)
+            self.assertEqual(source_audit, args.audit_output.read_bytes())
+            self.assertEqual("committed", json.loads(rebased.audit_output.read_text(encoding="utf-8"))["state"])
 
     def test_source1938_closed_owner_rebase_replays_source_report_marker_clears(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
