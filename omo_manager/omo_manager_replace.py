@@ -3336,8 +3336,9 @@ def recover_existing(
                 record, audit_bytes = transition_audit(args.audit_output, audit_bytes, record, "owner_stopped", completed=())
                 return Recovery(plan, record, audit_bytes, entries, True)
             raise ReplaceError("Source-1289 old-manager close outcome is ambiguous after descendant closure")
+        source1938_guard_loss = is_source1938_semantic_exception(args)
         if (
-            not is_guest1269_replacement(args)
+            not (is_guest1269_replacement(args) or source1938_guard_loss)
             or record.get("error") != "tmux symbolic target no longer owns the exact pane at command execution"
             or not all_before
             or old is not None
@@ -3345,6 +3346,8 @@ def recover_existing(
             or process_start_ticks(args.old_pane_pid) is not None
         ):
             raise ReplaceError("prior guarded manager stop failed; its exact closed-owner recovery state cannot be proved")
+        if source1938_guard_loss and record.get("completed_writes") != []:
+            raise ReplaceError("Source-1938 proofless guard-loss recovery found partial lifecycle writes")
         prepared_record = dict(record)
         prepared_record["state"] = "prepared"
         prepared_record["completed_writes"] = []
@@ -3355,7 +3358,18 @@ def recover_existing(
         expected_authority = serialized_audit(close_authority_record(args, prepared_bytes, commitment))
         if authority.data != expected_authority:
             raise ReplaceError("failed-stop recovery close-authority record changed")
+        if source1938_guard_loss:
+            if proof:
+                raise ReplaceError("Source-1938 proofless guard-loss recovery contradicts an existing close proof")
+            if markdown_paths(args.root) != membership:
+                raise ReplaceError("Source-1938 proofless guard-loss recovery found changed Markdown membership")
+            if authoritative_active_target_task_paths(args.root, args.new_target):
+                raise ReplaceError("Source-1938 proofless guard-loss recovery found successor target ownership")
+            if active_child_task_refs(args.root, plan.successor_path, args.new_target):
+                raise ReplaceError("Source-1938 proofless guard-loss recovery found prospective successor child custody")
+            validate_protected_bindings(args, inventory)
         # 🧑 "Atomically close only exact failed `guest_hees:0` ... Verify old owner absent and exactly one successor owns all work"
+        # 🧑 Source `manager_mail/85c5dff58359-1938.txt:3-7`: replace the nonresponsive exact old manager and leave one successor.
         record["owner_close_evidence"] = "authorized-absence"
         record, audit_bytes = transition_audit(
             args.audit_output,

@@ -3043,6 +3043,141 @@ class ManagerReplaceTests(unittest.TestCase):
             self.assertEqual("done", parsed(root / args.stale_manager_task, root).status)
             self.assertEqual("committed", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
 
+    def test_source1938_exact_proofless_guard_loss_recovers_as_authorized_absence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            state: dict[str, object] = {"old_live": True, "stop_calls": 0}
+
+            def lose_target_before_proof(_args: object) -> str:
+                stop_calls = state["stop_calls"]
+                if not isinstance(stop_calls, int):
+                    raise AssertionError("invalid stop call count")
+                state["stop_calls"] = stop_calls + 1
+                state["old_live"] = False
+                raise ReplaceError("tmux symbolic target no longer owns the exact pane at command execution")
+
+            with (
+                self.source1938_runtime(state, args, protected, historical_sha),
+                patch.object(manager_replace, "stop", side_effect=lose_target_before_proof),
+                patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+                self.assertRaisesRegex(ReplaceError, "manager stop failed before lifecycle mutation"),
+            ):
+                replace_manager(args)
+            failed = json.loads(args.audit_output.read_text(encoding="utf-8"))
+            self.assertEqual("stop_failed", failed["state"])
+            self.assertEqual([], failed["completed_writes"])
+            self.assertEqual("blocked", parsed(root / args.old_task, root).status)
+            self.assertFalse((root / args.successor_task).exists())
+
+            with (
+                self.source1938_runtime(state, args, protected, historical_sha),
+                patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+            ):
+                result = replace_manager(args)
+
+            self.assertIn("sole ownership", result)
+            self.assertEqual(1, state["stop_calls"])
+            self.assertEqual("done", parsed(root / args.old_task, root).status)
+            self.assertEqual("blocked", parsed(root / args.successor_task, root).status)
+            committed = json.loads(args.audit_output.read_text(encoding="utf-8"))
+            self.assertEqual("committed", committed["state"])
+            self.assertEqual("authorized-absence", committed["owner_close_evidence"])
+
+    def test_source1938_proofless_guard_loss_rejects_partial_write_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            state: dict[str, object] = {"old_live": True}
+
+            def lose_target_before_proof(_args: object) -> str:
+                state["old_live"] = False
+                raise ReplaceError("tmux symbolic target no longer owns the exact pane at command execution")
+
+            with (
+                self.source1938_runtime(state, args, protected, historical_sha),
+                patch.object(manager_replace, "stop", side_effect=lose_target_before_proof),
+                patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+                self.assertRaisesRegex(ReplaceError, "manager stop failed before lifecycle mutation"),
+            ):
+                replace_manager(args)
+            malformed = json.loads(args.audit_output.read_text(encoding="utf-8"))
+            malformed["completed_writes"] = [args.old_task]
+            args.audit_output.write_bytes(manager_replace.serialized_audit(malformed))
+
+            with (
+                self.source1938_runtime(state, args, protected, historical_sha),
+                patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                self.assertRaisesRegex(ReplaceError, "found partial lifecycle writes"),
+            ):
+                replace_manager(args)
+            self.assertEqual("blocked", parsed(root / args.old_task, root).status)
+            self.assertFalse((root / args.successor_task).exists())
+
+    def test_source1938_proofless_guard_loss_rejects_membership_or_process_drift(self) -> None:
+        for drift, expected in (
+            ("membership", "changed Markdown membership"),
+            ("process", "protected pane/process inventory changed"),
+            ("successor-owner", "found successor target ownership"),
+            ("successor-child", "found prospective successor child custody"),
+        ):
+            with self.subTest(drift=drift), tempfile.TemporaryDirectory() as tmp:
+                root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+                dormant_path = root / f"dormant_{drift}.md"
+                if drift in {"successor-owner", "successor-child"}:
+                    dormant_path.write_text(
+                        task_text(
+                            status="done",
+                            runat=args.new_target if drift == "successor-owner" else "other:9",
+                            managerat="other:1" if drift == "successor-owner" else args.new_target,
+                            is_manager=False,
+                            pending=(),
+                        ),
+                        encoding="utf-8",
+                    )
+                state: dict[str, object] = {"old_live": True}
+
+                def lose_target_before_proof(_args: object) -> str:
+                    state["old_live"] = False
+                    raise ReplaceError("tmux symbolic target no longer owns the exact pane at command execution")
+
+                with (
+                    self.source1938_runtime(state, args, protected, historical_sha),
+                    patch.object(manager_replace, "stop", side_effect=lose_target_before_proof),
+                    patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+                    self.assertRaisesRegex(ReplaceError, "manager stop failed before lifecycle mutation"),
+                ):
+                    replace_manager(args)
+                if drift == "membership":
+                    (root / "concurrent.md").write_text(
+                        task_text(status="done", runat="other:9", managerat="other:1", is_manager=False, pending=()),
+                        encoding="utf-8",
+                    )
+                else:
+                    if drift == "process":
+                        state["protected_drift"] = True
+                    else:
+                        dormant_path.write_text(
+                            task_text(
+                                status="blocked",
+                                runat=args.new_target if drift == "successor-owner" else "other:9",
+                                managerat="other:1" if drift == "successor-owner" else args.new_target,
+                                is_manager=False,
+                                pending=(),
+                            ),
+                            encoding="utf-8",
+                        )
+                with (
+                    self.source1938_runtime(state, args, protected, historical_sha),
+                    patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+                    patch.object(manager_replace, "process_start_ticks", return_value=None),
+                    self.assertRaisesRegex(ReplaceError, expected),
+                ):
+                    replace_manager(args)
+                self.assertEqual("stop_failed", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+                self.assertEqual("blocked", parsed(root / args.old_task, root).status)
+                self.assertFalse((root / args.successor_task).exists())
+
     def test_other_authority_cannot_request_descendant_closure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _root, args, _files = self.whole_tree_fixture(Path(tmp))
