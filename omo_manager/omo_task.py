@@ -51,7 +51,6 @@ except ModuleNotFoundError:
     from omo_task_metadata import TASK_FRONTMATTER_V1, TASK_FRONTMATTER_V2, first_version, frontmatter_text, runat_kind
     from omo_task_lock import process_start_ticks, task_file_lock, task_target_lock
 
-VL_WORKER_INSTRUCTIONS = HELPER_DIR / "VL_WORKER_DEFAULTS.md"
 PCODX_WRAPPER = HELPER_DIR / "pcodx"
 COMMAND_BY_TOOL = {
     "codex": ("bunx", "@openai/codex@latest", "--dangerously-bypass-approvals-and-sandbox"),
@@ -1262,10 +1261,7 @@ def omnigent_initial_prompt(args: Args) -> str:
     manager_target = managerat_for_task(args, "omnigent://pending")
     if args.agent_instructions_file is None:
         raise RuntimeError("prompted launch has no captured `getagentsmd` output")
-    paths = [args.agent_instructions_file]
-    if is_vl_agent(args.task_file, ""):
-        paths.append(VL_WORKER_INSTRUCTIONS)
-    parts = [path.read_text(encoding="utf-8").rstrip() for path in paths]
+    parts = [args.agent_instructions_file.read_text(encoding="utf-8").rstrip()]
     instruction = task_instruction_text(args, manager_target).rstrip()
     if instruction:
         parts.append(instruction)
@@ -1305,10 +1301,13 @@ def write_instruction_file(text: str, prefix: str) -> Path:
         return Path(handle.name)
 
 
-def write_agent_instructions_file(is_manager: bool) -> Path:
+def write_agent_instructions_file(is_manager: bool, vl_agent: bool = False) -> Path:
     """Freeze public instruction-command output before mutating launch state."""
 
-    instructions = launch_instructions("submanager" if is_manager else None)
+    extra_names = ("vl_worker",) if vl_agent else ()
+    instructions = launch_instructions(
+        "submanager" if is_manager else None, extra_names
+    )
     with tempfile.NamedTemporaryFile("wb", prefix="omo-getagentsmd-output-", delete=False) as handle:
         os.fchmod(handle.fileno(), 0o600)
         _ = handle.write(instructions)
@@ -1354,8 +1353,6 @@ def prompt_input(
     if agent_instructions_file is None:
         raise ValueError("prompted launch has no captured `getagentsmd` output")
     paths = [agent_instructions_file]
-    if vl_agent:
-        paths.append(VL_WORKER_INSTRUCTIONS)
     if prompt_file is not None:
         paths.append(prompt_file)
     if human_instruction_file is not None:
@@ -1812,7 +1809,7 @@ def start_codex(target: str, args: Args) -> None:
     prepared_exact_prompt = args.prepared_runtime_path is not None
     local_agent_instructions: Path | None = None
     if not args.resume_idle and not prepared_exact_prompt and args.agent_instructions_file is None:
-        local_agent_instructions = write_agent_instructions_file(args.is_manager)
+        local_agent_instructions = write_agent_instructions_file(args.is_manager, vl_agent)
         args = replace(args, agent_instructions_file=local_agent_instructions)
     excerpt = human_email_excerpt(args)
     human_instruction_file = write_human_instruction_file(excerpt, human_email_source(args)) if excerpt else None
@@ -1842,8 +1839,6 @@ def start_codex(target: str, args: Args) -> None:
             if args.agent_instructions_file is None:
                 raise RuntimeError("prompted launch has no captured `getagentsmd` output")
             prompt_sources = [args.agent_instructions_file]
-            if vl_agent:
-                prompt_sources.append(VL_WORKER_INSTRUCTIONS)
             if manager_delegation_file is not None:
                 prompt_sources.append(manager_delegation_file)
             if human_instruction_file is not None:
@@ -2347,8 +2342,6 @@ def validate_inputs(args: Args) -> str:
         _ = human_email_excerpt(args)
     if args.workdir is not None and not args.omnigent:
         _ = validate_launch_session(args)
-    if args.workdir is not None and not args.resume_idle and is_vl_agent(args.task_file, target(args)):
-        readable_file(VL_WORKER_INSTRUCTIONS, "VL worker defaults")
     if args.prompt_file is not None and not args.prompt_file.is_file():
         raise ValueError(f"prompt file not found: {args.prompt_file}")
     if args.prompt_file is not None:
@@ -3328,7 +3321,9 @@ def main(argv: list[str]) -> int:
     try:
         args = parse_args(argv)
         if args.workdir is not None and not args.resume_idle and args.prepared_successor_journal is None:
-            agent_instructions_file = write_agent_instructions_file(args.is_manager)
+            agent_instructions_file = write_agent_instructions_file(
+                args.is_manager, is_vl_agent(args.task_file, target(args))
+            )
             args = replace(args, agent_instructions_file=agent_instructions_file)
         if args.migrate_manager_owner:
             migration_path = task_path(args.root, args.task_file)

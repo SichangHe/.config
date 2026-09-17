@@ -36,6 +36,19 @@ class AgentInstructionsTests(unittest.TestCase):
             result,
         )
 
+    def test_extra_instruction_transcript_shows_command_and_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            command = Path(tmp) / "getagentsmd"
+            command.write_text("#!/bin/sh\nprintf '%s\\n' \"${*:-root}\"\n", encoding="utf-8")
+            command.chmod(0o700)
+            with patch.object(instructions, "GETAGENTSMD", command):
+                result = instructions.launch_instructions(extra_names=("vl_worker",)).decode()
+        self.assertEqual(
+            f"$ {command}\nroot\n\n$ {command} get agent_work\nget agent_work\n\n"
+            f"$ {command} get vl_worker\nget vl_worker\n",
+            result,
+        )
+
     def test_failure_and_empty_output_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             command = Path(tmp) / "getagentsmd"

@@ -22,7 +22,6 @@ from omo_manager.omo_task import (
     LaunchWindow,
     PCODX_WRAPPER,
     PENDING_TASK_ITEMS_MARKER,
-    VL_WORKER_INSTRUCTIONS,
     codex_cmd,
     effective_tool,
     ensure_task_file,
@@ -57,6 +56,7 @@ from omo_manager.omo_task import (
     wait_shell,
     worker_command,
     write_human_instruction_file,
+    write_agent_instructions_file,
 )
 from omo_manager.omo_task_lock import task_file_lock
 from omo_manager.tests.test_task_metadata_v2 import v2_task
@@ -164,6 +164,38 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIn("x.md omnigent://session-123", (root / "TODO.md").read_text(encoding="utf-8"))
             self.assertIn('<manager_delegation from="mgr:1">', send.call_args.args[1])
             launch.assert_called_once_with("codex", root, "gpt-5.6-sol", "high", host_id="", title="task")
+
+    @patch("omo_manager.omo_task.send_omnigent_message")
+    @patch("omo_manager.omo_task.launch_omnigent_session", return_value="omnigent://session-123")
+    def test_main_vl_launch_captures_public_vl_instructions(self, _launch, _send) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task-file",
+                        "vl_example.md",
+                        "--omnigent",
+                        "--tool",
+                        "codex",
+                        "--manager-target",
+                        "mgr:1",
+                        "--workdir",
+                        str(root),
+                        "--model",
+                        "gpt-5.6-sol",
+                        "--reasoning-effort",
+                        "high",
+                        "--prompt-file",
+                        str(prompt),
+                    ]
+                )
+            self.assertEqual(0, result)
+            self.launch_instructions_mock.assert_called_once_with(None, ("vl_worker",))
 
     @patch("omo_manager.omo_task.ensure_task_file", side_effect=OSError("disk full"))
     @patch("omo_manager.omo_task.launch_omnigent_session", return_value="omnigent://session-orphan")
@@ -1433,17 +1465,19 @@ class OmoTaskTests(unittest.TestCase):
     def test_codex_cmd_prepends_worker_defaults_to_prompt_file(self) -> None:
         self.assertIn(str(AGENT_INSTRUCTIONS), codex_cmd(prompt_file=Path("/tmp/prompt.md"), agent_instructions_file=AGENT_INSTRUCTIONS))
 
-    def test_codex_cmd_adds_vl_worker_defaults_only_for_vl_agents(self) -> None:
-        self.assertNotIn(str(VL_WORKER_INSTRUCTIONS), codex_cmd(prompt_file=Path("/tmp/prompt.md"), agent_instructions_file=AGENT_INSTRUCTIONS))
+    def test_codex_cmd_uses_captured_vl_instructions(self) -> None:
         self.assertEqual(
-            f'bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox "$(cat -- {AGENT_INSTRUCTIONS} {VL_WORKER_INSTRUCTIONS} /tmp/prompt.md)"',
+            f'bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox "$(cat -- {AGENT_INSTRUCTIONS} /tmp/prompt.md)"',
             codex_cmd(prompt_file=Path("/tmp/prompt.md"), vl_agent=True, tool="codex", agent_instructions_file=AGENT_INSTRUCTIONS),
         )
 
-    def test_codex_cmd_adds_defaults_without_custom_prompt(self) -> None:
-        command = codex_cmd(vl_agent=True, agent_instructions_file=AGENT_INSTRUCTIONS)
-        self.assertIn(str(AGENT_INSTRUCTIONS), command)
-        self.assertIn(str(VL_WORKER_INSTRUCTIONS), command)
+    def test_vl_instruction_capture_requests_public_document(self) -> None:
+        instructions = write_agent_instructions_file(False, True)
+        try:
+            self.assertEqual(b"$ /test/getagentsmd\nagent instructions\n", instructions.read_bytes())
+            self.launch_instructions_mock.assert_called_with(None, ("vl_worker",))
+        finally:
+            instructions.unlink()
 
     def test_vl_agent_scope_uses_task_file_or_tmux_session(self) -> None:
         self.assertTrue(is_vl_agent("vl_worker.md", "cfg:2"))
@@ -2237,7 +2271,6 @@ class OmoTaskTests(unittest.TestCase):
                 )
                 expected = (
                     instructions.read_bytes()
-                    + VL_WORKER_INSTRUCTIONS.read_bytes()
                     + custom.read_bytes()
                     + b'\n<human_instruction authoritative="true">\n'
                     + excerpt.encode()
@@ -3150,7 +3183,8 @@ class OmoTaskTests(unittest.TestCase):
             ):
                 start_codex("vl:7", args)
             command = tmux.call_args_list[0].args[0]
-            self.assertIn(str(VL_WORKER_INSTRUCTIONS), command[3])
+            self.assertIn("omo-getagentsmd-output-", command[3])
+            self.launch_instructions_mock.assert_called_with(None, ("vl_worker",))
 
     def test_start_codex_automatically_adds_getagentsmd_manager_instructions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3165,7 +3199,7 @@ class OmoTaskTests(unittest.TestCase):
                 start_codex("cfg:7", args)
             command = tmux.call_args_list[0].args[0][3]
             self.assertIn("omo-getagentsmd-output-", command)
-            self.launch_instructions_mock.assert_called_with("submanager")
+            self.launch_instructions_mock.assert_called_with("submanager", ())
 
     def test_start_codex_rejects_context_free_vl_launch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

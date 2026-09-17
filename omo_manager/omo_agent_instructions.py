@@ -38,7 +38,9 @@ def command_output(*args: str) -> bytes:
 
 
 # 🧑 “launch_instructions() retrieves the document and makes its content available in the manager's initial prompt before the manager starts ... make it clear that it is the output of that command”
-def launch_instructions(manager_role: str | None = None) -> bytes:
+def launch_instructions(
+    manager_role: str | None = None, extra_names: tuple[str, ...] = ()
+) -> bytes:
     """Return command transcripts for a worker, main manager, or submanager."""
 
     if manager_role not in {None, "main_manager", "submanager"}:
@@ -52,4 +54,5 @@ def launch_instructions(manager_role: str | None = None) -> bytes:
                 command_output("get", manager_role),
             )
         )
+    parts.extend(command_output("get", name) for name in extra_names)
     return b"\n".join(parts)

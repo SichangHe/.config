@@ -19,8 +19,8 @@ Non-submanager VL worker launches, identified by a `vl_` task filename or the `v
 Every prompted launch begins with transcripts showing `getagentsmd` and
 `getagentsmd get agent_work` plus their output; `--resume-idle` is the no-prompt
 recovery exception.
-Prompted VL launches add `VL_WORKER_DEFAULTS.md` and still require
-`--prompt-file` for task-local context. Manager launches selected with
+Prompted VL launches add the `getagentsmd get vl_worker` command transcript and
+still require `--prompt-file` for task-local context. Manager launches selected with
 `--is-manager` also capture `get agent_manager` and `get submanager`. A failed
 or empty instruction command stops launch before task, TODO, or tmux mutation.
 The launcher labels `--prompt-file` content as agent-authored with

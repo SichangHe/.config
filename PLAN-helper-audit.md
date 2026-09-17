@@ -89,7 +89,7 @@
 - cost/history helpers: `omo_codex_cost.py`, `omo_oc_history.py`
 - OpenCode legacy helpers: `opencode_auth_switch.py`, `opencode_auth_rotation_dryrun.py`, `opencode_quota_profile_watch.py`, `opencode_rotation_quiet_check.py`, `pcodx`
 - domain-specific helpers to prune or isolate: `omo_vl_experiment_preflight.py`
-- helper docs and tests: `omo_manager/docs/**`, `omo_manager/tests/**`, `WORKER_DEFAULTS.md`, `MANAGER_HELPERS.md`, `VL_WORKER_DEFAULTS.md`, work-log `MANAGER.md`
+- helper docs and tests: `omo_manager/docs/**`, `omo_manager/tests/**`, `MANAGER_HELPERS.md`, and work-log task records
 
 ## human walkthrough plan
 
@@ -168,7 +168,7 @@
   - source-script contract to implement: `omo_task.py` validates a readable script path, sources it in the same shell that launches Codex/pcodx, lets the script fail the launch by returning nonzero, and keeps manager code ignorant of project-specific env names such as `VLH`, `VERUS`, and provider policy
   - expected cleanup: remove or deprecate `--vl-experiment-preflight`, `--vl-preflight-vlh`, `--vl-preflight-verus`, `--vl-preflight-artifact-root`, automatic `vl_*_exp_*`/`vl_*_rerun_*` preflight gating, `VL_EXPERIMENT_PREFLIGHT`, `vl_preflight_env`, and `run_vl_experiment_preflight`
   - tests to update: `omo_manager/tests/test_omo_task.py` should cover parsing the generic prelaunch script flag, dry-run launch command, source-script ordering before Codex, source-script path validation before mutation, and removal of the VL-specific preflight behavior
-  - docs to update if implementation lands: `omo_manager/docs/routing/task-launch.md` and `omo_manager/VL_WORKER_DEFAULTS.md`
+  - docs to update if implementation lands: `omo_manager/docs/routing/task-launch.md` and `getagentsmd get vl_worker`
   - reviewed design: `omo_manager/docs/routing/task-file-frontmatter.md` is committed as `a331807`
   - frontmatter schema: `version`, `status`, conditional `blocked_on`, `runat`, `tool`, `managerat`, `is_manager`, and `pending_task_items`
   - frontmatter constraint: all task files except main manager task files must have frontmatter; helpers must treat frontmatter as source of truth
