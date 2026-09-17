@@ -16,6 +16,8 @@
   - draft structured metadata contract for task Markdown files
 - `omnigent-migration.md`
   - incremental runtime-target migration while tmux remains compatible
+- `omnigent-replacement.md`
+  - reviewed delivery fencing and expected-state replacement for the WebConf owner
 - `task-launch.md`
   - task file creation and worker launch helper reference
 - `queue-transfer.md`
