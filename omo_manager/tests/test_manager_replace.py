@@ -755,6 +755,15 @@ class ManagerReplaceTests(unittest.TestCase):
         return root, exact, protected
 
     def source1938_fixture(self, base: Path) -> tuple[Path, Args, tuple[PaneIdentity, ...], str]:
+        state_home = base / ".source1938-test-state"
+        self.enterContext(patch.dict(os.environ, {"XDG_STATE_HOME": str(state_home)}))
+        self.enterContext(
+            patch.object(
+                manager_replace,
+                "PENDING_REPORT_STATE",
+                state_home / "omo-manager/pending-watch-consumed-reports.tsv",
+            )
+        )
         root = base / "work_logs"
         root.mkdir(mode=0o700)
         private = base / "private"
@@ -1057,7 +1066,7 @@ class ManagerReplaceTests(unittest.TestCase):
         report_dir = Path("/tmp") / f"omo-agent-messages-{os.getuid()}"
         report_dir.mkdir(mode=0o700, exist_ok=True)
         report_path = report_dir / f"agent_in-progress_{token}.md"
-        commitment_dir = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")).expanduser().resolve(strict=False) / "omo-manager/report-receipts"
+        commitment_dir = root.parent / ".source1938-test-state/omo-manager/report-receipts"
         commitment_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         commitment_path = commitment_dir / f"test-source1938-{token}.commitment"
         self.addCleanup(report_path.unlink, missing_ok=True)
