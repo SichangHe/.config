@@ -7,6 +7,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -1015,6 +1016,32 @@ class ManagerReplaceTests(unittest.TestCase):
             replace_manager(args)
         return state
 
+    def bind_source1938_current_rebase(
+        self,
+        args: Args,
+        state: dict[str, object],
+        protected: tuple[PaneIdentity, ...],
+        historical_sha: str,
+    ) -> Args:
+        paths = manager_replace.markdown_paths(args.root)
+        successor = (args.root / args.successor_task).resolve(strict=False)
+        membership = tuple(path for path in paths if path != successor)
+        provisional = replace(
+            args,
+            closed_owner_current_membership_sha256=manager_replace.markdown_membership_digest(args.root, membership),
+        )
+        with (
+            self.source1938_runtime(state, provisional, protected, historical_sha),
+            patch.object(manager_replace, "process_start_ticks", return_value=None),
+        ):
+            plan = manager_replace.prepare(provisional, paths)
+        if plan.source1938_topology is None:
+            raise AssertionError("expected Source-1938 current topology fixture")
+        return replace(
+            provisional,
+            closed_owner_current_topology_sha256=manager_replace.json_digest(plan.source1938_topology),
+        )
+
     def append_source1938_report_receipt(
         self,
         root: Path,
@@ -1042,6 +1069,7 @@ class ManagerReplaceTests(unittest.TestCase):
         pointer = f"(from agent {producer_target} {report_path})"
         receiver_target = parsed(receiver_path, root).runat
         owner_bytes = receiver_path.read_bytes()
+        separator_bytes = 1 if not owner_bytes or owner_bytes.endswith(b"\n") else 2
         message = b"Retained child progress only.\n"
         message_sha256 = hashlib.sha256(message).hexdigest()
         replay_id = hashlib.sha256(f"source1938-{token}".encode()).hexdigest()
@@ -1087,7 +1115,7 @@ class ManagerReplaceTests(unittest.TestCase):
                 f"(sent from agent via omo_report.sh tmux={producer_target} time=17:21 task-file={Path(producer_task).name})\n"
                 f"[message-sha256: {message_sha256}]\n"
                 f"[omo-report-owner-prefix: manager-path-sha256={hashlib.sha256(str(receiver_path).encode()).hexdigest()} "
-                f"sha256={hashlib.sha256(owner_bytes).hexdigest()} size-bytes={len(owner_bytes)} separator-bytes=1]\n"
+                f"sha256={hashlib.sha256(owner_bytes).hexdigest()} size-bytes={len(owner_bytes)} separator-bytes={separator_bytes}]\n"
                 f"[omo-transfer: {json.dumps(transfer, ensure_ascii=True, sort_keys=True, separators=(',', ':'))}]\n"
                 "message:\n"
             ).encode()
@@ -1095,7 +1123,7 @@ class ManagerReplaceTests(unittest.TestCase):
         )
         report_path.chmod(0o600)
         if pending:
-            receipt = f"\n(pending)\n{pointer}\n"
+            receipt = "\n" * separator_bytes + f"(pending)\n{pointer}\n"
         else:
             receipt = (
                 f"\n{pointer}\n"
@@ -1118,6 +1146,51 @@ class ManagerReplaceTests(unittest.TestCase):
         self.assertTrue(changed)
         task_path.write_text(updated, encoding="utf-8")
         return line_number
+
+    def consume_source1938_watcher_reports(
+        self,
+        root: Path,
+        receiver_task: str,
+        reports: tuple[tuple[str, Path], ...],
+    ) -> dict[str, tuple[str, ...]]:
+        """Replay the durable v2 watcher transition produced for each report."""
+
+        receiver_path = (root / receiver_task).resolve()
+        authority_source = manager_replace.TASK_LOCK_SOURCE_PATH
+        authority_source_sha256 = hashlib.sha256(authority_source.read_bytes()).hexdigest()
+        transitions: dict[str, tuple[str, ...]] = {}
+        for target, report_path in reports:
+            pointer = f"(from agent {target} {report_path})"
+            artifact = manager_replace.authenticated_agent_report(pointer)
+            if artifact is None:
+                raise AssertionError("expected authenticated Source-1938 watcher report fixture")
+            report_key = manager_replace.consumed_report_key_for_artifact(root, artifact)
+            before = receiver_path.read_bytes()
+            block = b"(pending)\n" + pointer.encode() + b"\n"
+            self.assertEqual(1, before.count(block))
+            after = before.replace(block, b"", 1)
+            transition = (
+                "watcher-locked-pointer-removal-transition-v2",
+                hashlib.sha256(str(receiver_path).encode()).hexdigest(),
+                hashlib.sha256(pointer.encode()).hexdigest(),
+                hashlib.sha256(before).hexdigest(),
+                str(len(before)),
+                hashlib.sha256(after).hexdigest(),
+                str(len(after)),
+                "watcher-consumption-authority-v1",
+                "bounded-watcher-lease",
+                "1",
+                "1",
+                hashlib.sha256(str(manager_replace.report_authority_lock_path(manager_replace.PENDING_REPORT_STATE, report_key)).encode()).hexdigest(),
+                "1",
+                "1",
+                str(authority_source),
+                authority_source_sha256,
+                "0" * 64,
+            )
+            transitions[report_key] = transition
+            receiver_path.write_bytes(after)
+        return transitions
 
     def whole_tree_fixture(self, base: Path) -> tuple[Path, Args, dict[str, str]]:
         root, args, files = self.fixture(base)
@@ -3350,6 +3423,7 @@ class ManagerReplaceTests(unittest.TestCase):
                 closed_owner_audit=args.audit_output,
                 closed_owner_audit_sha256=hashlib.sha256(source_bytes).hexdigest(),
             )
+            rebased = self.bind_source1938_current_rebase(rebased, state, protected, historical_sha)
 
             with (
                 self.source1938_runtime(state, rebased, protected, historical_sha),
@@ -3432,6 +3506,7 @@ class ManagerReplaceTests(unittest.TestCase):
                 closed_owner_audit=source_args.audit_output,
                 closed_owner_audit_sha256=hashlib.sha256(source_audit).hexdigest(),
             )
+            rebased = self.bind_source1938_current_rebase(rebased, state, protected, historical_sha)
 
             with (
                 self.source1938_runtime(state, rebased, protected, historical_sha),
@@ -3446,6 +3521,44 @@ class ManagerReplaceTests(unittest.TestCase):
             self.assertTrue(old_report.exists())
             self.assertEqual("committed", json.loads(rebased.audit_output.read_text(encoding="utf-8"))["state"])
             self.assertEqual(source_audit, source_args.audit_output.read_bytes())
+
+    def test_source1938_closed_owner_rebase_rejects_current_membership_or_topology_pin_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            state = self.source1938_stop_failed(args, protected, historical_sha)
+            source_audit = args.audit_output.read_bytes()
+            self.append_source1938_report_receipt(root, args, "current-pin-drift")
+            current_old = (root / args.old_task).read_bytes()
+            rebased = replace(
+                args,
+                old_sha256=hashlib.sha256(current_old).hexdigest(),
+                audit_output=args.audit_output.with_name("source1938-current-pin.json"),
+                closed_owner_audit=args.audit_output,
+                closed_owner_audit_sha256=hashlib.sha256(source_audit).hexdigest(),
+            )
+            rebased = self.bind_source1938_current_rebase(rebased, state, protected, historical_sha)
+
+            for field, expected in (
+                ("closed_owner_current_membership_sha256", "current Markdown membership pin changed"),
+                ("closed_owner_current_topology_sha256", "current topology pin changed"),
+            ):
+                with self.subTest(field=field):
+                    changed = replace(
+                        rebased,
+                        audit_output=rebased.audit_output.with_name(f"source1938-{field}.json"),
+                        **{field: "0" * 64},
+                    )
+                    with (
+                        self.source1938_runtime(state, changed, protected, historical_sha),
+                        patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+                        patch.object(manager_replace, "process_start_ticks", return_value=None),
+                        patch.object(manager_replace, "stop") as stop_mock,
+                        self.assertRaisesRegex(ReplaceError, expected),
+                    ):
+                        replace_manager(changed)
+                    stop_mock.assert_not_called()
+                    self.assertFalse(changed.audit_output.exists())
+                    self.assertEqual(source_audit, args.audit_output.read_bytes())
 
     def test_source1938_source_report_marker_clear_tampering_fails_closed(self) -> None:
         for drift in ("line", "kind", "report"):
@@ -3480,6 +3593,354 @@ class ManagerReplaceTests(unittest.TestCase):
                     report.write_bytes(report.read_bytes() + b"drift\n")
                 with self.assertRaises(ReplaceError):
                     manager_replace.source1938_authenticated_retained_child_reports(args, source_child, child_path.read_bytes())
+
+    def test_source1938_closed_owner_rebase_accepts_authenticated_current_lineage_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            first_report = self.append_source1938_report_receipt(
+                root,
+                args,
+                "collab-source-first",
+                receiver_task="collab_recovery.md",
+                producer_task="meeting_open_audit.md",
+                producer_target="dw:57",
+                pending=True,
+            )
+            second_report = self.append_source1938_report_receipt(
+                root,
+                args,
+                "collab-source-second",
+                receiver_task="collab_recovery.md",
+                producer_task="meeting_open_audit.md",
+                producer_target="dw:57",
+                pending=True,
+            )
+            source_collab = (root / "collab_recovery.md").read_bytes()
+            source_args = replace(
+                args,
+                children=tuple(
+                    replace(child, sha256=hashlib.sha256(source_collab).hexdigest())
+                    if child.task == "collab_recovery.md"
+                    else child
+                    for child in args.children
+                ),
+            )
+            state = self.source1938_stop_failed(source_args, protected, historical_sha)
+            source_audit = source_args.audit_output.read_bytes()
+            self.append_source1938_report_receipt(root, source_args, "closed-owner-progress")
+
+            transitions = self.consume_source1938_watcher_reports(
+                root,
+                "collab_recovery.md",
+                (("dw:57", first_report), ("dw:57", second_report)),
+            )
+            collab_path = root / "collab_recovery.md"
+            collab_path.write_bytes(collab_path.read_bytes().rstrip(b"\n") + b"\n")
+
+            completed_path = root / "meeting_open_audit.md"
+            completed_path.write_text(
+                completed_path.read_text(encoding="utf-8").replace("status: running", "status: done", 1).replace(
+                    "pending_task_items:\n  - Audit open collaborator-meeting items.",
+                    "pending_task_items: []",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            added_task = "dw_final_audit.md"
+            added_queue = ("Verify the Human-requested DW repository cleanup without changing repositories.",)
+            (root / added_task).write_text(
+                task_text(
+                    status="running",
+                    runat="dw:58",
+                    managerat=manager_replace.SOURCE1938_SHARED_TARGET,
+                    is_manager=False,
+                    pending=added_queue,
+                ),
+                encoding="utf-8",
+            )
+            todo_path = root / "TODO.md"
+            todo = todo_path.read_text(encoding="utf-8")
+            todo = todo.replace("meeting_open_audit.md dw:57\n", "")
+            todo = todo.replace("collab_recovery.md dw:13\n", f"collab_recovery.md dw:13\n{added_task} dw:58\n")
+            todo = todo.replace("previous:\n", "previous:\nmeeting_open_audit.md dw:57\n")
+            todo_path.write_text(todo, encoding="utf-8")
+
+            added_identity = PaneIdentity("dw:58.0", "%120", 8120, 2120)
+            current_protected = tuple(sorted((*protected, added_identity), key=lambda identity: identity.target))
+            current_collab = collab_path.read_bytes()
+            current_old = (root / args.old_task).read_bytes()
+            rebased = replace(
+                source_args,
+                old_sha256=hashlib.sha256(current_old).hexdigest(),
+                todo_sha256=hashlib.sha256(todo.encode()).hexdigest(),
+                children=tuple(
+                    replace(child, sha256=hashlib.sha256(current_collab).hexdigest())
+                    if child.task == "collab_recovery.md"
+                    else child
+                    for child in source_args.children
+                ),
+                protected_targets=tuple(identity.target for identity in current_protected),
+                protected_targets_sha256=manager_replace.json_digest(
+                    [
+                        {
+                            "target": identity.target,
+                            "pane_id": identity.pane_id,
+                            "pid": identity.pid,
+                            "start_ticks": identity.start_ticks,
+                        }
+                        for identity in current_protected
+                    ]
+                ),
+                audit_output=source_args.audit_output.with_name("source1938-lineage-rebased.json"),
+                closed_owner_audit=source_args.audit_output,
+                closed_owner_audit_sha256=hashlib.sha256(source_audit).hexdigest(),
+            )
+            rebased = self.bind_source1938_current_rebase(rebased, state, current_protected, historical_sha)
+
+            @contextlib.contextmanager
+            def transition_snapshot(_args: Args) -> Iterator[dict[str, tuple[str, ...]]]:
+                yield transitions
+
+            with (
+                self.source1938_runtime(state, rebased, current_protected, historical_sha),
+                patch.object(manager_replace, "consumed_report_transition", side_effect=lambda _state, key: transitions.get(key)),
+                patch.object(manager_replace, "source1938_report_transition_snapshot", side_effect=transition_snapshot),
+                patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                patch.object(manager_replace, "stop") as stop_mock,
+            ):
+                result = replace_manager(rebased)
+
+            stop_mock.assert_not_called()
+            self.assertIn("sole ownership", result)
+            self.assertEqual(source_audit, source_args.audit_output.read_bytes())
+            self.assertEqual("done", parsed(completed_path, root).status)
+            self.assertEqual(added_queue, parsed(root / added_task, root).pending_task_items)
+            self.assertEqual(manager_replace.SOURCE1938_SHARED_TARGET, parsed(root / added_task, root).managerat)
+            record = json.loads(rebased.audit_output.read_text(encoding="utf-8"))
+            self.assertEqual("committed", record["state"])
+            self.assertEqual(rebased.closed_owner_current_membership_sha256, record["closed_owner_current_membership_sha256"])
+            self.assertEqual(rebased.closed_owner_current_topology_sha256, record["closed_owner_current_topology_sha256"])
+            self.assertRegex(record["closed_owner_direct_child_receipt_sha256"], r"^[0-9a-f]{64}$")
+            self.assertRegex(record["closed_owner_topology_lineage_sha256"], r"^[0-9a-f]{64}$")
+
+    def test_source1938_direct_child_watcher_transition_mismatch_fails_closed(self) -> None:
+        for drift in ("missing", "before", "after", "pointer", "authority-source"):
+            with self.subTest(drift=drift), tempfile.TemporaryDirectory() as tmp:
+                root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+                report = self.append_source1938_report_receipt(
+                    root,
+                    args,
+                    f"collab-transition-{drift}",
+                    receiver_task="collab_recovery.md",
+                    producer_task="meeting_open_audit.md",
+                    producer_target="dw:57",
+                    pending=True,
+                )
+                source_collab = (root / "collab_recovery.md").read_bytes()
+                source_args = replace(
+                    args,
+                    children=tuple(
+                        replace(child, sha256=hashlib.sha256(source_collab).hexdigest())
+                        if child.task == "collab_recovery.md"
+                        else child
+                        for child in args.children
+                    ),
+                )
+                state = self.source1938_stop_failed(source_args, protected, historical_sha)
+                source_audit = source_args.audit_output.read_bytes()
+                self.append_source1938_report_receipt(root, source_args, f"old-transition-{drift}")
+                valid = self.consume_source1938_watcher_reports(
+                    root,
+                    "collab_recovery.md",
+                    (("dw:57", report),),
+                )
+                current_collab = (root / "collab_recovery.md").read_bytes()
+                current_old = (root / args.old_task).read_bytes()
+                rebased = replace(
+                    source_args,
+                    old_sha256=hashlib.sha256(current_old).hexdigest(),
+                    children=tuple(
+                        replace(child, sha256=hashlib.sha256(current_collab).hexdigest())
+                        if child.task == "collab_recovery.md"
+                        else child
+                        for child in source_args.children
+                    ),
+                    audit_output=source_args.audit_output.with_name(f"source1938-transition-{drift}.json"),
+                    closed_owner_audit=source_args.audit_output,
+                    closed_owner_audit_sha256=hashlib.sha256(source_audit).hexdigest(),
+                )
+                rebased = self.bind_source1938_current_rebase(rebased, state, protected, historical_sha)
+                changed = dict(valid)
+                report_key = next(iter(changed))
+                if drift == "missing":
+                    del changed[report_key]
+                else:
+                    transition = list(changed[report_key])
+                    transition[{"before": 3, "after": 5, "pointer": 2, "authority-source": 15}[drift]] = "f" * 64
+                    changed[report_key] = tuple(transition)
+
+                @contextlib.contextmanager
+                def transition_snapshot(_args: Args) -> Iterator[dict[str, tuple[str, ...]]]:
+                    yield changed
+
+                with (
+                    self.source1938_runtime(state, rebased, protected, historical_sha),
+                    patch.object(manager_replace, "consumed_report_transition", side_effect=lambda _state, key: changed.get(key)),
+                    patch.object(manager_replace, "source1938_report_transition_snapshot", side_effect=transition_snapshot),
+                    patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+                    patch.object(manager_replace, "process_start_ticks", return_value=None),
+                    patch.object(manager_replace, "stop") as stop_mock,
+                    self.assertRaises(ReplaceError),
+                ):
+                    replace_manager(rebased)
+                stop_mock.assert_not_called()
+                self.assertFalse(rebased.audit_output.exists())
+                self.assertEqual(source_audit, source_args.audit_output.read_bytes())
+                self.assertFalse((root / args.successor_task).exists())
+
+    def test_source1938_direct_child_watcher_transition_accepts_two_newline_separator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            collab_path = root / "collab_recovery.md"
+            collab_path.write_bytes(collab_path.read_bytes().rstrip(b"\n"))
+            report = self.append_source1938_report_receipt(
+                root,
+                args,
+                "collab-two-newline-separator",
+                receiver_task="collab_recovery.md",
+                producer_task="meeting_open_audit.md",
+                producer_target="dw:57",
+                pending=True,
+            )
+            source = collab_path.read_bytes()
+            source_args = replace(
+                args,
+                children=tuple(
+                    replace(child, sha256=hashlib.sha256(source).hexdigest())
+                    if child.task == "collab_recovery.md"
+                    else child
+                    for child in args.children
+                ),
+            )
+            self.source1938_stop_failed(source_args, protected, historical_sha)
+            source_record = json.loads(source_args.audit_output.read_text(encoding="utf-8"))
+            transitions = self.consume_source1938_watcher_reports(root, "collab_recovery.md", (("dw:57", report),))
+            artifacts, binding, transition_sources = manager_replace.source1938_watcher_child_reports(
+                source_args,
+                source_record,
+                "collab_recovery.md",
+                source,
+                collab_path.read_bytes(),
+                transitions,
+            )
+
+            self.assertEqual((report,), tuple(artifact.path for artifact in artifacts))
+            transition_binding = binding["transitions"]
+            self.assertIsInstance(transition_binding, list)
+            assert isinstance(transition_binding, list)
+            self.assertEqual(1, len(transition_binding))
+            self.assertEqual((manager_replace.TASK_LOCK_SOURCE_PATH,), transition_sources)
+
+    def test_source1938_direct_child_watcher_ledger_is_reauthenticated_after_crash(self) -> None:
+        class SimulatedCrash(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            report = self.append_source1938_report_receipt(
+                root,
+                args,
+                "collab-transition-retry",
+                receiver_task="collab_recovery.md",
+                producer_task="meeting_open_audit.md",
+                producer_target="dw:57",
+                pending=True,
+            )
+            source_collab = (root / "collab_recovery.md").read_bytes()
+            source_args = replace(
+                args,
+                children=tuple(
+                    replace(child, sha256=hashlib.sha256(source_collab).hexdigest())
+                    if child.task == "collab_recovery.md"
+                    else child
+                    for child in args.children
+                ),
+            )
+            state = self.source1938_stop_failed(source_args, protected, historical_sha)
+            source_audit = source_args.audit_output.read_bytes()
+            self.append_source1938_report_receipt(root, source_args, "old-transition-retry")
+            valid = self.consume_source1938_watcher_reports(root, "collab_recovery.md", (("dw:57", report),))
+            current_collab = (root / "collab_recovery.md").read_bytes()
+            current_old = (root / args.old_task).read_bytes()
+            rebased = replace(
+                source_args,
+                old_sha256=hashlib.sha256(current_old).hexdigest(),
+                children=tuple(
+                    replace(child, sha256=hashlib.sha256(current_collab).hexdigest())
+                    if child.task == "collab_recovery.md"
+                    else child
+                    for child in source_args.children
+                ),
+                audit_output=source_args.audit_output.with_name("source1938-transition-retry.json"),
+                closed_owner_audit=source_args.audit_output,
+                closed_owner_audit_sha256=hashlib.sha256(source_audit).hexdigest(),
+            )
+            rebased = self.bind_source1938_current_rebase(rebased, state, protected, historical_sha)
+
+            @contextlib.contextmanager
+            def valid_snapshot(_args: Args) -> Iterator[dict[str, tuple[str, ...]]]:
+                yield valid
+
+            real_replace_snapshot = manager_replace.replace_snapshot
+
+            def crash_after_old_write(
+                expected: manager_replace.Snapshot,
+                data: bytes,
+                label: str,
+            ) -> manager_replace.Snapshot:
+                result = real_replace_snapshot(expected, data, label)
+                if label == "old manager":
+                    raise SimulatedCrash
+                return result
+
+            with (
+                self.source1938_runtime(state, rebased, protected, historical_sha),
+                patch.object(manager_replace, "consumed_report_transition", side_effect=lambda _state, key: valid.get(key)),
+                patch.object(manager_replace, "source1938_report_transition_snapshot", side_effect=valid_snapshot),
+                patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                patch.object(manager_replace, "stop") as stop_mock,
+                patch.object(manager_replace, "replace_snapshot", side_effect=crash_after_old_write),
+                self.assertRaises(SimulatedCrash),
+            ):
+                replace_manager(rebased)
+            stop_mock.assert_not_called()
+            self.assertEqual("done", parsed(root / args.old_task, root).status)
+
+            changed = dict(valid)
+            report_key = next(iter(changed))
+            transition = list(changed[report_key])
+            transition[5] = "f" * 64
+            changed[report_key] = tuple(transition)
+
+            @contextlib.contextmanager
+            def changed_snapshot(_args: Args) -> Iterator[dict[str, tuple[str, ...]]]:
+                yield changed
+
+            with (
+                self.source1938_runtime(state, rebased, protected, historical_sha),
+                patch.object(manager_replace, "consumed_report_transition", side_effect=lambda _state, key: changed.get(key)),
+                patch.object(manager_replace, "source1938_report_transition_snapshot", side_effect=changed_snapshot),
+                patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                patch.object(manager_replace, "stop") as retry_stop,
+                self.assertRaises(ReplaceError),
+            ):
+                replace_manager(rebased)
+            retry_stop.assert_not_called()
+            self.assertEqual(source_audit, source_args.audit_output.read_bytes())
+            self.assertFalse((root / args.successor_task).exists())
 
     def test_source1938_source_report_evidence_is_reauthenticated_after_crash(self) -> None:
         class SimulatedCrash(BaseException):
@@ -3530,10 +3991,15 @@ class ManagerReplaceTests(unittest.TestCase):
                     closed_owner_audit=source_args.audit_output,
                     closed_owner_audit_sha256=hashlib.sha256(source_audit).hexdigest(),
                 )
+                rebased = self.bind_source1938_current_rebase(rebased, state, protected, historical_sha)
                 real_replace_snapshot = manager_replace.replace_snapshot
 
-                def crash_after_old_write(expected: object, data: bytes, label: str) -> object:
-                    result = real_replace_snapshot(expected, data, label)  # type: ignore[arg-type]
+                def crash_after_old_write(
+                    expected: manager_replace.Snapshot,
+                    data: bytes,
+                    label: str,
+                ) -> manager_replace.Snapshot:
+                    result = real_replace_snapshot(expected, data, label)
                     if label == "old manager":
                         raise SimulatedCrash
                     return result
@@ -3590,13 +4056,17 @@ class ManagerReplaceTests(unittest.TestCase):
                 old_path = root / args.old_task
                 current_children = args.children
                 if drift == "membership":
-                    (root / "late.md").write_text(
-                        task_text(status="done", runat="other:9", managerat="other:1", is_manager=False, pending=()),
-                        encoding="utf-8",
-                    )
+                    (root / "meeting_open_audit.md").unlink()
                 elif drift == "todo":
                     todo_path = root / "TODO.md"
-                    todo_path.write_text(todo_path.read_text(encoding="utf-8") + "late.md other:9\n", encoding="utf-8")
+                    todo_path.write_text(
+                        todo_path.read_text(encoding="utf-8").replace(
+                            f"{args.old_task} {args.old_target}",
+                            f"{args.old_task} dw:9",
+                            1,
+                        ),
+                        encoding="utf-8",
+                    )
                 elif drift == "child":
                     child_path = root / manager_replace.SOURCE1938_LIVE_SHARED_TASK
                     child_path.write_text(child_path.read_text(encoding="utf-8") + "drift\n", encoding="utf-8")
@@ -3670,6 +4140,17 @@ class ManagerReplaceTests(unittest.TestCase):
                     closed_owner_audit=args.audit_output,
                     closed_owner_audit_sha256=hashlib.sha256(source_bytes).hexdigest(),
                 )
+                try:
+                    rebased = self.bind_source1938_current_rebase(rebased, state, protected, historical_sha)
+                except ReplaceError:
+                    if drift not in {"child", "todo"}:
+                        raise
+                    paths = manager_replace.markdown_paths(root)
+                    rebased = replace(
+                        rebased,
+                        closed_owner_current_membership_sha256=manager_replace.markdown_membership_digest(root, paths),
+                        closed_owner_current_topology_sha256="0" * 64,
+                    )
                 with (
                     self.source1938_runtime(state, rebased, protected, historical_sha),
                     patch.object(manager_replace, "has_bound_close_proof", return_value=False),
@@ -3715,6 +4196,7 @@ class ManagerReplaceTests(unittest.TestCase):
                 closed_owner_audit=args.audit_output,
                 closed_owner_audit_sha256=hashlib.sha256(source_bytes).hexdigest(),
             )
+            rebased = self.bind_source1938_current_rebase(rebased, state, protected, historical_sha)
             real_replace_snapshot = manager_replace.replace_snapshot
 
             def crash_after_old_write(expected: object, data: bytes, label: str) -> object:
@@ -3792,6 +4274,7 @@ class ManagerReplaceTests(unittest.TestCase):
                     closed_owner_audit=args.audit_output,
                     closed_owner_audit_sha256=hashlib.sha256(source_bytes).hexdigest(),
                 )
+                rebased = self.bind_source1938_current_rebase(rebased, state, protected, historical_sha)
                 real_replace_snapshot = manager_replace.replace_snapshot
 
                 def crash_after_old_write(expected: object, data: bytes, label: str) -> object:
