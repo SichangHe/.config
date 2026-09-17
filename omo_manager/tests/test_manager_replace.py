@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
-import contextlib
+import os
+import subprocess
 import tempfile
 import unittest
-import subprocess
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -992,6 +993,99 @@ class ManagerReplaceTests(unittest.TestCase):
         stack.enter_context(patch.object(manager_replace, "stop", side_effect=stopped))
         stack.enter_context(patch.object(manager_replace, "has_bound_close_proof", side_effect=lambda *_args: not state.get("old_live", True)))
         return stack
+
+    def source1938_stop_failed(
+        self,
+        args: Args,
+        protected: tuple[PaneIdentity, ...],
+        historical_sha: str,
+    ) -> dict[str, object]:
+        state: dict[str, object] = {"old_live": True}
+
+        def lose_target_before_proof(_args: object) -> str:
+            state["old_live"] = False
+            raise ReplaceError("tmux symbolic target no longer owns the exact pane at command execution")
+
+        with (
+            self.source1938_runtime(state, args, protected, historical_sha),
+            patch.object(manager_replace, "stop", side_effect=lose_target_before_proof),
+            patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+            self.assertRaisesRegex(ReplaceError, "manager stop failed before lifecycle mutation"),
+        ):
+            replace_manager(args)
+        return state
+
+    def append_source1938_report_receipt(self, root: Path, args: Args) -> Path:
+        token = hashlib.sha256(str(root).encode()).hexdigest()
+        report_dir = Path("/tmp") / f"omo-agent-messages-{os.getuid()}"
+        report_dir.mkdir(mode=0o700, exist_ok=True)
+        report_path = report_dir / f"agent_in-progress_{token}.md"
+        commitment_dir = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")).expanduser().resolve(strict=False) / "omo-manager/report-receipts"
+        commitment_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        commitment_path = commitment_dir / f"test-source1938-{token}.commitment"
+        self.addCleanup(report_path.unlink, missing_ok=True)
+        self.addCleanup(commitment_path.unlink, missing_ok=True)
+        source_task = str((root / manager_replace.SOURCE1938_LIVE_SHARED_TASK).resolve())
+        receiver = str((root / args.old_task).resolve())
+        pointer = f"(from agent dw:33 {report_path})"
+        message = b"Retained child progress only.\n"
+        message_sha256 = hashlib.sha256(message).hexdigest()
+        replay_id = hashlib.sha256(f"source1938-{token}".encode()).hexdigest()
+        transfer_contract = {
+            "authority": {
+                "kind": "agent-originated",
+                "producer_target": manager_replace.SOURCE1938_SHARED_TARGET,
+                "source_task": source_task,
+            },
+            "commitment_path": str(commitment_path),
+            "queue_item": {
+                "input_sha256": message_sha256,
+                "manager": receiver,
+                "pointer": pointer,
+                "producer": source_task,
+                "replay_id": replay_id,
+            },
+            "receiver": receiver,
+            "routing": {
+                "manager": receiver,
+                "producer_target": manager_replace.SOURCE1938_SHARED_TARGET,
+                "requested_manager_target": args.old_target,
+                "resolved_manager_target": args.old_target,
+                "route_kind": "active-manager-task",
+                "task": source_task,
+            },
+            "schema": "omo-report-transfer-receipt/v1",
+        }
+        commitment: dict[str, object] = {
+            "allocation": {},
+            "preflight": {},
+            "replay_id": replay_id,
+            "schema": "omo-report-transaction-commitment/v2",
+            "transfer": transfer_contract,
+        }
+        commitment["commitment_id"] = hashlib.sha256(json.dumps(commitment, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest()
+        commitment_path.write_bytes((json.dumps(commitment, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii"))
+        commitment_path.chmod(0o600)
+        transfer = {**transfer_contract, "commitment_id": commitment["commitment_id"]}
+        transfer["transfer_id"] = hashlib.sha256(json.dumps(transfer, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest()
+        report_path.write_bytes(
+            (
+                "(sent from agent via omo_report.sh tmux=dw:33 time=17:21 task-file=dw_cleanup_mgr.md)\n"
+                f"[message-sha256: {message_sha256}]\n"
+                f"[omo-transfer: {json.dumps(transfer, ensure_ascii=True, sort_keys=True, separators=(',', ':'))}]\n"
+                "message:\n"
+            ).encode()
+            + message
+        )
+        report_path.chmod(0o600)
+        old_path = root / args.old_task
+        old_path.write_text(
+            old_path.read_text(encoding="utf-8")
+            + f"\n{pointer}\n"
+            + "(pending marker cleared line=342: report-only: Reviewed retained dw:33 progress; existing custody and ordered queue remain authoritative; no new Human work was requested.)\n",
+            encoding="utf-8",
+        )
+        return report_path
 
     def whole_tree_fixture(self, base: Path) -> tuple[Path, Args, dict[str, str]]:
         root, args, files = self.fixture(base)
@@ -3178,6 +3272,160 @@ class ManagerReplaceTests(unittest.TestCase):
                 self.assertEqual("blocked", parsed(root / args.old_task, root).status)
                 self.assertFalse((root / args.successor_task).exists())
 
+    def test_source1938_closed_owner_rebase_accepts_one_retained_child_report_without_reclosing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+            state = self.source1938_stop_failed(args, protected, historical_sha)
+            source_bytes = args.audit_output.read_bytes()
+            self.append_source1938_report_receipt(root, args)
+            current_old = (root / args.old_task).read_text(encoding="utf-8")
+            rebased = replace(
+                args,
+                old_sha256=sha(current_old),
+                audit_output=args.audit_output.with_name("source1938-rebased.json"),
+                closed_owner_audit=args.audit_output,
+                closed_owner_audit_sha256=hashlib.sha256(source_bytes).hexdigest(),
+            )
+
+            with (
+                self.source1938_runtime(state, rebased, protected, historical_sha),
+                patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                patch.object(manager_replace, "stop") as stop_mock,
+            ):
+                result = replace_manager(rebased)
+
+            stop_mock.assert_not_called()
+            self.assertIn("sole ownership", result)
+            self.assertEqual(source_bytes, args.audit_output.read_bytes())
+            self.assertEqual("done", parsed(root / args.old_task, root).status)
+            self.assertEqual("blocked", parsed(root / args.successor_task, root).status)
+            record = json.loads(rebased.audit_output.read_text(encoding="utf-8"))
+            self.assertEqual("committed", record["state"])
+            self.assertEqual("authorized-absence", record["owner_close_evidence"])
+            self.assertEqual(manager_replace.SOURCE1938_REBASE_KIND, record["closed_owner_rebase_kind"])
+            self.assertEqual(args.old_sha256, record["closed_owner_source_old_sha256"])
+            self.assertEqual(rebased.old_sha256, record["closed_owner_current_old_sha256"])
+
+    def test_source1938_closed_owner_rebase_rejects_every_noncanonical_drift(self) -> None:
+        for drift in ("membership", "todo", "child", "prefix", "second-receipt", "human", "clear-kind", "body-hash", "wrong-owner"):
+            with (
+                self.subTest(drift=drift),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+                state = self.source1938_stop_failed(args, protected, historical_sha)
+                source_bytes = args.audit_output.read_bytes()
+                report_path = self.append_source1938_report_receipt(root, args)
+                old_path = root / args.old_task
+                if drift == "membership":
+                    (root / "late.md").write_text(
+                        task_text(status="done", runat="other:9", managerat="other:1", is_manager=False, pending=()),
+                        encoding="utf-8",
+                    )
+                elif drift == "todo":
+                    todo_path = root / "TODO.md"
+                    todo_path.write_text(todo_path.read_text(encoding="utf-8") + "late.md other:9\n", encoding="utf-8")
+                elif drift == "child":
+                    child_path = root / manager_replace.SOURCE1938_LIVE_SHARED_TASK
+                    child_path.write_text(child_path.read_text(encoding="utf-8") + "drift\n", encoding="utf-8")
+                elif drift == "prefix":
+                    old_path.write_text(
+                        old_path.read_text(encoding="utf-8").replace(
+                            "Agent-authored narrative must not reach the successor.",
+                            "Changed agent-authored narrative.",
+                            1,
+                        ),
+                        encoding="utf-8",
+                    )
+                elif drift == "second-receipt":
+                    old_path.write_text(
+                        old_path.read_text(encoding="utf-8")
+                        + f"\n(from agent dw:33 {report_path})\n"
+                        + "(pending marker cleared line=344: report-only: Duplicate report receipt.)\n",
+                        encoding="utf-8",
+                    )
+                elif drift == "human":
+                    old_path.write_text(old_path.read_text(encoding="utf-8").replace("(from agent dw:33", "(from Human dw:33", 1), encoding="utf-8")
+                elif drift == "clear-kind":
+                    old_path.write_text(old_path.read_text(encoding="utf-8").replace("report-only:", "existing-owner-item:", 1), encoding="utf-8")
+                elif drift == "body-hash":
+                    report_path.write_bytes(report_path.read_bytes() + b"drift\n")
+                else:
+                    report_path.write_text(report_path.read_text(encoding="utf-8").replace('"producer_target":"dw:33"', '"producer_target":"dw:32"'), encoding="utf-8")
+                current_old = old_path.read_text(encoding="utf-8")
+                current_todo = (root / "TODO.md").read_text(encoding="utf-8")
+                rebased = replace(
+                    args,
+                    old_sha256=sha(current_old),
+                    todo_sha256=sha(current_todo),
+                    audit_output=args.audit_output.with_name("source1938-rebased.json"),
+                    closed_owner_audit=args.audit_output,
+                    closed_owner_audit_sha256=hashlib.sha256(source_bytes).hexdigest(),
+                )
+                with (
+                    self.source1938_runtime(state, rebased, protected, historical_sha),
+                    patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+                    patch.object(manager_replace, "process_start_ticks", return_value=None),
+                    patch.object(manager_replace, "stop") as stop_mock,
+                    self.assertRaises(ReplaceError),
+                ):
+                    replace_manager(rebased)
+                stop_mock.assert_not_called()
+                self.assertFalse(rebased.audit_output.exists())
+                self.assertEqual(source_bytes, args.audit_output.read_bytes())
+                self.assertFalse((root / args.successor_task).exists())
+
+    def test_source1938_closed_owner_rebase_retry_reauthenticates_source_and_receipt(self) -> None:
+        class SimulatedCrash(BaseException):
+            pass
+
+        for drift in ("source", "receipt", "commitment"):
+            with (
+                self.subTest(drift=drift),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
+                root, args, protected, historical_sha = self.source1938_fixture(Path(tmp))
+                state = self.source1938_stop_failed(args, protected, historical_sha)
+                source_bytes = args.audit_output.read_bytes()
+                report_path = self.append_source1938_report_receipt(root, args)
+                artifact = manager_replace.authenticated_agent_report(f"(from agent dw:33 {report_path})")
+                if artifact is None or artifact.commitment_path is None:
+                    raise AssertionError("expected authenticated Source-1938 report fixture")
+                current_old = (root / args.old_task).read_text(encoding="utf-8")
+                rebased = replace(
+                    args,
+                    old_sha256=sha(current_old),
+                    audit_output=args.audit_output.with_name("source1938-rebased.json"),
+                    closed_owner_audit=args.audit_output,
+                    closed_owner_audit_sha256=hashlib.sha256(source_bytes).hexdigest(),
+                )
+                with (
+                    self.source1938_runtime(state, rebased, protected, historical_sha),
+                    patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+                    patch.object(manager_replace, "process_start_ticks", return_value=None),
+                    patch.object(manager_replace, "stop") as stop_mock,
+                    patch.object(manager_replace, "replace_snapshot", side_effect=SimulatedCrash),
+                    self.assertRaises(SimulatedCrash),
+                ):
+                    replace_manager(rebased)
+                stop_mock.assert_not_called()
+                if drift == "source":
+                    args.audit_output.write_bytes(args.audit_output.read_bytes() + b"drift\n")
+                elif drift == "receipt":
+                    report_path.write_text(report_path.read_text(encoding="utf-8") + "drift\n", encoding="utf-8")
+                else:
+                    artifact.commitment_path.write_bytes(artifact.commitment_path.read_bytes() + b"drift\n")
+                with (
+                    self.source1938_runtime(state, rebased, protected, historical_sha),
+                    patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+                    patch.object(manager_replace, "process_start_ticks", return_value=None),
+                    patch.object(manager_replace, "stop") as retry_stop,
+                    self.assertRaises(ReplaceError),
+                ):
+                    replace_manager(rebased)
+                retry_stop.assert_not_called()
+
     def test_other_authority_cannot_request_descendant_closure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _root, args, _files = self.whole_tree_fixture(Path(tmp))
@@ -3997,7 +4245,7 @@ class ManagerReplaceTests(unittest.TestCase):
                 closed_owner_audit=args.audit_output.with_name("prior.json"),
                 closed_owner_audit_sha256="0" * 64,
             )
-            with self.assertRaisesRegex(ReplaceError, "only for the exact Source-1269 replacement"):
+            with self.assertRaisesRegex(ReplaceError, "only for an exact authorized replacement"):
                 manager_replace.validate_targets(changed)
 
     def test_other_manager_guard_loss_cannot_use_source1269_absence_reconciliation(self) -> None:

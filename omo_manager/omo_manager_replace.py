@@ -27,11 +27,12 @@ from typing import cast
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from omo_manager.omo_codex_stop import Args as StopArgs
-from omo_manager.omo_codex_stop import has_bound_close_proof, stop
 from omo_manager.omo_codex_start import PCODX_ENV_KEYS as START_PCODX_ENV_KEYS
 from omo_manager.omo_codex_start import Pane as StartPane
 from omo_manager.omo_codex_start import pcodx_state
+from omo_manager.omo_codex_stop import Args as StopArgs
+from omo_manager.omo_codex_stop import has_bound_close_proof, stop
+from omo_manager.omo_pending_watch import AuthenticatedAgentReport, authenticated_agent_report
 from omo_manager.omo_task_edit import render_pending_items
 from omo_manager.omo_task_lock import process_start_ticks, task_file_lock, task_target_lock
 from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1, TaskFrontmatterError, TaskMetadata, parse_task_metadata
@@ -208,6 +209,17 @@ SOURCE1938_OLD_QUEUE = (
     "🧑 Source-1852 (manager_mail/85c5dff58359-1852.txt): \"The page limit target is eight for the body, not twelve.\" Use an eight-page body target for paper edits, builds, and reports.",
     "🧑 Source-1852 (manager_mail/85c5dff58359-1852.txt): \"Stop including this\" refers to the quoted \"New analysis and reproduction steps\" GitHub link. Omit those analysis/reproduction links from Human emails.",
     "🧑 Source-1860 (manager_mail/85c5dff58359-1860.txt): inspect the beginning of 2025/0110madhyastha.md; tick checklist items already completed; execute agent-actionable remaining items such as moving detector comparison into the paper main body.",
+)
+SOURCE1938_REBASE_KIND = "source1938-retained-child-report-only"
+SOURCE1938_REBASE_FIELDS = {
+    "closed_owner_rebase_kind",
+    "closed_owner_source_old_sha256",
+    "closed_owner_current_old_sha256",
+    "closed_owner_receipt_binding_sha256",
+}
+SOURCE1938_REPORT_ONLY_APPEND_RE = re.compile(
+    rb"\n\(from agent dw:33 (?P<path>/tmp/omo-agent-messages-[A-Za-z0-9_-]+/agent_in-progress_[0-9a-f]{64}\.md)\)\n"
+    rb"\(pending marker cleared line=(?P<line>[1-9][0-9]*): report-only: (?P<comment>[^\r\n]+)\)\n"
 )
 SOURCE_ONLY_AUTHORITY_MODE = "source-only-old-task-before-image"
 PCODX_REPLACE_EVIDENCE_RE = re.compile(
@@ -1769,8 +1781,8 @@ def validate_targets(args: Args) -> None:
     if not (is_pcodx_replacement(args) or is_source1485_replacement(args)) and args.authority_envelope_file_sha256:
         raise ReplaceError("authority-envelope file digest is accepted only for PCODX or exact Source-1485 replacement")
     if args.closed_owner_audit is not None:
-        if not is_guest1269_replacement(args):
-            raise ReplaceError("closed-owner audit recovery is accepted only for the exact Source-1269 replacement")
+        if not (is_guest1269_replacement(args) or is_source1938_semantic_exception(args)):
+            raise ReplaceError("closed-owner audit recovery is accepted only for an exact authorized replacement")
         if args.closed_owner_audit == args.audit_output:
             raise ReplaceError("closed-owner evidence and the fresh replacement audit must use distinct paths")
     if is_source1289_whole_tree(args) and not args.descendants:
@@ -2295,7 +2307,11 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
     protected_identities: tuple[PaneIdentity, ...] = ()
     if uses_protected_inventory(args):
         inventory = pane_inventory()
-        validate_live_bindings(args, inventory)
+        if args.closed_owner_audit is None:
+            validate_live_bindings(args, inventory)
+        else:
+            validate_closed_owner_absence(args)
+            validate_protected_bindings(args, inventory)
         validate_source1485_protected_set(args, inventory, tuple(child_metadata_values))
         protected_identities = protected_inventory(args, inventory)
     descendant_identities = tuple(PaneIdentity(canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks) for item in args.descendants)
@@ -2784,6 +2800,8 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
         allowed.add("protected_inventory")
     if is_source1938_semantic_exception(args):
         allowed.update({"source1938_topology", "source1938_topology_sha256", "stale_manager_queue_sha256"})
+        if args.closed_owner_audit is not None:
+            allowed.update(SOURCE1938_REBASE_FIELDS)
     if args.descendants:
         allowed.add("descendant_close_commitments")
         commitments = record.get("descendant_close_commitments")
@@ -2901,10 +2919,102 @@ def validate_closed_owner_absence(args: Args) -> None:
         raise ReplaceError("closed-owner source pane or process identity is no longer absent")
 
 
+def source1938_authenticated_report(
+    args: Args,
+    source_old: bytes,
+    current_old: bytes,
+    retained_child: bytes,
+) -> tuple[AuthenticatedAgentReport, bytes]:
+    if digest(source_old) == digest(current_old) or not current_old.startswith(source_old):
+        raise ReplaceError("Source-1938 closed-owner rebase is not one append-only report receipt")
+    try:
+        current_text = current_old.decode()
+    except UnicodeDecodeError as exc:
+        raise ReplaceError("Source-1938 closed-owner task receipt is not UTF-8") from exc
+    if metadata(source_old, args.root, "Source-1938 closed-owner source task") != metadata(
+        current_old,
+        args.root,
+        "Source-1938 closed-owner current task",
+    ):
+        raise ReplaceError("Source-1938 closed-owner task metadata or ordered queue changed")
+    if has_pending_marker(current_text):
+        raise ReplaceError("Source-1938 closed-owner task retains an unconsumed pending marker")
+    suffix = current_old[len(source_old) :]
+    match = SOURCE1938_REPORT_ONLY_APPEND_RE.fullmatch(suffix)
+    if match is None:
+        raise ReplaceError("Source-1938 closed-owner task lacks one canonical report-only receipt")
+    retained = metadata(retained_child, args.root, "Source-1938 retained report producer")
+    if (
+        retained.status == "done"
+        or not retained.is_manager
+        or canonical_target(retained.runat) != canonical_target(SOURCE1938_SHARED_TARGET)
+        or canonical_target(retained.managerat) != canonical_target(args.old_target)
+    ):
+        raise ReplaceError("Source-1938 report receipt producer is not the retained live dw:33 child")
+    report_path_text = match.group("path").decode()
+    source_task = str(task_path(args.root, SOURCE1938_LIVE_SHARED_TASK))
+    receiver = str(task_path(args.root, args.old_task))
+    pointer = f"(from agent dw:33 {report_path_text})"
+    artifact = authenticated_agent_report(pointer)
+    if (
+        artifact is None
+        or artifact.target != SOURCE1938_SHARED_TARGET
+        or artifact.path != Path(report_path_text)
+        or artifact.source_task != source_task
+        or artifact.receiver != receiver
+        or artifact.commitment_path is None
+    ):
+        raise ReplaceError("Source-1938 report receipt is not an authenticated transfer from the retained live dw:33 child")
+    return artifact, suffix
+
+
+def source1938_report_receipt_binding(
+    args: Args,
+    source_old: bytes,
+    current_old: bytes,
+    retained_child: bytes,
+) -> dict[str, str]:
+    artifact, suffix = source1938_authenticated_report(args, source_old, current_old, retained_child)
+    if artifact.commitment_path is None:
+        raise ReplaceError("Source-1938 authenticated report lost its commitment path")
+    report = read_snapshot(artifact.path, "Source-1938 retained-child report receipt")
+    commitment = read_snapshot(artifact.commitment_path, "Source-1938 retained-child report commitment")
+    receipt_binding = {
+        "commitment_path": str(artifact.commitment_path),
+        "commitment_sha256": digest(commitment.data),
+        "message_sha256": artifact.message_sha256,
+        "pointer": f"(from agent dw:33 {artifact.path})",
+        "report_sha256": digest(report.data),
+        "routing_sources": list(artifact.routing_source_bindings),
+        "suffix_sha256": digest(suffix),
+    }
+    return {
+        "closed_owner_rebase_kind": SOURCE1938_REBASE_KIND,
+        "closed_owner_source_old_sha256": digest(source_old),
+        "closed_owner_current_old_sha256": digest(current_old),
+        "closed_owner_receipt_binding_sha256": json_digest(receipt_binding),
+    }
+
+
+def source1938_rebase_evidence_paths(args: Args) -> tuple[Path, ...]:
+    if args.closed_owner_audit is None or not is_source1938_semantic_exception(args):
+        return ()
+    _prepared, _authority, _source_args, source_entries, _membership = authenticate_closed_owner_source(args)
+    source_old = source_entries[0].before
+    retained = next((entry.before for entry in source_entries if entry.task == SOURCE1938_LIVE_SHARED_TASK), None)
+    if source_old is None or retained is None:
+        raise ReplaceError("Source-1938 closed-owner source lost required report-custody images")
+    current_old = read_snapshot(task_path(args.root, args.old_task), "Source-1938 current closed-owner task")
+    artifact, _suffix = source1938_authenticated_report(args, source_old, current_old.data, retained)
+    if artifact.commitment_path is None:
+        raise ReplaceError("Source-1938 authenticated report lost its commitment path")
+    return artifact.path, artifact.commitment_path
+
+
 # 🧑 "Bind the exact failed manager, current TODO ... pane/process/session identity ... and protected targets."
 def authenticate_closed_owner_source(
     args: Args,
-) -> tuple[str, str, Args, tuple[AuditEntry, ...]]:
+) -> tuple[str, str, Args, tuple[AuditEntry, ...], tuple[Path, ...]]:
     source_path = args.closed_owner_audit
     if source_path is None:
         raise ReplaceError("closed-owner recovery source is absent")
@@ -2915,14 +3025,15 @@ def authenticate_closed_owner_source(
         loaded: object = json.loads(source_snapshot.data)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ReplaceError(f"closed-owner replacement audit is invalid JSON: {exc}") from exc
-    if not isinstance(loaded, dict) or SHA256_RE.fullmatch(str(loaded.get("todo_sha256", ""))) is None:
-        raise ReplaceError("closed-owner replacement audit lacks its original TODO binding")
+    if not isinstance(loaded, dict) or any(SHA256_RE.fullmatch(str(loaded.get(key, ""))) is None for key in ("old_sha256", "todo_sha256")):
+        raise ReplaceError("closed-owner replacement audit lacks its original task and TODO bindings")
     source_preparer = loaded.get("preparer")
     source_reviewer = loaded.get("reviewer")
     if not isinstance(source_preparer, str) or not source_preparer.strip() or not isinstance(source_reviewer, str) or not source_reviewer.strip() or source_preparer.strip() == source_reviewer.strip():
         raise ReplaceError("closed-owner replacement audit has invalid review identities")
     source_args = replace(
         args,
+        old_sha256=str(loaded["old_sha256"]),
         todo_sha256=str(loaded["todo_sha256"]),
         audit_output=source_path,
         preparer=source_preparer,
@@ -2930,7 +3041,7 @@ def authenticate_closed_owner_source(
         closed_owner_audit=None,
         closed_owner_audit_sha256="",
     )
-    record, audit_bytes, entries, _membership = read_audit(source_args)
+    record, audit_bytes, entries, membership = read_audit(source_args)
     if audit_bytes != source_snapshot.data:
         raise ReplaceError("closed-owner replacement audit changed during authentication")
     if (
@@ -2939,13 +3050,13 @@ def authenticate_closed_owner_source(
         or record.get("completed_writes") != []
         or record.get("owner_close_evidence") is not None
     ):
-        raise ReplaceError("closed-owner source is not the exact proofless Source-1269 stop failure")
+        raise ReplaceError("closed-owner source is not the exact proofless authorized stop failure")
     commitment = record.get("close_proof_commitment")
     if not isinstance(commitment, str):
         raise ReplaceError("closed-owner source close commitment is malformed")
     authority_path, proof_path = closed_owner_evidence_paths(source_path)
     if has_bound_close_proof(proof_path, commitment):
-        raise ReplaceError("closed-owner source has a bound close proof and is not the proofless Source-1269 incident")
+        raise ReplaceError("closed-owner source has a bound close proof and is not a proofless authorized incident")
     prepared = dict(record)
     prepared["state"] = "prepared"
     prepared["completed_writes"] = []
@@ -2955,23 +3066,106 @@ def authenticate_closed_owner_source(
     authority = read_snapshot(authority_path, "closed-owner close authority")
     if authority.data != serialized_audit(close_authority_record(source_args, prepared_bytes, commitment)):
         raise ReplaceError("closed-owner Human-bound close authority changed")
-    return digest(prepared_bytes), digest(authority.data), source_args, entries
+    return digest(prepared_bytes), digest(authority.data), source_args, entries, membership
 
 
-def validate_closed_owner_before_state(args: Args, source_args: Args, entries: tuple[AuditEntry, ...]) -> None:
+def source1938_rebase_binding_from_audit(
+    args: Args,
+    source_args: Args,
+    source_entries: tuple[AuditEntry, ...],
+    source_membership: tuple[Path, ...],
+    current_entries: tuple[AuditEntry, ...],
+    current_membership: tuple[Path, ...],
+) -> dict[str, str]:
+    if current_membership != source_membership or len(current_entries) != len(source_entries):
+        raise ReplaceError("Source-1938 closed-owner rebase changed Markdown membership")
+    if any(
+        current.task != source.task
+        or current.before != source.before
+        or current.mode != source.mode
+        or current.gid != source.gid
+        for current, source in zip(current_entries[1:], source_entries[1:], strict=True)
+    ):
+        raise ReplaceError("Source-1938 closed-owner rebase changed an audited non-owner before image")
+    source_old = source_entries[0]
+    current_old = current_entries[0]
+    if (
+        source_old.before is None
+        or current_old.before is None
+        or (current_old.mode, current_old.gid) != (source_old.mode, source_old.gid)
+        or digest(source_old.before) != source_args.old_sha256
+        or digest(current_old.before) != args.old_sha256
+    ):
+        raise ReplaceError("Source-1938 closed-owner rebase changed its bound old-task image")
+    retained = next((entry.before for entry in source_entries if entry.task == SOURCE1938_LIVE_SHARED_TASK), None)
+    if retained is None:
+        raise ReplaceError("Source-1938 closed-owner source lost the retained dw:33 child")
+    return source1938_report_receipt_binding(args, source_old.before, current_old.before, retained)
+
+
+def validate_closed_owner_before_state(
+    args: Args,
+    source_args: Args,
+    entries: tuple[AuditEntry, ...],
+    membership: tuple[Path, ...],
+) -> dict[str, str]:
     states = tuple(current_entry_state(source_args, entry)[0] for entry in entries)
-    if any(state != "before" for state in (*states[:-2], states[-1])):
-        raise ReplaceError("closed-owner source lifecycle bytes changed outside the current TODO")
+    if is_source1938_semantic_exception(args):
+        if markdown_paths(args.root) != membership:
+            raise ReplaceError("Source-1938 closed-owner rebase changed Markdown membership")
+        if any(state != "before" for state in states[1:]):
+            raise ReplaceError("Source-1938 closed-owner rebase changed an audited non-owner before image")
+        old_entry = entries[0]
+        if old_entry.before is None:
+            raise ReplaceError("Source-1938 closed-owner source lost its old-task before image")
+        current_old = read_snapshot(task_path(args.root, args.old_task), "Source-1938 current closed-owner task")
+        if stat.S_IMODE(current_old.state.st_mode) != old_entry.mode or current_old.state.st_gid != old_entry.gid or digest(current_old.data) != args.old_sha256:
+            raise ReplaceError("Source-1938 closed-owner rebase changed its bound old-task image")
+        retained = next((entry.before for entry in entries if entry.task == SOURCE1938_LIVE_SHARED_TASK), None)
+        if retained is None:
+            raise ReplaceError("Source-1938 closed-owner source lost the retained dw:33 child")
+        old_path = task_path(args.root, args.old_task)
+        successor_path = task_path(args.root, args.successor_task)
+        historical_path = task_path(args.root, args.historical_task)
+        live_shared_path = task_path(args.root, SOURCE1938_LIVE_SHARED_TASK)
+        if authoritative_active_target_task_paths(args.root, args.old_target) != (old_path.resolve(),):
+            raise ReplaceError("Source-1938 closed-owner rebase changed old task ownership")
+        if authoritative_active_target_task_paths(args.root, args.new_target) or active_child_task_refs(args.root, successor_path, args.new_target):
+            raise ReplaceError("Source-1938 closed-owner rebase found prospective successor custody")
+        if set(authoritative_active_target_task_paths(args.root, SOURCE1938_SHARED_TARGET)) != {live_shared_path.resolve(), historical_path.resolve()}:
+            raise ReplaceError("Source-1938 closed-owner rebase changed retained dw:33 topology")
+        binding = source1938_report_receipt_binding(args, old_entry.before, current_old.data, retained)
+    else:
+        if any(state != "before" for state in (*states[:-2], states[-1])):
+            raise ReplaceError("closed-owner source lifecycle bytes changed outside the current TODO")
+        binding = {}
     validate_closed_owner_absence(args)
+    return binding
 
 
-def validate_closed_owner_recovery(args: Args, record: dict[str, object]) -> None:
-    prepared, authority, _source_args, _entries = authenticate_closed_owner_source(args)
+def validate_closed_owner_recovery(
+    args: Args,
+    record: dict[str, object],
+    entries: tuple[AuditEntry, ...],
+    membership: tuple[Path, ...],
+) -> None:
+    prepared, authority, source_args, source_entries, source_membership = authenticate_closed_owner_source(args)
     if (prepared, authority) != (
         record.get("closed_owner_prepared_sha256"),
         record.get("closed_owner_authority_sha256"),
     ):
         raise ReplaceError("closed-owner evidence changed before lifecycle recovery")
+    if is_source1938_semantic_exception(args):
+        binding = source1938_rebase_binding_from_audit(
+            args,
+            source_args,
+            source_entries,
+            source_membership,
+            entries,
+            membership,
+        )
+        if any(record.get(key) != value for key, value in binding.items()):
+            raise ReplaceError("Source-1938 closed-owner report receipt binding changed")
     validate_closed_owner_absence(args)
 
 
@@ -3747,8 +3941,8 @@ def prove_committed(
     successor: Snapshot,
 ) -> None:
     if args.closed_owner_audit is not None:
-        _prepared, _authority, _source_args, _entries = authenticate_closed_owner_source(args)
-        validate_closed_owner_absence(args)
+        current_record, _current_bytes, current_entries, current_membership = read_audit(args)
+        validate_closed_owner_recovery(args, current_record, current_entries, current_membership)
     require_snapshot(plan.authority, "replacement authority")
     if plan.source1601_authority is not None:
         require_snapshot(plan.source1601_authority, "committed Source-1601 authority")
@@ -3882,7 +4076,15 @@ def replace_manager(args: Args) -> str:
     empty_tree_authority_path = task_path(args.root, SOURCE1292_FILE)
     source1938_stale_authority_path = task_path(args.root, SOURCE1938_STALE_AUTHORITY)
     close_authority_path, proof_path = closed_owner_evidence_paths(args.audit_output)
-    source_evidence_paths = () if args.closed_owner_audit is None else (args.closed_owner_audit, *closed_owner_evidence_paths(args.closed_owner_audit))
+    source_evidence_paths = (
+        ()
+        if args.closed_owner_audit is None
+        else (
+            args.closed_owner_audit,
+            *closed_owner_evidence_paths(args.closed_owner_audit),
+            *source1938_rebase_evidence_paths(args),
+        )
+    )
     descendant_evidence = tuple(path for child in args.descendants for path in descendant_evidence_paths(args.audit_output, child))
     lock_paths = tuple(
         sorted(
@@ -3923,8 +4125,8 @@ def replace_manager(args: Args) -> str:
         owner_stopped = False
         if args.audit_output.exists() or args.audit_output.is_symlink():
             if args.closed_owner_audit is not None:
-                current_record, _current_bytes, _current_entries, _current_membership = read_audit(args)
-                validate_closed_owner_recovery(args, current_record)
+                current_record, _current_bytes, current_entries, current_membership = read_audit(args)
+                validate_closed_owner_recovery(args, current_record, current_entries, current_membership)
             recovery = recover_existing(args, proof_path, close_authority_path)
             if recovery.result:
                 return recovery.result
@@ -3932,6 +4134,7 @@ def replace_manager(args: Args) -> str:
             record = recovery.record
             audit_bytes = recovery.audit_bytes
             entries = recovery.entries
+            membership = plan.initial_markdown_paths
             owner_stopped = recovery.owner_stopped
             secret = record.get("close_proof_secret")
             commitment = record.get("close_proof_commitment")
@@ -3950,13 +4153,15 @@ def replace_manager(args: Args) -> str:
                 audit_bytes = reserve_audit(args.audit_output, record)
                 _ = reserve_audit(close_authority_path, close_authority_record(args, audit_bytes, commitment))
             else:
-                prepared_sha256, authority_sha256, source_args, source_entries = authenticate_closed_owner_source(args)
-                validate_closed_owner_before_state(args, source_args, source_entries)
+                prepared_sha256, authority_sha256, source_args, source_entries, source_membership = authenticate_closed_owner_source(args)
+                rebase_binding = validate_closed_owner_before_state(args, source_args, source_entries, source_membership)
                 plan = prepare(args, initial_paths)
-                prepared_after, authority_after, source_args, source_entries = authenticate_closed_owner_source(args)
+                prepared_after, authority_after, source_args, source_entries, source_membership = authenticate_closed_owner_source(args)
                 if (prepared_after, authority_after) != (prepared_sha256, authority_sha256):
                     raise ReplaceError("closed-owner evidence changed while the fresh plan was prepared")
-                validate_closed_owner_before_state(args, source_args, source_entries)
+                rebase_binding_after = validate_closed_owner_before_state(args, source_args, source_entries, source_membership)
+                if rebase_binding_after != rebase_binding:
+                    raise ReplaceError("closed-owner report receipt changed while the fresh plan was prepared")
                 secret = os.urandom(32).hex()
                 commitment = digest(secret.encode())
                 record = audit_record(args, plan, secret, commitment)
@@ -3968,13 +4173,14 @@ def replace_manager(args: Args) -> str:
                         "closed_owner_authority_sha256": authority_sha256,
                     }
                 )
+                record.update(rebase_binding)
                 audit_bytes = reserve_audit(args.audit_output, record)
                 owner_stopped = True
             record, audit_bytes, entries, membership = read_audit(args)
             if membership != plan.initial_markdown_paths:
                 raise ReplaceError("private replacement audit did not preserve prepared Markdown membership")
         if args.closed_owner_audit is not None and owner_stopped:
-            validate_closed_owner_recovery(args, record)
+            validate_closed_owner_recovery(args, record, entries, membership)
         if not owner_stopped:
             validate_live_bindings(args, pane_inventory(), require_descendants=False)
             # 🧑 Source `manager_mail/85c5dff58359-1289.txt`: "replace the entire agent tree for this task. Get completing new agents to do them."
