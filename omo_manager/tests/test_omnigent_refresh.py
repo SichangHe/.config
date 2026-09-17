@@ -21,6 +21,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
+from pydantic import TypeAdapter, ValidationError
+
 from omnigent.entities import NewConversationItem
 from omnigent.entities.conversation import MessageData
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
@@ -69,6 +71,7 @@ class RefreshProcessTests(unittest.TestCase):
         request = refresh.RefreshRequest(
             server_pid=self.old.pid, checkout=str(self.root), published_commit="a" * 40,
             published_ref="refs/heads/fixture", task_path=str(self.task), workspace=str(workspace),
+            old_native_cwd=str(self.root), old_bridge_cwd=None,
             **{name: str(self.root / ("config.yaml" if name == "global_config_path" else name)) for name in names},
         )
         config = BackendConfig(OLD_SESSION_ID, self.host.pid, str(self.root / "bridge"), str(self.root / "host-config"), f"http://127.0.0.1:{self.port}")
@@ -256,6 +259,32 @@ class RefreshProcessTests(unittest.TestCase):
             launches.assert_not_called()
         self.assertFalse(Path(self.plan.request.journal_path).exists())
         self.assertIsNone(self.old.poll())
+
+    def test_predecessor_cwd_bindings_are_explicit_and_request_tampering_cannot_launch(self) -> None:
+        request = asdict(self.plan.request)
+        self.assertIsNone(request["old_bridge_cwd"])
+        self.assertNotEqual(request["old_native_cwd"], request["workspace"])
+        self.assertEqual(TypeAdapter(refresh.RefreshRequest).validate_json(refresh._bytes(request)), self.plan.request)
+        for missing in ("old_native_cwd", "old_bridge_cwd"):
+            incomplete = {key: value for key, value in request.items() if key != missing}
+            with self.assertRaises(ValidationError):
+                TypeAdapter(refresh.RefreshRequest).validate_json(refresh._bytes(incomplete))
+        for field in ("old_native_cwd", "old_bridge_cwd"):
+            tampered = replace(self.plan, request=replace(self.plan.request, **{field: self.plan.request.workspace}))
+            self.plan_path.write_bytes(refresh._bytes(asdict(tampered)))
+            with patch.object(refresh.subprocess, "Popen") as launches, patch.object(refresh, "pidfd_signal") as signals:
+                self.assertEqual(rejection(refresh.execute(*self.arguments(), timeout_s=0)), "refresh_plan_mismatch")
+                launches.assert_not_called()
+                signals.assert_not_called()
+        self.assertIsNone(self.old.poll())
+        self.assertFalse(Path(self.plan.request.journal_path).exists())
+
+    def test_observed_predecessor_cwd_never_substitutes_for_successor_workspace(self) -> None:
+        wrong = replace(self.plan.request, workspace=self.plan.request.old_native_cwd)
+        self.assertEqual(rejection(refresh._scope(wrong)), "wrong_refresh_scope")
+        for cwd in ("relative", str(self.root / "missing")):
+            result = refresh._scope(replace(self.plan.request, old_native_cwd=cwd))
+            self.assertIsInstance(result, Rejected)
 
     def test_publication_package_and_preserved_history_drift_cannot_launch(self) -> None:
         cases = (
@@ -459,7 +488,7 @@ class RefreshObservationTests(unittest.TestCase):
 
     def test_native_probe_requests_only_full_read_and_rejects_active_turn(self) -> None:
         async def exercise() -> None:
-            thread: dict[str, object] = {"id": OLD_THREAD_ID, "cwd": "/fixture", "turns": [{"id": "past", "status": "completed", "items": []}]}
+            thread: dict[str, object] = {"id": OLD_THREAD_ID, "cwd": "/fixture", "turns": [{"id": f"past-{index}", "status": "completed", "items": []} for index in range(3)]}
             requests: list[dict[str, object]] = []
             closed: asyncio.Queue[None] = asyncio.Queue()
 
@@ -478,14 +507,85 @@ class RefreshObservationTests(unittest.TestCase):
                 url = f"ws://127.0.0.1:{next(iter(server.sockets)).getsockname()[1]}"
                 self.assertEqual(await refresh._thread(url, "/fixture"), digest(refresh._bytes(thread)))
                 await closed.get()
-                thread["turns"] = [{"status": "inProgress"}]
-                self.assertEqual(rejection(await refresh._thread(url, "/fixture")), "native_not_idle")
+                self.assertEqual(rejection(await refresh._thread(url, "/wrong")), "native_cwd_mismatch")
                 await closed.get()
-            self.assertEqual([request["method"] for request in requests], ["initialize", "initialized", "thread/read"] * 2)
-            for request in (requests[2], requests[5]):
+                for turns in ([{"status": "completed"}] * 2, [{"status": "completed"}] * 4, [{"status": "completed"}, {"status": "completed"}, {"status": "inProgress"}], [{"status": "completed"}, {"status": "completed"}, {"status": "failed"}]):
+                    thread["turns"] = turns
+                    self.assertEqual(rejection(await refresh._thread(url, "/fixture")), "native_not_idle")
+                    await closed.get()
+            self.assertEqual([request["method"] for request in requests], ["initialize", "initialized", "thread/read"] * 6)
+            for request in requests[2::3]:
                 self.assertEqual(request["params"], {"threadId": OLD_THREAD_ID, "includeTurns": True})
 
         asyncio.run(asyncio.wait_for(exercise(), timeout=5))
+
+    def test_null_bridge_and_different_native_cwd_preserve_real_store_and_history(self) -> None:
+        async def exercise(root: Path) -> None:
+            workspace, native_cwd = root / refresh.WORKSPACE_NAME, root / "native-config"
+            workspace.mkdir()
+            native_cwd.mkdir()
+            request = refresh.RefreshRequest(
+                server_pid=os.getpid(), checkout=str(root), published_commit="a" * 40, published_ref="fixture",
+                authority_path=str(root / "authority"), task_path=str(root / refresh.TASK_NAME), todo_path=str(root / "TODO"),
+                workspace=str(workspace), old_native_cwd=str(native_cwd), old_bridge_cwd=None,
+                **{field: str(root / field) for field in ("global_config_path", "fence_database", "control_socket", "preparation_path", "packet_path", "approval_path", "backend_config_path", "journal_path", "log_path")},
+            )
+            uri = f"sqlite:///{root / 'app.sqlite'}"
+            store = SqlAlchemyConversationStore(uri)
+            self.addCleanup(store._engine.dispose)
+            store.create_conversation(conversation_id=OLD_SESSION_ID, title="old owner", runner_id="runner-old", host_id=OLD_HOST_ID, workspace=str(workspace))
+            store.set_external_session_id(OLD_SESSION_ID, OLD_THREAD_ID)
+            for index in range(3):
+                store.create_conversation(title=f"retained session {index}")
+            store.append(OLD_SESSION_ID, [NewConversationItem(type="message", response_id=str(uuid4()), data=MessageData(role="user", content=[{"type": "input_text", "text": f"consumed item {index}"}])) for index in range(22)])
+            before_database = refresh._database(uri, str(workspace))
+            current = process(os.getpid(), "host")
+            assert isinstance(current, Process)
+            bridge_path = root / "bridge.json"
+            thread: dict[str, object] = {"id": OLD_THREAD_ID, "cwd": str(native_cwd), "turns": [{"id": f"completed-{index}", "status": "completed", "items": [{"consumed": index}]} for index in range(3)]}
+            methods: list[str] = []
+            drift_during_read = False
+            bridge: dict[str, object] = {}
+
+            async def handler(connection: ServerConnection) -> None:
+                async for payload in connection:
+                    message = json.loads(payload)
+                    methods.append(message["method"])
+                    if "id" in message:
+                        if message["method"] == "thread/read" and drift_during_read:
+                            bridge_path.write_bytes(refresh._bytes(bridge | {"cwd": str(workspace)}))
+                        result = {"thread": thread} if message["method"] == "thread/read" else {}
+                        await connection.send(json.dumps({"id": message["id"], "result": result}))
+
+            async with serve(handler, "127.0.0.1", 0) as server:
+                url = f"ws://127.0.0.1:{next(iter(server.sockets)).getsockname()[1]}"
+                config = BackendConfig(OLD_SESSION_ID, os.getpid(), str(bridge_path), str(root / "host"), "http://127.0.0.1:1")
+                Path(request.backend_config_path).write_bytes(refresh._bytes(asdict(config)))
+                Path(request.backend_config_path).chmod(0o600)
+                bridge = {"session_id": OLD_SESSION_ID, "thread_id": OLD_THREAD_ID, "cwd": None, "active_turn_id": None, "socket_path": url}
+                bridge_path.write_bytes(refresh._bytes(bridge))
+                with patch.object(refresh, "process_domain", return_value=(current,)), patch.object(refresh, "_public", return_value=digest(b"same public state")):
+                    observed = await asyncio.to_thread(refresh.observe, request, uri)
+                    assert isinstance(observed, refresh.PreservedState), observed
+                    self.assertEqual(observed.native_thread_sha256, digest(refresh._bytes(thread)))
+                    self.assertEqual(observed.bridge_sha256, digest(bridge_path.read_bytes()))
+                    self.assertEqual(observed, await asyncio.to_thread(refresh.observe, request, uri))
+                    wrong_native = replace(request, old_native_cwd=str(workspace))
+                    self.assertEqual(rejection(await asyncio.to_thread(refresh.observe, wrong_native, uri)), "native_cwd_mismatch")
+                    wrong_bridge = replace(request, old_bridge_cwd=str(native_cwd))
+                    self.assertEqual(rejection(await asyncio.to_thread(refresh.observe, wrong_bridge, uri)), "bridge_cwd_mismatch")
+                    bridge_path.write_bytes(refresh._bytes(bridge | {"active_turn_id": "active"}))
+                    self.assertEqual(rejection(await asyncio.to_thread(refresh.observe, request, uri)), "native_not_idle")
+                    bridge_path.write_bytes(refresh._bytes({key: value for key, value in bridge.items() if key != "cwd"}))
+                    self.assertEqual(rejection(await asyncio.to_thread(refresh.observe, request, uri)), "bridge_cwd_mismatch")
+                    bridge_path.write_bytes(refresh._bytes(bridge))
+                    drift_during_read = True
+                    self.assertEqual(rejection(await asyncio.to_thread(refresh.observe, request, uri)), "bridge_drift")
+            self.assertEqual(methods, ["initialize", "initialized", "thread/read"] * 4)
+            self.assertEqual(refresh._database(uri, str(workspace)), before_database)
+
+        with tempfile.TemporaryDirectory(prefix="omnigent-predecessor-binding-") as directory:
+            asyncio.run(asyncio.wait_for(exercise(Path(directory).resolve()), timeout=10))
 
 
 if __name__ == "__main__":

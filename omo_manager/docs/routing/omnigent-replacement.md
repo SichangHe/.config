@@ -51,6 +51,8 @@ server refresh
 
 - `omo_omnigent_refresh.py` accepts only the existing explicit loopback CLI deployment and a clean published configuration checkout
   - original interpreter, PID incarnation, listening socket, package, source, authority, task, TODO, queue, host tree and native thread are pinned
+  - required `old_native_cwd` and nullable `old_bridge_cwd` bind observed predecessor directories independently of the strict configured successor workspace
+  - refresh never infers missing predecessor cwd fields; every observation rechecks their exact reviewed values and all three completed native turns without replay
   - a separately reviewed refresh plan is required before stopping the server
 - a standby records its own process identity before the original server receives a graceful stop
   - the standby owns the wait-for-exit and exact bootstrap `exec`, independent of the invoking client

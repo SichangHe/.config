@@ -41,6 +41,8 @@ class RefreshRequest:
     task_path: str
     todo_path: str
     workspace: str
+    old_native_cwd: str
+    old_bridge_cwd: str | None
     global_config_path: str
     fence_database: str
     control_socket: str
@@ -217,7 +219,7 @@ def _database(uri: str, workspace: str) -> tuple[str, str] | Rejected:
         return digest(_bytes(records)), str(value["runner_id"])
 
 
-async def _thread(socket_path: str, workspace: str) -> str | Rejected:
+async def _thread(socket_path: str, old_native_cwd: str) -> str | Rejected:
     from omnigent.codex_native_app_server import CodexAppServerClient
 
     client = CodexAppServerClient(ws_url=socket_path, client_name="omo-server-refresh-readonly")
@@ -229,8 +231,10 @@ async def _thread(socket_path: str, workspace: str) -> str | Rejected:
         if not isinstance(thread, dict):
             return Rejected("native_thread_unobservable", "thread/read did not return a thread object")
         turns = thread.get("turns")
-        if thread.get("id") != OLD_THREAD_ID or thread.get("cwd") != workspace or not isinstance(turns, list) or any(not isinstance(turn, dict) or turn.get("status") == "inProgress" for turn in turns):
-            return Rejected("native_not_idle", "old native thread must match and contain no active turn")
+        if thread.get("cwd") != old_native_cwd:
+            return Rejected("native_cwd_mismatch", "old native cwd differs from the explicit predecessor binding")
+        if thread.get("id") != OLD_THREAD_ID or not isinstance(turns, list) or len(turns) != 3 or any(not isinstance(turn, dict) or turn.get("status") != "completed" for turn in turns):
+            return Rejected("native_not_idle", "old native thread must match and contain exactly three completed turns")
         return digest(_bytes(thread))
     finally:
         await client.close()
@@ -245,15 +249,17 @@ def observe(request: RefreshRequest, database_uri: str) -> PreservedState | Reje
             return Rejected("old_binding_mismatch", "backend does not name the authorized predecessor")
         bridge_bytes = Path(config.bridge_state_path).read_bytes()
         bridge = json.loads(bridge_bytes)
-        if not isinstance(bridge, dict) or bridge.get("session_id", "").replace("-", "") != OLD_SESSION_ID or bridge.get("thread_id") != OLD_THREAD_ID or bridge.get("cwd") != request.workspace or bridge.get("active_turn_id") is not None or not isinstance(bridge.get("socket_path"), str):
+        if not isinstance(bridge, dict) or bridge.get("session_id", "").replace("-", "") != OLD_SESSION_ID or bridge.get("thread_id") != OLD_THREAD_ID or bridge.get("active_turn_id") is not None or not isinstance(bridge.get("socket_path"), str):
             return Rejected("native_not_idle", "bridge must bind the exact idle predecessor")
+        if "cwd" not in bridge or bridge["cwd"] != request.old_bridge_cwd:
+            return Rejected("bridge_cwd_mismatch", "old bridge cwd differs from the explicit nullable predecessor binding")
         domain = process_domain(config.host_pid, (OLD_THREAD_ID, config.bridge_state_path, bridge["socket_path"]))
         if isinstance(domain, Rejected):
             return domain
         database = _database(database_uri, request.workspace)
         if isinstance(database, Rejected):
             return database
-        thread = asyncio.run(asyncio.wait_for(_thread(bridge["socket_path"], request.workspace), timeout=15))
+        thread = asyncio.run(asyncio.wait_for(_thread(bridge["socket_path"], request.old_native_cwd), timeout=15))
         if isinstance(thread, Rejected):
             return thread
         public = _public(config.server_url, database[1])
@@ -297,8 +303,13 @@ def _scope(request: RefreshRequest) -> Rejected | None:
 
     try:
         workspace = Path(request.workspace)
-        if Path(request.task_path).name != TASK_NAME or workspace.name != WORKSPACE_NAME or workspace.resolve(strict=True) != workspace or not workspace.is_dir() or workspace != configured_workspace():
+        if Path(request.task_path).name != TASK_NAME or workspace.name != WORKSPACE_NAME or workspace.resolve(strict=True) != workspace or not workspace.is_dir() or workspace.stat().st_uid != os.geteuid() or workspace != configured_workspace():
             return Rejected("wrong_refresh_scope", "only the existing Source1957 task and workspace are supported")
+        if not isinstance(request.old_native_cwd, str) or request.old_bridge_cwd is not None and not isinstance(request.old_bridge_cwd, str):
+            return Rejected("invalid_predecessor_cwd", "native cwd must be explicit text and bridge cwd explicit text or null")
+        for value in (request.old_native_cwd, request.old_bridge_cwd):
+            if value is not None and (not Path(value).is_absolute() or Path(value).resolve(strict=True) != Path(value) or not Path(value).is_dir()):
+                return Rejected("invalid_predecessor_cwd", "predecessor cwd bindings must be canonical existing directories")
         artifacts = (request.journal_path, request.log_path, request.fence_database, request.control_socket, request.packet_path, request.approval_path, request.preparation_path, request.backend_config_path)
         if len(set(artifacts)) != len(artifacts):
             return Rejected("refresh_path_alias", "all private refresh/control artifacts must be distinct")
