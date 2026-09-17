@@ -1522,27 +1522,38 @@ def record_session_id(
     if UUID_RE.fullmatch(session_id) is None:
         raise StartError("Codex status did not return one valid session UUID.")
     before = path.stat()
-    text = path.read_text(encoding="utf-8")
-    if expected_sha256 and hashlib.sha256(text.encode()).hexdigest() != expected_sha256:
+    raw = path.read_bytes()
+    if expected_sha256 and hashlib.sha256(raw).hexdigest() != expected_sha256:
         raise StartError("task changed before session UUID binding; no prompt was sent.")
+    text = raw.decode("utf-8")
     parts = frontmatter_parts(text)
     if parts is None:
         raise StartError("task file requires valid frontmatter before session binding.")
-    frontmatter, body = parts
+    frontmatter, _body = parts
     existing = [line.split(":", 1)[1].strip() for line in frontmatter if line.startswith("session_id:")]
     if existing and existing != [session_id] and not replace_existing:
         raise StartError("task frontmatter already contains a different Codex session UUID.")
+    lines = text.splitlines(keepends=True)
+    closing = next((index for index, line in enumerate(lines[1:], start=1) if line.rstrip("\r\n").strip() == "---"), None)
+    if closing is None:
+        raise StartError("task file requires valid frontmatter before session binding.")
     if existing and existing != [session_id]:
-        frontmatter = [f"session_id: {session_id}" if line.startswith("session_id:") else line for line in frontmatter]
+        for index in range(1, closing):
+            content = lines[index].rstrip("\r\n")
+            if content.startswith("session_id:"):
+                ending = lines[index][len(content) :]
+                lines[index] = f"session_id: {session_id}{ending}"
     elif not existing:
-        frontmatter.append(f"session_id: {session_id}")
-    trailing = "\n" if text.endswith("\n") else ""
+        opening_ending = lines[0][len(lines[0].rstrip("\r\n")) :]
+        newline = opening_ending or "\n"
+        lines.insert(closing, f"session_id: {session_id}{newline}")
+    updated = "".join(lines)
     try:
         from omo_manager.omo_task import atomic_replace_if_unchanged
     except ModuleNotFoundError:
         from omo_task import atomic_replace_if_unchanged
     try:
-        atomic_replace_if_unchanged(path, "\n".join(["---", *frontmatter, "---", *body]) + trailing, before, lock_held=lock_held)
+        atomic_replace_if_unchanged(path, updated, before, lock_held=lock_held)
     except (OSError, ValueError) as exc:
         raise StartError(f"task changed during session UUID binding; no prompt was sent: {exc}") from exc
 

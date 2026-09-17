@@ -372,6 +372,29 @@ class CodexSessionCaptureTests(unittest.TestCase):
             record_session_id(path, self.UUID)
             self.assertEqual(parse_task_metadata(path.read_text()).session_id, self.UUID)
 
+    def test_frontmatter_session_id_preserves_raw_crlf_body_and_digest_binding(self):
+        raw = (
+            b"---\n"
+            b"version: v1.0.0\n"
+            b"status: long_running\n"
+            b"runat: dw:59\n"
+            b"tool: codex\n"
+            b"managerat: wl:1\n"
+            b"is_manager: true\n"
+            b"pending_task_items: []\n"
+            b"---\n"
+            b"<human_instruction>\r\nExact Human text\r\n</human_instruction>\r\n"
+        )
+        expected = raw.replace(b"pending_task_items: []\n", b"pending_task_items: []\nsession_id: " + self.UUID.encode() + b"\n", 1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "task.md"
+            path.write_bytes(raw)
+
+            record_session_id(path, self.UUID, __import__("hashlib").sha256(raw).hexdigest())
+
+            self.assertEqual(expected, path.read_bytes())
+            self.assertIn(b"<human_instruction>\r\nExact Human text\r\n</human_instruction>\r\n", path.read_bytes())
+
     def test_rejects_digest_drift(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "task.md"
