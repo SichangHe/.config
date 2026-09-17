@@ -59,6 +59,12 @@ LEGACY_PURPOSES = (
         "58a6169e82ac0add13bab11a643ae09e3f69f1a4f48f2dfe36becd71faa7743f",
         "Execute Human Source-1256 by closing all opsmail0802 and agent_managers agents, consolidating their tasks and status, and replacing mailbox compression with one fresh agent outside those namespaces.",
     ),
+    # 🧑 "by merging I mean you take original bits verbatim and put them in. ... agents think they can paraphrase it. They cannot."
+    LegacyPurpose(
+        "202608/unslop_skill_repair_1119.md",
+        "e1b0a4ca4d529bbfbd9f68d27df7230ecb556787d27102a0110f01f1bc8fe0d5",
+        "Restore the human-authored skill byte-for-byte and append the current upstream Unslop body byte-for-byte except duplicate YAML frontmatter.",
+    ),
 )
 
 

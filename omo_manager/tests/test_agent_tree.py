@@ -197,6 +197,37 @@ class AgentTreeTests(unittest.TestCase):
                 self.todo_rows.clear()
                 (self.root / name).unlink()
 
+    def test_exact_source1119_historical_body_supplies_registered_purpose(self) -> None:
+        source = (
+            task_text("team:2", "top:0", status="blocked", blocked_on="done_close_failed: refusing to stop the current pane: %2")
+            .split('<manager_delegation from="top:0">', 1)[0]
+            + "(verified removed pending item: Restored the human-authored skill byte-for-byte, appended the current upstream Unslop body byte-for-byte except duplicate YAML frontmatter, independent reviewer PASS, validation PASS, and pushed .config macos commit b15d313; prior bad merge was dd428bb.)\n"
+        )
+        self.add_task("202608/unslop_skill_repair_1119.md", source, indexed_target="team:2", section="previous")
+        self.finish()
+
+        output = tree.run(self.args(statuses=("blocked",)))
+
+        self.assertIn("purpose: Restore the human-authored skill byte-for-byte", output)
+        self.assertIn("no open work recorded", output)
+
+    def test_source1119_compatibility_rejects_other_path_or_body(self) -> None:
+        body = "(verified removed pending item: Restored the human-authored skill byte-for-byte, appended the current upstream Unslop body byte-for-byte except duplicate YAML frontmatter, independent reviewer PASS, validation PASS, and pushed .config macos commit b15d313; prior bad merge was dd428bb.)\n"
+        frontmatter = task_text(
+            "team:2",
+            "top:0",
+            status="blocked",
+            blocked_on="done_close_failed: refusing to stop the current pane: %2",
+        ).split('<manager_delegation from="top:0">', 1)[0]
+        for name, suffix in (("other.md", ""), ("202608/unslop_skill_repair_1119.md", "changed\n")):
+            with self.subTest(name=name, changed=bool(suffix)):
+                self.add_task(name, frontmatter + body + suffix, indexed_target="team:2", section="previous")
+                self.finish()
+                with self.assertRaisesRegex(tree.TreeError, "no assignment paragraph"):
+                    tree.run(self.args(statuses=("blocked",)))
+                self.todo_rows.clear()
+                (self.root / name).unlink()
+
     def test_duplicate_or_mismatched_index_fails(self) -> None:
         self.add_task("worker.md", task_text("team:2", "top:0"), indexed_target="team:2")
         self.todo_rows.append("current:\nworker.md team:2\n")
