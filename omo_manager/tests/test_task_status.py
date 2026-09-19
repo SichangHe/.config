@@ -3976,7 +3976,7 @@ class TaskStatusTests(unittest.TestCase):
                     "schema": "omo-report-terminal-task-custody/v1",
                 },
             }
-            state = {"live": True}
+            state = {"live": True, "terminalized": False}
             capture_sha256 = "c" * 64
 
             def target_pane(_target: str) -> str:
@@ -3989,9 +3989,18 @@ class TaskStatusTests(unittest.TestCase):
                 callback = values[6]
                 assert callable(callback)
                 callback()
+                state["terminalized"] = True
                 return ExitedCodexShell(args.expected_session_id, capture_sha256)
 
+            def validate_terminal(*_values: object) -> str:
+                if not state["terminalized"]:
+                    raise RuntimeError("Codex has not exited")
+                return capture_sha256
+
             def close(*values: object) -> None:
+                pre_close = values[10]
+                assert callable(pre_close)
+                pre_close()
                 proof = Path(str(values[4]))
                 audit = Path(str(values[5]))
                 write_done_live_close_started(
@@ -4028,7 +4037,10 @@ class TaskStatusTests(unittest.TestCase):
                 patch("omo_manager.omo_task_status.pane_id", side_effect=target_pane),
                 patch("omo_manager.omo_task_status.process_start_ticks", side_effect=start_ticks),
                 patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell_with_consumed_report", side_effect=terminalize),
-                patch("omo_manager.omo_task_status.validate_exited_codex_shell_with_consumed_report", return_value=capture_sha256),
+                patch(
+                    "omo_manager.omo_task_status.validate_exited_codex_shell_with_consumed_report",
+                    side_effect=validate_terminal,
+                ),
                 patch("omo_manager.omo_task_status.close_bound_tmux_target", side_effect=close),
             ):
                 self.assertEqual((args.active_target, args.expected_session_id), close_done_live_no_mail(args, task, text, task.stat()))
@@ -4037,6 +4049,106 @@ class TaskStatusTests(unittest.TestCase):
             audit = json.loads(args.audit_output.read_text(encoding="utf-8"))
             self.assertEqual("complete-preserved", audit["state"])
             self.assertEqual(args.expected_task_sha256, audit["completed_task_sha256"])
+
+    def test_split_evidence_close_adopts_authenticated_exited_shell(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_done_live_close_case(root)
+            task.unlink()
+            task = root / "mail_unread_0649.md"
+            text = text.replace("runat: wl:2", "runat: config:40").replace("managerat: wl:1", "managerat: config:27")
+            task.write_text(text, encoding="utf-8")
+            todo_text = todo_text.replace("task.md wl:2", "mail_unread_0649.md config:40")
+            todo.write_text(todo_text, encoding="utf-8")
+            receipt = root / "private" / "split-export.json"
+            receipt.write_text("{}\n", encoding="utf-8")
+            receipt.chmod(0o600)
+            args = replace(
+                args,
+                task_file=Path("mail_unread_0649.md"),
+                active_target="config:40",
+                manager_target="config:27",
+                expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                expected_pane_id="%3551",
+                expected_session_id="01a0bb70-e246-7031-9fd3-c0d761556c57",
+                manager_consumed_report_receipt=receipt,
+                manager_consumed_report_receipt_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest(),
+            )
+            manager = root / "manager.md"
+            manager.write_text(task_frontmatter(status="long_running", runat="config:27", is_manager=True), encoding="utf-8")
+            attestation = {
+                "archive_custody": {
+                    "git_provenance": {
+                        "commitment_binding": {"evidence_mode": "split-owner-manager"},
+                    },
+                    "schema": "omo-report-terminal-task-custody/v1",
+                },
+            }
+            state = {"present": True}
+            capture_sha256 = "c" * 64
+
+            def target_pane(_target: str) -> str:
+                return "%3551" if state["present"] else ""
+
+            def start_ticks(_pid: int) -> int | None:
+                return 73 if state["present"] else None
+
+            def close(*values: object) -> None:
+                pre_close = values[10]
+                assert callable(pre_close)
+                pre_close()
+                proof = Path(str(values[4]))
+                audit = Path(str(values[5]))
+                write_done_live_close_started(
+                    proof,
+                    audit,
+                    str(values[6]),
+                    str(values[7]),
+                    str(values[12]),
+                    args.active_target,
+                    args.expected_pane_id,
+                    args.expected_pane_pid,
+                    args.expected_pane_start_ticks,
+                )
+                state["present"] = False
+                with (
+                    patch("omo_manager.omo_codex_stop.pane_id", return_value=""),
+                    patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=None),
+                ):
+                    promote_done_live_close_started(
+                        proof,
+                        audit,
+                        str(values[7]),
+                        str(values[12]),
+                        args.active_target,
+                        args.expected_pane_id,
+                        args.expected_pane_pid,
+                        args.expected_pane_start_ticks,
+                    )
+
+            with (
+                patch("omo_manager.omo_task_status.prevalidate_manager_consumed_export", return_value=(attestation, manager)),
+                patch("omo_manager.omo_task_status.validate_manager_consumed_report", return_value=True),
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_task_status.pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_task_status.process_start_ticks", side_effect=start_ticks),
+                patch(
+                    "omo_manager.omo_task_status.validate_exited_codex_shell_with_consumed_report",
+                    return_value=capture_sha256,
+                ),
+                patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell_with_consumed_report") as terminalize,
+                patch("omo_manager.omo_task_status.close_bound_tmux_target", side_effect=close),
+            ):
+                self.assertEqual((args.active_target, args.expected_session_id), close_done_live_no_mail(args, task, text, task.stat()))
+            terminalize.assert_not_called()
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            audit = json.loads(args.audit_output.read_text(encoding="utf-8"))
+            self.assertEqual("complete-preserved", audit["state"])
+            self.assertEqual("v2.0.0", audit["version"])
+            self.assertEqual(capture_sha256, audit["terminal_capture_sha256"])
+            self.assertEqual(args.manager_consumed_report_receipt_sha256, audit["manager_consumed_receipt_sha256"])
 
     def test_source1845_human_authority_closes_only_the_bound_done_live_pane(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

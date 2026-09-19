@@ -6919,7 +6919,7 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                 if done_live_pane_state(args) != "live":
                     raise TaskFrontmatterError("done-live close prepared recovery lost its exact live pane.")
                 capture_sha256 = ""
-                if close_audit.state == "prepared":
+                if close_audit.state == "prepared" or split_evidence:
                     try:
                         capture_sha256 = validate_terminal_shell(
                             args.active_target,
@@ -6929,6 +6929,8 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                         )
                     except RuntimeError:
                         capture_sha256 = ""
+                if capture_sha256 and close_audit.state == "reserved":
+                    terminalization_evidence()
                 if not capture_sha256:
                     shell = terminalize_to_shell(
                         args.active_target,
