@@ -28,5 +28,7 @@
   - digest-bound atomic close, active-child migration, rollback, and unlaunched successor publication
 - `source1923-manager-adopt.md`
   - one-shot guarded adoption of the already-live Source-1923 DeepWiki successor
+- `pb-owner-handoff.md`
+  - exact no-restart PB predecessor-to-service ownership transaction
 - `amh-route-launch.md`
   - AMH Human-email route worker launch after watcher commit
