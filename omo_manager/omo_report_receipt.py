@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import importlib.machinery
+import importlib.util
 import io
 import json
 import math
@@ -16,21 +18,56 @@ import stat
 import subprocess
 import sys
 import time
+import types
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .omo_pending_digest import PENDING_CONTENT_CHAR_LIMIT
-from .omo_omnigent_identity import OmniGentIdentityError
-from .omo_omnigent_identity import authenticate_current_omnigent
-from .omo_task_lock import task_file_lock_at_path
-from .omo_task_lock import task_file_lock_path
-from .omo_task_lock import watcher_report_authority_is_live
-from .omo_task_lock import watcher_report_manager_temporary
-from .omo_task_lock import watcher_report_state_maintenance_temporary
-from .omo_task_lock import watcher_report_state_temporary
+# 🧑 "omo_report.sh fails before routing because ... omo_report_receipt.py cannot import .omo_omnigent_identity"
+if __package__ in {None, ""}:
+    package_path = Path(__file__).resolve().parent
+    package_spec = importlib.machinery.ModuleSpec("omo_manager", loader=None, is_package=True)
+    package_spec.submodule_search_locations = [str(package_path)]
+    package = types.ModuleType("omo_manager")
+    package.__package__ = "omo_manager"
+    package.__path__ = [str(package_path)]
+    package.__spec__ = package_spec
+    sys.modules["omo_manager"] = package
+
+    def load_local_module(name: str) -> None:
+        module_name = f"omo_manager.{name}"
+        source_path = package_path / f"{name}.py"
+        spec = importlib.util.spec_from_file_location(module_name, source_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load local report dependency: {source_path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+
+    load_local_module("omo_pending_digest")
+    load_local_module("omo_omnigent_identity")
+    load_local_module("omo_task_lock")
+    from omo_manager.omo_pending_digest import PENDING_CONTENT_CHAR_LIMIT
+    from omo_manager.omo_omnigent_identity import OmniGentIdentityError
+    from omo_manager.omo_omnigent_identity import authenticate_current_omnigent
+    from omo_manager.omo_task_lock import task_file_lock_at_path
+    from omo_manager.omo_task_lock import task_file_lock_path
+    from omo_manager.omo_task_lock import watcher_report_authority_is_live
+    from omo_manager.omo_task_lock import watcher_report_manager_temporary
+    from omo_manager.omo_task_lock import watcher_report_state_maintenance_temporary
+    from omo_manager.omo_task_lock import watcher_report_state_temporary
+else:
+    from .omo_pending_digest import PENDING_CONTENT_CHAR_LIMIT
+    from .omo_omnigent_identity import OmniGentIdentityError
+    from .omo_omnigent_identity import authenticate_current_omnigent
+    from .omo_task_lock import task_file_lock_at_path
+    from .omo_task_lock import task_file_lock_path
+    from .omo_task_lock import watcher_report_authority_is_live
+    from .omo_task_lock import watcher_report_manager_temporary
+    from .omo_task_lock import watcher_report_state_maintenance_temporary
+    from .omo_task_lock import watcher_report_state_temporary
 
 
 RECEIVER_VERSION = "4"
@@ -75,6 +112,12 @@ SESSION_ID_RE = re.compile(
     r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"
 )
 MESSAGE_ID_RE = re.compile(r"^<[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+>$")
+SPLIT_NO_MAIL_TASK = "mail_unread_0649.md"
+SPLIT_NO_MAIL_OWNER_TARGET = "config:40"
+SPLIT_NO_MAIL_MANAGER_TARGET = "config:27"
+SPLIT_NO_MAIL_OWNER_SESSION = "01a0bb70-e246-7031-9fd3-c0d761556c57"
+SPLIT_NO_MAIL_MANAGER_SESSION = "01a0bad1-b7fb-7842-acc5-df20a5fc3614"
+SPLIT_NO_MAIL_PANE_ID = "%3551"
 REPORT_ONLY_DISPOSITION_RE = re.compile(
     r"^\(pending marker cleared line=([1-9][0-9]*): report-only: (\([^\r\n]+\))\)\n$"
 )
@@ -126,6 +169,16 @@ class RootRetainedNoMailEvidence:
     transcript: Path
     transcript_prefix_sha256: str
     transcript_prefix_size_bytes: int
+
+
+@dataclass(frozen=True)
+class RootRetainedSplitNoMailEvidence:
+    transcript: Path
+    transcript_prefix_sha256: str
+    transcript_prefix_size_bytes: int
+    manager_transcript: Path
+    manager_transcript_prefix_sha256: str
+    manager_transcript_prefix_size_bytes: int
 
 
 @dataclass(frozen=True)
@@ -245,7 +298,7 @@ class Arguments:
     tmux_pane_id: str
     tmux_window_name: str
     selected_done_task: bool
-    root_retained_evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | None = None
+    root_retained_evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | RootRetainedSplitNoMailEvidence | None = None
     omnigent_session_id: str = ""
     omnigent_thread_id: str = ""
     omnigent_workspace: str = ""
@@ -308,7 +361,7 @@ class Plan:
     receipt_final: Path
     receipt_publication_temporary: Path
     receipt_publication_final: Path
-    root_retained_evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | None = None
+    root_retained_evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | RootRetainedSplitNoMailEvidence | None = None
 
 
 # 🧑 "Do not use `--task-file`, `--root`, `--manager-target`, or other manual route flags."
@@ -973,6 +1026,12 @@ def parse_args(argv: list[str] | None = None) -> Arguments:
     _ = parser.add_argument("--root-retained-no-mail-transcript", type=Path)
     _ = parser.add_argument("--root-retained-no-mail-prefix-sha256", default="")
     _ = parser.add_argument("--root-retained-no-mail-prefix-size-bytes", default=0, type=int)
+    _ = parser.add_argument("--root-retained-split-no-mail-owner-transcript", type=Path)
+    _ = parser.add_argument("--root-retained-split-no-mail-owner-prefix-sha256", default="")
+    _ = parser.add_argument("--root-retained-split-no-mail-owner-prefix-size-bytes", default=0, type=int)
+    _ = parser.add_argument("--root-retained-split-no-mail-manager-transcript", type=Path)
+    _ = parser.add_argument("--root-retained-split-no-mail-manager-prefix-sha256", default="")
+    _ = parser.add_argument("--root-retained-split-no-mail-manager-prefix-size-bytes", default=0, type=int)
     parsed = parser.parse_args(argv)
     evidence_values = (
         parsed.root_retained_session_transcript,
@@ -993,9 +1052,19 @@ def parse_args(argv: list[str] | None = None) -> Arguments:
     )
     if any(no_mail_values) and not all(no_mail_values):
         raise ReceiptError("root-retained no-mail evidence arguments are incomplete")
-    if all(evidence_values) and all(no_mail_values):
+    split_no_mail_values = (
+        parsed.root_retained_split_no_mail_owner_transcript,
+        parsed.root_retained_split_no_mail_owner_prefix_sha256,
+        parsed.root_retained_split_no_mail_owner_prefix_size_bytes,
+        parsed.root_retained_split_no_mail_manager_transcript,
+        parsed.root_retained_split_no_mail_manager_prefix_sha256,
+        parsed.root_retained_split_no_mail_manager_prefix_size_bytes,
+    )
+    if any(split_no_mail_values) and not all(split_no_mail_values):
+        raise ReceiptError("root-retained split no-mail evidence arguments are incomplete")
+    if sum((all(evidence_values), all(no_mail_values), all(split_no_mail_values))) > 1:
         raise ReceiptError("root-retained evidence provenance is ambiguous")
-    evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | None = (
+    evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | RootRetainedSplitNoMailEvidence | None = (
         RootRetainedEvidence(
             parsed.root_retained_session_transcript,
             parsed.root_retained_session_prefix_sha256,
@@ -1007,6 +1076,15 @@ def parse_args(argv: list[str] | None = None) -> Arguments:
             parsed.published_result_commit,
         )
         if all(evidence_values)
+        else RootRetainedSplitNoMailEvidence(
+            parsed.root_retained_split_no_mail_owner_transcript,
+            parsed.root_retained_split_no_mail_owner_prefix_sha256,
+            parsed.root_retained_split_no_mail_owner_prefix_size_bytes,
+            parsed.root_retained_split_no_mail_manager_transcript,
+            parsed.root_retained_split_no_mail_manager_prefix_sha256,
+            parsed.root_retained_split_no_mail_manager_prefix_size_bytes,
+        )
+        if all(split_no_mail_values)
         else (
             RootRetainedNoMailEvidence(
                 parsed.root_retained_no_mail_transcript,
@@ -4634,7 +4712,18 @@ def consumed_closure_export(
         verification["recovery_replay_id"] = plan.replay_id
     if plan.root_retained_evidence is not None:
         evidence = plan.root_retained_evidence
-        if isinstance(evidence, RootRetainedNoMailEvidence):
+        if isinstance(evidence, RootRetainedSplitNoMailEvidence):
+            verification.update(
+                {
+                    "root_retained_split_no_mail_owner_transcript": str(evidence.transcript),
+                    "root_retained_split_no_mail_owner_prefix_sha256": evidence.transcript_prefix_sha256,
+                    "root_retained_split_no_mail_owner_prefix_size_bytes": evidence.transcript_prefix_size_bytes,
+                    "root_retained_split_no_mail_manager_transcript": str(evidence.manager_transcript),
+                    "root_retained_split_no_mail_manager_prefix_sha256": evidence.manager_transcript_prefix_sha256,
+                    "root_retained_split_no_mail_manager_prefix_size_bytes": evidence.manager_transcript_prefix_size_bytes,
+                }
+            )
+        elif isinstance(evidence, RootRetainedNoMailEvidence):
             verification.update(
                 {
                     "root_retained_no_mail_transcript": str(evidence.transcript),
@@ -4705,6 +4794,7 @@ def validate_consumed_closure_export(payload: bytes) -> dict[str, object]:
         expected_context.update({"archived_task", "archived_task_path", "recovery_replay_id"})
     root_retained_evidence = "root_retained_session_transcript" in verification
     root_retained_no_mail_evidence = "root_retained_no_mail_transcript" in verification
+    root_retained_split_no_mail_evidence = "root_retained_split_no_mail_owner_transcript" in verification
     if root_retained_evidence:
         expected_context.update(
             {
@@ -4764,6 +4854,32 @@ def validate_consumed_closure_export(payload: bytes) -> dict[str, object]:
             or not 0 < prefix_size <= MAX_SESSION_PREFIX_BYTES
         ):
             raise ReceiptError("consumed attestation export root-retained no-mail evidence is invalid")
+    if root_retained_split_no_mail_evidence:
+        expected_context.update(
+            {
+                "root_retained_split_no_mail_owner_transcript",
+                "root_retained_split_no_mail_owner_prefix_sha256",
+                "root_retained_split_no_mail_owner_prefix_size_bytes",
+                "root_retained_split_no_mail_manager_transcript",
+                "root_retained_split_no_mail_manager_prefix_sha256",
+                "root_retained_split_no_mail_manager_prefix_size_bytes",
+            }
+        )
+        owner_transcript = Path(str(verification.get("root_retained_split_no_mail_owner_transcript", "")))
+        manager_transcript = Path(str(verification.get("root_retained_split_no_mail_manager_transcript", "")))
+        owner_size = verification.get("root_retained_split_no_mail_owner_prefix_size_bytes")
+        manager_size = verification.get("root_retained_split_no_mail_manager_prefix_size_bytes")
+        if (
+            not archived
+            or root_retained_evidence
+            or root_retained_no_mail_evidence
+            or owner_transcript == manager_transcript
+            or any(not path.is_absolute() or path != path.absolute() for path in (owner_transcript, manager_transcript))
+            or HASH_RE.fullmatch(str(verification.get("root_retained_split_no_mail_owner_prefix_sha256", ""))) is None
+            or HASH_RE.fullmatch(str(verification.get("root_retained_split_no_mail_manager_prefix_sha256", ""))) is None
+            or any(not isinstance(size, int) or isinstance(size, bool) or not 0 < size <= MAX_SESSION_PREFIX_BYTES for size in (owner_size, manager_size))
+        ):
+            raise ReceiptError("consumed attestation export split no-mail evidence is invalid")
     if (
         loaded.get("schema") != "omo-report-consumed-export/v1"
         or export_id != bound_receipt_id(unsigned)
@@ -4814,6 +4930,16 @@ def validate_consumed_closure_export(payload: bytes) -> dict[str, object]:
             "root_retained_no_mail_transcript",
             "root_retained_no_mail_prefix_sha256",
             "root_retained_no_mail_prefix_size_bytes",
+        ):
+            argv.extend((f"--{key.replace('_', '-')}", str(verification[key])))
+    if root_retained_split_no_mail_evidence:
+        for key in (
+            "root_retained_split_no_mail_owner_transcript",
+            "root_retained_split_no_mail_owner_prefix_sha256",
+            "root_retained_split_no_mail_owner_prefix_size_bytes",
+            "root_retained_split_no_mail_manager_transcript",
+            "root_retained_split_no_mail_manager_prefix_sha256",
+            "root_retained_split_no_mail_manager_prefix_size_bytes",
         ):
             argv.extend((f"--{key.replace('_', '-')}", str(verification[key])))
     state_home = Path(str(verification["state_home"]))
@@ -5619,14 +5745,23 @@ def run(
 
 
 def read_append_only_session_prefix(
-    evidence: RootRetainedEvidence | RootRetainedNoMailEvidence,
+    evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | RootRetainedSplitNoMailEvidence,
     *,
     lifecycle: bool = False,
+    manager: bool = False,
     maximum: int = MAX_SESSION_PREFIX_BYTES,
 ) -> bytes:
     """Read an exact immutable prefix while permitting later session appends."""
 
-    if lifecycle and isinstance(evidence, RootRetainedEvidence):
+    if lifecycle and manager:
+        raise ReceiptError("root-retained transcript evidence role is ambiguous")
+    if manager and isinstance(evidence, RootRetainedSplitNoMailEvidence):
+        path = evidence.manager_transcript
+        expected_sha256 = evidence.manager_transcript_prefix_sha256
+        expected_size = evidence.manager_transcript_prefix_size_bytes
+    elif manager:
+        raise ReceiptError("root-retained evidence has no manager transcript")
+    elif lifecycle and isinstance(evidence, RootRetainedEvidence):
         path = evidence.lifecycle_transcript
         expected_sha256 = evidence.lifecycle_transcript_prefix_sha256
         expected_size = evidence.lifecycle_transcript_prefix_size_bytes
@@ -5802,6 +5937,38 @@ def capture_root_retained_no_mail_evidence(transcript: Path) -> RootRetainedNoMa
     return evidence
 
 
+def capture_root_retained_split_no_mail_evidence(
+    owner_transcript: Path,
+    manager_transcript: Path,
+) -> RootRetainedSplitNoMailEvidence:
+    """Bind distinct owner and manager prefixes for one no-mail completion."""
+
+    owner_transcript, owner_payload = capture_session_prefix(
+        owner_transcript,
+        "root-retained split no-mail owner transcript",
+    )
+    manager_transcript, manager_payload = capture_session_prefix(
+        manager_transcript,
+        "root-retained split no-mail manager transcript",
+    )
+    if owner_transcript == manager_transcript:
+        raise ReceiptError("split no-mail owner and manager transcripts must be distinct")
+    evidence = RootRetainedSplitNoMailEvidence(
+        owner_transcript,
+        hashlib.sha256(owner_payload).hexdigest(),
+        len(owner_payload),
+        manager_transcript,
+        hashlib.sha256(manager_payload).hexdigest(),
+        len(manager_payload),
+    )
+    if (
+        read_append_only_session_prefix(evidence) != owner_payload
+        or read_append_only_session_prefix(evidence, manager=True) != manager_payload
+    ):
+        raise ReceiptError("root-retained split no-mail transcript prefix changed during capture")
+    return evidence
+
+
 def root_retained_jsonl_records(payload: bytes, field: str) -> list[dict[str, object]]:
     """Parse one complete transcript prefix without accepting non-object records."""
 
@@ -5841,7 +6008,11 @@ def command_mentions_email_helper(command: object) -> bool:
     """Conservatively detect a Human-mail helper anywhere in a shell command."""
 
     return isinstance(command, list) and any(
-        isinstance(part, str) and re.search(r"(?:^|[^A-Za-z0-9_.-])email_me\.py(?:$|[^A-Za-z0-9_.-])", part)
+        isinstance(part, str)
+        and re.search(
+            r"(?:^|[^A-Za-z0-9_.-])(?:email_me\.py|sendmail|mailx|s-nail|mutt|swaks|smtplib)(?:$|[^A-Za-z0-9_.-])",
+            part,
+        )
         for part in command
     )
 
@@ -6816,6 +6987,476 @@ def top_level_no_mail_root_retained_provenance(
     }
 
 
+def split_no_mail_root_retained_provenance(
+    root: Path,
+    original_task: Path,
+    current_payload: bytes,
+    todo_payload: bytes,
+    source_sha256: str,
+    source_size: int,
+    source_todo_sha256: str,
+    source_todo_size: int,
+    replay_id: str,
+    manager_target: str,
+    evidence: RootRetainedSplitNoMailEvidence,
+) -> dict[str, object]:
+    """Authenticate a worker report and completion split from manager removal."""
+
+    owner_prefix = read_append_only_session_prefix(evidence)
+    manager_prefix = read_append_only_session_prefix(evidence, manager=True)
+    owner_records = root_retained_jsonl_records(owner_prefix, "split no-mail owner prefix")
+    manager_records = root_retained_jsonl_records(manager_prefix, "split no-mail manager prefix")
+
+    def session_identity(records: list[dict[str, object]], transcript: Path, role: str) -> tuple[str, Path]:
+        matches = [record for record in records if record.get("type") == "session_meta"]
+        payload = matches[0].get("payload") if matches else None
+        session_id = str(payload.get("id", "")) if isinstance(payload, dict) else ""
+        cwd = Path(str(payload.get("cwd", ""))) if isinstance(payload, dict) else Path("")
+        if (
+            len(matches) != 1
+            or records.index(matches[0]) != 0
+            or matches[0].get("ordinal") != 0
+            or not isinstance(payload, dict)
+            or payload.get("session_id") != session_id
+            or SESSION_ID_RE.fullmatch(session_id) is None
+            or not cwd.is_absolute()
+            or payload.get("originator") != "codex-tui"
+            or payload.get("source") != "cli"
+            or any(key in payload for key in ("forked_from_id", "parent_thread_id"))
+            or payload.get("thread_source") not in {None, "user"}
+            or not transcript.name.endswith(f"-{session_id}.jsonl")
+        ):
+            raise ReceiptError(f"split no-mail {role} transcript is not one top-level Codex session")
+        return session_id, cwd
+
+    owner_session_id, owner_cwd = session_identity(owner_records, evidence.transcript, "owner")
+    manager_session_id, manager_cwd = session_identity(manager_records, evidence.manager_transcript, "manager")
+    current_snapshot = frontmatter_snapshot(current_payload)
+    if (
+        current_snapshot is None
+        or original_task.name != SPLIT_NO_MAIL_TASK
+        or manager_target != SPLIT_NO_MAIL_MANAGER_TARGET
+        or current_snapshot[0].get("runat") != SPLIT_NO_MAIL_OWNER_TARGET
+        or current_snapshot[0].get("status") != "done"
+        or current_snapshot[0].get("managerat") != manager_target
+        or current_snapshot[0].get("tool") != "codex"
+        or current_snapshot[0].get("is_manager") != "false"
+        or current_snapshot[0].get("pending_task_items") != "[]"
+        or current_snapshot[0].get("session_id") not in {None, owner_session_id}
+        or owner_session_id != SPLIT_NO_MAIL_OWNER_SESSION
+        or manager_session_id != SPLIT_NO_MAIL_MANAGER_SESSION
+        or owner_session_id == manager_session_id
+        or "blocked_on" in current_snapshot[0]
+    ):
+        raise ReceiptError("split no-mail task does not bind the owner session and terminal metadata")
+
+    def successful_event(record: dict[str, object], session_id: str, cwd: Path) -> tuple[list[str], str, str] | None:
+        payload = record.get("payload")
+        item = payload.get("item") if isinstance(payload, dict) else None
+        stdout = item.get("stdout") if isinstance(item, dict) else None
+        if (
+            record.get("type") != "event_msg"
+            or not isinstance(payload, dict)
+            or payload.get("type") != "item_completed"
+            or payload.get("thread_id") != session_id
+            or not isinstance(payload.get("turn_id"), str)
+            or not isinstance(item, dict)
+            or item.get("type") != "CommandExecution"
+            or item.get("status") != "completed"
+            or item.get("exit_code") != 0
+            or not isinstance(stdout, str)
+            or item.get("aggregated_output") != stdout
+            or item.get("formatted_output") != stdout
+            or item.get("stderr") != ""
+            or item.get("cwd") != f"file://{cwd}"
+            or item.get("source") != "unified_exec_startup"
+        ):
+            return None
+        return shell_tokens(item.get("command")), stdout, str(payload["turn_id"])
+
+    def linked_execution(
+        records: list[dict[str, object]],
+        event_index: int,
+        turn_id: str,
+        stdout: str,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        payload = records[event_index].get("payload")
+        item = payload.get("item") if isinstance(payload, dict) else None
+        command = item.get("command") if isinstance(item, dict) else None
+        shell_command = command[-1] if isinstance(command, list) and command else None
+        matches: list[tuple[dict[str, object], dict[str, object]]] = []
+        for call_index, call in enumerate(records[:event_index]):
+            call_payload = call.get("payload")
+            metadata = call_payload.get("internal_chat_message_metadata_passthrough") if isinstance(call_payload, dict) else None
+            call_id = call_payload.get("call_id") if isinstance(call_payload, dict) else None
+            raw_input = call_payload.get("input") if isinstance(call_payload, dict) else None
+            if (
+                call.get("type") != "response_item"
+                or not isinstance(call_payload, dict)
+                or call_payload.get("type") != "custom_tool_call"
+                or call_payload.get("name") != "exec"
+                or not isinstance(metadata, dict)
+                or metadata.get("turn_id") != turn_id
+                or not isinstance(call_id, str)
+                or not isinstance(raw_input, str)
+                or custom_exec_shell_command(raw_input) != shell_command
+            ):
+                continue
+            for output in records[event_index + 1 :]:
+                output_payload = output.get("payload")
+                output_metadata = output_payload.get("internal_chat_message_metadata_passthrough") if isinstance(output_payload, dict) else None
+                blocks = output_payload.get("output") if isinstance(output_payload, dict) else None
+                if (
+                    output.get("type") == "response_item"
+                    and isinstance(output_payload, dict)
+                    and output_payload.get("type") == "custom_tool_call_output"
+                    and output_payload.get("call_id") == call_id
+                    and isinstance(output_metadata, dict)
+                    and output_metadata.get("turn_id") == turn_id
+                    and isinstance(blocks, list)
+                    and sum(
+                        isinstance(block, dict)
+                        and isinstance(block.get("text"), str)
+                        and stdout in str(block["text"])
+                        for block in blocks
+                    )
+                    == 1
+                ):
+                    matches.append((call, output))
+        if len(matches) != 1:
+            raise ReceiptError("split no-mail command lacks one exact linked Codex execution")
+        return matches[0]
+
+    report_matches: list[tuple[int, dict[str, object], dict[str, object], dict[str, object], str]] = []
+    for index, record in enumerate(owner_records):
+        event = successful_event(record, owner_session_id, owner_cwd)
+        if event is None:
+            continue
+        tokens, stdout, turn_id = event
+        report_path = Path("")
+        acceptance_text = stdout
+        if (
+            len(tokens) == 5
+            and Path(tokens[0]).name == "omo_report.sh"
+            and tokens[1:4] == ["--status", "done", "--message-file"]
+            and Path(tokens[4]).is_absolute()
+        ):
+            report_path = Path(tokens[4])
+        elif (
+            len(tokens) == 14
+            and Path(tokens[0]).name == "omo_report.sh"
+            and tokens[1:5] == ["--describe", "--status", "done", "--message-file"]
+            and Path(tokens[5]).is_absolute()
+            and tokens[6:13] == ["&&", "timeout", "30s", tokens[0], "--status", "done", "--message-file"]
+            and tokens[13] == tokens[5]
+        ):
+            lines = stdout.splitlines(keepends=True)
+            if len(lines) != 2:
+                continue
+            try:
+                description = json.loads(lines[0])
+                described_acceptance = json.loads(lines[1])
+            except json.JSONDecodeError:
+                continue
+            if (
+                not isinstance(description, dict)
+                or not isinstance(described_acceptance, dict)
+                or canonical_json(description) + canonical_json(described_acceptance) != stdout.encode()
+                or description.get("schema") != DESCRIPTION_SCHEMA
+                or description.get("status") != "done"
+                or description.get("input") != described_acceptance.get("input")
+                or description.get("routing") != described_acceptance.get("routing")
+                or not isinstance(description.get("receipt"), dict)
+                or description["receipt"].get("replay_id") != described_acceptance.get("replay_id")
+            ):
+                continue
+            report_path = Path(tokens[5])
+            acceptance_text = lines[1]
+        else:
+            continue
+        try:
+            acceptance = json.loads(acceptance_text)
+        except json.JSONDecodeError:
+            continue
+        transfer = acceptance.get("transfer_receipt") if isinstance(acceptance, dict) else None
+        routing = acceptance.get("routing") if isinstance(acceptance, dict) else None
+        authority = transfer.get("authority") if isinstance(transfer, dict) else None
+        queue_item = transfer.get("queue_item") if isinstance(transfer, dict) else None
+        input_info = acceptance.get("input") if isinstance(acceptance, dict) else None
+        if (
+            isinstance(acceptance, dict)
+            and canonical_json(acceptance) == acceptance_text.encode()
+            and acceptance.get("schema") == "omo-report-acceptance/v1"
+            and acceptance.get("accepted") is False
+            and acceptance.get("manager_acknowledged") is False
+            and acceptance.get("reason") == "routed; manager acknowledgment pending"
+            and acceptance.get("retry_required") is True
+            and acceptance.get("status") == "done"
+            and acceptance.get("replay_id") == replay_id
+            and isinstance(input_info, dict)
+            and input_info.get("sha256") == hashlib.sha256(regular_file_bytes(report_path, maximum=MAX_ENVELOPE_BYTES, field="split no-mail report draft")).hexdigest()
+            and input_info.get("size_bytes") == report_path.stat().st_size
+            and isinstance(routing, dict)
+            and routing.get("task") == str(original_task)
+            and routing.get("producer_target") == current_snapshot[0]["runat"]
+            and routing.get("requested_manager_target") == manager_target
+            and isinstance(authority, dict)
+            and authority.get("kind") == "agent-originated"
+            and authority.get("source_task") == str(original_task)
+            and authority.get("producer_target") == current_snapshot[0]["runat"]
+            and isinstance(queue_item, dict)
+            and queue_item.get("replay_id") == replay_id
+        ):
+            call, output = linked_execution(owner_records, index, turn_id, stdout)
+            report_matches.append((index, record, call, output, acceptance_text))
+    if len(report_matches) != 1:
+        raise ReceiptError("split no-mail owner transcript lacks one exact terminal report")
+    report_index, report_record, report_call, report_output_record, report_output = report_matches[0]
+    acceptance = json.loads(report_output)
+    manager_path = Path(str(acceptance["routing"].get("manager", "")))
+    manager_payload = regular_file_bytes(
+        manager_path,
+        maximum=MAX_ROUTE_FILE_BYTES,
+        field="split no-mail manager task",
+    )
+    manager_snapshot = frontmatter_snapshot(manager_payload)
+    if (
+        manager_path.parent != root
+        or manager_snapshot is None
+        or manager_snapshot[0].get("runat") != manager_target
+        or manager_snapshot[0].get("is_manager") != "true"
+        or manager_snapshot[0].get("status") not in {"running", "long_running"}
+    ):
+        raise ReceiptError("split no-mail manager transcript does not bind the authoritative manager task")
+    manager_targets = {manager_target, f"{manager_target}.0"}
+    manager_identity_matches: list[tuple[int, dict[str, object], dict[str, object], dict[str, object]]] = []
+    for index, record in enumerate(manager_records):
+        event = successful_event(record, manager_session_id, manager_cwd)
+        if event is None:
+            continue
+        tokens, stdout, turn_id = event
+        environment = dict(
+            line.split("=", 1)
+            for line in stdout.splitlines()
+            if "=" in line
+        )
+        if (
+            tokens == ["env", "|", "rg", "^(OMO|TASK|MANAGER)"]
+            and environment.get("OMO_AGENT_TMUX_TARGET") in manager_targets
+            and environment.get("OMO_MANAGER_TMUX_TARGET") in manager_targets
+            and environment.get("OMO_WORK_LOGS_ROOT") == str(root)
+        ):
+            call, output = linked_execution(manager_records, index, turn_id, stdout)
+            manager_identity_matches.append((index, record, call, output))
+    if len(manager_identity_matches) != 1:
+        raise ReceiptError("split no-mail manager transcript lacks one exact pane identity binding")
+    manager_identity_index, manager_identity_record, manager_identity_call, manager_identity_output = manager_identity_matches[0]
+    queue_item = acceptance["transfer_receipt"]["queue_item"]
+    pointer = str(queue_item["pointer"])
+    pointer_match = re.fullmatch(r"\(from agent [A-Za-z0-9_.:-]+ (/.+)\)", pointer)
+    if pointer_match is None:
+        raise ReceiptError("split no-mail report pointer is invalid")
+    envelope = Path(pointer_match.group(1))
+    envelope_payload = regular_file_bytes(envelope, maximum=MAX_ENVELOPE_BYTES, field="split no-mail private envelope")
+
+    removal_matches: list[tuple[int, dict[str, object], str, str, str, dict[str, object], dict[str, object]]] = []
+    for index, record in enumerate(manager_records):
+        event = successful_event(record, manager_session_id, manager_cwd)
+        if event is None:
+            continue
+        tokens, stdout, turn_id = event
+        command_index = next((position for position, token in enumerate(tokens) if Path(token).name == "omo_task_edit.py"), -1)
+        tail = tokens[command_index:] if command_index >= 0 else []
+        if (
+            len(tail) != 9
+            or tail[1] != "pending-remove"
+            or Path(tail[2]) != original_task
+            or tail[3] != "--item"
+            or tail[5] != "--evidence"
+            or tail[7] != "--completion-key"
+            or tail[8] not in {"$key", "${key}"}
+            or stdout != f"removed 1 pending item(s) from {original_task.name}; Verify the removed pending item was actually done or cancelled; consider evaluator agents for uncertain verification.\n"
+        ):
+            continue
+        call, output = linked_execution(manager_records, index, turn_id, stdout)
+        removal_matches.append((index, record, tail[4], tail[6], turn_id, call, output))
+    if len(removal_matches) != 1:
+        raise ReceiptError("split no-mail manager transcript lacks one exact pending removal")
+    removal_index, removal_record, pending_item, removal_evidence, removal_turn_id, removal_call, removal_output_record = removal_matches[0]
+    removal_note = f"(verified removed pending item: {removal_evidence})\n".encode()
+    if not current_payload.endswith(removal_note):
+        raise ReceiptError("split no-mail task lacks the exact manager removal note")
+    report_time_base, status_replacements = re.subn(
+        rb"(?m)^status: done$",
+        b"status: running",
+        current_payload[: -len(removal_note)],
+        count=1,
+    )
+    report_time_matches: list[bytes] = []
+    for rendering in (pending_item, f"'{pending_item.replace(chr(39), chr(39) * 2)}'", yaml_double_quoted_scalar(pending_item)):
+        candidate, replacements = re.subn(
+            rb"(?m)^pending_task_items: \[\]$",
+            lambda _match, rendering=rendering: f"pending_task_items:\n  - {rendering}".encode(),
+            report_time_base,
+            count=1,
+        )
+        if replacements == 1 and len(candidate) == source_size and hashlib.sha256(candidate).hexdigest() == source_sha256:
+            report_time_matches.append(candidate)
+    if status_replacements != 1 or len(report_time_matches) != 1:
+        raise ReceiptError("split no-mail removal does not reconstruct the committed report task")
+
+    review_matches: list[tuple[int, dict[str, object], dict[str, object], dict[str, object]]] = []
+    expected_review_tokens = [
+        "sed",
+        "-n",
+        "1,400p",
+        f"{envelope};",
+        "omo_task_edit.py",
+        "summary",
+        f"{original_task};",
+        "rg",
+        "-n",
+        rf"^\(pending\)$|{envelope.stem[:15]}",
+        str(manager_path),
+        "|",
+        "tail",
+        "-n",
+        "20",
+    ]
+    for index, record in enumerate(manager_records[:removal_index]):
+        event = successful_event(record, manager_session_id, manager_cwd)
+        if event is None:
+            continue
+        tokens, stdout, turn_id = event
+        if (
+            turn_id == removal_turn_id
+            and tokens == expected_review_tokens
+            and f"task_file: {original_task.name}\nstatus: running\n" in stdout
+            and pending_item in stdout
+        ):
+            call, output = linked_execution(manager_records, index, turn_id, stdout)
+            output_payload = output.get("payload")
+            blocks = output_payload.get("output") if isinstance(output_payload, dict) else None
+            linked_text = "".join(
+                str(block["text"])
+                for block in blocks
+                if isinstance(block, dict) and isinstance(block.get("text"), str)
+            ) if isinstance(blocks, list) else ""
+            if linked_text.encode().count(envelope_payload) == 1:
+                review_matches.append((index, record, call, output))
+    if len(review_matches) != 1:
+        raise ReceiptError("split no-mail manager transcript lacks one exact report review before removal")
+    review_index, review_record, review_call, review_output_record = review_matches[0]
+
+    completion_matches: list[tuple[int, dict[str, object], str, dict[str, object], dict[str, object], str]] = []
+    running_payload, running_replacements = re.subn(rb"(?m)^status: done$", b"status: running", current_payload, count=1)
+    running_sha256 = hashlib.sha256(running_payload).hexdigest()
+    for index, record in enumerate(owner_records[report_index + 1 :], report_index + 1):
+        event = successful_event(record, owner_session_id, owner_cwd)
+        if event is None:
+            continue
+        tokens, stdout, turn_id = event
+        if not tokens or Path(tokens[0]).name != "omo_task_status.py" or tokens[-1] != str(original_task):
+            continue
+        options = tokens[1:-1]
+        if len(options) != 13 or options[:3] != ["--root", str(root), "--complete-live-no-mail"]:
+            continue
+        pairs = dict(zip(options[3::2], options[4::2], strict=True))
+        if (
+            running_replacements == 1
+            and pairs.get("--active-target") == current_snapshot[0]["runat"]
+            and pairs.get("--manager-target") == manager_target
+            and pairs.get("--expected-task-sha256") == running_sha256
+            and pairs.get("--expected-todo-sha256") == source_todo_sha256
+            and source_todo_size > 0
+            and re.fullmatch(r"%[0-9]+", str(pairs.get("--expected-pane-id", ""))) is not None
+            and stdout == f"Completed live worker metadata for {current_snapshot[0]['runat']} without email or pane mutation.\nStatus set to done.\n"
+        ):
+            call, output = linked_execution(owner_records, index, turn_id, stdout)
+            completion_matches.append((index, record, turn_id, call, output, str(pairs["--expected-pane-id"])))
+    if len(completion_matches) != 1:
+        raise ReceiptError("split no-mail owner transcript lacks one exact metadata completion")
+    completion_index, completion_record, _completion_turn, completion_call, completion_output_record, pane_id = completion_matches[0]
+    def event_time(record: dict[str, object]) -> datetime:
+        raw = record.get("timestamp")
+        if not isinstance(raw, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", raw) is None:
+            raise ReceiptError("split no-mail evidence timestamp is not canonical UTC")
+        try:
+            parsed = datetime.fromisoformat(f"{raw[:-1]}+00:00")
+        except ValueError as exc:
+            raise ReceiptError("split no-mail evidence timestamp is not canonical UTC") from exc
+        if parsed.tzinfo != timezone.utc:
+            raise ReceiptError("split no-mail evidence timestamp is not canonical UTC")
+        return parsed
+
+    report_time = event_time(report_record)
+    manager_identity_time = event_time(manager_identity_record)
+    review_time = event_time(review_record)
+    removal_time = event_time(removal_record)
+    completion_time = event_time(completion_record)
+    if manager_identity_index >= review_index or not manager_identity_time < review_time or not report_time < review_time <= removal_time < completion_time:
+        raise ReceiptError("split no-mail report, removal, and completion order is invalid")
+    if pane_id != SPLIT_NO_MAIL_PANE_ID:
+        raise ReceiptError("split no-mail owner pane identity is invalid")
+    for record in manager_records[review_index : removal_index + 1]:
+        payload = record.get("payload")
+        item = payload.get("item") if isinstance(payload, dict) else None
+        if command_mentions_email_helper(item.get("command") if isinstance(item, dict) else None):
+            raise ReceiptError("split no-mail manager transition contains a Human email command")
+    for record in owner_records:
+        payload = record.get("payload")
+        item = payload.get("item") if isinstance(payload, dict) else None
+        if command_mentions_email_helper(item.get("command") if isinstance(item, dict) else None):
+            raise ReceiptError("split no-mail owner transition contains a Human email command")
+    if (
+        read_append_only_session_prefix(evidence) != owner_prefix
+        or read_append_only_session_prefix(evidence, manager=True) != manager_prefix
+        or regular_file_bytes(original_task, maximum=MAX_ROUTE_FILE_BYTES, field="completed task") != current_payload
+        or regular_file_bytes(root / "TODO.md", maximum=MAX_ROUTE_FILE_BYTES, field="TODO") != todo_payload
+    ):
+        raise ReceiptError("split no-mail evidence changed during verification")
+    return {
+        "schema": "omo-report-terminal-task-transition/v1",
+        "task_ref": original_task.relative_to(root).as_posix(),
+        "committed_running_sha256": source_sha256,
+        "committed_running_size_bytes": source_size,
+        "current_done_sha256": hashlib.sha256(current_payload).hexdigest(),
+        "current_done_size_bytes": len(current_payload),
+        "todo_previous_row": f"{original_task.relative_to(root).as_posix()} {current_snapshot[0]['runat']}",
+        "commitment_binding": {
+            "kind": "codex-top-level-no-mail-prefix",
+            "evidence_mode": "split-owner-manager",
+            "session_id": owner_session_id,
+            "pane_id": pane_id,
+            "owner_transcript": str(evidence.transcript),
+            "owner_transcript_prefix_sha256": evidence.transcript_prefix_sha256,
+            "owner_transcript_prefix_size_bytes": evidence.transcript_prefix_size_bytes,
+            "manager_session_id": manager_session_id,
+            "manager_target": manager_target,
+            "manager_transcript": str(evidence.manager_transcript),
+            "manager_transcript_prefix_sha256": evidence.manager_transcript_prefix_sha256,
+            "manager_transcript_prefix_size_bytes": evidence.manager_transcript_prefix_size_bytes,
+            "report_record_sha256": hashlib.sha256(canonical_json(report_record)).hexdigest(),
+            "report_call_sha256": hashlib.sha256(canonical_json(report_call)).hexdigest(),
+            "report_output_sha256": hashlib.sha256(canonical_json(report_output_record)).hexdigest(),
+            "manager_review_record_sha256": hashlib.sha256(canonical_json(review_record)).hexdigest(),
+            "manager_review_call_sha256": hashlib.sha256(canonical_json(review_call)).hexdigest(),
+            "manager_review_output_sha256": hashlib.sha256(canonical_json(review_output_record)).hexdigest(),
+            "manager_identity_record_sha256": hashlib.sha256(canonical_json(manager_identity_record)).hexdigest(),
+            "manager_identity_call_sha256": hashlib.sha256(canonical_json(manager_identity_call)).hexdigest(),
+            "manager_identity_output_sha256": hashlib.sha256(canonical_json(manager_identity_output)).hexdigest(),
+            "removal_record_sha256": hashlib.sha256(canonical_json(removal_record)).hexdigest(),
+            "removal_call_sha256": hashlib.sha256(canonical_json(removal_call)).hexdigest(),
+            "removal_output_sha256": hashlib.sha256(canonical_json(removal_output_record)).hexdigest(),
+            "completion_record_sha256": hashlib.sha256(canonical_json(completion_record)).hexdigest(),
+            "completion_call_sha256": hashlib.sha256(canonical_json(completion_call)).hexdigest(),
+            "completion_output_sha256": hashlib.sha256(canonical_json(completion_output_record)).hexdigest(),
+            "no_listed_human_mail_command": True,
+            "verified_removal_note_count": 1,
+        },
+    }
+
+
 def session_root_retained_provenance(
     root: Path,
     original_task: Path,
@@ -6823,12 +7464,28 @@ def session_root_retained_provenance(
     todo_payload: bytes,
     source_sha256: str,
     source_size: int,
+    source_todo_sha256: str,
+    source_todo_size: int,
     replay_id: str,
     manager_target: str,
-    evidence: RootRetainedEvidence | RootRetainedNoMailEvidence,
+    evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | RootRetainedSplitNoMailEvidence,
 ) -> dict[str, object]:
     """Authenticate report-time task bytes and their narrow post-report evolution."""
 
+    if isinstance(evidence, RootRetainedSplitNoMailEvidence):
+        return split_no_mail_root_retained_provenance(
+            root,
+            original_task,
+            current_payload,
+            todo_payload,
+            source_sha256,
+            source_size,
+            source_todo_sha256,
+            source_todo_size,
+            replay_id,
+            manager_target,
+            evidence,
+        )
     if isinstance(evidence, RootRetainedNoMailEvidence):
         return top_level_no_mail_root_retained_provenance(
             root,
@@ -7550,7 +8207,7 @@ def registered_root_retained_cleanup_provenance(
     source_size: int,
     replay_id: str,
     manager_target: str,
-    root_retained_evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | None,
+    root_retained_evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | RootRetainedSplitNoMailEvidence | None,
 ) -> dict[str, object] | None:
     """Authenticate one registered post-report cleanup against Git custody."""
 
@@ -7667,7 +8324,7 @@ def infer_archived_task_path(
     route_evidence: tuple[dict[str, object], ...] | list[dict[str, object]],
     replay_id: str,
     manager_target: str,
-    root_retained_evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | None = None,
+    root_retained_evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | RootRetainedSplitNoMailEvidence | None = None,
 ) -> tuple[Path, dict[str, object]]:
     """Authenticate one archived task through immutable report and Git custody."""
 
@@ -7777,6 +8434,8 @@ def infer_archived_task_path(
                 todo_payload,
                 str(source_sha256),
                 source_size,
+                str(todo_records[0]["sha256"]),
+                int(todo_records[0].get("size_bytes", 0)),
                 replay_id,
                 manager_target,
                 root_retained_evidence,
@@ -8045,6 +8704,8 @@ def export_archived_consumed_report(
     acknowledgment_message_id: str = "",
     published_result_commit: str = "",
     no_mail_transcript: Path | None = None,
+    split_no_mail_owner_transcript: Path | None = None,
+    split_no_mail_manager_transcript: Path | None = None,
 ) -> bytes:
     """Infer an archived transaction only from its exact private envelope."""
 
@@ -8190,6 +8851,19 @@ def export_archived_consumed_report(
         if root_retained_evidence is not None:
             raise ReceiptError("root-retained evidence provenance is ambiguous")
         root_retained_evidence = capture_root_retained_no_mail_evidence(no_mail_transcript)
+    split_presence = (
+        split_no_mail_owner_transcript is not None,
+        split_no_mail_manager_transcript is not None,
+    )
+    if any(split_presence) and not all(split_presence):
+        raise ReceiptError("split no-mail evidence requires owner and manager transcripts")
+    if all(split_presence):
+        if root_retained_evidence is not None:
+            raise ReceiptError("root-retained evidence provenance is ambiguous")
+        root_retained_evidence = capture_root_retained_split_no_mail_evidence(
+            split_no_mail_owner_transcript,  # type: ignore[arg-type]
+            split_no_mail_manager_transcript,  # type: ignore[arg-type]
+        )
     archived_task, _git_provenance = infer_archived_task_path(
         root,
         task,
@@ -8295,6 +8969,13 @@ def main() -> int:
                 Path(sys.argv[2]),
                 Path(sys.argv[3]),
                 no_mail_transcript=Path(sys.argv[4]),
+            )
+        elif len(sys.argv) == 6 and sys.argv[1] == "--export-archived-consumed":
+            output = export_archived_consumed_report(
+                Path(sys.argv[2]),
+                Path(sys.argv[3]),
+                split_no_mail_owner_transcript=Path(sys.argv[4]),
+                split_no_mail_manager_transcript=Path(sys.argv[5]),
             )
         elif len(sys.argv) == 4 and sys.argv[1] == "--export-archived-consumed":
             output = export_archived_consumed_report(Path(sys.argv[2]), Path(sys.argv[3]))

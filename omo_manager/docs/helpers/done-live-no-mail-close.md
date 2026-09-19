@@ -18,6 +18,7 @@ command
   - this authority waives only the missing terminal-report receipt; every task, TODO, ownership, pane, process, session, and audit guard remains
   - the normal live-pane path retains the close-proof guard; the exact documented absence recovery instead requires that no proof artifact exists and records no kill claim
 - when the done task was moved into `YYYYMM/` and removed from TODO, or remains at its original path under one canonical `previous` row, first create the export with `omo_report.sh --export-archived-consumed PRIVATE_ENVELOPE --consumed-attestation-output ABSOLUTE_FILE`
+  - if the manager removed the queue item separately, add the split owner and manager transcript options documented in `root-retained-session-custody.md`
   - validate it with `omo_report.sh --validate-consumed-export FILE --expected-sha256 SHA256`
   - pass the archived task path, its original manager target, the export, and its digest to the same describe command
 - run `omo_task_status.py --close-done-live-no-mail TASK.md`
@@ -40,6 +41,8 @@ task custody
   - a root-retained task requires the exact report-time bytes after only reversing `status: done` to `status: running`, plus exactly one literal `previous:` header and one exact unindented row
   - a root-retained task whose ordered queue was removed after report time may instead use the transcript-prefix custody contract in `root-retained-session-custody.md`; the described live Codex session must match that transcript
 - keep the TODO bytes unchanged
+- split owner/manager evidence also keeps the done task bytes unchanged; its
+  private audit ends in `complete-preserved` instead of appending a close note
 
 pane closure
 

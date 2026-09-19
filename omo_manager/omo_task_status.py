@@ -88,6 +88,11 @@ from omo_manager.omo_completion_email import require_owner_completion
 from omo_manager.omo_completion_email import validate_completion_notice_delivery
 from omo_manager.omo_report_receipt import ReceiptError
 from omo_manager.omo_report_receipt import REPORT_ONLY_DISPOSITION_RE
+from omo_manager.omo_report_receipt import SPLIT_NO_MAIL_MANAGER_TARGET
+from omo_manager.omo_report_receipt import SPLIT_NO_MAIL_OWNER_SESSION
+from omo_manager.omo_report_receipt import SPLIT_NO_MAIL_OWNER_TARGET
+from omo_manager.omo_report_receipt import SPLIT_NO_MAIL_PANE_ID
+from omo_manager.omo_report_receipt import SPLIT_NO_MAIL_TASK
 from omo_manager.omo_report_receipt import validate_consumed_closure_export_file
 
 PENDING_MARKER = "(pending)"
@@ -115,6 +120,7 @@ DONE_LIVE_CLOSE_STATES = frozenset(
         "prepared",
         "terminalized",
         "owner-stopped",
+        "complete-preserved",
         "note-prepared",
         "complete",
         "human-authorized-absence-prepared",
@@ -5647,6 +5653,7 @@ def parse_done_live_close_audit(args: Args, path: Path, text: str) -> DoneLiveCl
     pre_terminal = state in {"reserved", "prepared"}
     absence = state in {"human-authorized-absence-prepared", "human-authorized-absence-complete"}
     note_ready = state in {"note-prepared", "complete"} or absence
+    task_preserved = state == "complete-preserved"
     if (
         state not in DONE_LIVE_CLOSE_STATES
         or version not in {
@@ -5679,7 +5686,8 @@ def parse_done_live_close_audit(args: Args, path: Path, text: str) -> DoneLiveCl
         or ((pre_terminal or absence) and (capture_sha256 or commitment != "0" * 64))
         or (not pre_terminal and not absence and (SHA256_RE.fullmatch(capture_sha256) is None or SHA256_RE.fullmatch(commitment) is None or commitment == "0" * 64))
         or (note_ready and (not note or SHA256_RE.fullmatch(completed_sha256) is None))
-        or (not note_ready and (note or completed_sha256))
+        or (task_preserved and (note or completed_sha256 != args.expected_task_sha256))
+        or (not note_ready and not task_preserved and (note or completed_sha256))
         or (
             note_ready
             and (
@@ -5714,7 +5722,7 @@ def validate_done_live_task(args: Args, text: str, audit: DoneLiveCloseAudit | N
     ):
         raise TaskFrontmatterError("done-live close requires one done v1 non-manager worker with an empty queue and no pending marker.")
     current_sha256 = hashlib.sha256(text.encode()).hexdigest()
-    if audit is None or audit.state in {"reserved", "prepared", "terminalized", "owner-stopped"}:
+    if audit is None or audit.state in {"reserved", "prepared", "terminalized", "owner-stopped", "complete-preserved"}:
         if current_sha256 != args.expected_task_sha256:
             raise TaskFrontmatterError("done-live close task bytes do not match --expected-task-sha256.")
         return metadata
@@ -6223,6 +6231,11 @@ def validate_consumed_closure_attestation(
                 and (
                     CODEX_SESSION_RE.fullmatch(str(session_binding.get("session_id", ""))) is None
                     or (
+                        session_binding.get("evidence_mode") == "split-owner-manager"
+                        and bool(args.expected_pane_id)
+                        and session_binding.get("pane_id") != args.expected_pane_id
+                    )
+                    or (
                         bool(args.expected_session_id)
                         and session_binding.get("session_id") != args.expected_session_id
                     )
@@ -6710,6 +6723,21 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
     archived = prevalidated_attestation is not None and prevalidated_attestation.get("archive_custody") is not None
     custody = prevalidated_attestation.get("archive_custody") if prevalidated_attestation is not None else None
     monthly_archive = isinstance(custody, dict) and custody.get("schema") == "omo-report-archived-task-custody/v1"
+    provenance = custody.get("git_provenance") if isinstance(custody, dict) else None
+    commitment_binding = provenance.get("commitment_binding") if isinstance(provenance, dict) else None
+    split_evidence = (
+        isinstance(commitment_binding, dict)
+        and commitment_binding.get("evidence_mode") == "split-owner-manager"
+    )
+    if split_evidence and (
+        relative_task_ref(args.root, path) != SPLIT_NO_MAIL_TASK
+        or args.active_target != SPLIT_NO_MAIL_OWNER_TARGET
+        or args.manager_target != SPLIT_NO_MAIL_MANAGER_TARGET
+        or args.expected_session_id != SPLIT_NO_MAIL_OWNER_SESSION
+        or args.expected_pane_id != SPLIT_NO_MAIL_PANE_ID
+    ):
+        raise TaskFrontmatterError("split no-mail close does not match its exact one-worker authority.")
+    preserve_task_bytes = split_evidence
     locked_paths = {path, todo}
     if manager_path is not None:
         locked_paths.add(manager_path)
@@ -7011,9 +7039,18 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                 if not has_bound_close_proof(proof_path, close_audit.close_proof_commitment, terminalized_sha256) or path_artifact_exists(started_path) or done_live_pane_state(args) != "absent":
                     raise TaskFrontmatterError("done-live close stopped state lacks exact durable absence evidence.")
                 unchanged_evidence()
-                note = close_note(args.active_target, args.expected_session_id)
-                completed_sha256 = hashlib.sha256(f"{current_text}{note}".encode()).hexdigest()
-                advance_audit(replace(close_audit, state="note-prepared", close_note=note, completed_task_sha256=completed_sha256))
+                if preserve_task_bytes:
+                    advance_audit(
+                        replace(
+                            close_audit,
+                            state="complete-preserved",
+                            completed_task_sha256=args.expected_task_sha256,
+                        )
+                    )
+                else:
+                    note = close_note(args.active_target, args.expected_session_id)
+                    completed_sha256 = hashlib.sha256(f"{current_text}{note}".encode()).hexdigest()
+                    advance_audit(replace(close_audit, state="note-prepared", close_note=note, completed_task_sha256=completed_sha256))
 
             if close_audit.state == "note-prepared":
                 terminalized_sha256 = terminalized_done_live_audit_sha256(args, path, close_audit)
@@ -7030,7 +7067,7 @@ def close_done_live_no_mail(args: Args, path: Path, text: str, before: os.stat_r
                 unchanged_evidence()
                 advance_audit(replace(close_audit, state="complete"))
 
-            if close_audit.state != "complete":
+            if close_audit.state not in {"complete", "complete-preserved"}:
                 raise TaskFrontmatterError("done-live close audit did not reach its complete state.")
             terminalized_sha256 = terminalized_done_live_audit_sha256(args, path, close_audit)
             if not has_bound_close_proof(proof_path, close_audit.close_proof_commitment, terminalized_sha256) or path_artifact_exists(started_path) or done_live_pane_state(args) != "absent":

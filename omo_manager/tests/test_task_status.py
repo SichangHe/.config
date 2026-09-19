@@ -3323,9 +3323,31 @@ class TaskStatusTests(unittest.TestCase):
             ).hexdigest()
             args = replace(args, terminal_evidence=attestation["attestation_id"])
             validate_consumed_closure_attestation(args, task, attestation, text.encode())
+            provenance["commitment_binding"].update(
+                {"evidence_mode": "split-owner-manager", "pane_id": args.expected_pane_id}
+            )
+            unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
+            attestation["attestation_id"] = hashlib.sha256(
+                json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            split_args = replace(args, terminal_evidence=attestation["attestation_id"])
+            validate_consumed_closure_attestation(split_args, task, attestation, text.encode())
+            validate_consumed_closure_attestation(
+                replace(split_args, expected_pane_id="", expected_session_id=""),
+                task,
+                attestation,
+                text.encode(),
+            )
             with self.assertRaisesRegex(TaskFrontmatterError, "archive custody changed"):
                 validate_consumed_closure_attestation(
-                    replace(args, expected_session_id="11111111-2222-3333-4444-555555555555"),
+                    replace(split_args, expected_pane_id="%9999"),
+                    task,
+                    attestation,
+                    text.encode(),
+                )
+            with self.assertRaisesRegex(TaskFrontmatterError, "archive custody changed"):
+                validate_consumed_closure_attestation(
+                    replace(split_args, expected_session_id="11111111-2222-3333-4444-555555555555"),
                     task,
                     attestation,
                     text.encode(),
@@ -3334,7 +3356,7 @@ class TaskStatusTests(unittest.TestCase):
             todo.write_text(todo_text.replace("task.md wl:2\n", ""), encoding="utf-8")
 
             with self.assertRaisesRegex(TaskFrontmatterError, "archive custody changed"):
-                validate_consumed_closure_attestation(args, task, attestation, text.encode())
+                validate_consumed_closure_attestation(split_args, task, attestation, text.encode())
 
     def test_done_live_evidence_collects_guarded_current_close_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3918,6 +3940,103 @@ class TaskStatusTests(unittest.TestCase):
             proof = args.audit_output.with_name(f".{args.audit_output.name}.owner-stopped")
             self.assertTrue(proof.is_file())
             self.assertIn("no email or task reopening", output.getvalue())
+
+    def test_split_evidence_close_preserves_done_task_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_done_live_close_case(root)
+            task.unlink()
+            task = root / "mail_unread_0649.md"
+            text = text.replace("runat: wl:2", "runat: config:40").replace("managerat: wl:1", "managerat: config:27")
+            task.write_text(text, encoding="utf-8")
+            todo_text = todo_text.replace("task.md wl:2", "mail_unread_0649.md config:40")
+            todo.write_text(todo_text, encoding="utf-8")
+            receipt = root / "private" / "split-export.json"
+            receipt.write_text("{}\n", encoding="utf-8")
+            receipt.chmod(0o600)
+            args = replace(
+                args,
+                task_file=Path("mail_unread_0649.md"),
+                active_target="config:40",
+                manager_target="config:27",
+                expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                expected_pane_id="%3551",
+                expected_session_id="01a0bb70-e246-7031-9fd3-c0d761556c57",
+                manager_consumed_report_receipt=receipt,
+                manager_consumed_report_receipt_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest(),
+            )
+            manager = root / "manager.md"
+            manager.write_text(task_frontmatter(status="long_running", runat="config:27", is_manager=True), encoding="utf-8")
+            attestation = {
+                "archive_custody": {
+                    "git_provenance": {
+                        "commitment_binding": {"evidence_mode": "split-owner-manager"},
+                    },
+                    "schema": "omo-report-terminal-task-custody/v1",
+                },
+            }
+            state = {"live": True}
+            capture_sha256 = "c" * 64
+
+            def target_pane(_target: str) -> str:
+                return "%3551" if state["live"] else ""
+
+            def start_ticks(_pid: int) -> int | None:
+                return 73 if state["live"] else None
+
+            def terminalize(*values: object) -> ExitedCodexShell:
+                callback = values[6]
+                assert callable(callback)
+                callback()
+                return ExitedCodexShell(args.expected_session_id, capture_sha256)
+
+            def close(*values: object) -> None:
+                proof = Path(str(values[4]))
+                audit = Path(str(values[5]))
+                write_done_live_close_started(
+                    proof,
+                    audit,
+                    str(values[6]),
+                    str(values[7]),
+                    str(values[12]),
+                    args.active_target,
+                    args.expected_pane_id,
+                    args.expected_pane_pid,
+                    args.expected_pane_start_ticks,
+                )
+                state["live"] = False
+                with (
+                    patch("omo_manager.omo_codex_stop.pane_id", return_value=""),
+                    patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=None),
+                ):
+                    promote_done_live_close_started(
+                        proof,
+                        audit,
+                        str(values[7]),
+                        str(values[12]),
+                        args.active_target,
+                        args.expected_pane_id,
+                        args.expected_pane_pid,
+                        args.expected_pane_start_ticks,
+                    )
+
+            with (
+                patch("omo_manager.omo_task_status.prevalidate_manager_consumed_export", return_value=(attestation, manager)),
+                patch("omo_manager.omo_task_status.validate_manager_consumed_report", return_value=True),
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_task_status.pane_id", side_effect=target_pane),
+                patch("omo_manager.omo_task_status.process_start_ticks", side_effect=start_ticks),
+                patch("omo_manager.omo_task_status.terminalize_bound_codex_to_shell_with_consumed_report", side_effect=terminalize),
+                patch("omo_manager.omo_task_status.validate_exited_codex_shell_with_consumed_report", return_value=capture_sha256),
+                patch("omo_manager.omo_task_status.close_bound_tmux_target", side_effect=close),
+            ):
+                self.assertEqual((args.active_target, args.expected_session_id), close_done_live_no_mail(args, task, text, task.stat()))
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            audit = json.loads(args.audit_output.read_text(encoding="utf-8"))
+            self.assertEqual("complete-preserved", audit["state"])
+            self.assertEqual(args.expected_task_sha256, audit["completed_task_sha256"])
 
     def test_source1845_human_authority_closes_only_the_bound_done_live_pane(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

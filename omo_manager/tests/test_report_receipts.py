@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -21,6 +22,8 @@ from unittest.mock import patch
 from omo_manager import omo_report_receipt
 from omo_manager.omo_report_receipt import OwnerPrefixBinding, ReceiptError, canonical_json, persist_consumed_closure_attestation, regular_file_tail, validate_committed_route_evidence, validate_consumed_closure_export
 from omo_manager.omo_task_status import Args as TaskStatusArgs
+from omo_manager.omo_task_status import TaskFrontmatterError
+from omo_manager.omo_task_status import describe_done_live_no_mail
 from omo_manager.omo_task_status import validate_manager_consumed_report
 from omo_manager.omo_task_metadata import render_v1_pending_scalar
 
@@ -77,7 +80,14 @@ def frontmatter(*, runat: str, managerat: str, is_manager: bool = False) -> str:
     )
 
 
-def fixture(tmp_path: Path, *, body: bytes = b"private report\n", managerat: str = "main:0.0") -> ReportFixture:
+def fixture(
+    tmp_path: Path,
+    *,
+    body: bytes = b"private report\n",
+    managerat: str = "main:0.0",
+    worker_target: str = "cfg:7",
+    pane: str = "%1701",
+) -> ReportFixture:
     root = tmp_path / "logs"
     root.mkdir()
     home = tmp_path / "home"
@@ -86,8 +96,8 @@ def fixture(tmp_path: Path, *, body: bytes = b"private report\n", managerat: str
     bin_dir.mkdir()
     tmux = bin_dir / "tmux"
     tmux.write_text(
-        """#!/usr/bin/env bash
-printf 'cfg\\t7\\t0\\t%%1701\\tworker\\n'
+        f"""#!/usr/bin/env bash
+printf '{worker_target.partition(':')[0]}\\t{worker_target.partition(':')[2]}\\t0\\t{pane.replace('%', '%%')}\\tworker\\n'
 """,
         encoding="utf-8",
     )
@@ -97,8 +107,8 @@ printf 'cfg\\t7\\t0\\t%%1701\\tworker\\n'
         f"OMO_WORK_LOGS_ROOT={root}\nOMO_MANAGER_TMUX_TARGET=main:0.0\n",
         encoding="utf-8",
     )
-    (root / "TODO.md").write_text("current:\nworker.md cfg:7\n", encoding="utf-8")
-    (root / "worker.md").write_text(frontmatter(runat="cfg:7", managerat=managerat), encoding="utf-8")
+    (root / "TODO.md").write_text(f"current:\nworker.md {worker_target}\n", encoding="utf-8")
+    (root / "worker.md").write_text(frontmatter(runat=worker_target, managerat=managerat), encoding="utf-8")
     message = tmp_path / "message.md"
     message.write_bytes(body)
     message.chmod(0o600)
@@ -119,20 +129,27 @@ printf 'cfg\\t7\\t0\\t%%1701\\tworker\\n'
             "OMO_MANAGER_LOCAL_ENV": str(local_env),
             "OMO_REPORT_ACK_TIMEOUT_S": "2",
             "PATH": f"{bin_dir}:{env['PATH']}",
-            "TMUX_PANE": "%1701",
+            "TMUX_PANE": pane,
         }
     )
     return ReportFixture(root=root, message=message, env=env)
 
 
-def active_manager_fixture(tmp_path: Path, *, body: bytes = b"unused active-route body\n") -> tuple[ReportFixture, Path, bytes]:
-    case = fixture(tmp_path, body=body, managerat="vl:2")
+def active_manager_fixture(
+    tmp_path: Path,
+    *,
+    body: bytes = b"unused active-route body\n",
+    worker_target: str = "cfg:7",
+    manager_target: str = "vl:2",
+    pane: str = "%1701",
+) -> tuple[ReportFixture, Path, bytes]:
+    case = fixture(tmp_path, body=body, managerat=manager_target, worker_target=worker_target, pane=pane)
     manager = case.root / "manager.md"
     (case.root / "TODO.md").write_text(
-        "current:\nworker.md cfg:7\nmanager.md vl:2\n",
+        f"current:\nworker.md {worker_target}\nmanager.md {manager_target}\n",
         encoding="utf-8",
     )
-    owner = frontmatter(runat="vl:2", managerat="main:0.0", is_manager=True).encode()
+    owner = frontmatter(runat=manager_target, managerat="main:0.0", is_manager=True).encode()
     manager.write_bytes(owner)
     return case, manager, owner
 
@@ -420,6 +437,7 @@ def export_archived_report(
     *,
     session_evidence: tuple[Path, Path, str, str] | None = None,
     no_mail_transcript: Path | None = None,
+    split_no_mail_transcripts: tuple[Path, Path] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [
         str(REPORT),
@@ -444,6 +462,15 @@ def export_archived_report(
         )
     if no_mail_transcript is not None:
         command.extend(("--root-retained-no-mail-transcript", str(no_mail_transcript)))
+    if split_no_mail_transcripts is not None:
+        command.extend(
+            (
+                "--root-retained-split-no-mail-owner-transcript",
+                str(split_no_mail_transcripts[0]),
+                "--root-retained-split-no-mail-manager-transcript",
+                str(split_no_mail_transcripts[1]),
+            )
+        )
     return subprocess.run(
         command,
         cwd=case.root.parent,
@@ -466,11 +493,27 @@ def root_retained_no_mail_fixture(
     no_mail_task_contract: str | None = None,
     manager_pending_done: bool = False,
     combined_describe: bool = False,
+    worker_target: str = "cfg:7",
+    manager_target: str = "vl:2",
+    task_name: str = "worker.md",
+    pane: str = "%1701",
+    session_id: str = "11111111-2222-3333-4444-555555555555",
 ) -> tuple[ReportFixture, Path, Path, Path, str]:
     if human_email and manager_pending_done:
         raise AssertionError("terminal manager-pending fixtures are no-mail only")
-    case, manager, _owner = active_manager_fixture(tmp_path)
+    case, manager, _owner = active_manager_fixture(
+        tmp_path,
+        worker_target=worker_target,
+        manager_target=manager_target,
+        pane=pane,
+    )
     task = case.root / "worker.md"
+    if task_name != task.name:
+        task = task.rename(case.root / task_name)
+        (case.root / "TODO.md").write_text(
+            f"current:\n{task_name} {worker_target}\nmanager.md {manager_target}\n",
+            encoding="utf-8",
+        )
     pending_item = (
         "🧑 Finish the bounded classification and email the result."
         if human_email
@@ -503,11 +546,11 @@ def root_retained_no_mail_fixture(
         source.write_text(f"{authority_text}\n", encoding="utf-8")
         source.chmod(0o600)
     report_time_task = (
-        frontmatter(runat="cfg:7", managerat="vl:2").replace(
+        frontmatter(runat=worker_target, managerat=manager_target).replace(
             "pending_task_items: []",
             f"pending_task_items:\n  - {pending_rendering}",
         )
-        + '<manager_delegation from="vl:2">\n'
+        + f'<manager_delegation from="{manager_target}">\n'
         + task_contract
         + "</manager_delegation>\n"
         + human_instruction
@@ -544,10 +587,9 @@ def root_retained_no_mail_fixture(
         encoding="utf-8",
     )
     (case.root / "TODO.md").write_text(
-        "current:\nmanager.md vl:2\n\nprevious:\nworker.md cfg:7\n",
+        f"current:\nmanager.md {manager_target}\n\nprevious:\n{task_name} {worker_target}\n",
         encoding="utf-8",
     )
-    session_id = "11111111-2222-3333-4444-555555555555"
     turn_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
     report_call_id = "call_report"
     acknowledgment_call_id = "call_acknowledgment"
@@ -571,9 +613,9 @@ def root_retained_no_mail_fixture(
         )
         report_output = (canonical_json(description) + canonical_json(acceptance)).decode()
     if human_email:
-        acknowledgment_command = "omo_codex_status.py vl:2 --lines 24"
+        acknowledgment_command = f"omo_codex_status.py {manager_target} --lines 24"
         acknowledgment_output = (
-            f'<agent_message from="cfg:7">\n'
+            f'<agent_message from="{worker_target}">\n'
             "Agent report received; review it and handle any follow-up:\n"
             f"(from agent {envelope})\n"
             "</agent_message>\n"
@@ -669,7 +711,7 @@ def root_retained_no_mail_fixture(
         terminal_ordinal = 10
     elif manager_pending_done:
         manager_directive = (
-            '<agent_message from="vl:2">\n'
+            f'<agent_message from="{manager_target}">\n'
             "Your one-shot evaluation is complete. Remove your exact evaluation pending item "
             "using `omo_pending.py remove --help`, citing your immutable report, with no Human email.\n"
             "</agent_message>"
@@ -756,6 +798,159 @@ def archive_root_retained_no_mail_task(case: ReportFixture, task: Path) -> Path:
     subprocess.run(["git", "-C", str(case.root), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(case.root), "commit", "-qm", "archive completed task"], check=True)
     return archived
+
+
+def split_no_mail_transcripts(
+    tmp_path: Path,
+    *,
+    combined_describe: bool = False,
+) -> tuple[ReportFixture, Path, Path, Path, Path]:
+    case, envelope, task, transcript, _replay_id = root_retained_no_mail_fixture(
+        tmp_path,
+        manager_pending_done=True,
+        combined_describe=combined_describe,
+        worker_target="config:40",
+        manager_target="config:27",
+        task_name="mail_unread_0649.md",
+        pane="%3551",
+        session_id="01a0bb70-e246-7031-9fd3-c0d761556c57",
+    )
+    records = [json.loads(line) for line in transcript.read_text(encoding="utf-8").splitlines()]
+    report_acceptance = json.loads(str(records[2]["payload"]["item"]["stdout"]).splitlines()[-1])
+    commitment = json.loads(Path(report_acceptance["transfer_receipt"]["commitment_path"]).read_text(encoding="utf-8"))
+    todo_source = next(
+        source for source in commitment["preflight"]["routing_sources"]
+        if Path(source["path"]).name == "TODO.md"
+    )
+    owner_session = str(records[0]["payload"]["id"])
+    owner_turn = str(records[1]["payload"]["internal_chat_message_metadata_passthrough"]["turn_id"])
+    cwd = Path(str(records[0]["payload"]["cwd"]))
+    pending_item = "Finish the bounded classification:\v\u00a0report it privately."
+    removal_command = records[7]["payload"]["item"]["command"][-1]
+    removal_tokens = shlex.split(removal_command)
+    removal_evidence = removal_tokens[removal_tokens.index("--evidence") + 1]
+
+    def execution(
+        ordinal: int,
+        call_id: str,
+        turn_id: str,
+        session_id: str,
+        command: str,
+        stdout: str,
+        timestamp: str,
+    ) -> list[dict[str, object]]:
+        return [
+            {
+                "ordinal": ordinal,
+                "timestamp": timestamp,
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "exec",
+                    "call_id": call_id,
+                    "input": f"const r = await tools.exec_command({json.dumps({'cmd': command})});",
+                    "internal_chat_message_metadata_passthrough": {"turn_id": turn_id},
+                },
+            },
+            {
+                "ordinal": ordinal + 1,
+                "timestamp": timestamp,
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "thread_id": session_id,
+                    "turn_id": turn_id,
+                    "item": {
+                        "type": "CommandExecution",
+                        "command": ["/bin/sh", "-lc", command],
+                        "cwd": f"file://{cwd}",
+                        "status": "completed",
+                        "stdout": stdout,
+                        "stderr": "",
+                        "aggregated_output": stdout,
+                        "formatted_output": stdout,
+                        "exit_code": 0,
+                        "source": "unified_exec_startup",
+                    },
+                },
+            },
+            {
+                "ordinal": ordinal + 2,
+                "timestamp": timestamp,
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": call_id,
+                    "output": [{"type": "input_text", "text": stdout}],
+                    "internal_chat_message_metadata_passthrough": {"turn_id": turn_id},
+                },
+            },
+        ]
+
+    for ordinal, record in enumerate(records[1:4], 1):
+        record["ordinal"] = ordinal
+        record["timestamp"] = "2026-09-19T21:19:22.000Z"
+    running = task.read_bytes().replace(b"status: done", b"status: running", 1)
+    completion_command = (
+        f"omo_task_status.py --root {case.root} --complete-live-no-mail --active-target config:40 "
+        f"--manager-target config:27 --expected-task-sha256 {hashlib.sha256(running).hexdigest()} "
+        f"--expected-todo-sha256 {todo_source['sha256']} --expected-pane-id %3551 {task}"
+    )
+    completion_stdout = "Completed live worker metadata for config:40 without email or pane mutation.\nStatus set to done.\n"
+    owner_records = [records[0], *records[1:4]]
+    owner_records.extend(
+        execution(4, "call_complete", owner_turn, owner_session, completion_command, completion_stdout, "2026-09-19T21:21:20.000Z")
+    )
+    owner_records.append(
+        {"ordinal": 7, "timestamp": "2026-09-19T21:21:21.000Z", "type": "event_msg", "payload": {"type": "task_complete", "turn_id": owner_turn}}
+    )
+    transcript.write_bytes(b"".join(canonical_json(record) for record in owner_records))
+
+    manager_session = "01a0bad1-b7fb-7842-acc5-df20a5fc3614"
+    manager_turn = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+    manager_records: list[dict[str, object]] = [
+        {
+            "ordinal": 0,
+            "timestamp": "2026-09-19T21:20:00.000Z",
+            "type": "session_meta",
+            "payload": {"session_id": manager_session, "id": manager_session, "cwd": str(cwd), "originator": "codex-tui", "source": "cli", "thread_source": "user"},
+        }
+    ]
+    identity_stdout = (
+        "OMO_AGENT_TMUX_TARGET=config:27.0\n"
+        "OMO_MANAGER_TMUX_TARGET=config:27.0\n"
+        f"OMO_WORK_LOGS_ROOT={case.root}\n"
+    )
+    manager_records.extend(
+        execution(1, "call_identity", "cccccccc-dddd-eeee-ffff-000000000000", manager_session, "env | rg '^(OMO|TASK|MANAGER)'", identity_stdout, "2026-09-19T21:19:59.000Z")
+    )
+    review_command = (
+        f"sed -n '1,400p' {envelope}; omo_task_edit.py summary {task}; "
+        f"rg -n '^\\(pending\\)$|{envelope.stem[:15]}' {case.root / 'manager.md'} | tail -n 20"
+    )
+    review_stdout = (
+        f"task_file: {task.name}\nstatus: running\nrunat: config:40\nmanagerat: config:27\nis_manager: false\n"
+        f"pending_task_items:\n  - {pending_item}\n"
+    )
+    review_records = execution(4, "call_review", manager_turn, manager_session, review_command, review_stdout, "2026-09-19T21:20:00.000Z")
+    review_records[2]["payload"]["output"][0]["text"] = envelope.read_text(encoding="utf-8") + review_stdout
+    manager_records.extend(review_records)
+    manager_remove = (
+        "key=$(printf '%s' completed | sha256sum | cut -d' ' -f1); "
+        f"omo_task_edit.py pending-remove {task} --item {shlex.quote(pending_item)} "
+        f"--evidence {shlex.quote(removal_evidence)} --completion-key \"$key\""
+    )
+    manager_remove_stdout = (
+        f"removed 1 pending item(s) from {task.name}; Verify the removed pending item was actually done or cancelled; "
+        "consider evaluator agents for uncertain verification.\n"
+    )
+    manager_records.extend(
+        execution(7, "call_remove", manager_turn, manager_session, manager_remove, manager_remove_stdout, "2026-09-19T21:20:20.000Z")
+    )
+    manager_transcript = tmp_path / f"rollout-split-manager-{manager_session}.jsonl"
+    manager_transcript.write_bytes(b"".join(canonical_json(record) for record in manager_records))
+    manager_transcript.chmod(0o600)
+    return case, envelope, task, transcript, manager_transcript
 
 
 def insert_no_mail_removal(transcript: Path, command: str, *, call_id: str) -> None:
@@ -4275,6 +4470,7 @@ return 75
             self.assertEqual(0, validated.returncode, validated.stderr)
             self.assertEqual(json.loads(verified.stdout), json.loads(validated.stdout))
             executed_sources = {
+                "omo_manager.omo_omnigent_identity": OMO_DIR / "omo_omnigent_identity.py",
                 "omo_manager.omo_pending_digest": OMO_DIR / "omo_pending_digest.py",
                 "omo_manager.omo_report_receipt": OMO_DIR / "omo_report_receipt.py",
                 "omo_manager.omo_task_lock": OMO_DIR / "omo_task_lock.py",
@@ -4392,7 +4588,6 @@ return 75
                 validated = validate_export_from(case, exported)
                 self.assertEqual(0, validated.returncode, validated.stderr)
                 self.assertEqual(attestation, json.loads(validated.stdout))
-
     def test_archived_consumed_export_authenticates_uncommitted_running_task_across_r100_rename(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -5068,6 +5263,173 @@ return 75
             self.assertEqual(0, validated.returncode, validated.stderr)
             self.assertEqual(attestation, json.loads(validated.stdout))
 
+    def test_root_retained_split_no_mail_custody_authenticates_manager_removal(self) -> None:
+        for combined_describe in (False, True):
+            with self.subTest(combined_describe=combined_describe), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                case, envelope, task, owner_transcript, manager_transcript = split_no_mail_transcripts(
+                    tmp_path,
+                    combined_describe=combined_describe,
+                )
+                exported = tmp_path / "root-retained-split-no-mail.json"
+
+                result = export_archived_report(
+                    case,
+                    envelope,
+                    exported,
+                    split_no_mail_transcripts=(owner_transcript, manager_transcript),
+                )
+
+                self.assertEqual(0, result.returncode, result.stderr)
+                attestation = json.loads(result.stdout)
+                binding = attestation["archive_custody"]["git_provenance"]["commitment_binding"]
+                self.assertEqual("split-owner-manager", binding["evidence_mode"])
+                self.assertEqual("%3551", binding["pane_id"])
+                self.assertEqual(hashlib.sha256(task.read_bytes()).hexdigest(), attestation["archive_custody"]["task_sha256"])
+                validated = validate_export_from(case, exported)
+                self.assertEqual(0, validated.returncode, validated.stderr)
+                self.assertEqual(attestation, json.loads(validated.stdout))
+                close_args = TaskStatusArgs(
+                    case.root,
+                    Path(task.name),
+                    "done",
+                    "",
+                    active_target="config:40",
+                    manager_target="config:27",
+                    terminal_evidence=attestation["attestation_id"],
+                    manager_consumed_report_receipt=exported,
+                    manager_consumed_report_receipt_sha256=hashlib.sha256(exported.read_bytes()).hexdigest(),
+                )
+                self.assertTrue(validate_manager_consumed_report(close_args, task, attestation))
+                describe_args = replace(
+                    close_args,
+                    status="",
+                    describe_done_live_no_mail=True,
+                    terminal_evidence="",
+                )
+                executed_sources = {
+                    "omo_manager.omo_omnigent_identity": OMO_DIR / "omo_omnigent_identity.py",
+                    "omo_manager.omo_pending_digest": OMO_DIR / "omo_pending_digest.py",
+                    "omo_manager.omo_report_receipt": OMO_DIR / "omo_report_receipt.py",
+                    "omo_manager.omo_task_lock": OMO_DIR / "omo_task_lock.py",
+                }
+                with ExitStack() as patches:
+                    for module_name, source in executed_sources.items():
+                        patches.enter_context(
+                            patch.object(
+                                sys.modules[module_name],
+                                "__executed_source_sha256__",
+                                hashlib.sha256(source.read_bytes()).hexdigest(),
+                                create=True,
+                            )
+                        )
+                    patches.enter_context(patch.object(omo_report_receipt, "__executed_helper_path__", str(REPORT), create=True))
+                    patches.enter_context(
+                        patch.object(
+                            omo_report_receipt,
+                            "__executed_helper_sha256__",
+                            hashlib.sha256(REPORT.read_bytes()).hexdigest(),
+                            create=True,
+                        )
+                    )
+                    patches.enter_context(patch("omo_manager.omo_task_status.park_target_pane_id", return_value="%3551"))
+                    patches.enter_context(patch("omo_manager.omo_task_status.pane_id", return_value="%3551"))
+                    patches.enter_context(patch("omo_manager.omo_task_status.bound_guarded_read", return_value="%3551\t4242\n"))
+                    patches.enter_context(patch("omo_manager.omo_task_status.process_start_ticks", return_value=73))
+                    patches.enter_context(
+                        patch(
+                            "omo_manager.omo_task_status.guarded_capture",
+                            return_value="› Ask Codex to do anything\n\n  gpt-5.5 xhigh · ~/.config · 1M used\n",
+                        )
+                    )
+                    patches.enter_context(
+                        patch(
+                            "omo_manager.omo_task_status.query_status_session_id",
+                            return_value=("01a0bb70-e246-7031-9fd3-c0d761556c57", "status"),
+                        )
+                    )
+                    description = describe_done_live_no_mail(describe_args, task, task.read_text(encoding="utf-8"), task.stat())
+                self.assertEqual("%3551", description["pane_id"])
+                self.assertEqual("01a0bb70-e246-7031-9fd3-c0d761556c57", description["session_id"])
+                with self.assertRaisesRegex(TaskFrontmatterError, "archive custody changed"):
+                    validate_manager_consumed_report(replace(close_args, expected_pane_id="%9999"), task, attestation)
+                with self.assertRaisesRegex(TaskFrontmatterError, "archive custody changed"):
+                    validate_manager_consumed_report(
+                        replace(close_args, expected_session_id="11111111-2222-3333-4444-555555555555"),
+                        task,
+                        attestation,
+                    )
+
+    def test_root_retained_split_no_mail_custody_rejects_mismatch(self) -> None:
+        for defect in (
+            "manager",
+            "manager identity",
+            "owner",
+            "queue",
+            "completion",
+            "todo digest",
+            "review command",
+            "timestamp",
+            "identity order",
+            "identity record order",
+            "post-completion email",
+        ):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                case, envelope, task, owner_transcript, manager_transcript = split_no_mail_transcripts(tmp_path)
+                path = manager_transcript if defect in {"manager", "manager identity", "queue", "review command", "identity order", "identity record order"} else owner_transcript
+                payload = path.read_text(encoding="utf-8")
+                if defect == "manager":
+                    payload = payload.replace(
+                        "01a0bad1-b7fb-7842-acc5-df20a5fc3614",
+                        "77777777-7777-8888-9999-aaaaaaaaaaaa",
+                    )
+                elif defect == "manager identity":
+                    payload = payload.replace("OMO_AGENT_TMUX_TARGET=config:27.0", "OMO_AGENT_TMUX_TARGET=config:28.0")
+                elif defect == "owner":
+                    payload = payload.replace("--active-target config:40", "--active-target config:41")
+                elif defect == "queue":
+                    payload = payload.replace("Finish the bounded classification", "Different pending item")
+                elif defect == "todo digest":
+                    payload = re.sub(r"--expected-todo-sha256 [0-9a-f]{64}", f"--expected-todo-sha256 {'1' * 64}", payload)
+                elif defect == "review command":
+                    payload = payload.replace("1,400p", "1,399p")
+                elif defect == "timestamp":
+                    payload = payload.replace("2026-09-19T21:21:20.000Z", "2026-09-19 21:21:20")
+                elif defect == "identity order":
+                    payload = payload.replace("2026-09-19T21:19:59.000Z", "2026-09-19T21:20:01.000Z")
+                elif defect == "identity record order":
+                    records = [json.loads(line) for line in payload.splitlines()]
+                    identity = records[1:4]
+                    records = [records[0], *records[4:], *identity]
+                    payload = b"".join(canonical_json(record) for record in records).decode()
+                elif defect == "post-completion email":
+                    records = [json.loads(line) for line in payload.splitlines()]
+                    records.append(
+                        {
+                            "ordinal": 8,
+                            "timestamp": "2026-09-19T21:21:22.000Z",
+                            "type": "event_msg",
+                            "payload": {
+                                "type": "item_completed",
+                                "item": {"command": ["/bin/sh", "-lc", "sendmail human@example.test"]},
+                            },
+                        }
+                    )
+                    payload = b"".join(canonical_json(record) for record in records).decode()
+                else:
+                    payload = payload.replace("Status set to done.", "Status remains running.")
+                path.write_text(payload, encoding="utf-8")
+
+                result = export_archived_report(
+                    case,
+                    envelope,
+                    tmp_path / "rejected.json",
+                    split_no_mail_transcripts=(owner_transcript, manager_transcript),
+                )
+
+                self.assertEqual(2, result.returncode)
+
     def test_archived_no_mail_custody_authenticates_manager_consumed_terminal_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -5708,7 +6070,7 @@ return 75
             )
 
             self.assertEqual(2, rejected.returncode)
-            self.assertIn("either all or none", rejected.stderr)
+            self.assertIn("one complete root-retained evidence form", rejected.stderr)
 
     def test_root_retained_session_custody_rejects_origin_main_race(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

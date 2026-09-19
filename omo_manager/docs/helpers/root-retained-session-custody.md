@@ -34,6 +34,33 @@ omo_report.sh \
   --root-retained-no-mail-transcript OWNER_CODEX_JSONL
 ```
 
+If the owner routed the terminal report but its manager separately removed the
+queue item before the owner completed metadata, use the split form:
+
+```bash
+omo_report.sh \
+  --export-archived-consumed PRIVATE_ENVELOPE \
+  --consumed-attestation-output OWNER_PRIVATE_EXPORT \
+  --root-retained-split-no-mail-owner-transcript OWNER_CODEX_JSONL \
+  --root-retained-split-no-mail-manager-transcript MANAGER_CODEX_JSONL
+```
+
+The split form requires one manager-pending terminal report, one canonical
+same-turn envelope/task/manager review and exact `omo_task_edit.py pending-remove`, and one later exact
+owner `--complete-live-no-mail`. It binds both append-only prefixes, both
+sessions, the report transaction, reconstructed queue transition, owner pane,
+done task bytes, and canonical `TODO.md` previous row. Any target, manager,
+task, queue, report, command, session, pane, ordering, email, or live-state
+mismatch fails closed. The complete owner prefix and the manager review-to-removal
+interval must contain none of the directly invoked mail programs recognized by
+the verifier: `email_me.py`, `sendmail`, `mailx`, `s-nail`, `mutt`, `swaks`, or
+Python `smtplib`. Earlier unrelated manager work is outside that scan. The task
+contract and recorded completion separately state that no Human email occurred.
+
+This is a one-worker recovery form. It accepts only `mail_unread_0649.md` at
+`config:40`, its recorded owner session and `%3551` pane, and its `config:27`
+manager session. Other tasks and identities must use an ordinary supported form.
+
 This form requires one top-level Codex transcript to prove the private report, the matching queue removal, and the same-turn terminal completion. It reconstructs and verifies the committed report-time task from the final task and exact removal evidence. Two report/removal pairs are supported:
 
 - an acknowledged terminal `done` report followed by `--no-email`, with exactly one explicit no-Human-email contract and no Human-email command anywhere in the captured prefix;
