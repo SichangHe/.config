@@ -253,6 +253,37 @@ class CodexStopTests(unittest.TestCase):
             observed = validate_exited_codex_shell_with_consumed_report("cfg:1", "%42", session_id, "specific-token")
         self.assertEqual(hashlib.sha256(transcript.encode()).hexdigest(), observed)
 
+    def test_validate_exited_codex_shell_accepts_one_blank_line_before_idle_prompt(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f"terminal report sent\nTo continue this session, run:\n  codex resume {session_id}\nOr run codex resume and select Follow manager worker defaults.\n⏎\n\n❯                              host worktree"
+        styled_tail = "\x1b[2m⏎\x1b[0m\n\n" + styled_fish_tail().split("\n", 1)[1]
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.pane_target", return_value="cfg:1.0"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="fish"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["❯ host worktree"])),
+            patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
+            patch("omo_manager.omo_codex_stop.capture_styled", return_value=styled_tail),
+            patch("omo_manager.omo_codex_stop.pane_prompt_identity", return_value=(2, "fish", "host", "worktree")),
+        ):
+            observed = validate_exited_codex_shell_with_consumed_report("cfg:1", "%42", session_id, "specific-token")
+        self.assertEqual(hashlib.sha256(transcript.encode()).hexdigest(), observed)
+
+    def test_validate_exited_codex_shell_rejects_two_blank_lines_before_prompt(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f"terminal report sent\nTo continue this session, run:\n  codex resume {session_id}\n⏎\n\n\n❯ idle prompt"
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.pane_target", return_value="cfg:1.0"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="fish"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["❯ idle prompt"])),
+            patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
+            self.assertRaisesRegex(RuntimeError, "shell activity"),
+        ):
+            validate_exited_codex_shell_with_consumed_report("cfg:1", "%42", session_id, "specific-token")
+
     def test_validate_exited_codex_shell_rejects_activity_after_exact_exit_marker(self) -> None:
         session_id = "11111111-2222-3333-4444-555555555555"
         transcript = f"terminal report sent\nTo continue this session, run:\n  codex resume {session_id}\n⏎\ncommand output\n❯ idle prompt"
@@ -863,6 +894,43 @@ $ """
             patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["$ "])),
             patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
             patch("omo_manager.omo_codex_stop.capture_styled", return_value=styled_fish_tail()),
+            patch("omo_manager.omo_codex_stop.pane_prompt_identity", return_value=(2, "fish", "host", "worktree")),
+            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+        ):
+            close_exited_codex_shell_with_task_receipt(
+                "cfg:1",
+                "%42",
+                session_id,
+                task_payload,
+                hashlib.sha256(task_payload).hexdigest(),
+                receipt,
+                message_id,
+                session_payload=session_payload,
+                expected_session_sha256=hashlib.sha256(session_payload).hexdigest(),
+                expected_completion_command=TEST_COMPLETION_COMMAND,
+            )
+
+        close.assert_called_once_with("%42")
+
+    def test_close_exited_codex_shell_with_task_receipt_accepts_one_blank_line_before_idle_prompt(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        receipt = "receipt-token-123456"
+        message_id = "123.456.789@example.com"
+        task_payload = (f"accepted report receipt {receipt}\ncompletion notice was accepted as Message-ID <{message_id}>\n").encode()
+        session_payload = exited_session_payload(session_id, receipt, message_id)
+        transcript = (
+            f"Conversation interrupted\nTo continue this session, run codex resume {session_id}\n"
+            "Or run codex resume and select Follow manager worker defaults.\n"
+            "⏎\n\n❯                              host worktree"
+        )
+        styled_tail = "\x1b[2m⏎\x1b[0m\n\n" + styled_fish_tail().split("\n", 1)[1]
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", side_effect=["%42", "%42", "%42", "%42", ""]),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="fish"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["$ "])),
+            patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
+            patch("omo_manager.omo_codex_stop.capture_styled", return_value=styled_tail),
             patch("omo_manager.omo_codex_stop.pane_prompt_identity", return_value=(2, "fish", "host", "worktree")),
             patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
         ):

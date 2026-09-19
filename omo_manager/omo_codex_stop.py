@@ -2292,10 +2292,15 @@ def _validate_exited_codex_shell(
         raise RuntimeError("terminal report evidence is absent before the final Codex exit marker")
     shell_tail = exit_text[resume_matches[0].end() :].strip("\r\n")
     shell_tail = EXIT_SELECTOR_RE.sub("", shell_tail, count=1).strip("\r\n")
-    marker_mode = len(shell_tail.splitlines()) == 2 and shell_tail.startswith(f"{EXIT_IDLE_MARKER}\n")
+    tail_lines = shell_tail.splitlines()
+    marker_mode = (
+        len(tail_lines) in {2, 3}
+        and tail_lines[0] == EXIT_IDLE_MARKER
+        and (len(tail_lines) == 2 or tail_lines[1] == "")
+    )
     prompt_identity = pane_prompt_identity(expected_pane_id) if marker_mode else None
     styled_before = capture_styled(expected_pane_id, n_lines) if marker_mode else ""
-    styled_tail = "\n".join(styled_before.rstrip("\r\n").splitlines()[-2:])
+    styled_tail = "\n".join(styled_before.rstrip("\r\n").splitlines()[-len(tail_lines) :])
     if (marker_mode and shell_command != "fish") or not exited_shell_tail_is_idle(shell_tail, styled_tail, prompt_identity):
         raise RuntimeError("pane contains shell activity after the terminal Codex exit")
     final_shell_command = current_command(expected_pane_id)
@@ -2326,18 +2331,24 @@ def exited_shell_tail_is_idle(shell_tail: str, styled_shell_tail: str, prompt_id
     lines = shell_tail.splitlines()
     if len(lines) == 1:
         return True
-    if len(lines) != 2 or lines[0] != EXIT_IDLE_MARKER or prompt_identity is None:
+    if (
+        len(lines) not in {2, 3}
+        or lines[0] != EXIT_IDLE_MARKER
+        or (len(lines) == 3 and lines[1] != "")
+        or prompt_identity is None
+    ):
         return False
     cursor_x, command, host, cwd_name = prompt_identity
     styled_lines = styled_shell_tail.splitlines()
     styled_prompt = rf"\x1b\[32m❯\x1b\[39m[ \t]{{2,}}\x1b\[1m\x1b\[31m{re.escape(host)}\x1b\[0m \x1b\[35m{re.escape(cwd_name)}\x1b\[39m(?:[ \t].*)?"
     return (
-        len(styled_lines) == 2
+        len(styled_lines) == len(lines)
         and cursor_x == EXIT_IDLE_CURSOR_X
         and command == "fish"
         and bool(cwd_name)
         and styled_lines[0] == "\x1b[2m⏎\x1b[0m"
-        and re.fullmatch(styled_prompt, styled_lines[1]) is not None
+        and (len(styled_lines) == 2 or styled_lines[1] == "")
+        and re.fullmatch(styled_prompt, styled_lines[-1]) is not None
         and ANSI_CSI_RE.sub("", styled_shell_tail) == shell_tail
     )
 
@@ -2553,10 +2564,15 @@ def close_exited_codex_shell_with_task_receipt(
         raise RuntimeError("captured terminal Codex session does not match the supplied session id")
     shell_tail = exit_text[resume_matches[0].end() :].strip("\r\n")
     shell_tail = EXIT_SELECTOR_RE.sub("", shell_tail, count=1).strip("\r\n")
-    marker_mode = len(shell_tail.splitlines()) == 2 and shell_tail.startswith(f"{EXIT_IDLE_MARKER}\n")
+    tail_lines = shell_tail.splitlines()
+    marker_mode = (
+        len(tail_lines) in {2, 3}
+        and tail_lines[0] == EXIT_IDLE_MARKER
+        and (len(tail_lines) == 2 or tail_lines[1] == "")
+    )
     prompt_identity = pane_prompt_identity(expected_pane_id) if marker_mode else None
     styled_before = capture_styled(expected_pane_id, n_lines) if marker_mode else ""
-    styled_tail = "\n".join(styled_before.rstrip("\r\n").splitlines()[-2:])
+    styled_tail = "\n".join(styled_before.rstrip("\r\n").splitlines()[-len(tail_lines) :])
     if (marker_mode and shell_command != "fish") or not exited_shell_tail_is_idle(shell_tail, styled_tail, prompt_identity):
         raise RuntimeError("pane contains shell activity after the terminal Codex exit")
     final_shell_command = current_command(expected_pane_id)
