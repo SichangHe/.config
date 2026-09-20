@@ -220,6 +220,56 @@ SOURCE1970_TASK_LINEAGE = (
         "fc893edfeea1cdf7bef2b841faa592afc58fa14edcc3f2984d4093077eb79181",
     ),
 )
+# 🧑 Human Source-1994 asked for six exact figure revisions, acknowledged and later
+# answered in the existing plot thread. The sixth item remains open until Human approval.
+SOURCE1994_ROOT = "/ssd1/sichangheagent/work_logs"
+SOURCE1994_PATH = "manager_mail/85c5dff58359-1994.txt"
+SOURCE1994_SHA256 = "af1970799caa268fe9543ab8898ac18d3fa9b17b68770037f7b0c4e865757ffd"
+SOURCE1994_TASK = "src1959_plot.md"
+SOURCE1994_TASK_SHA256 = "1ceda2ff8f33363a076d463521f82e1c6e42bc47b93b28128839e5b3f6293998"
+SOURCE1994_QUEUE_SHA256 = "7dcf350513e984adce5263d4f8da8546439050ce5e01ec3487bb061444885730"
+SOURCE1994_AFTER_QUEUE_SHA256 = "ff24282b9da95eae84c3fc29033dcca54ca23c65faefa58954c28bac009b11ac"
+SOURCE1994_OWNER = "dw3:0"
+SOURCE1994_MANAGER = "dw:61"
+SOURCE1994_STATUS = "blocked"
+SOURCE1994_BLOCKED_ON = "human Source-1994 figure approval"
+SOURCE1994_AUTHORITY_LINES = (
+    "Marks seem too small. Remember this will be in a single column in a 2-column layout",
+    "Label In-domain False Positive Rate (correct?)",
+    "Top 2 plots seem to have data swapped. FPR should be very low while FNR is the one that’s high",
+    "Top right plot has the first box too much bigger than the other, making the other ones too imprecise to see. Rid it or somehow provide a cut y axis. Not sure what’s the best to do here",
+    "We don’t need these separate plots",
+    "After you revise, I will review, then you can coordinate with the paper revision agent to put these in and we’ll see how they look inside the PDF",
+)
+SOURCE1994_ITEMS = tuple(f"🧑 Source-1994: “{line}”" for line in SOURCE1994_AUTHORITY_LINES)
+SOURCE1994_COMPLETED_ITEMS = SOURCE1994_ITEMS[:5]
+SOURCE1994_ITEMS_SHA256 = "3e1407abf45da4dfd45ebbc46c487c4ec4d1a5db15851de6507dd482858262bf"
+SOURCE1994_ACK_MESSAGE_ID = "<178985963616.4080231.3631792560089430968@gmail.com>"
+SOURCE1994_ACK_SUBJECT_SHA256 = "78670a4069835b6b121de7d4ac635264afc69edeb05bdaaeef5248da4ae1eb55"
+SOURCE1994_ACK_BODY_SHA256 = "24c88a6244912a9aa9997404e3d9335e887a0445bcaeb936ccc002a6466abf10"
+SOURCE1994_RESULT_MESSAGE_ID = "<178986479352.681621.17315868044505576479@gmail.com>"
+SOURCE1994_RESULT_SUBJECT_SHA256 = SOURCE1994_ACK_SUBJECT_SHA256
+SOURCE1994_RESULT_BODY_SHA256 = "2e94395f7f1f0c559fae57d0d7c9109bc51d5f95ffab7088b31a9677f98bdde1"
+SOURCE1994_RESULT_REPO = Path("/ssd1/sichangheagent/dw3")
+SOURCE1994_RESULT_COMMIT = "c57ada9c41b91805e8b3c9d0d5e2c72fced24a95"
+SOURCE1994_EVIDENCE = (
+    f"Source-1994 items 1–5 completed by commit {SOURCE1994_RESULT_COMMIT} and reviewed Human result Message-ID "
+    f"{SOURCE1994_RESULT_MESSAGE_ID}; item 6 remains open pending Human approval."
+)
+SOURCE1994_PURPOSE_SHA256 = "17a4398c14b2c7c69d95411c94b737954bf595fbbe1dafba31476f76f550712a"
+SOURCE1994_STALE_ADD_CLAIM = (
+    "a85d4a84f0e995109a6059e568a9357b1e46a64d00124d83607fdea89b60d963",
+    "73479abe146b8505a4de450d89535e91cd9039a761b01eb224a8334111c2c619",
+    SOURCE1994_MANAGER,
+    "15615ec45e3e74de4daf5de93bb3d5c722bbb59e4e12e0dd057a7762dfe7fc60",
+    "9858f2809fdd334f0f301b5b539eefef130f63ab3844bfca9288bed52cb0759c",
+)
+SOURCE1994_SOURCE_POINTER = f"(record and delegate {SOURCE1994_PATH})"
+SOURCE1994_SOURCE1977_COMPLETION_LINE = (
+    "(verified removed pending items: Completed by commit 096ce52; independently reviewed artifacts: "
+    "/hdd1/sichanghe/DeGenTWeb_slow/data/classify/full_corpus_svm_size_boxplots_source1977_reviewed_20260919; "
+    "Human completion email Message-ID <178985052856.2662722.8783220920664080578@gmail.com>.)"
+)
 # 🧑 Human: "do not send another Human email"
 WATCHER_PANGRAM_ROOT = "/ssd1/sichangheagent/work_logs"
 WATCHER_PANGRAM_TASK = "watcher_repair.md"
@@ -508,6 +558,22 @@ def source1970_eval_recovery_request() -> OrdinaryPendingRecoveryRequest:
     )
 
 
+def source1994_plot_recovery_request() -> OrdinaryPendingRecoveryRequest:
+    """Return the immutable request for the Source-1994 record-and-resolve recovery."""
+
+    return OrdinaryPendingRecoveryRequest(
+        "source1994-plot-record-remove",
+        SOURCE1994_TASK_SHA256,
+        SOURCE1994_QUEUE_SHA256,
+        SOURCE1994_PURPOSE_SHA256,
+        SOURCE1994_PURPOSE_SHA256,
+        *SOURCE1994_STALE_ADD_CLAIM,
+        SOURCE1994_RESULT_MESSAGE_ID,
+        SOURCE1994_RESULT_SUBJECT_SHA256,
+        SOURCE1994_RESULT_BODY_SHA256,
+    )
+
+
 def watcher_pangram_recovery_request() -> OrdinaryPendingRecoveryRequest:
     """Return the one reviewed-Sent, no-claim watcher reconciliation request."""
 
@@ -552,6 +618,17 @@ def mail_compress_recovery_request() -> OrdinaryPendingRecoveryRequest:
 def recovery_incident_values(request: OrdinaryPendingRecoveryRequest) -> tuple[str, ...]:
     """Bind incident-only evidence without changing earlier transition records."""
 
+    if request.mode == "source1994-plot-record-remove":
+        return (
+            SOURCE1994_SHA256,
+            SOURCE1994_ITEMS_SHA256,
+            SOURCE1994_AFTER_QUEUE_SHA256,
+            SOURCE1994_ACK_MESSAGE_ID,
+            SOURCE1994_ACK_SUBJECT_SHA256,
+            SOURCE1994_ACK_BODY_SHA256,
+            str(SOURCE1994_RESULT_REPO),
+            SOURCE1994_RESULT_COMMIT,
+        )
     if request.mode != "mail-compress-reviewed-sent-remove":
         return ()
     return tuple(value for binding in (*MAIL_COMPRESS_FAILED_CLAIMS[2:], *MAIL_COMPRESS_DELIVERED_CLAIMS) for value in binding)
@@ -725,6 +802,7 @@ def validate_recovery_request(request: OrdinaryPendingRecoveryRequest) -> None:
         "supersede-remove",
         "source1990-pangram-remove",
         "source1970-eval-remove",
+        "source1994-plot-record-remove",
         "watcher-pangram-reviewed-sent-remove",
         "mail-compress-reviewed-sent-remove",
     }:
@@ -1110,6 +1188,96 @@ def validate_source1970_eval_authority(
     ):
         raise OSError("Source-1970 authority does not bind this exact evaluation recovery")
     validate_source1970_task_lineage(root, plan.task, current_text, request)
+
+
+def validate_source1994_plot_authority(
+    root: Path,
+    plan: CompletionEmail,
+    items: tuple[str, ...],
+    evidence: str,
+    request: OrdinaryPendingRecoveryRequest,
+    current_text: str,
+) -> None:
+    """Authenticate the exact six-item Source-1994 record-and-resolve incident."""
+
+    source = root / SOURCE1994_PATH
+    try:
+        payload = owned_private_file(source, "Source-1994 authority", 32_768)
+        source_lines = payload.decode("utf-8").splitlines()
+        metadata = parse_task_metadata(current_text, root)
+        relative = plan.task.resolve().relative_to(root.resolve()).as_posix()
+    except FileNotFoundError as exc:
+        raise OSError("Source-1994 authority is missing") from exc
+    except (UnicodeDecodeError, TaskFrontmatterError, ValueError) as exc:
+        raise OSError("Source-1994 authority or task is malformed") from exc
+    authority_positions = tuple(
+        source_lines.index(line) if source_lines.count(line) == 1 else -1
+        for line in SOURCE1994_AUTHORITY_LINES
+    )
+    expected_plan = _build_completion_email(
+        root,
+        plan.task,
+        current_text,
+        "pending item removed after verification",
+        items=SOURCE1994_COMPLETED_ITEMS,
+        evidence=SOURCE1994_EVIDENCE,
+        semantic_key=SOURCE1994_PURPOSE_SHA256,
+        sent_recovery=True,
+    )
+    if (
+        metadata is None
+        or hashlib.sha256(payload).hexdigest() != SOURCE1994_SHA256
+        or authority_positions != tuple(sorted(authority_positions))
+        or any(position < 0 for position in authority_positions)
+        or hashlib.sha256("\0".join(SOURCE1994_ITEMS).encode()).hexdigest() != SOURCE1994_ITEMS_SHA256
+        or str(root.resolve()) != SOURCE1994_ROOT
+        or relative != SOURCE1994_TASK
+        or metadata.version != "v1.0.0"
+        or metadata.status != SOURCE1994_STATUS
+        or metadata.blocked_on != SOURCE1994_BLOCKED_ON
+        or metadata.runat != SOURCE1994_OWNER
+        or metadata.managerat != SOURCE1994_MANAGER
+        or metadata.is_manager
+        or metadata.pending_task_items
+        or digest_fields("pending-queue-v1", *metadata.pending_task_items) != SOURCE1994_QUEUE_SHA256
+        or current_text.splitlines().count(SOURCE1994_SOURCE_POINTER) != 1
+        or current_text.splitlines().count(SOURCE1994_SOURCE1977_COMPLETION_LINE) != 1
+        or hashlib.sha256(current_text.encode()).hexdigest() != SOURCE1994_TASK_SHA256
+        or items != SOURCE1994_COMPLETED_ITEMS
+        or evidence != SOURCE1994_EVIDENCE
+        or request != source1994_plot_recovery_request()
+        or stale_claim_bindings(request) != (SOURCE1994_STALE_ADD_CLAIM,)
+        or ordinary_pending_purpose(plan.outcome, items, evidence) != SOURCE1994_PURPOSE_SHA256
+        or plan != expected_plan
+        or plan.target != SOURCE1994_OWNER
+        or plan.manager_target != SOURCE1994_MANAGER
+        or plan.task_sha256 != SOURCE1994_TASK_SHA256
+        or plan.send_allowed
+    ):
+        raise OSError("Source-1994 authority does not bind this exact plot recovery")
+    if not verify_ordinary_completion_in_sent(
+        SOURCE1994_ACK_MESSAGE_ID,
+        SOURCE1994_ACK_SUBJECT_SHA256,
+        SOURCE1994_ACK_BODY_SHA256,
+    ):
+        raise OSError("Source-1994 acknowledgement lacks exact Sent-Mail evidence")
+    try:
+        commit = git_output(
+            SOURCE1994_RESULT_REPO,
+            "rev-parse",
+            f"{SOURCE1994_RESULT_COMMIT}^{{commit}}",
+        ).decode().strip()
+        _ = git_output(
+            SOURCE1994_RESULT_REPO,
+            "merge-base",
+            "--is-ancestor",
+            SOURCE1994_RESULT_COMMIT,
+            "main",
+        )
+    except (OSError, UnicodeDecodeError) as exc:
+        raise OSError("Source-1994 result commit could not be authenticated on main") from exc
+    if commit != SOURCE1994_RESULT_COMMIT:
+        raise OSError("Source-1994 result commit identity changed")
 
 
 def claims_rows(state: Path) -> tuple[Path, list[list[str]], str]:
@@ -1538,6 +1706,7 @@ def prepare_ordinary_pending_transition(
         "supersede-remove",
         "source1990-pangram-remove",
         "source1970-eval-remove",
+        "source1994-plot-record-remove",
         "watcher-pangram-reviewed-sent-remove",
         "mail-compress-reviewed-sent-remove",
     } and plan.outcome != "pending item removed after verification":
@@ -1548,6 +1717,8 @@ def prepare_ordinary_pending_transition(
         validate_watcher_pangram_reviewed_sent_authority(plan.root, plan, items, evidence, request, current_text)
     elif request.mode == "source1970-eval-remove":
         validate_source1970_eval_authority(plan.root, plan, items, evidence, request, current_text)
+    elif request.mode == "source1994-plot-record-remove":
+        validate_source1994_plot_authority(plan.root, plan, items, evidence, request, current_text)
     elif request.mode == "mail-compress-reviewed-sent-remove":
         validate_mail_compress_authority(plan.root, plan, items, evidence, request, current_text)
     else:
@@ -1567,6 +1738,7 @@ def prepare_ordinary_pending_transition(
     if request.mode not in {
         "source1990-pangram-remove",
         "source1970-eval-remove",
+        "source1994-plot-record-remove",
         "watcher-pangram-reviewed-sent-remove",
         "mail-compress-reviewed-sent-remove",
     } and request.sent_body_sha256 != hashlib.sha256(plan.body.encode()).hexdigest():

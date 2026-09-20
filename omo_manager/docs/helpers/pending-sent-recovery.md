@@ -33,6 +33,11 @@ Public no-send recovery commands are incident-specific. They accept only their r
   - its one global Message-ID record binds the five-item queue mutation and ordered six-item resolution before either claim or task mutation; later delivery checks accept it only through the exact canonical committed transition
   - it records `prepared`, removes the five live items, appends the six-item delivered-answer evidence, fsyncs the empty queue, and records `committed`
   - a crash after the task replacement replays only that exact prepared transition; drift or Message-ID reuse fails closed
+- Source-1994 plot adapter
+  - `recover-source1994-plot` takes no incident parameters and never invokes the sender
+  - it binds the exact authority file, owner task bytes, empty ordered queue, blocked lifecycle, authenticated owner/manager, acknowledgement and reviewed-result Sent messages, result commit on `main`, and sole failed add claim
+  - it atomically records all six exact Human items, durably preserves their text, reconciles only the five completed figure changes, and leaves the review-before-paper-integration item open
+  - it preserves the earlier Source-1977 reconciliation and every unrelated claim; any task, queue, source, claim, commit, or Sent-message drift fails before task mutation
 - watcher Pangram reviewed-Sent adapter
   - `recover-watcher-pangram-reviewed-sent` takes no incident parameters and never invokes the sender
   - it binds only the current `watcher_repair.md` bytes, `config:35` owner, `config:39` manager, complete ordered queue, and its exact three-item subset
