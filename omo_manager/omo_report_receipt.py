@@ -6,8 +6,6 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
-import importlib.machinery
-import importlib.util
 import io
 import json
 import math
@@ -18,7 +16,6 @@ import stat
 import subprocess
 import sys
 import time
-import types
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
@@ -27,47 +24,18 @@ from pathlib import Path
 
 # 🧑 "omo_report.sh fails before routing because ... omo_report_receipt.py cannot import .omo_omnigent_identity"
 if __package__ in {None, ""}:
-    package_path = Path(__file__).resolve().parent
-    package_spec = importlib.machinery.ModuleSpec("omo_manager", loader=None, is_package=True)
-    package_spec.submodule_search_locations = [str(package_path)]
-    package = types.ModuleType("omo_manager")
-    package.__package__ = "omo_manager"
-    package.__path__ = [str(package_path)]
-    package.__spec__ = package_spec
-    sys.modules["omo_manager"] = package
+    print("omo_report_receipt.py must be loaded through the adjacent omo_report.sh", file=sys.stderr)
+    raise SystemExit(2)
 
-    def load_local_module(name: str) -> None:
-        module_name = f"omo_manager.{name}"
-        source_path = package_path / f"{name}.py"
-        spec = importlib.util.spec_from_file_location(module_name, source_path)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"cannot load local report dependency: {source_path}")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        spec.loader.exec_module(module)
-
-    load_local_module("omo_pending_digest")
-    load_local_module("omo_omnigent_identity")
-    load_local_module("omo_task_lock")
-    from omo_manager.omo_pending_digest import PENDING_CONTENT_CHAR_LIMIT
-    from omo_manager.omo_omnigent_identity import OmniGentIdentityError
-    from omo_manager.omo_omnigent_identity import authenticate_current_omnigent
-    from omo_manager.omo_task_lock import task_file_lock_at_path
-    from omo_manager.omo_task_lock import task_file_lock_path
-    from omo_manager.omo_task_lock import watcher_report_authority_is_live
-    from omo_manager.omo_task_lock import watcher_report_manager_temporary
-    from omo_manager.omo_task_lock import watcher_report_state_maintenance_temporary
-    from omo_manager.omo_task_lock import watcher_report_state_temporary
-else:
-    from .omo_pending_digest import PENDING_CONTENT_CHAR_LIMIT
-    from .omo_omnigent_identity import OmniGentIdentityError
-    from .omo_omnigent_identity import authenticate_current_omnigent
-    from .omo_task_lock import task_file_lock_at_path
-    from .omo_task_lock import task_file_lock_path
-    from .omo_task_lock import watcher_report_authority_is_live
-    from .omo_task_lock import watcher_report_manager_temporary
-    from .omo_task_lock import watcher_report_state_maintenance_temporary
-    from .omo_task_lock import watcher_report_state_temporary
+from .omo_pending_digest import PENDING_CONTENT_CHAR_LIMIT
+from .omo_omnigent_identity import OmniGentIdentityError
+from .omo_omnigent_identity import authenticate_current_omnigent
+from .omo_task_lock import task_file_lock_at_path
+from .omo_task_lock import task_file_lock_path
+from .omo_task_lock import watcher_report_authority_is_live
+from .omo_task_lock import watcher_report_manager_temporary
+from .omo_task_lock import watcher_report_state_maintenance_temporary
+from .omo_task_lock import watcher_report_state_temporary
 
 
 RECEIVER_VERSION = "4"
