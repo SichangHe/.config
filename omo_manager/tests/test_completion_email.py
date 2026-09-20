@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from email.message import EmailMessage
 from pathlib import Path
 from unittest.mock import patch
 
+from omo_manager import omo_pending
+from omo_manager import omo_completion_email
 from omo_manager.omo_agent_status import TaskFrontmatterError
+from omo_manager.omo_agent_status import parse_task_metadata
 from omo_manager.omo_completion_email import build_completion_email
 from omo_manager.omo_completion_email import claim_completion_email
 from omo_manager.omo_completion_email import completion_email_is_delivered
@@ -20,6 +25,12 @@ from omo_manager.omo_completion_email import require_owner_completion
 from omo_manager.omo_completion_email import main
 from omo_manager.omo_completion_email import mark_completion_email_delivered
 from omo_manager.omo_completion_email import mark_completion_email_request_queued
+from omo_manager.omo_completion_email import OrdinaryPendingRecoveryRequest
+from omo_manager.omo_completion_email import ordinary_pending_purpose
+from omo_manager.omo_completion_email import plan_sent_recovery_completion
+from omo_manager.omo_completion_email import prepare_ordinary_pending_transition
+from omo_manager.omo_completion_email import commit_ordinary_pending_transition
+from omo_manager.omo_completion_email import digest_fields
 from omo_manager.omo_completion_email import send_completion_email
 from omo_manager.omo_completion_email import validate_completion_notice_delivery
 from omo_manager.omo_completion_email import verify_ordinary_completion_in_sent
@@ -65,6 +76,690 @@ def source1241_task(
 
 
 class CompletionEmailTest(unittest.TestCase):
+    def test_source1990_production_identity_preflight_is_read_only(self) -> None:
+        """Production constants authenticate the current Pangram task without mutation."""
+
+        root = Path("/ssd1/sichangheagent/work_logs")
+        task = root / omo_completion_email.SOURCE1990_PANGRAM_TASK
+        current = task.read_text(encoding="utf-8")
+        request = OrdinaryPendingRecoveryRequest(
+            "source1990-pangram-remove",
+            omo_completion_email.SOURCE1990_PANGRAM_TASK_SHA256,
+            omo_completion_email.SOURCE1990_PANGRAM_QUEUE_SHA256,
+            omo_completion_email.SOURCE1990_PANGRAM_PURPOSE_SHA256,
+            omo_completion_email.SOURCE1990_PANGRAM_PURPOSE_SHA256,
+            *omo_completion_email.SOURCE1990_PANGRAM_PRIMARY_CLAIM,
+            omo_completion_email.SOURCE1990_PANGRAM_MESSAGE_ID,
+            omo_completion_email.SOURCE1990_PANGRAM_SUBJECT_SHA256,
+            omo_completion_email.SOURCE1990_PANGRAM_BODY_SHA256,
+            *omo_completion_email.SOURCE1990_PANGRAM_CHURN,
+            "",
+            *omo_completion_email.SOURCE1990_PANGRAM_EXTRA_CLAIM,
+        )
+        plan = omo_completion_email.CompletionEmail(
+            root,
+            task,
+            omo_completion_email.SOURCE1990_PANGRAM_OWNER,
+            omo_completion_email.SOURCE1990_PANGRAM_MANAGER,
+            omo_completion_email.SOURCE1990_PANGRAM_TASK_SHA256,
+            "pending item removed after verification",
+            "",
+            "",
+            "preflight",
+            "preflight-notice",
+            omo_completion_email.SOURCE1990_PANGRAM_PURPOSE_SHA256,
+            send_allowed=False,
+        )
+        omo_completion_email.validate_source1990_pangram_authority(
+            root,
+            plan,
+            omo_completion_email.SOURCE1990_PANGRAM_ITEMS,
+            omo_completion_email.SOURCE1990_PANGRAM_EVIDENCE,
+            request,
+            current,
+        )
+
+    def test_source1990_adapter_authenticates_real_git_churn_and_rejects_drift(self) -> None:
+        """The incident path requires a real before-to-prefix Git transition."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / omo_completion_email.SOURCE1990_PATH
+            source.parent.mkdir()
+            source.write_text(omo_completion_email.SOURCE1990_TEXT, encoding="utf-8")
+            source.chmod(0o600)
+            items = omo_completion_email.SOURCE1990_PANGRAM_ITEMS
+            task = root / omo_completion_email.SOURCE1990_PANGRAM_TASK
+            before = task_text().replace("cfg:2", "dw:15").replace("cfg:1", "dw:60").replace(
+                "  - finish review", "".join(f"  - {item}\n" for item in items).rstrip()
+            )
+            claim_bound = f"{before}manager claim-bound update\n"
+            authorized = f"{claim_bound}manager custody update\n"
+            current = f"{authorized}human authorization update\n"
+
+            def git(*arguments: str) -> str:
+                return subprocess.run(
+                    ["git", *arguments], cwd=root, check=True, capture_output=True, text=True, timeout=10
+                ).stdout.strip()
+
+            git("init", "-q")
+            git("config", "user.email", "test@example.test")
+            git("config", "user.name", "test")
+            task.write_text(before, encoding="utf-8")
+            git("add", task.name)
+            git("commit", "-qm", "before")
+            task.write_text(claim_bound, encoding="utf-8")
+            git("add", task.name)
+            git("commit", "-qm", "claim-bound")
+            claim_bound_commit = git("rev-parse", "HEAD")
+            claim_bound_parent = git("rev-parse", "HEAD^")
+            before_blob = git("rev-parse", f"{claim_bound_parent}:{task.name}")
+            after_blob = git("rev-parse", f"{claim_bound_commit}:{task.name}")
+            diff_sha256 = hashlib.sha256(
+                subprocess.run(
+                    ["git", "diff", "--no-ext-diff", "--binary", claim_bound_parent, claim_bound_commit, "--", task.name],
+                    cwd=root,
+                    check=True,
+                    capture_output=True,
+                    timeout=10,
+                ).stdout
+            ).hexdigest()
+            task.write_text(authorized, encoding="utf-8")
+            git("add", task.name)
+            git("commit", "-qm", "authorized")
+            authorized_commit = git("rev-parse", "HEAD")
+            authorized_parent = git("rev-parse", "HEAD^")
+            authorized_before_blob = git("rev-parse", f"{authorized_parent}:{task.name}")
+            authorized_after_blob = git("rev-parse", f"{authorized_commit}:{task.name}")
+            authorized_diff_sha256 = hashlib.sha256(
+                subprocess.run(
+                    ["git", "diff", "--no-ext-diff", "--binary", authorized_parent, authorized_commit, "--", task.name],
+                    cwd=root,
+                    check=True,
+                    capture_output=True,
+                    timeout=10,
+                ).stdout
+            ).hexdigest()
+            task.write_text(current, encoding="utf-8")
+            git("add", task.name)
+            git("commit", "-qm", "post-authority")
+            post_commit = git("rev-parse", "HEAD")
+            post_parent = git("rev-parse", "HEAD^")
+            post_before_blob = git("rev-parse", f"{post_parent}:{task.name}")
+            post_after_blob = git("rev-parse", f"{post_commit}:{task.name}")
+            post_diff_sha256 = hashlib.sha256(
+                subprocess.run(
+                    ["git", "diff", "--no-ext-diff", "--binary", post_parent, post_commit, "--", task.name],
+                    cwd=root,
+                    check=True,
+                    capture_output=True,
+                    timeout=10,
+                ).stdout
+            ).hexdigest()
+            primary = ("a" * 64, hashlib.sha256(b"older independent claim").hexdigest(), "dw:60", "b" * 64, "c" * 64)
+            extra = ("d" * 64, hashlib.sha256(before.encode()).hexdigest(), "dw:60", "e" * 64, "f" * 64)
+            evidence = "reviewed"
+            purpose = ordinary_pending_purpose("pending item removed after verification", items, evidence)
+            request = OrdinaryPendingRecoveryRequest(
+                "source1990-pangram-remove",
+                hashlib.sha256(current.encode()).hexdigest(),
+                digest_fields("pending-queue-v1", *items),
+                purpose,
+                purpose,
+                *primary,
+                "<churn@example.test>",
+                "1" * 64,
+                "2" * 64,
+                claim_bound_commit,
+                before_blob,
+                after_blob,
+                diff_sha256,
+                "",
+                *extra,
+            )
+            plan = omo_completion_email.CompletionEmail(
+                root,
+                task,
+                "dw:15",
+                "dw:60",
+                request.expected_task_sha256,
+                "pending item removed after verification",
+                "",
+                "",
+                "key",
+                "notice",
+                purpose,
+                send_allowed=False,
+            )
+            authority = {
+                "SOURCE1990_PANGRAM_ROOT": str(root.resolve()),
+                "SOURCE1990_PANGRAM_TASK_SHA256": request.expected_task_sha256,
+                "SOURCE1990_PANGRAM_CLAIM_BOUND_TASK_SHA256": hashlib.sha256(claim_bound.encode()).hexdigest(),
+                "SOURCE1990_PANGRAM_AUTHORIZED_TASK_SHA256": hashlib.sha256(authorized.encode()).hexdigest(),
+                "SOURCE1990_PANGRAM_QUEUE_SHA256": request.expected_queue_sha256,
+                "SOURCE1990_PANGRAM_PURPOSE_SHA256": purpose,
+                "SOURCE1990_PANGRAM_EVIDENCE": evidence,
+                "SOURCE1990_PANGRAM_MESSAGE_ID": request.message_id,
+                "SOURCE1990_PANGRAM_SUBJECT_SHA256": request.sent_subject_sha256,
+                "SOURCE1990_PANGRAM_BODY_SHA256": request.sent_body_sha256,
+                "SOURCE1990_PANGRAM_PRIMARY_CLAIM": primary,
+                "SOURCE1990_PANGRAM_EXTRA_CLAIM": extra,
+                "SOURCE1990_PANGRAM_CHURN": (claim_bound_commit, before_blob, after_blob, diff_sha256),
+                "SOURCE1990_PANGRAM_CUSTODY_CHURN": (
+                    authorized_commit,
+                    authorized_before_blob,
+                    authorized_after_blob,
+                    authorized_diff_sha256,
+                ),
+                "SOURCE1990_PANGRAM_POST_AUTHORITY_CHURN": (post_commit, post_before_blob, post_after_blob, post_diff_sha256),
+            }
+            with patch.multiple(omo_completion_email, **authority):
+                omo_completion_email.validate_source1990_pangram_authority(root, plan, items, evidence, request, current)
+                wrong_prefix = f"{current[:-1]}!"
+                with self.assertRaisesRegex(OSError, "does not bind"):
+                    omo_completion_email.validate_source1990_pangram_authority(root, plan, items, evidence, request, wrong_prefix)
+                wrong_blob = replace(request, churn_before_blob="0" * 40)
+                with patch.object(
+                    omo_completion_email, "SOURCE1990_PANGRAM_CHURN", (claim_bound_commit, wrong_blob.churn_before_blob, after_blob, diff_sha256)
+                ):
+                    with self.assertRaisesRegex(OSError, "does not contain"):
+                        omo_completion_email.validate_source1990_pangram_authority(root, plan, items, evidence, wrong_blob, current)
+                wrong_diff = replace(request, churn_diff_sha256="0" * 64)
+                with patch.object(
+                    omo_completion_email, "SOURCE1990_PANGRAM_CHURN", (claim_bound_commit, before_blob, after_blob, wrong_diff.churn_diff_sha256)
+                ):
+                    with self.assertRaisesRegex(OSError, "diff does not match"):
+                        omo_completion_email.validate_source1990_pangram_authority(root, plan, items, evidence, wrong_diff, current)
+
+    def test_public_cli_rejects_generic_sent_recovery(self) -> None:
+        with self.assertRaises(SystemExit):
+            omo_pending.parse_args(["recover-sent-add"])
+        with self.assertRaises(SystemExit):
+            omo_pending.parse_args(["recover-sent-remove"])
+
+    def test_source1990_adapter_rejects_any_delivered_message_drift(self) -> None:
+        """The incident adapter is limited to its literal Human authority and answer."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / omo_completion_email.SOURCE1990_PATH
+            source.parent.mkdir()
+            source.write_text(omo_completion_email.SOURCE1990_TEXT, encoding="utf-8")
+            source.chmod(0o600)
+            task = root / omo_completion_email.SOURCE1990_PANGRAM_TASK
+            plan = omo_completion_email.CompletionEmail(
+                root,
+                task,
+                omo_completion_email.SOURCE1990_PANGRAM_OWNER,
+                omo_completion_email.SOURCE1990_PANGRAM_MANAGER,
+                omo_completion_email.SOURCE1990_PANGRAM_TASK_SHA256,
+                "pending item removed after verification",
+                "",
+                "",
+                "key",
+                "notice",
+                omo_completion_email.SOURCE1990_PANGRAM_PURPOSE_SHA256,
+                send_allowed=False,
+            )
+            primary = omo_completion_email.SOURCE1990_PANGRAM_PRIMARY_CLAIM
+            extra = omo_completion_email.SOURCE1990_PANGRAM_EXTRA_CLAIM
+            request = OrdinaryPendingRecoveryRequest(
+                "source1990-pangram-remove",
+                omo_completion_email.SOURCE1990_PANGRAM_TASK_SHA256,
+                omo_completion_email.SOURCE1990_PANGRAM_QUEUE_SHA256,
+                omo_completion_email.SOURCE1990_PANGRAM_PURPOSE_SHA256,
+                omo_completion_email.SOURCE1990_PANGRAM_PURPOSE_SHA256,
+                *primary,
+                omo_completion_email.SOURCE1990_PANGRAM_MESSAGE_ID,
+                omo_completion_email.SOURCE1990_PANGRAM_SUBJECT_SHA256,
+                omo_completion_email.SOURCE1990_PANGRAM_BODY_SHA256,
+                *omo_completion_email.SOURCE1990_PANGRAM_CHURN,
+                "",
+                *extra,
+            )
+            current = "prefix\ncustody clearance\n"
+            current_sha256 = hashlib.sha256(current.encode()).hexdigest()
+            plan = replace(plan, task_sha256=current_sha256)
+            request = replace(request, expected_task_sha256=current_sha256)
+            authority_constants = {
+                "SOURCE1990_PANGRAM_ROOT": str(root.resolve()),
+                "SOURCE1990_PANGRAM_TASK_SHA256": current_sha256,
+            }
+            with patch.multiple(omo_completion_email, **authority_constants), patch(
+                "omo_manager.omo_completion_email.validate_manager_churn"
+            ):
+                omo_completion_email.validate_source1990_pangram_authority(
+                    root,
+                    plan,
+                    omo_completion_email.SOURCE1990_PANGRAM_ITEMS,
+                    omo_completion_email.SOURCE1990_PANGRAM_EVIDENCE,
+                    request,
+                    current,
+                )
+                wrong_message = replace(request, message_id="<unrelated@example.test>")
+                with self.assertRaisesRegex(OSError, "does not bind"):
+                    omo_completion_email.validate_source1990_pangram_authority(
+                        root,
+                        plan,
+                        omo_completion_email.SOURCE1990_PANGRAM_ITEMS,
+                        omo_completion_email.SOURCE1990_PANGRAM_EVIDENCE,
+                        wrong_message,
+                        current,
+                    )
+
+    def test_source1990_pangram_cli_retires_both_claims_and_replays(self) -> None:
+        """Exercise the incident adapter through its no-send command boundary."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            source = root / omo_completion_email.SOURCE1990_PATH
+            source.parent.mkdir()
+            source.write_text(omo_completion_email.SOURCE1990_TEXT, encoding="utf-8")
+            source.chmod(0o600)
+            items = omo_completion_email.SOURCE1990_PANGRAM_ITEMS
+            task = root / "src1964_pangram.md"
+            text = task_text().replace("cfg:2", "dw:15").replace("cfg:1", "dw:60").replace(
+                "  - finish review", "".join(f"  - {item}\n" for item in items).rstrip()
+            )
+            task.write_text(text, encoding="utf-8")
+            evidence = omo_completion_email.SOURCE1990_PANGRAM_EVIDENCE
+            purpose = ordinary_pending_purpose("pending item removed after verification", items, evidence)
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_pending.current_pending_task", return_value=task
+            ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task), patch(
+                "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True
+            ):
+                primary = plan_completion_email(
+                    root, task, text, "pending item completed", items=(items[0],), semantic_key="a" * 64, pending_item_owner=True
+                )
+                extra = plan_completion_email(
+                    root, task, text, "pending item completed", items=(items[1],), semantic_key="b" * 64, pending_item_owner=True
+                )
+                assert primary is not None and extra is not None
+                self.assertTrue(claim_completion_email(primary))
+                self.assertTrue(claim_completion_email(extra))
+                primary_binding = (
+                    primary.key,
+                    primary.task_sha256,
+                    primary.manager_target,
+                    primary.notice_semantic_key,
+                    hashlib.sha256((state / "completion-email-authorizations" / primary.key).read_bytes()).hexdigest(),
+                )
+                extra_binding = (
+                    extra.key,
+                    extra.task_sha256,
+                    extra.manager_target,
+                    extra.notice_semantic_key,
+                    hashlib.sha256((state / "completion-email-authorizations" / extra.key).read_bytes()).hexdigest(),
+                )
+                source_constants = {
+                    "SOURCE1990_PANGRAM_ROOT": str(root.resolve()),
+                    "SOURCE1990_PANGRAM_TASK": task.name,
+                    "SOURCE1990_PANGRAM_OWNER": "dw:15",
+                    "SOURCE1990_PANGRAM_MANAGER": "dw:60",
+                    "SOURCE1990_PANGRAM_TASK_SHA256": hashlib.sha256(text.encode()).hexdigest(),
+                    "SOURCE1990_PANGRAM_QUEUE_SHA256": digest_fields("pending-queue-v1", *items),
+                    "SOURCE1990_PANGRAM_PURPOSE_SHA256": purpose,
+                    "SOURCE1990_PANGRAM_EVIDENCE": evidence,
+                    "SOURCE1990_PANGRAM_MESSAGE_ID": "<source1990@example.test>",
+                    "SOURCE1990_PANGRAM_SUBJECT_SHA256": "c" * 64,
+                    "SOURCE1990_PANGRAM_BODY_SHA256": "d" * 64,
+                    "SOURCE1990_PANGRAM_PRIMARY_CLAIM": primary_binding,
+                    "SOURCE1990_PANGRAM_EXTRA_CLAIM": extra_binding,
+                    "SOURCE1990_PANGRAM_CHURN": ("", "", "", ""),
+                }
+                argv = [
+                    "recover-source1990-pangram",
+                    *(value for item in items for value in ("--item", item)),
+                    "--evidence",
+                    evidence,
+                    "--expected-task-sha256",
+                    source_constants["SOURCE1990_PANGRAM_TASK_SHA256"],
+                    "--expected-queue-sha256",
+                    source_constants["SOURCE1990_PANGRAM_QUEUE_SHA256"],
+                    "--purpose-sha256",
+                    purpose,
+                    "--prior-claim-key",
+                    primary.key,
+                    "--prior-task-sha256",
+                    primary.task_sha256,
+                    "--prior-manager-target",
+                    primary.manager_target,
+                    "--prior-semantic-key",
+                    primary.notice_semantic_key,
+                    "--prior-authorization-sha256",
+                    primary_binding[-1],
+                    "--message-id",
+                    "<source1990@example.test>",
+                    "--sent-subject-sha256",
+                    "c" * 64,
+                    "--sent-body-sha256",
+                    "d" * 64,
+                    "--extra-claim-key",
+                    extra.key,
+                    "--extra-task-sha256",
+                    extra.task_sha256,
+                    "--extra-manager-target",
+                    extra.manager_target,
+                    "--extra-semantic-key",
+                    extra.notice_semantic_key,
+                    "--extra-authorization-sha256",
+                    extra_binding[-1],
+                ]
+                with patch.multiple(omo_completion_email, **source_constants), patch(
+                    "omo_manager.omo_completion_email.validate_manager_churn"
+                ):
+                    parsed = omo_pending.parse_args(argv)
+                    updated, _count = omo_pending.remove_pending_items(text, items)
+                    updated = omo_pending.append_comment(updated, omo_pending.pending_remove_evidence_comment(len(items), evidence))
+                    recovery = plan_sent_recovery_completion(
+                        root,
+                        task,
+                        text,
+                        "pending item removed after verification",
+                        items=items,
+                        evidence=evidence,
+                        semantic_key=omo_pending.sent_recovery_request(parsed).semantic_key,
+                    )
+                    assert recovery is not None
+                    original_fsync_directory = omo_completion_email.fsync_directory
+
+                    def lose_recovery_directory(directory: Path) -> None:
+                        if directory == state:
+                            raise OSError("power loss before recovery directory link")
+                        original_fsync_directory(directory)
+
+                    with patch("omo_manager.omo_completion_email.fsync_directory", side_effect=lose_recovery_directory):
+                        with self.assertRaisesRegex(OSError, "power loss"):
+                            prepare_ordinary_pending_transition(
+                                recovery,
+                                items,
+                                evidence,
+                                hashlib.sha256(updated.encode()).hexdigest(),
+                                digest_fields("pending-queue-v1"),
+                                omo_pending.sent_recovery_request(parsed),
+                                text,
+                            )
+                    self.assertEqual([], list((state / "ordinary-completion-by-message").iterdir()))
+                    prepared = prepare_ordinary_pending_transition(
+                        recovery,
+                        items,
+                        evidence,
+                        hashlib.sha256(updated.encode()).hexdigest(),
+                        digest_fields("pending-queue-v1"),
+                        omo_pending.sent_recovery_request(parsed),
+                        text,
+                    )
+                    self.assertIn('"status":"prepared"', prepared.record)
+                    with patch("omo_manager.omo_pending.fsync_task_parent", side_effect=OSError("power loss after task replace")):
+                        with self.assertRaisesRegex(OSError, "power loss"):
+                            omo_pending.run(parsed, root=root)
+                    self.assertEqual((), parse_task_metadata(task.read_text(encoding="utf-8"), root).pending_task_items)
+                    self.assertEqual(0, omo_pending.run(parsed, root=root))
+            self.assertEqual((), parse_task_metadata(task.read_text(encoding="utf-8"), root).pending_task_items)
+            claims = (state / "completion-email-claims.tsv").read_text(encoding="utf-8")
+            self.assertIn(f"{primary.key}\tretired:", claims)
+            self.assertIn(f"{extra.key}\tretired:", claims)
+
+    def test_internal_recovery_replays_only_the_same_prepared_four_item_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            items = tuple(f"🧑 Human item {number}" for number in range(1, 5))
+            text = task_text().replace("  - finish review", "".join(f"  - {item}\n" for item in items).rstrip())
+            task.write_text(text, encoding="utf-8")
+            semantic_key = "a" * 64
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_pending.current_pending_task", return_value=task
+            ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task), patch(
+                "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True
+            ):
+                prior = plan_completion_email(
+                    root,
+                    task,
+                    text,
+                    "pending item completed",
+                    items=(items[0],),
+                    semantic_key=semantic_key,
+                    pending_item_owner=True,
+                )
+                assert prior is not None
+                self.assertTrue(claim_completion_email(prior))
+                evidence = "reviewed"
+                purpose = ordinary_pending_purpose("pending item removed after verification", items, evidence)
+                body = "pending item deleted:\n" + "".join(f"- Human item {number}\n" for number in range(1, 5))
+                request = OrdinaryPendingRecoveryRequest(
+                    "supersede-remove",
+                    hashlib.sha256(text.encode()).hexdigest(),
+                    digest_fields("pending-queue-v1", *items),
+                    purpose,
+                    purpose,
+                    prior.key,
+                    prior.task_sha256,
+                    prior.manager_target,
+                    prior.notice_semantic_key,
+                    hashlib.sha256((state / "completion-email-authorizations" / prior.key).read_bytes()).hexdigest(),
+                    "<canonical@example.test>",
+                    "b" * 64,
+                    hashlib.sha256(body.encode()).hexdigest(),
+                )
+                updated, _count = omo_pending.remove_pending_items(text, items)
+                updated = omo_pending.append_comment(updated, omo_pending.pending_remove_evidence_comment(len(items), evidence))
+                recovery = plan_sent_recovery_completion(
+                    root,
+                    task,
+                    text,
+                    "pending item removed after verification",
+                    items=items,
+                    evidence=evidence,
+                    semantic_key=request.semantic_key,
+                )
+                assert recovery is not None
+                prepared = prepare_ordinary_pending_transition(
+                    recovery,
+                    items,
+                    evidence,
+                    hashlib.sha256(updated.encode()).hexdigest(),
+                    digest_fields("pending-queue-v1"),
+                    request,
+                    text,
+                )
+                self.assertIn('"status":"prepared"', prepared.record)
+                task.write_text(updated, encoding="utf-8")
+                commit_ordinary_pending_transition(prepared, hashlib.sha256(updated.encode()).hexdigest())
+                self.assertEqual((), parse_task_metadata(task.read_text(encoding="utf-8"), root).pending_task_items)
+                commit_ordinary_pending_transition(prepared, hashlib.sha256(updated.encode()).hexdigest())
+            self.assertIn("retired:", (state / "completion-email-claims.tsv").read_text(encoding="utf-8"))
+
+    def test_sent_recovery_rejects_a_verified_noncanonical_body_before_tombstoning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            text = task_text().replace("  - finish review", "  - 🧑 first")
+            task.write_text(text, encoding="utf-8")
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_completion_email.current_pending_task", return_value=task
+            ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+                prior = plan_completion_email(
+                    root, task, text, "pending item completed", items=("🧑 first",), semantic_key="a" * 64, pending_item_owner=True
+                )
+                assert prior is not None
+                self.assertTrue(claim_completion_email(prior))
+                request = OrdinaryPendingRecoveryRequest(
+                    "supersede-remove",
+                    hashlib.sha256(text.encode()).hexdigest(),
+                    digest_fields("pending-queue-v1", "🧑 first"),
+                    ordinary_pending_purpose("pending item removed after verification", ("🧑 first",), "reviewed"),
+                    ordinary_pending_purpose("pending item removed after verification", ("🧑 first",), "reviewed"),
+                    prior.key,
+                    prior.task_sha256,
+                    prior.manager_target,
+                    prior.notice_semantic_key,
+                    hashlib.sha256((state / "completion-email-authorizations" / prior.key).read_bytes()).hexdigest(),
+                    "<wrong-body@example.test>",
+                    "b" * 64,
+                    "c" * 64,
+                )
+                recovery = plan_sent_recovery_completion(
+                    root,
+                    task,
+                    text,
+                    "pending item removed after verification",
+                    items=("🧑 first",),
+                    evidence="reviewed",
+                    semantic_key=request.semantic_key,
+                )
+                assert recovery is not None
+                with self.assertRaisesRegex(OSError, "does not match the canonical"):
+                    prepare_ordinary_pending_transition(recovery, ("🧑 first",), "reviewed", "d" * 64, digest_fields("pending-queue-v1"), request, text)
+            self.assertFalse((state / "ordinary-pending-transitions").exists())
+
+    def test_sent_recovery_crash_after_message_marker_rejects_other_transition(self) -> None:
+        """A durable Message-ID binding survives a crash before claim retirement."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            items = ("🧑 first",)
+            text = task_text().replace("  - finish review", "  - 🧑 first")
+            task.write_text(text, encoding="utf-8")
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_completion_email.current_pending_task", return_value=task
+            ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+                prior = plan_completion_email(
+                    root, task, text, "pending item completed", items=items, semantic_key="a" * 64, pending_item_owner=True
+                )
+                assert prior is not None
+                self.assertTrue(claim_completion_email(prior))
+                authorization_sha256 = hashlib.sha256((state / "completion-email-authorizations" / prior.key).read_bytes()).hexdigest()
+                evidence = "reviewed"
+                purpose = ordinary_pending_purpose("pending item removed after verification", items, evidence)
+                request = OrdinaryPendingRecoveryRequest(
+                    "supersede-remove",
+                    hashlib.sha256(text.encode()).hexdigest(),
+                    digest_fields("pending-queue-v1", *items),
+                    purpose,
+                    purpose,
+                    prior.key,
+                    prior.task_sha256,
+                    prior.manager_target,
+                    prior.notice_semantic_key,
+                    authorization_sha256,
+                    "<marker-crash@example.test>",
+                    "b" * 64,
+                    hashlib.sha256(b"pending item deleted:\n- first\n").hexdigest(),
+                )
+                recovery = plan_sent_recovery_completion(
+                    root, task, text, "pending item removed after verification", items=items, evidence=evidence, semantic_key=purpose
+                )
+                assert recovery is not None
+                with patch("omo_manager.omo_completion_email.rewrite_claims", side_effect=RuntimeError("crash")):
+                    with self.assertRaisesRegex(RuntimeError, "crash"):
+                        prepare_ordinary_pending_transition(
+                            recovery, items, evidence, "d" * 64, digest_fields("pending-queue-v1"), request, text
+                        )
+                prepared = prepare_ordinary_pending_transition(
+                    recovery, items, evidence, "d" * 64, digest_fields("pending-queue-v1"), request, text
+                )
+                self.assertIn('"status":"prepared"', prepared.record)
+                changed_evidence = "different reviewed evidence"
+                changed_purpose = ordinary_pending_purpose("pending item removed after verification", items, changed_evidence)
+                changed_request = replace(request, purpose_sha256=changed_purpose, semantic_key=changed_purpose)
+                changed = plan_sent_recovery_completion(
+                    root,
+                    task,
+                    text,
+                    "pending item removed after verification",
+                    items=items,
+                    evidence=changed_evidence,
+                    semantic_key=changed_purpose,
+                )
+                assert changed is not None
+                with self.assertRaisesRegex(OSError, "Message-ID is already bound"):
+                    prepare_ordinary_pending_transition(
+                        changed,
+                        items,
+                        changed_evidence,
+                        "e" * 64,
+                        digest_fields("pending-queue-v1"),
+                        changed_request,
+                        text,
+                    )
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+
+    def test_sent_recovery_retires_all_bound_claims_before_committing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            items = ("🧑 first", "🧑 second")
+            text = task_text().replace("  - finish review", "  - 🧑 first\n  - 🧑 second")
+            task.write_text(text, encoding="utf-8")
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_completion_email.current_pending_task", return_value=task
+            ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+                primary = plan_completion_email(
+                    root, task, text, "pending item completed", items=("🧑 first",), semantic_key="a" * 64, pending_item_owner=True
+                )
+                extra = plan_completion_email(
+                    root, task, text, "pending item completed", items=("🧑 second",), semantic_key="b" * 64, pending_item_owner=True
+                )
+                assert primary is not None and extra is not None
+                self.assertTrue(claim_completion_email(primary))
+                self.assertTrue(claim_completion_email(extra))
+                authorization_dir = state / "completion-email-authorizations"
+                request = OrdinaryPendingRecoveryRequest(
+                    "supersede-remove",
+                    hashlib.sha256(text.encode()).hexdigest(),
+                    digest_fields("pending-queue-v1", *items),
+                    ordinary_pending_purpose("pending item removed after verification", items, "reviewed"),
+                    ordinary_pending_purpose("pending item removed after verification", items, "reviewed"),
+                    primary.key,
+                    primary.task_sha256,
+                    primary.manager_target,
+                    primary.notice_semantic_key,
+                    hashlib.sha256((authorization_dir / primary.key).read_bytes()).hexdigest(),
+                    "<sent@example.test>",
+                    "c" * 64,
+                    hashlib.sha256(b"pending item deleted:\n- first\n- second\n").hexdigest(),
+                    extra_claim_key=extra.key,
+                    extra_task_sha256=extra.task_sha256,
+                    extra_manager_target=extra.manager_target,
+                    extra_semantic_key=extra.notice_semantic_key,
+                    extra_authorization_sha256=hashlib.sha256((authorization_dir / extra.key).read_bytes()).hexdigest(),
+                )
+                recovery = plan_sent_recovery_completion(
+                    root,
+                    task,
+                    text,
+                    "pending item removed after verification",
+                    items=items,
+                    evidence="reviewed",
+                    semantic_key=request.semantic_key,
+                )
+                assert recovery is not None
+                updated = text.replace("  - 🧑 first\n  - 🧑 second\n", "") + "(verified removed pending items: reviewed)\n"
+                transition = prepare_ordinary_pending_transition(
+                    recovery,
+                    items,
+                    "reviewed",
+                    hashlib.sha256(updated.encode()).hexdigest(),
+                    digest_fields("pending-queue-v1"),
+                    request,
+                    text,
+                )
+                task.write_text(updated, encoding="utf-8")
+                commit_ordinary_pending_transition(transition, hashlib.sha256(updated.encode()).hexdigest())
+            claims = (state / "completion-email-claims.tsv").read_text(encoding="utf-8")
+            self.assertIn(f"{primary.key}\tretired:{transition.key}", claims)
+            self.assertIn(f"{extra.key}\tretired:{transition.key}", claims)
+            self.assertTrue((state / "completion-email-retired-authorizations" / primary.key).is_file())
+            self.assertTrue((state / "completion-email-retired-authorizations" / extra.key).is_file())
+
     def test_manager_maintenance_without_requested_human_result_is_suppressed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -378,8 +1073,11 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
                 used_marker.write_text(f"{original_plan.target}\t{task.name}\n", encoding="utf-8")
                 used_marker.chmod(0o600)
                 mark_completion_email_delivered(original_plan)
-                changed = f"""{original.replace("status: running", "status: blocked\nblocked_on: done_close_in_progress: manager is closing the agent before marking done")}manager note
-"""
+                blocked = original.replace(
+                    "status: running",
+                    "status: blocked\nblocked_on: done_close_in_progress: manager is closing the agent before marking done",
+                )
+                changed = f"{blocked}manager note\n"
                 task.write_text(changed, encoding="utf-8")
                 recovery_plan = build_completion_email(root, task, changed, "task done", semantic_key=semantic_key)
                 assert recovery_plan is not None

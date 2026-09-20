@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -34,15 +35,25 @@ from omo_manager.omo_task_edit import pending_remove_evidence_comment
 from omo_manager.omo_task_edit import remove_pending_items
 from omo_manager.omo_task_edit import replace_pending_item
 from omo_manager.omo_task_edit import replace_if_unchanged
+from omo_manager.omo_task_status import replace_if_unchanged_locked
 from omo_manager.omo_task_lock import task_target_lock
+from omo_manager.omo_task_lock import task_file_lock
 from omo_manager.omo_task_metadata import PendingTaskItem
 from omo_manager.omo_task_metadata import PENDING_ITEM_PROVENANCE_HELP
 from omo_manager.omo_task_metadata import human_authored_pending_items
+from omo_manager.omo_task_metadata import parse_task_metadata
 from omo_manager.omo_task_metadata import pending_items_with_origin
 from omo_manager.omo_task_metadata import pending_replacement_with_origin
 from omo_manager.omo_blocking_actor import request as blocking_request
 from omo_manager.omo_completion_email import plan_completion_email
 from omo_manager.omo_completion_email import completion_email_is_delivered
+from omo_manager.omo_completion_email import commit_ordinary_pending_transition
+from omo_manager.omo_completion_email import digest_fields
+from omo_manager.omo_completion_email import load_ordinary_pending_transition
+from omo_manager.omo_completion_email import OrdinaryPendingRecoveryRequest
+from omo_manager.omo_completion_email import ordinary_pending_purpose
+from omo_manager.omo_completion_email import plan_sent_recovery_completion
+from omo_manager.omo_completion_email import prepare_ordinary_pending_transition
 from omo_manager.omo_completion_email import require_owner_completion
 
 
@@ -61,6 +72,27 @@ class Args:
     no_email: bool = False
     completion_key: str = ""
     recovery_id: str = ""
+    expected_task_sha256: str = ""
+    expected_queue_sha256: str = ""
+    purpose_sha256: str = ""
+    prior_claim_key: str = ""
+    prior_task_sha256: str = ""
+    prior_manager_target: str = ""
+    prior_semantic_key: str = ""
+    prior_authorization_sha256: str = ""
+    message_id: str = ""
+    sent_subject_sha256: str = ""
+    sent_body_sha256: str = ""
+    churn_commit: str = ""
+    churn_before_blob: str = ""
+    churn_after_blob: str = ""
+    churn_diff_sha256: str = ""
+    prior_transition_key: str = ""
+    extra_claim_key: str = ""
+    extra_task_sha256: str = ""
+    extra_manager_target: str = ""
+    extra_semantic_key: str = ""
+    extra_authorization_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -150,6 +182,34 @@ def parse_args(argv: list[str]) -> Args:
         help="Send one missing Human deletion notice without changing the completed queue.",
     )
     recover.add_argument("--recovery-id", choices=sorted(REMOVAL_NOTICE_RECOVERIES), required=True)
+    source1990 = sub.add_parser(
+        "recover-source1990-pangram",
+        help="Apply the one Source-1990-authorized Pangram completion recovery without sending email.",
+    )
+    for recovery in (source1990,):
+        recovery.add_argument("--item", action="append", required=True)
+        recovery.add_argument("--expected-task-sha256", required=True)
+        recovery.add_argument("--expected-queue-sha256", required=True)
+        recovery.add_argument("--purpose-sha256", required=True)
+        recovery.add_argument("--prior-claim-key", required=True)
+        recovery.add_argument("--prior-task-sha256", required=True)
+        recovery.add_argument("--prior-manager-target", required=True)
+        recovery.add_argument("--prior-semantic-key", required=True)
+        recovery.add_argument("--prior-authorization-sha256", required=True)
+        recovery.add_argument("--message-id", required=True)
+        recovery.add_argument("--sent-subject-sha256", required=True)
+        recovery.add_argument("--sent-body-sha256", required=True)
+        recovery.add_argument("--churn-commit", default="")
+        recovery.add_argument("--churn-before-blob", default="")
+        recovery.add_argument("--churn-after-blob", default="")
+        recovery.add_argument("--churn-diff-sha256", default="")
+        recovery.add_argument("--prior-transition-key", default="")
+        recovery.add_argument("--extra-claim-key", default="")
+        recovery.add_argument("--extra-task-sha256", default="")
+        recovery.add_argument("--extra-manager-target", default="")
+        recovery.add_argument("--extra-semantic-key", default="")
+        recovery.add_argument("--extra-authorization-sha256", default="")
+    source1990.add_argument("--evidence", required=True)
     wake_ack = sub.add_parser("wake-ack", help="Acknowledge one durable ready-item notice.")
     wake_ack.add_argument("--notice-id", required=True)
     parsed = parser.parse_args(argv)
@@ -193,6 +253,68 @@ def parse_args(argv: list[str]) -> Args:
         )
     if parsed.command == "recover-removal-notice":
         return Args("recover-removal-notice", recovery_id=parsed.recovery_id)
+    if parsed.command == "recover-source1990-pangram":
+        hashes = (
+            parsed.expected_task_sha256,
+            parsed.expected_queue_sha256,
+            parsed.purpose_sha256,
+            parsed.prior_claim_key,
+            parsed.prior_task_sha256,
+            parsed.prior_semantic_key,
+            parsed.prior_authorization_sha256,
+            parsed.sent_subject_sha256,
+            parsed.sent_body_sha256,
+        )
+        if any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in hashes):
+            parser.error("Sent recovery SHA-256 bindings must be exact lowercase digests.")
+        if parsed.prior_transition_key and re.fullmatch(r"[0-9a-f]{64}", parsed.prior_transition_key) is None:
+            parser.error("--prior-transition-key must be a lowercase SHA-256 digest.")
+        churn = (
+            parsed.churn_commit,
+            parsed.churn_before_blob,
+            parsed.churn_after_blob,
+            parsed.churn_diff_sha256,
+        )
+        if any(churn) and not all(churn):
+            parser.error("Manager-churn commit, blobs, and diff digest must be supplied together.")
+        extra = (
+            parsed.extra_claim_key,
+            parsed.extra_task_sha256,
+            parsed.extra_manager_target,
+            parsed.extra_semantic_key,
+            parsed.extra_authorization_sha256,
+        )
+        if any(extra) and not all(extra):
+            parser.error("Extra stale claim bindings must be supplied together.")
+        if any(extra) and any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in (extra[0], extra[1], extra[3], extra[4])):
+            parser.error("Extra stale claim bindings require exact lowercase SHA-256 values.")
+        items = normalized_items(tuple(parsed.item))
+        return Args(
+            parsed.command,
+            items,
+            evidence=normalized_comment_message(getattr(parsed, "evidence", "")),
+            expected_task_sha256=parsed.expected_task_sha256,
+            expected_queue_sha256=parsed.expected_queue_sha256,
+            purpose_sha256=parsed.purpose_sha256,
+            prior_claim_key=parsed.prior_claim_key,
+            prior_task_sha256=parsed.prior_task_sha256,
+            prior_manager_target=parsed.prior_manager_target,
+            prior_semantic_key=parsed.prior_semantic_key,
+            prior_authorization_sha256=parsed.prior_authorization_sha256,
+            message_id=parsed.message_id,
+            sent_subject_sha256=parsed.sent_subject_sha256,
+            sent_body_sha256=parsed.sent_body_sha256,
+            churn_commit=parsed.churn_commit,
+            churn_before_blob=parsed.churn_before_blob,
+            churn_after_blob=parsed.churn_after_blob,
+            churn_diff_sha256=parsed.churn_diff_sha256,
+            prior_transition_key=parsed.prior_transition_key,
+            extra_claim_key=parsed.extra_claim_key,
+            extra_task_sha256=parsed.extra_task_sha256,
+            extra_manager_target=parsed.extra_manager_target,
+            extra_semantic_key=parsed.extra_semantic_key,
+            extra_authorization_sha256=parsed.extra_authorization_sha256,
+        )
     if parsed.command == "wake-ack":
         return Args("wake-ack", notice_id=parsed.notice_id)
     return Args("list")
@@ -284,7 +406,130 @@ def require_human_completion_key(items: tuple[str, ...], completion_key: str) ->
         raise BlockingError("Human-authored item removal requires --completion-key")
 
 
+def pending_queue_sha256(items: tuple[str, ...]) -> str:
+    return digest_fields("pending-queue-v1", *items)
+
+
+def fsync_task_parent(path: Path) -> None:
+    """Make an already-replaced task name durable before committing recovery state."""
+
+    fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def sent_recovery_request(args: Args) -> OrdinaryPendingRecoveryRequest:
+    if args.command != "recover-source1990-pangram":
+        raise BlockingError("only authenticated incident recovery adapters are supported")
+    mode = "source1990-pangram-remove"
+    semantic_key = args.purpose_sha256
+    return OrdinaryPendingRecoveryRequest(
+        mode,
+        args.expected_task_sha256,
+        args.expected_queue_sha256,
+        args.purpose_sha256,
+        semantic_key,
+        args.prior_claim_key,
+        args.prior_task_sha256,
+        args.prior_manager_target,
+        args.prior_semantic_key,
+        args.prior_authorization_sha256,
+        args.message_id,
+        args.sent_subject_sha256,
+        args.sent_body_sha256,
+        args.churn_commit,
+        args.churn_before_blob,
+        args.churn_after_blob,
+        args.churn_diff_sha256,
+        args.prior_transition_key,
+        args.extra_claim_key,
+        args.extra_task_sha256,
+        args.extra_manager_target,
+        args.extra_semantic_key,
+        args.extra_authorization_sha256,
+    )
+
+
+# 🧑 Human: "do not create a domain owner, edit the queue manually, or send a duplicate Human email."
+def recover_sent_pending_transition(args: Args, root: Path, path: Path) -> int:
+    """Apply one exact add/remove transition using already-delivered Sent evidence."""
+
+    if not args.items or human_authored_pending_items(args.items) != args.items or len(set(args.items)) != len(args.items):
+        raise BlockingError("Sent recovery requires distinct Human-authored items")
+    if args.command != "recover-source1990-pangram":
+        raise BlockingError("only authenticated incident recovery adapters are supported")
+    outcome = "pending item removed after verification"
+    request = sent_recovery_request(args)
+    with task_file_lock(path):
+        before = path.stat()
+        text = path.read_text(encoding="utf-8")
+        metadata = read_task_metadata(path, root)
+        if metadata is None or metadata.version != "v1.0.0" or metadata.is_manager:
+            raise BlockingError("Sent recovery requires one legacy worker queue")
+        current_task_sha256 = hashlib.sha256(text.encode()).hexdigest()
+        current_queue_sha256 = pending_queue_sha256(metadata.pending_task_items)
+        if current_task_sha256 != args.expected_task_sha256:
+            transition = load_ordinary_pending_transition(
+                root,
+                path,
+                outcome,
+                args.items,
+                args.evidence,
+                request,
+                current_task_sha256,
+                current_queue_sha256,
+            )
+            if transition is None:
+                raise BlockingError("Sent recovery task bytes changed without an exact prepared transition")
+            commit_ordinary_pending_transition(transition, current_task_sha256)
+            print(f"replayed committed {args.command} for {len(args.items)} pending item(s); no email sent")
+            return 0
+        if current_queue_sha256 != args.expected_queue_sha256:
+            raise BlockingError("Sent recovery ordered live queue changed")
+        if ordinary_pending_purpose(outcome, args.items, args.evidence) != args.purpose_sha256:
+            raise BlockingError("Sent recovery purpose digest changed")
+        if metadata.pending_task_items != args.items:
+            raise BlockingError("Sent recovery removal must cover the complete ordered live queue")
+        updated, count = remove_pending_items(text, args.items)
+        updated = append_comment(updated, pending_remove_evidence_comment(count, args.evidence))
+        updated_metadata = parse_task_metadata(updated, root)
+        if updated_metadata is None:
+            raise TaskFrontmatterError("updated pending queue metadata is invalid")
+        after_queue_sha256 = pending_queue_sha256(updated_metadata.pending_task_items)
+        after_task_sha256 = hashlib.sha256(updated.encode()).hexdigest()
+        plan = plan_sent_recovery_completion(
+            root,
+            path,
+            text,
+            outcome,
+            items=args.items,
+            evidence=args.evidence,
+            semantic_key=request.semantic_key,
+        )
+        if plan is None:
+            raise BlockingError("Sent recovery requires the exact pending-task owner")
+        transition = prepare_ordinary_pending_transition(
+            plan,
+            args.items,
+            args.evidence,
+            after_task_sha256,
+            after_queue_sha256,
+            request,
+            text,
+        )
+        replace_if_unchanged_locked(path, updated, before)
+        fsync_task_parent(path)
+        committed_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+        commit_ordinary_pending_transition(transition, committed_sha256)
+        print(f"reconciled {args.command} for {count} pending item(s); no email sent")
+        return 0
+
+
 def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
+    if args.command in {"recover-sent-add", "recover-sent-remove"}:
+        raise ValueError("generic Sent recovery is not a public command")
     if args.no_email and (args.item_id or args.answer_subject_file or args.answer_message_file):
         raise ValueError("--no-email requires legacy --item removal without answer-email options")
     if args.no_email and human_authored_pending_items(args.items):
@@ -311,6 +556,8 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
                 for item in current.pending_task_items:
                     print(item)
             return 0
+        if args.command == "recover-source1990-pangram":
+            return recover_sent_pending_transition(args, root, path)
         answer_subject, answer_body = human_answer(args)
         if args.command == "recover-removal-notice":
             recovery = REMOVAL_NOTICE_RECOVERIES.get(args.recovery_id)

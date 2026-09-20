@@ -6,6 +6,7 @@ import argparse
 import fcntl
 import hashlib
 import imaplib
+import json
 import os
 import re
 import shlex
@@ -16,6 +17,7 @@ import tempfile
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass
+from dataclasses import replace
 from email import policy
 from email.message import EmailMessage, Message
 from email.parser import BytesParser
@@ -40,6 +42,61 @@ EMAIL_HELPER = Path(__file__).resolve().parents[1] / "helper.sh" / "email_me.py"
 COMPLETION_ENTRYPOINT = Path(__file__).resolve()
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 RECONCILIATION_VERSION = "v1"
+# 🧑 Human source `manager_mail/85c5dff58359-1990.txt`: "fix the helper script to allow that"
+SOURCE1990_PATH = "manager_mail/85c5dff58359-1990.txt"
+SOURCE1990_SHA256 = "77f7bc7cf0d63d754ac07331da5d4c49a5b6e184bb53f0c33336bc86b8feb1d7"
+SOURCE1990_TEXT = "Subject: Re: Pangram queue decision — watcher_repair.md\n\nAnyway, if you are saying I said to mark something done and the helper script could not do it due to some stupid reasons, fix the helper script to allow that"
+SOURCE1990_PANGRAM_ROOT = "/ssd1/sichangheagent/work_logs"
+SOURCE1990_PANGRAM_TASK = "src1964_pangram.md"
+SOURCE1990_PANGRAM_OWNER = "dw:15"
+SOURCE1990_PANGRAM_MANAGER = "dw:60"
+SOURCE1990_PANGRAM_CLAIM_BOUND_TASK_SHA256 = "98ad7210b0b7dcf88d30ad141dcbdbb201abfcbed0e7d5086d14b3f373b77c2d"
+SOURCE1990_PANGRAM_AUTHORIZED_TASK_SHA256 = "fde2aac686832d25ca6817f07b048a2168e9d220a846776d9b3fd6cd239d0e38"
+SOURCE1990_PANGRAM_TASK_SHA256 = "764849bdd27dfcd20bbb42c2bc099e9651c944e79c945d28e289707764e8b32e"
+SOURCE1990_PANGRAM_QUEUE_SHA256 = "7809db5269454b970f1c3ef44278ceb006de48693fe6af2c4100ad1cb2230078"
+SOURCE1990_PANGRAM_PURPOSE_SHA256 = "289ba586544ab9caf05744a435a5a98afcc830cbf17712cf2f5b17cc2ea8aae3"
+SOURCE1990_PANGRAM_EVIDENCE = "All four items answered in reviewed Human email Message-ID <178984962018.2270905.17610697508862128015@gmail.com>; final independent review PASS in /tmp/src1975-report-feedback3.md; durable comparison in docs/notes/pangram_binoculars_comparison_2026-09-16.md."
+SOURCE1990_PANGRAM_MESSAGE_ID = "<178984962018.2270905.17610697508862128015@gmail.com>"
+SOURCE1990_PANGRAM_SUBJECT_SHA256 = "b2439c1be93a90abff001abd6a6c39bfaddb49354dfd1722f48301ee549f1aa8"
+SOURCE1990_PANGRAM_BODY_SHA256 = "7b1fadcf6e946e5f170271aed9fc40b04dd2a4695e471d4c3c59bf652cc89d75"
+SOURCE1990_PANGRAM_PRIMARY_CLAIM = (
+    "4c8bf60548d6296bcac97a33d602c9c6e7cc9ebb9e9b6b80a2ecee53e235dfbc",
+    "be7c7a869fd151177f82cd14ba13062ded0bd992937105c9869fc7a8e4d8dbf8",
+    "dw:60",
+    "7b1fadcf6e946e5f170271aed9fc40b04dd2a4695e471d4c3c59bf652cc89d75",
+    "f29025212bb166d9d92172f6b4757b2c9f3de363b7b34c8ee59245d9bdd86e21",
+)
+SOURCE1990_PANGRAM_EXTRA_CLAIM = (
+    "6887b3aaddbd5019d090774e1ea5c2414d3ac939eb8c6d86735bcb35d13dc402",
+    "611c6efbaff4ddb873e8902e3c476582fc28e446f1262fe16c51e0bb88d48975",
+    "dw:60",
+    "93d6ab3e808ef4c8467b1aea2e3953e0a21c5a278435ace6c628d5bb28148c6c",
+    "44811a627deda29f43c5672c42338c501b87b833a848dbe9fe15a4b3aa0aa1dd",
+)
+SOURCE1990_PANGRAM_CHURN = (
+    "059f1060f1df4646211a5742c12b24e927f2eb7b",
+    "d90f8d664e1093e16c06af95a074c9dece9ab0e0",
+    "8d9e5a7a7873316ffa4ce2d6138037afa78c4a11",
+    "bb4d7cefaddf29c5bd1f3d0dbe871c292aca24ffd8a67f19f027937ccbdd55e7",
+)
+SOURCE1990_PANGRAM_POST_AUTHORITY_CHURN = (
+    "2e696849aa32339b4a5e8ff470adec31824cec60",
+    "ee4dbda6fcb176eeb7fb42c830c53780ec3cedea",
+    "ef53c0cdc9ac2afd78381cf6de26967b680d3370",
+    "6deba6edfae0b6e6c79da413df9b65ec26340aaa5a8ce70a5eb661fdd3d48c14",
+)
+SOURCE1990_PANGRAM_CUSTODY_CHURN = (
+    "fc6e1bd9fdce0c2e188ad61d7ca8192e37f31e22",
+    "8d9e5a7a7873316ffa4ce2d6138037afa78c4a11",
+    "ee4dbda6fcb176eeb7fb42c830c53780ec3cedea",
+    "fa7066ec845ad5072932380ded11147471b2087a7278695790cbd9b7d97c42fd",
+)
+SOURCE1990_PANGRAM_ITEMS = (
+    "🧑 Human Source-1964: Revisit every original Sep 16 Pangram TODO, resume incomplete work, explain completed items with cited evidence, and email the Human in the distinct Pangram chain",
+    "🧑 Human Source-1975: Identify the Human questions that correspond to the quoted Pangram/Binoculars direct answers.",
+    "🧑 Human Source-1975: Determine whether the Sonnet body-swap experiment used the wrong LLMs.",
+    "🧑 Human Source-1975: Determine whether prompt or other protocol differences explain why Sonnet body swaps did better, and explain how the contrast happened.",
+)
 NO_CONTACT_RE = re.compile(
     r"\bsource[- ]985\b|\bno[- ]contact\b|\b(?:do not|must not|never) (?:send )?(?:any )?(?:human(?:-facing)? )?(?:email|mail|message|report|outreach|contact)\b|\b(?:do not|must not|never)\b[^.\n]{0,200}\b(?:send )?(?:any )?human (?:email|mail|message|report|outreach|contact)\b|\b(?:do not|must not|never)\b[^.\n]{0,100}\b(?:email|report|respond|write)\b[^.\n]{0,100}\bhuman\b|\b(?:no|forbid(?:s|den)?) human-facing reports?\b|\bhuman reporting (?:is )?(?:suppressed|forbidden|prohibited|paused)\b|\bwithout human email\b|\breport only privately\b|\bprivate reports? only\b",
     re.IGNORECASE,
@@ -138,12 +195,895 @@ class CompletionEmail:
     notice_key: str
     semantic_key: str
     contact_policy: ContactPolicyBinding | None = None
+    send_allowed: bool = True
 
     @property
     def notice_semantic_key(self) -> str:
         if self.outcome == "task done" and self.semantic_key:
             return hashlib.sha256(f"{self.semantic_key}\0task-close".encode()).hexdigest()
         return self.semantic_key
+
+
+@dataclass(frozen=True)
+class OrdinaryPendingRecoveryRequest:
+    mode: str
+    expected_task_sha256: str
+    expected_queue_sha256: str
+    purpose_sha256: str
+    semantic_key: str
+    prior_claim_key: str
+    prior_task_sha256: str
+    prior_manager_target: str
+    prior_semantic_key: str
+    prior_authorization_sha256: str
+    message_id: str
+    sent_subject_sha256: str
+    sent_body_sha256: str
+    churn_commit: str = ""
+    churn_before_blob: str = ""
+    churn_after_blob: str = ""
+    churn_diff_sha256: str = ""
+    prior_transition_key: str = ""
+    extra_claim_key: str = ""
+    extra_task_sha256: str = ""
+    extra_manager_target: str = ""
+    extra_semantic_key: str = ""
+    extra_authorization_sha256: str = ""
+
+
+@dataclass(frozen=True)
+class OrdinaryPendingTransition:
+    key: str
+    record: str
+    committed_record: str
+    after_task_sha256: str
+
+
+def digest_fields(*values: str) -> str:
+    payload = b""
+    for value in values:
+        encoded = value.encode()
+        payload += len(encoded).to_bytes(8, "big") + encoded
+    return hashlib.sha256(payload).hexdigest()
+
+
+def ordinary_pending_purpose(outcome: str, items: tuple[str, ...], evidence: str) -> str:
+    """Bind one recovery to its complete ordered purpose and canonical notice."""
+
+    subject = ""
+    body = pending_item_notice_body(outcome, items)
+    return digest_fields("ordinary-pending-purpose-v1", outcome, *items, evidence, subject, body)
+
+
+def ordinary_pending_transition_key(
+    root: Path,
+    task: Path,
+    outcome: str,
+    items: tuple[str, ...],
+    evidence: str,
+    request: OrdinaryPendingRecoveryRequest,
+) -> str:
+    purpose = ordinary_pending_purpose(outcome, items, evidence)
+    return digest_fields(
+        "ordinary-pending-transition-v1",
+        str(root.resolve()),
+        task.resolve().relative_to(root.resolve()).as_posix(),
+        purpose,
+        *request.__dict__.values(),
+    )
+
+
+def recovery_request_sha256(request: OrdinaryPendingRecoveryRequest) -> str:
+    return digest_fields("ordinary-pending-request-v1", *request.__dict__.values())
+
+
+def pending_transition_path(key: str) -> Path:
+    return completion_email_state_dir() / "ordinary-pending-transitions" / key
+
+
+def read_transition_record(key: str) -> tuple[dict[str, str], str] | None:
+    try:
+        payload = owned_private_file(pending_transition_path(key), "ordinary pending transition", 32_768).decode()
+    except FileNotFoundError:
+        return None
+    try:
+        values = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise OSError("ordinary pending transition is malformed") from exc
+    if not isinstance(values, dict) or any(not isinstance(name, str) or not isinstance(value, str) for name, value in values.items()):
+        raise OSError("ordinary pending transition is malformed")
+    return values, payload
+
+
+def canonical_json_record(values: dict[str, str]) -> str:
+    return json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def git_output(root: Path, *arguments: str) -> bytes:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *arguments],
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OSError("manager-churn Git evidence could not be authenticated") from exc
+    return result.stdout
+
+
+def validate_manager_churn(
+    root: Path,
+    task: Path,
+    request: OrdinaryPendingRecoveryRequest,
+    old_manager: str,
+    current_text: str,
+) -> None:
+    bindings = (
+        request.churn_commit,
+        request.churn_before_blob,
+        request.churn_after_blob,
+        request.churn_diff_sha256,
+    )
+    if not all(bindings) or SHA256_RE.fullmatch(request.churn_diff_sha256) is None:
+        raise OSError("manager churn requires exact commit, before/after blobs, and diff digest")
+    if re.fullmatch(r"[0-9a-f]{40,64}", request.churn_commit) is None or any(
+        re.fullmatch(r"[0-9a-f]{40,64}", value) is None for value in bindings[1:3]
+    ):
+        raise OSError("manager-churn Git object identity is malformed")
+    relative = task.resolve().relative_to(root.resolve()).as_posix()
+    parents = git_output(root, "show", "-s", "--format=%P", request.churn_commit).decode().strip().split()
+    if len(parents) != 1:
+        raise OSError("manager-churn commit must have exactly one parent")
+    before_blob = git_output(root, "rev-parse", f"{parents[0]}:{relative}").decode().strip()
+    after_blob = git_output(root, "rev-parse", f"{request.churn_commit}:{relative}").decode().strip()
+    if (before_blob, after_blob) != (request.churn_before_blob, request.churn_after_blob):
+        raise OSError("manager-churn commit does not contain the exact task blobs")
+    diff = git_output(root, "diff", "--no-ext-diff", "--binary", parents[0], request.churn_commit, "--", relative)
+    if hashlib.sha256(diff).hexdigest() != request.churn_diff_sha256:
+        raise OSError("manager-churn task diff does not match its exact digest")
+    before_payload = git_output(root, "cat-file", "blob", before_blob)
+    after_payload = git_output(root, "cat-file", "blob", after_blob)
+    if (
+        hashlib.sha256(before_payload).hexdigest() != request.prior_task_sha256
+        or hashlib.sha256(after_payload).hexdigest() != request.expected_task_sha256
+    ):
+        raise OSError("manager-churn task blobs do not match the exact task digests")
+    try:
+        before = parse_task_metadata(before_payload.decode(), root)
+        after = parse_task_metadata(after_payload.decode(), root)
+        current = parse_task_metadata(current_text, root)
+    except (UnicodeDecodeError, TaskFrontmatterError) as exc:
+        raise OSError("manager-churn task blobs are invalid") from exc
+    if (
+        before is None
+        or after is None
+        or current is None
+        or canonical_tmux_target(before.runat) != canonical_tmux_target(current.runat)
+        or canonical_tmux_target(after.runat) != canonical_tmux_target(current.runat)
+        or canonical_tmux_target(before.managerat) != canonical_tmux_target(old_manager)
+        or canonical_tmux_target(after.managerat) != canonical_tmux_target(current.managerat)
+        or after.pending_task_items != current.pending_task_items
+        or before.is_manager
+        or after.is_manager
+    ):
+        raise OSError("manager-churn commit does not prove the exact owner and ordered-queue transition")
+
+
+def transition_static_values(
+    root: Path,
+    task: Path,
+    outcome: str,
+    items: tuple[str, ...],
+    evidence: str,
+    request: OrdinaryPendingRecoveryRequest,
+) -> dict[str, str]:
+    purpose = ordinary_pending_purpose(outcome, items, evidence)
+    key = ordinary_pending_transition_key(root, task, outcome, items, evidence, request)
+    return {
+        "schema": "omo-ordinary-pending-transition/v1",
+        "transition_key": key,
+        "request_sha256": recovery_request_sha256(request),
+        "mode": request.mode,
+        "purpose_sha256": purpose,
+        "root": str(root.resolve()),
+        "task": task.resolve().relative_to(root.resolve()).as_posix(),
+        "before_task_sha256": request.expected_task_sha256,
+        "before_queue_sha256": request.expected_queue_sha256,
+        "outcome_sha256": hashlib.sha256(outcome.encode()).hexdigest(),
+        "items_sha256": digest_fields("ordered-items-v1", *items),
+        "evidence_sha256": hashlib.sha256(evidence.encode()).hexdigest(),
+        "canonical_subject_sha256": hashlib.sha256(b"").hexdigest(),
+        "canonical_body_sha256": hashlib.sha256(pending_item_notice_body(outcome, items).encode()).hexdigest(),
+        "prior_claim_key": request.prior_claim_key,
+        "prior_task_sha256": request.prior_task_sha256,
+        "prior_manager_target": request.prior_manager_target,
+        "prior_semantic_key": request.prior_semantic_key,
+        "prior_authorization_sha256": request.prior_authorization_sha256,
+        "message_id": request.message_id,
+        "sent_subject_sha256": request.sent_subject_sha256,
+        "sent_body_sha256": request.sent_body_sha256,
+        "churn_commit": request.churn_commit,
+        "churn_before_blob": request.churn_before_blob,
+        "churn_after_blob": request.churn_after_blob,
+        "churn_diff_sha256": request.churn_diff_sha256,
+        "prior_transition_key": request.prior_transition_key,
+        "extra_claim_key": request.extra_claim_key,
+        "extra_task_sha256": request.extra_task_sha256,
+        "extra_manager_target": request.extra_manager_target,
+        "extra_semantic_key": request.extra_semantic_key,
+        "extra_authorization_sha256": request.extra_authorization_sha256,
+    }
+
+
+def validate_recovery_request(request: OrdinaryPendingRecoveryRequest) -> None:
+    if request.mode not in {"adopt-add", "supersede-remove", "source1990-pangram-remove"}:
+        raise ValueError("ordinary pending recovery mode is invalid")
+    hashes = (
+        request.expected_task_sha256,
+        request.expected_queue_sha256,
+        request.purpose_sha256,
+        request.semantic_key,
+        request.prior_claim_key,
+        request.prior_task_sha256,
+        request.prior_semantic_key,
+        request.prior_authorization_sha256,
+        request.sent_subject_sha256,
+        request.sent_body_sha256,
+    )
+    if any(SHA256_RE.fullmatch(value) is None for value in hashes):
+        raise ValueError("ordinary pending recovery requires exact lowercase SHA-256 bindings")
+    if request.prior_transition_key and SHA256_RE.fullmatch(request.prior_transition_key) is None:
+        raise ValueError("prior transition key must be a lowercase SHA-256 digest")
+    if re.fullmatch(r"<[^<>\s]+>", request.message_id) is None:
+        raise ValueError("ordinary pending recovery Message-ID is invalid")
+    extra = (
+        request.extra_claim_key,
+        request.extra_task_sha256,
+        request.extra_manager_target,
+        request.extra_semantic_key,
+        request.extra_authorization_sha256,
+    )
+    if any(extra) and not all(extra):
+        raise ValueError("extra stale claim bindings must be supplied together")
+    if any(extra) and any(SHA256_RE.fullmatch(value) is None for value in (extra[0], extra[1], extra[3], extra[4])):
+        raise ValueError("extra stale claim bindings require exact lowercase SHA-256 values")
+    if request.extra_claim_key == request.prior_claim_key:
+        raise ValueError("extra stale claim must differ from the primary prior claim")
+    churn = (
+        request.churn_commit,
+        request.churn_before_blob,
+        request.churn_after_blob,
+        request.churn_diff_sha256,
+    )
+    if any(churn) and not all(churn):
+        raise ValueError("manager-churn bindings must be supplied together")
+
+
+def validate_prior_transition(
+    request: OrdinaryPendingRecoveryRequest,
+    root: Path,
+    task: Path,
+) -> None:
+    if request.prior_task_sha256 == request.expected_task_sha256:
+        if request.prior_transition_key:
+            raise OSError("unchanged task bytes cannot cite a prior transition")
+        return
+    if request.churn_commit:
+        return
+    if not request.prior_transition_key:
+        raise OSError("changed task bytes require one exact committed prior transition")
+    loaded = read_transition_record(request.prior_transition_key)
+    if loaded is None:
+        raise OSError("prior ordinary pending transition is missing")
+    values, _payload = loaded
+    if (
+        values.get("status") != "committed"
+        or values.get("root") != str(root.resolve())
+        or values.get("task") != task.resolve().relative_to(root.resolve()).as_posix()
+        or values.get("before_task_sha256") != request.prior_task_sha256
+        or values.get("after_task_sha256") != request.expected_task_sha256
+    ):
+        raise OSError("prior ordinary pending transition does not bind the task-byte change")
+
+
+def validate_source1990_pangram_authority(
+    root: Path,
+    plan: CompletionEmail,
+    items: tuple[str, ...],
+    evidence: str,
+    request: OrdinaryPendingRecoveryRequest,
+    current_text: str,
+) -> None:
+    """Authenticate the one Human-authorized Pangram recovery incident."""
+
+    source = root / SOURCE1990_PATH
+    try:
+        payload = owned_private_file(source, "Source-1990 authority", 4096)
+    except FileNotFoundError as exc:
+        raise OSError("Source-1990 authority is missing") from exc
+    try:
+        relative = plan.task.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        relative = ""
+    if (
+        hashlib.sha256(payload).hexdigest() != SOURCE1990_SHA256
+        or payload.decode("utf-8") != SOURCE1990_TEXT
+        or str(root.resolve()) != SOURCE1990_PANGRAM_ROOT
+        or relative != SOURCE1990_PANGRAM_TASK
+        or plan.target != SOURCE1990_PANGRAM_OWNER
+        or plan.manager_target != SOURCE1990_PANGRAM_MANAGER
+        or plan.task_sha256 != SOURCE1990_PANGRAM_TASK_SHA256
+        or hashlib.sha256(current_text.encode()).hexdigest() != SOURCE1990_PANGRAM_TASK_SHA256
+        or items != SOURCE1990_PANGRAM_ITEMS
+        or evidence != SOURCE1990_PANGRAM_EVIDENCE
+        or plan.outcome != "pending item removed after verification"
+        or request.mode != "source1990-pangram-remove"
+        or request.prior_transition_key
+        or request.expected_task_sha256 != SOURCE1990_PANGRAM_TASK_SHA256
+        or request.expected_queue_sha256 != SOURCE1990_PANGRAM_QUEUE_SHA256
+        or request.purpose_sha256 != SOURCE1990_PANGRAM_PURPOSE_SHA256
+        or request.message_id != SOURCE1990_PANGRAM_MESSAGE_ID
+        or request.sent_subject_sha256 != SOURCE1990_PANGRAM_SUBJECT_SHA256
+        or request.sent_body_sha256 != SOURCE1990_PANGRAM_BODY_SHA256
+        or stale_claim_bindings(request) != (SOURCE1990_PANGRAM_PRIMARY_CLAIM, SOURCE1990_PANGRAM_EXTRA_CLAIM)
+        or (request.churn_commit, request.churn_before_blob, request.churn_after_blob, request.churn_diff_sha256)
+        != SOURCE1990_PANGRAM_CHURN
+    ):
+        raise OSError("Source-1990 authority does not bind this exact Pangram recovery")
+    validate_manager_churn(
+        root,
+        plan.task,
+        replace(
+            request,
+            expected_task_sha256=SOURCE1990_PANGRAM_CLAIM_BOUND_TASK_SHA256,
+            prior_task_sha256=request.extra_task_sha256,
+            prior_manager_target=request.extra_manager_target,
+        ),
+        request.extra_manager_target,
+        current_text,
+    )
+    validate_manager_churn(
+        root,
+        plan.task,
+        replace(
+            request,
+            expected_task_sha256=SOURCE1990_PANGRAM_AUTHORIZED_TASK_SHA256,
+            prior_task_sha256=SOURCE1990_PANGRAM_CLAIM_BOUND_TASK_SHA256,
+            prior_manager_target=SOURCE1990_PANGRAM_MANAGER,
+            churn_commit=SOURCE1990_PANGRAM_CUSTODY_CHURN[0],
+            churn_before_blob=SOURCE1990_PANGRAM_CUSTODY_CHURN[1],
+            churn_after_blob=SOURCE1990_PANGRAM_CUSTODY_CHURN[2],
+            churn_diff_sha256=SOURCE1990_PANGRAM_CUSTODY_CHURN[3],
+        ),
+        SOURCE1990_PANGRAM_MANAGER,
+        current_text,
+    )
+    validate_manager_churn(
+        root,
+        plan.task,
+        replace(
+            request,
+            prior_task_sha256=SOURCE1990_PANGRAM_AUTHORIZED_TASK_SHA256,
+            prior_manager_target=SOURCE1990_PANGRAM_MANAGER,
+            churn_commit=SOURCE1990_PANGRAM_POST_AUTHORITY_CHURN[0],
+            churn_before_blob=SOURCE1990_PANGRAM_POST_AUTHORITY_CHURN[1],
+            churn_after_blob=SOURCE1990_PANGRAM_POST_AUTHORITY_CHURN[2],
+            churn_diff_sha256=SOURCE1990_PANGRAM_POST_AUTHORITY_CHURN[3],
+        ),
+        SOURCE1990_PANGRAM_MANAGER,
+        current_text,
+    )
+
+
+def claims_rows(state: Path) -> tuple[Path, list[list[str]], str]:
+    ledger = state / "completion-email-claims.tsv"
+    previous = owned_private_file(ledger, "completion claims ledger", 8_000_000).decode()
+    rows = [line.split("\t") for line in previous.splitlines()]
+    if any(len(row) not in {3, 5, 6, 7} for row in rows):
+        raise OSError("completion claims ledger is malformed")
+    return ledger, rows, previous
+
+
+def rewrite_claims(ledger: Path, previous: str, rows: list[list[str]]) -> None:
+    if owned_private_file(ledger, "completion claims ledger", 8_000_000).decode() != previous:
+        raise OSError("completion claims ledger changed while locked")
+    temporary = ledger.with_name(f".{ledger.name}.{os.getpid()}.tmp")
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            _ = handle.write("".join("\t".join(row) + "\n" for row in rows))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, ledger)
+        fsync_directory(ledger.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def authorization_values(payload: str) -> dict[str, str]:
+    try:
+        values = dict(line.split("=", 1) for line in payload.splitlines())
+    except ValueError as exc:
+        raise OSError("completion email authorization is malformed") from exc
+    expected = {
+        "version",
+        "target",
+        "root",
+        "task",
+        "task_sha256",
+        "notice_key",
+        "semantic_key",
+        "subject_sha256",
+        "body_sha256",
+    }
+    if len(values) != len(payload.splitlines()) or set(values) != expected or values["version"] != "1":
+        raise OSError("completion email authorization is malformed")
+    return values
+
+
+def forbidden_prior_claim_state(state: Path, key: str, notice_key: str) -> tuple[Path, ...]:
+    return (
+        state / "completion-email-authorization-used" / key,
+        state / "completion-email-delivered" / key,
+        state / "completion-email-reconciled" / key,
+        state / "completion-email-requests" / key,
+        state / "completion-email-reconciliations" / key,
+        state / "completion-notice-delivered" / notice_key,
+        state / "ordinary-completion-by-notice" / notice_key,
+    )
+
+
+def transition_tombstone(
+    transition_key: str,
+    request: OrdinaryPendingRecoveryRequest,
+    task_name: str,
+    notice_key: str,
+) -> list[str]:
+    _ = notice_key
+    return claim_tombstone(
+        transition_key,
+        request.prior_claim_key,
+        task_name,
+        request.prior_manager_target,
+        request.prior_task_sha256,
+    )
+
+
+def claim_tombstone(
+    transition_key: str,
+    claim_key: str,
+    task_name: str,
+    manager_target: str,
+    task_sha256: str,
+) -> list[str]:
+    """Make one retired claim impossible for the sender to use."""
+
+    return [
+        claim_key,
+        f"retired:{transition_key}",
+        task_name,
+        manager_target,
+        task_sha256,
+    ]
+
+
+def stale_claim_bindings(request: OrdinaryPendingRecoveryRequest) -> tuple[tuple[str, str, str, str, str], ...]:
+    """Return every exact unused claim that this recovery must permanently retire."""
+
+    bindings = [
+        (
+            request.prior_claim_key,
+            request.prior_task_sha256,
+            request.prior_manager_target,
+            request.prior_semantic_key,
+            request.prior_authorization_sha256,
+        )
+    ]
+    if request.extra_claim_key:
+        bindings.append(
+            (
+                request.extra_claim_key,
+                request.extra_task_sha256,
+                request.extra_manager_target,
+                request.extra_semantic_key,
+                request.extra_authorization_sha256,
+            )
+        )
+    return tuple(bindings)
+
+
+def transition_records(
+    static: dict[str, str],
+    *,
+    plan: CompletionEmail,
+    after_task_sha256: str,
+    after_queue_sha256: str,
+    authorization: dict[str, str],
+    ordinary_record: str,
+    message_record: str,
+) -> tuple[str, str]:
+    values = {
+        **static,
+        "status": "prepared",
+        "owner": plan.target,
+        "manager_owner": plan.manager_target,
+        "semantic_key": plan.notice_semantic_key,
+        "after_task_sha256": after_task_sha256,
+        "after_queue_sha256": after_queue_sha256,
+        "prior_notice_key": authorization["notice_key"],
+        "plan_notice_key": plan.notice_key,
+        "ordinary_record_sha256": hashlib.sha256(ordinary_record.encode()).hexdigest(),
+        "ordinary_record": ordinary_record,
+        "message_record_sha256": hashlib.sha256(message_record.encode()).hexdigest(),
+        "message_record": message_record,
+    }
+    prepared = canonical_json_record(values)
+    values["status"] = "committed"
+    return prepared, canonical_json_record(values)
+
+
+def prepare_ordinary_pending_transition(
+    plan: CompletionEmail,
+    items: tuple[str, ...],
+    evidence: str,
+    after_task_sha256: str,
+    after_queue_sha256: str,
+    request: OrdinaryPendingRecoveryRequest,
+    current_text: str,
+) -> OrdinaryPendingTransition:
+    """Retire one unused claim and prepare one replayable no-send queue transition."""
+
+    validate_recovery_request(request)
+    if plan.send_allowed:
+        raise OSError("ordinary pending recovery requires a no-send plan")
+    if plan.task_sha256 != request.expected_task_sha256:
+        raise OSError("ordinary pending recovery task digest changed")
+    if plan.notice_semantic_key != request.semantic_key:
+        raise OSError("ordinary pending recovery semantic key changed")
+    purpose = ordinary_pending_purpose(plan.outcome, items, evidence)
+    if purpose != request.purpose_sha256:
+        raise OSError("ordinary pending recovery purpose digest does not match")
+    if request.mode == "adopt-add" and (plan.outcome != "pending item created" or evidence):
+        raise OSError("claim adoption is supported only for the exact no-evidence add purpose")
+    if request.mode in {"supersede-remove", "source1990-pangram-remove"} and plan.outcome != "pending item removed after verification":
+        raise OSError("claim supersession is supported only for exact verified removal")
+    if request.mode == "adopt-add" and request.extra_claim_key:
+        raise OSError("claim adoption cannot retire an unrelated extra claim")
+    validate_prior_transition(request, plan.root, plan.task)
+    if request.mode == "source1990-pangram-remove":
+        validate_source1990_pangram_authority(plan.root, plan, items, evidence, request, current_text)
+    elif request.churn_commit:
+        validate_manager_churn(plan.root, plan.task, request, request.prior_manager_target, current_text)
+    elif canonical_tmux_target(request.prior_manager_target) != canonical_tmux_target(plan.manager_target):
+        raise OSError("manager churn requires exact Git evidence")
+    if not verify_ordinary_completion_in_sent(
+        request.message_id,
+        request.sent_subject_sha256,
+        request.sent_body_sha256,
+    ):
+        raise OSError("ordinary pending recovery message is not exact verified Sent-Mail evidence")
+    if request.mode != "source1990-pangram-remove" and request.sent_body_sha256 != hashlib.sha256(plan.body.encode()).hexdigest():
+        raise OSError("ordinary pending recovery Sent-Mail body does not match the canonical recovery notice")
+    static = transition_static_values(plan.root, plan.task, plan.outcome, items, evidence, request)
+    transition_key = static["transition_key"]
+    state = completion_email_state_dir()
+    state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    state.chmod(0o700)
+    fsync_directory(state.parent)
+    authorization_dir = state / "completion-email-authorizations"
+    retired_dir = state / "completion-email-retired-authorizations"
+    transition_dir = state / "ordinary-pending-transitions"
+    message_dir = state / "ordinary-completion-by-message"
+    notice_dir = state / "ordinary-completion-by-notice"
+    for directory in (retired_dir, transition_dir, message_dir, notice_dir):
+        directory.mkdir(mode=0o700, exist_ok=True)
+    fsync_directory(state)
+    transition_path = transition_dir / transition_key
+    message_path = message_dir / hashlib.sha256(request.message_id.encode()).hexdigest()
+    ordinary_record = ordinary_completion_record(
+        plan,
+        request.message_id,
+        request.sent_subject_sha256,
+        request.sent_body_sha256,
+    )
+    message_record = f"transition_key={transition_key}\n{ordinary_record}"
+    lock_paths = sorted(
+        (state / "completion-email-claims.lock", state / "ordinary-completion-reconcile.lock"),
+        key=str,
+    )
+    with ExitStack() as locks:
+        for lock_path in lock_paths:
+            _ = locks.enter_context(task_file_lock_at_path(lock_path))
+        for directory, label in (
+            (state, "completion state"),
+            (authorization_dir, "completion authorization directory"),
+            (retired_dir, "retired completion authorization directory"),
+            (transition_dir, "ordinary pending transition directory"),
+            (message_dir, "ordinary completion message directory"),
+            (notice_dir, "ordinary completion notice directory"),
+        ):
+            require_private_directory(directory, label)
+        ledger, rows, previous = claims_rows(state)
+        relative = plan.task.relative_to(plan.root).as_posix()
+        retirements: list[tuple[Path, Path, list[str], list[str], dict[str, str], bool]] = []
+        for claim_key, claim_task_sha256, manager_target, semantic_key, authorization_sha256 in stale_claim_bindings(request):
+            old = authorization_dir / claim_key
+            retired = retired_dir / claim_key
+            live = old.exists()
+            if live == retired.exists():
+                raise OSError("ordinary pending recovery authorization state is ambiguous")
+            authorization_payload = owned_private_file(
+                old if live else retired,
+                "prior completion authorization",
+                4096,
+            ).decode()
+            if hashlib.sha256(authorization_payload.encode()).hexdigest() != authorization_sha256:
+                raise OSError("prior completion authorization digest does not match")
+            authorization = authorization_values(authorization_payload)
+            if (
+                authorization["target"] != plan.target
+                or authorization["root"] != str(plan.root)
+                or authorization["task"] != relative
+                or authorization["task_sha256"] != claim_task_sha256
+                or authorization["semantic_key"] != semantic_key
+            ):
+                raise OSError("prior completion authorization does not match the exact task")
+            expected = [
+                claim_key,
+                plan.target,
+                plan.task.name,
+                manager_target,
+                claim_task_sha256,
+                authorization["notice_key"],
+                semantic_key,
+            ]
+            retirements.append(
+                (
+                    old,
+                    retired,
+                    expected,
+                    claim_tombstone(transition_key, claim_key, plan.task.name, manager_target, claim_task_sha256),
+                    authorization,
+                    live,
+                )
+            )
+        authorization = retirements[0][4]
+        prepared, committed = transition_records(
+            static,
+            plan=plan,
+            after_task_sha256=after_task_sha256,
+            after_queue_sha256=after_queue_sha256,
+            authorization=authorization,
+            ordinary_record=ordinary_record,
+            message_record=message_record,
+        )
+        try:
+            recorded_transition = owned_private_file(
+                transition_path,
+                "ordinary pending transition",
+                32_768,
+            ).decode()
+        except FileNotFoundError:
+            recorded_transition = ""
+        if recorded_transition not in {"", prepared, committed}:
+            raise OSError("ordinary pending transition is already bound to different evidence")
+        try:
+            recorded_message = owned_private_file(
+                message_path,
+                "ordinary completion message evidence",
+                16_384,
+            ).decode()
+        except FileNotFoundError:
+            recorded_message = ""
+        if recorded_message not in {"", message_record}:
+            raise OSError("ordinary pending recovery Message-ID is already bound to different evidence")
+        selected = [row for row in rows if row and row[0] == request.prior_claim_key]
+        expected_claim = retirements[0][2]
+        tombstone = retirements[0][3]
+        if selected not in ([expected_claim], [tombstone]):
+            raise OSError("prior completion claim is missing or ambiguous")
+        if request.mode == "adopt-add":
+            same_purpose = (
+                authorization["subject_sha256"] == hashlib.sha256(plan.subject.encode()).hexdigest()
+                and authorization["body_sha256"] == hashlib.sha256(plan.body.encode()).hexdigest()
+            )
+            prior_identity = "\0".join(
+                (
+                    str(plan.root),
+                    relative,
+                    plan.target,
+                    request.prior_manager_target,
+                    request.prior_task_sha256,
+                    plan.outcome,
+                    "\n".join(items),
+                    evidence,
+                    plan.subject,
+                    plan.body,
+                )
+            )
+            if (
+                not same_purpose
+                or plan.contact_policy is not None
+                or hashlib.sha256(prior_identity.encode()).hexdigest() != request.prior_claim_key
+            ):
+                raise OSError("prior completion claim belongs to a different purpose")
+        replacements: dict[tuple[str, ...], list[str]] = {}
+        for _old, _retired, expected, retired_claim, prior_authorization, _live in retirements:
+            selected = [row for row in rows if row and row[0] == expected[0]]
+            if selected not in ([expected], [retired_claim]):
+                raise OSError("prior completion claim is missing or ambiguous")
+            if selected == [expected]:
+                semantic_rows = [row for row in rows if len(row) == 7 and row[6] == expected[6]]
+                notice_rows = [row for row in rows if len(row) >= 6 and row[5] == prior_authorization["notice_key"]]
+                if semantic_rows != [expected] or notice_rows != [expected]:
+                    raise OSError("prior completion claim is not the sole exact purpose claim")
+                replacements[tuple(expected)] = retired_claim
+            if any(path.exists() for path in forbidden_prior_claim_state(state, expected[0], prior_authorization["notice_key"])):
+                raise OSError("prior completion claim may have been used, requested, delivered, or reconciled")
+        if not recorded_message:
+            exclusive_record(message_path, message_record)
+        if replacements:
+            rows = [replacements.get(tuple(row), row) for row in rows]
+            rewrite_claims(ledger, previous, rows)
+        current_forbidden = (
+            state / "completion-email-authorization-used" / plan.key,
+            state / "completion-email-delivered" / plan.key,
+            state / "completion-email-reconciled" / plan.key,
+            state / "completion-email-requests" / plan.key,
+            state / "completion-notice-delivered" / plan.notice_key,
+            state / "ordinary-completion-by-notice" / plan.notice_key,
+        )
+        if plan.key != request.prior_claim_key and any(path.exists() for path in current_forbidden):
+            raise OSError("ordinary pending recovery conflicts with existing completion state")
+        for old, retired, _expected, _tombstone, _authorization, live in retirements:
+            if live:
+                os.replace(old, retired)
+            fsync_directory(authorization_dir)
+            fsync_directory(retired_dir)
+        if not recorded_transition:
+            exclusive_record(transition_path, prepared)
+    return OrdinaryPendingTransition(transition_key, prepared, committed, after_task_sha256)
+
+
+def commit_ordinary_pending_transition(transition: OrdinaryPendingTransition, task_sha256: str) -> None:
+    """Commit a prepared recovery after the exact queue mutation is durable."""
+
+    if task_sha256 != transition.after_task_sha256:
+        raise OSError("ordinary pending transition task mutation is not exact")
+    state = completion_email_state_dir()
+    transition_path = pending_transition_path(transition.key)
+    values = json.loads(transition.record)
+    request_hash = values["request_sha256"]
+    message_id = values["message_id"]
+    message_path = state / "ordinary-completion-by-message" / hashlib.sha256(message_id.encode()).hexdigest()
+    notice_path = state / "ordinary-completion-by-notice" / values["plan_notice_key"]
+    ordinary_record = values["ordinary_record"]
+    message_record = values["message_record"]
+    lock_paths = sorted(
+        (state / "completion-email-claims.lock", state / "ordinary-completion-reconcile.lock"),
+        key=str,
+    )
+    with ExitStack() as locks:
+        for lock_path in lock_paths:
+            _ = locks.enter_context(task_file_lock_at_path(lock_path))
+        current = owned_private_file(transition_path, "ordinary pending transition", 32_768).decode()
+        if current == transition.committed_record:
+            return
+        if current != transition.record:
+            raise OSError("ordinary pending transition prepared state changed")
+        ledger, rows, _previous = claims_rows(state)
+        _ = ledger
+        request = request_from_transition_values(values)
+        tombstones = {
+            claim_key: claim_tombstone(transition.key, claim_key, Path(values["task"]).name, manager_target, claim_task_sha256)
+            for claim_key, claim_task_sha256, manager_target, _semantic_key, _authorization_sha256 in stale_claim_bindings(request)
+        }
+        if recovery_request_sha256_from_values(values) != request_hash or any(
+            [row for row in rows if row and row[0] == claim_key] != [tombstone]
+            for claim_key, tombstone in tombstones.items()
+        ):
+            raise OSError("ordinary pending transition tombstone is missing or ambiguous")
+        if owned_private_file(message_path, "ordinary completion message evidence", 16_384).decode() != message_record:
+            raise OSError("ordinary pending transition message evidence changed")
+        try:
+            recorded_notice = owned_private_file(notice_path, "ordinary completion reconciliation", 16_384).decode()
+        except FileNotFoundError:
+            exclusive_record(notice_path, ordinary_record)
+        else:
+            if recorded_notice != ordinary_record:
+                raise OSError("ordinary pending transition notice evidence changed")
+        replace_record(transition_path, transition.record, transition.committed_record)
+
+
+def recovery_request_sha256_from_values(values: dict[str, str]) -> str:
+    return recovery_request_sha256(request_from_transition_values(values))
+
+
+def request_from_transition_values(values: dict[str, str]) -> OrdinaryPendingRecoveryRequest:
+    return OrdinaryPendingRecoveryRequest(
+        values["mode"],
+        values["before_task_sha256"],
+        values["before_queue_sha256"],
+        values["purpose_sha256"],
+        values["semantic_key"],
+        values["prior_claim_key"],
+        values["prior_task_sha256"],
+        values["prior_manager_target"],
+        values["prior_semantic_key"],
+        values["prior_authorization_sha256"],
+        values["message_id"],
+        values["sent_subject_sha256"],
+        values["sent_body_sha256"],
+        values["churn_commit"],
+        values["churn_before_blob"],
+        values["churn_after_blob"],
+        values["churn_diff_sha256"],
+        values["prior_transition_key"],
+        values["extra_claim_key"],
+        values["extra_task_sha256"],
+        values["extra_manager_target"],
+        values["extra_semantic_key"],
+        values["extra_authorization_sha256"],
+    )
+
+
+def load_ordinary_pending_transition(
+    root: Path,
+    task: Path,
+    outcome: str,
+    items: tuple[str, ...],
+    evidence: str,
+    request: OrdinaryPendingRecoveryRequest,
+    task_sha256: str,
+    queue_sha256: str,
+) -> OrdinaryPendingTransition | None:
+    """Load an exact prepared/committed transition after its task mutation."""
+
+    validate_recovery_request(request)
+    static = transition_static_values(root, task, outcome, items, evidence, request)
+    loaded = read_transition_record(static["transition_key"])
+    if loaded is None:
+        return None
+    values, payload = loaded
+    expected_names = set(static) | {
+        "status",
+        "owner",
+        "manager_owner",
+        "semantic_key",
+        "after_task_sha256",
+        "after_queue_sha256",
+        "prior_notice_key",
+        "plan_notice_key",
+        "ordinary_record_sha256",
+        "ordinary_record",
+        "message_record_sha256",
+        "message_record",
+    }
+    if (
+        set(values) != expected_names
+        or any(values.get(name) != value for name, value in static.items())
+        or values.get("status") not in {"prepared", "committed"}
+        or values.get("after_task_sha256") != task_sha256
+        or values.get("after_queue_sha256") != queue_sha256
+        or values.get("semantic_key") != request.semantic_key
+        or recovery_request_sha256_from_values(values) != values.get("request_sha256")
+        or hashlib.sha256(values.get("ordinary_record", "").encode()).hexdigest()
+        != values.get("ordinary_record_sha256")
+        or hashlib.sha256(values.get("message_record", "").encode()).hexdigest()
+        != values.get("message_record_sha256")
+        or values.get("message_record") != f"transition_key={static['transition_key']}\n{values.get('ordinary_record', '')}"
+        or payload != canonical_json_record(values)
+    ):
+        raise OSError("ordinary pending transition does not match the exact replay")
+    prepared_values = {**values, "status": "prepared"}
+    committed_values = {**values, "status": "committed"}
+    return OrdinaryPendingTransition(
+        static["transition_key"],
+        canonical_json_record(prepared_values),
+        canonical_json_record(committed_values),
+        values["after_task_sha256"],
+    )
 
 
 def ordinary_sent_text(message: Message) -> str:
@@ -381,8 +1321,7 @@ def source1241_contact_clarification(root: Path, task: Path, text: str) -> Conta
     return ContactPolicyBinding(hashlib.sha256(task_payload).hexdigest(), source, hashlib.sha256(source_payload).hexdigest())
 
 
-# 🧑 Human: "correct the routing/reporting behavior so workers, not managers, report only requested results."
-def build_completion_email(
+def _build_completion_email(
     root: Path,
     task: Path,
     text: str,
@@ -391,8 +1330,9 @@ def build_completion_email(
     items: tuple[str, ...] = (),
     evidence: str = "",
     semantic_key: str = "",
+    sent_recovery: bool = False,
 ) -> CompletionEmail | None:
-    """Build the canonical notice without assigning reporter authority."""
+    """Build one canonical notice; recovery plans can never authorize sending."""
 
     metadata = parse_task_metadata(text, root)
     policy_text = text
@@ -483,6 +1423,31 @@ def build_completion_email(
         notice_key,
         semantic_key,
         contact_policy,
+        not sent_recovery,
+    )
+
+
+# 🧑 Human: "correct the routing/reporting behavior so workers, not managers, report only requested results."
+def build_completion_email(
+    root: Path,
+    task: Path,
+    text: str,
+    outcome: str,
+    *,
+    items: tuple[str, ...] = (),
+    evidence: str = "",
+    semantic_key: str = "",
+) -> CompletionEmail | None:
+    """Build the canonical notice without assigning reporter authority."""
+
+    return _build_completion_email(
+        root,
+        task,
+        text,
+        outcome,
+        items=items,
+        evidence=evidence,
+        semantic_key=semantic_key,
     )
 
 
@@ -568,7 +1533,39 @@ def plan_completion_email(
         ),
         canonical.semantic_key,
         canonical.contact_policy,
+        canonical.send_allowed,
     )
+
+
+def plan_sent_recovery_completion(
+    root: Path,
+    task: Path,
+    text: str,
+    outcome: str,
+    *,
+    items: tuple[str, ...],
+    evidence: str,
+    semantic_key: str,
+) -> CompletionEmail | None:
+    """Build an exact-owner no-send plan for already-delivered Sent evidence."""
+
+    plan = _build_completion_email(
+        root,
+        task,
+        text,
+        outcome,
+        items=items,
+        evidence=evidence,
+        semantic_key=semantic_key,
+        sent_recovery=True,
+    )
+    if plan is None:
+        return None
+    try:
+        owner = current_pending_task(root).resolve()
+    except (OSError, TaskFrontmatterError):
+        return None
+    return plan if owner == task.resolve() else None
 
 
 def reconciliation_record(
@@ -1448,6 +2445,8 @@ def refresh_unattempted_completion_claim(plan: CompletionEmail, previous_key: st
 def claim_completion_email(plan: CompletionEmail, *, recover_existing: bool = False) -> bool:
     """Prepare the exact capability before reserving its Human notice."""
 
+    if not plan.send_allowed:
+        raise OSError("Sent-Mail recovery plans cannot authorize email")
     state_dir = completion_email_state_dir()
     state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     state_dir.chmod(0o700)
@@ -1514,6 +2513,8 @@ def send_completion_email(plan: CompletionEmail | None) -> bool:
 
     if plan is None:
         return False
+    if not plan.send_allowed:
+        raise OSError("Sent-Mail recovery plans cannot send email")
     if not plan.semantic_key:
         raise ValueError("semantic completion key is required before email delivery")
     if completion_email_is_delivered(plan):
