@@ -118,6 +118,13 @@ class CompletionEmailTest(unittest.TestCase):
             request,
             current,
         )
+        self.assertTrue(
+            verify_ordinary_completion_in_sent(
+                request.message_id,
+                request.sent_subject_sha256,
+                request.sent_body_sha256,
+            )
+        )
 
     def test_source1990_adapter_authenticates_real_git_churn_and_rejects_drift(self) -> None:
         """The incident path requires a real before-to-prefix Git transition."""
@@ -344,6 +351,16 @@ class CompletionEmailTest(unittest.TestCase):
                         omo_completion_email.SOURCE1990_PANGRAM_ITEMS,
                         omo_completion_email.SOURCE1990_PANGRAM_EVIDENCE,
                         wrong_message,
+                        current,
+                    )
+                wrong_body = replace(request, sent_body_sha256="0" * 64)
+                with self.assertRaisesRegex(OSError, "does not bind"):
+                    omo_completion_email.validate_source1990_pangram_authority(
+                        root,
+                        plan,
+                        omo_completion_email.SOURCE1990_PANGRAM_ITEMS,
+                        omo_completion_email.SOURCE1990_PANGRAM_EVIDENCE,
+                        wrong_body,
                         current,
                     )
 
