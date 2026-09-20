@@ -97,6 +97,129 @@ SOURCE1990_PANGRAM_ITEMS = (
     "🧑 Human Source-1975: Determine whether the Sonnet body-swap experiment used the wrong LLMs.",
     "🧑 Human Source-1975: Determine whether prompt or other protocol differences explain why Sonnet body swaps did better, and explain how the contrast happened.",
 )
+# 🧑 Human: "fix the helper so already-delivered answers can satisfy exact completed Human queue work without duplicate email. Exact case: ... five live Source-1970 items and one missing sixth sentence in its body, all answered by existing Message-ID ..."
+SOURCE1970_ROOT = "/ssd1/sichangheagent/work_logs"
+SOURCE1970_PATH = "manager_mail/85c5dff58359-1970.txt"
+SOURCE1970_SHA256 = "1b0a78b8aa196c5ecd7938b66bf44fd144fb234a666e6123ce627510c6ec3434"
+SOURCE1970_TASK = "eval_sufficiency.md"
+SOURCE1970_TASK_SHA256 = "fc893edfeea1cdf7bef2b841faa592afc58fa14edcc3f2984d4093077eb79181"
+SOURCE1970_OWNER = "dw:58"
+SOURCE1970_MANAGER = "dw:60"
+SOURCE1970_STATUS = "blocked"
+SOURCE1970_BLOCKED_ON = "config:35 supported Source-1970 completion reconciliation"
+SOURCE1970_SENTENCE = "How exactly do we argue this, basically the eval is sufficient and there is no need for larger datasets?"
+SOURCE1970_MISSING_ITEM = f"🧑 Source-1970: “{SOURCE1970_SENTENCE}”"
+SOURCE1970_MISSING_BODY_LINE = (
+    f"Human Source-1970, verbatim from `manager_mail/85c5dff58359-1970.txt`: “{SOURCE1970_SENTENCE}”"
+)
+SOURCE1970_LIVE_ITEMS = (
+    "🧑 Source-1970: “Why” — explain why the existing evaluation can or cannot support the claim that generating more sites using the same methods would produce materially similar results.",
+    "🧑 Source-1970: “What do you mean?” — replace the confusing stored-site/resampling explanation with a direct explanation of the same-method new-site question.",
+    "🧑 Source-1970: “What we want to argue is if we generate more sites using the same methods, the results would pretty much be the same.”",
+    "🧑 Source-1970: “Do we argue in the paper like this?” — determine whether and how to use the observed 5th-to-95th-percentile narrowing in the paper.",
+    "🧑 Source-1970: “Stop undermining the paper. We need to convince people this whole eval makes sense, not tell them it doesn’t really mean anything.”",
+)
+SOURCE1970_RESOLUTION_ITEMS = (*SOURCE1970_LIVE_ITEMS, SOURCE1970_MISSING_ITEM)
+SOURCE1970_QUEUE_SHA256 = "e1c29082027f88d221503095a5ea1d8cd67551df431881cfbfb5984bcbb885e5"
+SOURCE1970_RESOLUTION_SHA256 = "b80bbfb076debcf20c0d41af89bd962a8ff1d688453dc2f0f8b408293038ec0d"
+SOURCE1970_MESSAGE_ID = "<178985059335.2672392.11170981607905287447@gmail.com>"
+SOURCE1970_SUBJECT_SHA256 = "39836bede4faaa9871c59d661cb953afd9310fa6e29f55c9d60c4eaf4adf340d"
+SOURCE1970_BODY_SHA256 = "316868914a3d039e8a0d6bde249817bb8fe97e4f9cbd9cfbe16a7689b9d3eea1"
+SOURCE1970_EVIDENCE = f"All six Source-1970 items answered in Human email Message-ID {SOURCE1970_MESSAGE_ID}."
+SOURCE1970_PURPOSE_SHA256 = "9f5f9c6e461cf025128bb68ee24b9702cf3f4f72f494a3ff74ef588df1c62a5a"
+SOURCE1970_PLAN_KEY = "1c96b6c9f7875eea32f3fa860b1cd51f554f2d9f202306ee50582306212e7449"
+SOURCE1970_NOTICE_KEY = "3462f407e63210223686243e677831f8ad6f605a25853f318c5efc7cd41881c9"
+SOURCE1970_CANONICAL_BODY_SHA256 = "84361a3bcd61e30e93d514cc5a2d489dee1930d135f2129a72b95454197cd86c"
+SOURCE1970_DELIVERED_CREATION_CLAIMS = (
+    (
+        "8cd7586d05099f4b4a8d137c64c6596f90553a61bf51bbad737ef3a1264051c7",
+        "119e4a73b9883784799cb67f6aab85e6928bf6494a43a1053b35da0464544a86",
+        "dw:13",
+        "c899d451ca18cb153e83c3c5ceab578f53be6815be0e9fab3cc9a4fab9a26ed5",
+        "fb9f46e49e2cb1129b713eb875cefb59beb0d9a411441c7397edf298421f10cb",
+        "4269af36f72ee61c655461b2e5afe52f951f93899c62563cade98358eb6286a7",
+    ),
+    (
+        "05a163eda7a8a594eb033f5b5fed45324c566be790240c88d4f0faed2786e928",
+        "f3e91525d30cd4f0f83887acc174280fc26c3d5ea91c4ccced629c0ec5e32c31",
+        "dw:13",
+        "746c3f2ef9cb4e3b7a617a645fff38b55c4d9f8e09586d18da99f375d4c45eab",
+        "5e3c2bc66c52bfa02fc02af3495e9157c5ebb8405afd0c31dfb4fd5e09f82878",
+        "b1803894793e8c3abafff4f297d10148783b1dbc03b247e74728c55b276509ec",
+    ),
+    (
+        "8866e66c90f402e54298100e2504b8d829dd790b1425b2339887c04ea9b46f2e",
+        "6a224f9df12c64cb70507ad084d34ac02c134830b01a39ecb11304ab7fa2bae3",
+        "dw:13",
+        "aaa4856ec93c1bf66344549d3ad21fc0869533b0b494a623ac03eb65f25f4b33",
+        "aad689c5dc8d55630a92ea3b934dfb535225632c82bc472015de25be7e44c38a",
+        "80d7a0abf32b7771b1e97aaab71358b44772929004442cd343ea8abae5fc8bbc",
+    ),
+    (
+        "bfbc298ab8a6411b7bed0967002462fc692c84e68d7ed6ba5ccf96f19dd57e4c",
+        "b4bc7ddbcde066c8d90c988b7ab08ee1ab611810f8e97b63d887ca61553d23c6",
+        "dw:13",
+        "aeaaa2ab2bcea9e87f1e8068fc820a78f51d15cb2e23c0298e03081bc586fa3c",
+        "d454b12e264d9803c3875d804e4ef17f231c79718f12f0785daecdbd2237d4de",
+        "717367c29b1f12f7367a5f5fe902b162c63d7d6712953b98a753864aacfcd85a",
+    ),
+    (
+        "0e5a152bb0473c3a3521d271fd0602afc5c46a24c6aec9eac7fb5f4fd3fcb729",
+        "ad0118e792b311d70ff09a8d5c925cfa6a38688463003b3f6608915dd83c4cd4",
+        "dw:13",
+        "7867f7258aad79cbc41c8ae3a7ab919e8a8f0455905faddc5cd0af70932998f0",
+        "36e52fa7b6b0c33aace0ab6a09be06c94d4683642d10207f86a188de841de7fe",
+        "259344bee12e9266c8206bad358b61ad3d4cb11b14902f7993bf31054b2eefb7",
+    ),
+)
+SOURCE1970_STALE_ADD_CLAIM = (
+    "43281a18d4ad00a0dcce7a698932828f5aca2dc46816762810c58f2a5741cf75",
+    "ad0118e792b311d70ff09a8d5c925cfa6a38688463003b3f6608915dd83c4cd4",
+    "dw:13",
+    "94feb6a13494a9733d02da9d6dea3985fe0746e065d1915f6ae1626e029bf9c6",
+    "726447405441a353022f10145e6e487b746b90dfaae74a24fe6e5c7402c15465",
+)
+SOURCE1970_STALE_REMOVAL_CLAIM = (
+    "43a09139661c2449d1f1d6d490d4a994234208bc7ae4783dfa8639a0f347a919",
+    "31e45d269e499f0851a300cf6b20fa942c557825be53866cba3d904896d9e7ed",
+    "dw:60",
+    "fedb33a3add1ea711eacbb3550fc84b44e98295610969347a8981579e5a0a6ef",
+    "7c929b465b5aa72156e152bd4e18882f6b1dd34e95b5f51f3dfa79d5cd6881f1",
+)
+SOURCE1970_TASK_LINEAGE = (
+    (
+        "059f1060f1df4646211a5742c12b24e927f2eb7b",
+        "195b6a9e0fb9548b280cd679e13866c6b287b4a5",
+        "7b871b10ec83f484961fce0717e28b45c96ff8a2",
+        "990cc67cddf91f26dbc12a55dccdc1f00d013b328b2ef58c58d394268ae8f2e4",
+        "94fde9073b913a06ab75a7b8bac3cfeb8221d9a0798b9e703752495d3e7326e2",
+        "31e45d269e499f0851a300cf6b20fa942c557825be53866cba3d904896d9e7ed",
+    ),
+    (
+        "46c542fd7c1de6b6716f750f23186c4d54949f50",
+        "7b871b10ec83f484961fce0717e28b45c96ff8a2",
+        "b11e506f63b90de44af60300d60fdb37268f2184",
+        "e8d6501a71571440be1d2389c2ae83b7c12910e897f986cec0f8c1095593eb95",
+        "31e45d269e499f0851a300cf6b20fa942c557825be53866cba3d904896d9e7ed",
+        "309cf83db6b334f009233afbd102fee1276eb6754bc61756cca8b24ff6c9abdf",
+    ),
+    (
+        "7508ffc22e8c3ba7f697f37751a7df758307a332",
+        "b11e506f63b90de44af60300d60fdb37268f2184",
+        "0fb2796e26d2d9fc37cf433f28654010178d864c",
+        "7abc11af0add2531090e309db55c4390b369262aa494c65f91690ca8476114db",
+        "309cf83db6b334f009233afbd102fee1276eb6754bc61756cca8b24ff6c9abdf",
+        "6c88a9484d68e5c53a6a338fd133e228f42f672ac942db895d57e5e0069f8b9d",
+    ),
+    (
+        "2e696849aa32339b4a5e8ff470adec31824cec60",
+        "0fb2796e26d2d9fc37cf433f28654010178d864c",
+        "7488418938feb158054ff124eff2aa2457dd169e",
+        "234f2500893440af35c4d3931a002b8e40c8230f70d842c6a73e17a4cc57293a",
+        "6c88a9484d68e5c53a6a338fd133e228f42f672ac942db895d57e5e0069f8b9d",
+        "fc893edfeea1cdf7bef2b841faa592afc58fa14edcc3f2984d4093077eb79181",
+    ),
+)
 NO_CONTACT_RE = re.compile(
     r"\bsource[- ]985\b|\bno[- ]contact\b|\b(?:do not|must not|never) (?:send )?(?:any )?(?:human(?:-facing)? )?(?:email|mail|message|report|outreach|contact)\b|\b(?:do not|must not|never)\b[^.\n]{0,200}\b(?:send )?(?:any )?human (?:email|mail|message|report|outreach|contact)\b|\b(?:do not|must not|never)\b[^.\n]{0,100}\b(?:email|report|respond|write)\b[^.\n]{0,100}\bhuman\b|\b(?:no|forbid(?:s|den)?) human-facing reports?\b|\bhuman reporting (?:is )?(?:suppressed|forbidden|prohibited|paused)\b|\bwithout human email\b|\breport only privately\b|\bprivate reports? only\b",
     re.IGNORECASE,
@@ -253,6 +376,39 @@ def ordinary_pending_purpose(outcome: str, items: tuple[str, ...], evidence: str
     subject = ""
     body = pending_item_notice_body(outcome, items)
     return digest_fields("ordinary-pending-purpose-v1", outcome, *items, evidence, subject, body)
+
+
+def source1970_eval_queue_items() -> tuple[str, ...]:
+    return SOURCE1970_LIVE_ITEMS
+
+
+def source1970_eval_resolution_items() -> tuple[str, ...]:
+    return SOURCE1970_RESOLUTION_ITEMS
+
+
+def source1970_eval_evidence() -> str:
+    return SOURCE1970_EVIDENCE
+
+
+def source1970_eval_recovery_request() -> OrdinaryPendingRecoveryRequest:
+    """Return the immutable request for the sole Source-1970 recovery."""
+
+    return OrdinaryPendingRecoveryRequest(
+        "source1970-eval-remove",
+        SOURCE1970_TASK_SHA256,
+        SOURCE1970_QUEUE_SHA256,
+        SOURCE1970_PURPOSE_SHA256,
+        SOURCE1970_PURPOSE_SHA256,
+        *SOURCE1970_STALE_ADD_CLAIM,
+        SOURCE1970_MESSAGE_ID,
+        SOURCE1970_SUBJECT_SHA256,
+        SOURCE1970_BODY_SHA256,
+        extra_claim_key=SOURCE1970_STALE_REMOVAL_CLAIM[0],
+        extra_task_sha256=SOURCE1970_STALE_REMOVAL_CLAIM[1],
+        extra_manager_target=SOURCE1970_STALE_REMOVAL_CLAIM[2],
+        extra_semantic_key=SOURCE1970_STALE_REMOVAL_CLAIM[3],
+        extra_authorization_sha256=SOURCE1970_STALE_REMOVAL_CLAIM[4],
+    )
 
 
 def ordinary_pending_transition_key(
@@ -417,7 +573,7 @@ def transition_static_values(
 
 
 def validate_recovery_request(request: OrdinaryPendingRecoveryRequest) -> None:
-    if request.mode not in {"adopt-add", "supersede-remove", "source1990-pangram-remove"}:
+    if request.mode not in {"adopt-add", "supersede-remove", "source1990-pangram-remove", "source1970-eval-remove"}:
         raise ValueError("ordinary pending recovery mode is invalid")
     hashes = (
         request.expected_task_sha256,
@@ -576,6 +732,107 @@ def validate_source1990_pangram_authority(
     )
 
 
+def validate_source1970_task_lineage(
+    root: Path,
+    task: Path,
+    current_text: str,
+    request: OrdinaryPendingRecoveryRequest,
+) -> None:
+    """Authenticate every exact committed task-byte step after the removal claim."""
+
+    if (
+        len(SOURCE1970_TASK_LINEAGE) != 4
+        or SOURCE1970_TASK_LINEAGE[0][5] != SOURCE1970_STALE_REMOVAL_CLAIM[1]
+        or SOURCE1970_TASK_LINEAGE[-1][5] != SOURCE1970_TASK_SHA256
+        or any(
+            left[5] != right[4] or left[2] != right[1]
+            for left, right in zip(SOURCE1970_TASK_LINEAGE, SOURCE1970_TASK_LINEAGE[1:])
+        )
+    ):
+        raise OSError("Source-1970 task lineage constants are not contiguous")
+    for commit, before_blob, after_blob, diff_sha256, before_sha256, after_sha256 in SOURCE1970_TASK_LINEAGE:
+        validate_manager_churn(
+            root,
+            task,
+            replace(
+                request,
+                expected_task_sha256=after_sha256,
+                prior_task_sha256=before_sha256,
+                prior_manager_target=SOURCE1970_MANAGER,
+                churn_commit=commit,
+                churn_before_blob=before_blob,
+                churn_after_blob=after_blob,
+                churn_diff_sha256=diff_sha256,
+            ),
+            SOURCE1970_MANAGER,
+            current_text,
+        )
+
+
+def validate_source1970_eval_authority(
+    root: Path,
+    plan: CompletionEmail,
+    items: tuple[str, ...],
+    evidence: str,
+    request: OrdinaryPendingRecoveryRequest,
+    current_text: str,
+) -> None:
+    """Authenticate the one Source-1970 six-item completion incident."""
+
+    source = root / SOURCE1970_PATH
+    try:
+        payload = owned_private_file(source, "Source-1970 authority", 32_768)
+        source_text = payload.decode("utf-8")
+        metadata = parse_task_metadata(current_text, root)
+    except FileNotFoundError as exc:
+        raise OSError("Source-1970 authority is missing") from exc
+    except (UnicodeDecodeError, TaskFrontmatterError) as exc:
+        raise OSError("Source-1970 authority or task is malformed") from exc
+    try:
+        relative = plan.task.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        relative = ""
+    expected_plan = _build_completion_email(
+        root,
+        plan.task,
+        current_text,
+        "pending item removed after verification",
+        items=SOURCE1970_RESOLUTION_ITEMS,
+        evidence=SOURCE1970_EVIDENCE,
+        semantic_key=SOURCE1970_PURPOSE_SHA256,
+        sent_recovery=True,
+    )
+    if (
+        metadata is None
+        or hashlib.sha256(payload).hexdigest() != SOURCE1970_SHA256
+        or SOURCE1970_SENTENCE not in source_text
+        or current_text.splitlines().count(SOURCE1970_MISSING_BODY_LINE) != 1
+        or str(root.resolve()) != SOURCE1970_ROOT
+        or relative != SOURCE1970_TASK
+        or metadata.version != "v1.0.0"
+        or metadata.status != SOURCE1970_STATUS
+        or metadata.blocked_on != SOURCE1970_BLOCKED_ON
+        or metadata.runat != SOURCE1970_OWNER
+        or metadata.managerat != SOURCE1970_MANAGER
+        or metadata.is_manager
+        or metadata.pending_task_items != SOURCE1970_LIVE_ITEMS
+        or digest_fields("pending-queue-v1", *metadata.pending_task_items) != SOURCE1970_QUEUE_SHA256
+        or digest_fields("pending-queue-v1", *items) != SOURCE1970_RESOLUTION_SHA256
+        or items != SOURCE1970_RESOLUTION_ITEMS
+        or evidence != SOURCE1970_EVIDENCE
+        or request != source1970_eval_recovery_request()
+        or ordinary_pending_purpose(plan.outcome, items, evidence) != SOURCE1970_PURPOSE_SHA256
+        or plan != expected_plan
+        or plan.key != SOURCE1970_PLAN_KEY
+        or plan.notice_key != SOURCE1970_NOTICE_KEY
+        or hashlib.sha256(plan.body.encode()).hexdigest() != SOURCE1970_CANONICAL_BODY_SHA256
+        or plan.task_sha256 != SOURCE1970_TASK_SHA256
+        or hashlib.sha256(current_text.encode()).hexdigest() != SOURCE1970_TASK_SHA256
+    ):
+        raise OSError("Source-1970 authority does not bind this exact evaluation recovery")
+    validate_source1970_task_lineage(root, plan.task, current_text, request)
+
+
 def claims_rows(state: Path) -> tuple[Path, list[list[str]], str]:
     ledger = state / "completion-email-claims.tsv"
     previous = owned_private_file(ledger, "completion claims ledger", 8_000_000).decode()
@@ -693,6 +950,146 @@ def stale_claim_bindings(request: OrdinaryPendingRecoveryRequest) -> tuple[tuple
     return tuple(bindings)
 
 
+def validate_source1970_eval_state(
+    state: Path,
+    plan: CompletionEmail,
+    request: OrdinaryPendingRecoveryRequest,
+    transition_key: str,
+    rows: list[list[str]],
+) -> None:
+    """Authenticate the exact delivered and unused Source-1970 claim set."""
+
+    authorization_dir = state / "completion-email-authorizations"
+    retired_dir = state / "completion-email-retired-authorizations"
+    used_dir = state / "completion-email-authorization-used"
+    delivery_dir = state / "completion-email-delivered"
+    notice_delivery_dir = state / "completion-notice-delivered"
+    for directory, label in (
+        (authorization_dir, "completion authorization directory"),
+        (retired_dir, "retired completion authorization directory"),
+        (used_dir, "completion authorization use directory"),
+        (delivery_dir, "completion delivery directory"),
+        (notice_delivery_dir, "completion notice delivery directory"),
+    ):
+        require_private_directory(directory, label)
+    if len(SOURCE1970_DELIVERED_CREATION_CLAIMS) != len(SOURCE1970_LIVE_ITEMS):
+        raise OSError("Source-1970 delivered creation bindings are incomplete")
+    relative = plan.task.relative_to(plan.root).as_posix()
+    for item, binding in zip(SOURCE1970_LIVE_ITEMS, SOURCE1970_DELIVERED_CREATION_CLAIMS, strict=True):
+        claim_key, task_sha256, manager_target, notice_key, semantic_key, authorization_sha256 = binding
+        expected = [
+            claim_key,
+            SOURCE1970_OWNER,
+            SOURCE1970_TASK,
+            manager_target,
+            task_sha256,
+            notice_key,
+            semantic_key,
+        ]
+        if (
+            [row for row in rows if row and row[0] == claim_key] != [expected]
+            or [row for row in rows if len(row) >= 6 and row[5] == notice_key] != [expected]
+            or [row for row in rows if len(row) == 7 and row[6] == semantic_key] != [expected]
+        ):
+            raise OSError("Source-1970 creation delivery lacks one exact claim")
+        authorization_payload = owned_private_file(
+            authorization_dir / claim_key,
+            "Source-1970 creation authorization",
+            4096,
+        ).decode()
+        expected_authorization = {
+            "version": "1",
+            "target": SOURCE1970_OWNER,
+            "root": str(plan.root),
+            "task": relative,
+            "task_sha256": task_sha256,
+            "notice_key": notice_key,
+            "semantic_key": semantic_key,
+            "subject_sha256": hashlib.sha256(b"").hexdigest(),
+            "body_sha256": hashlib.sha256(pending_item_notice_body("pending item created", (item,)).encode()).hexdigest(),
+        }
+        if (
+            hashlib.sha256(authorization_payload.encode()).hexdigest() != authorization_sha256
+            or authorization_values(authorization_payload) != expected_authorization
+            or owned_private_file(used_dir / claim_key, "Source-1970 creation authorization use", 4096).decode()
+            != f"{SOURCE1970_OWNER}\t{SOURCE1970_TASK}\n"
+            or owned_private_file(delivery_dir / claim_key, "Source-1970 creation delivery", 4096).decode()
+            != f"{SOURCE1970_OWNER}\t{SOURCE1970_TASK}\t{task_sha256}\n"
+            or owned_private_file(
+                notice_delivery_dir / notice_key,
+                "Source-1970 creation notice delivery",
+                4096,
+            ).decode()
+            != f"{claim_key}\t{SOURCE1970_OWNER}\t{SOURCE1970_TASK}\t{task_sha256}\n"
+            or (retired_dir / claim_key).exists()
+        ):
+            raise OSError("Source-1970 creation delivery evidence changed")
+    for claim_key, task_sha256, manager_target, semantic_key, authorization_sha256 in stale_claim_bindings(request):
+        old = authorization_dir / claim_key
+        retired = retired_dir / claim_key
+        live = old.exists()
+        if live == retired.exists():
+            raise OSError("Source-1970 unused authorization state is ambiguous")
+        payload = owned_private_file(
+            old if live else retired,
+            "Source-1970 unused authorization",
+            4096,
+        ).decode()
+        authorization = authorization_values(payload)
+        expected = [
+            claim_key,
+            SOURCE1970_OWNER,
+            SOURCE1970_TASK,
+            manager_target,
+            task_sha256,
+            authorization["notice_key"],
+            semantic_key,
+        ]
+        tombstone = claim_tombstone(transition_key, claim_key, SOURCE1970_TASK, manager_target, task_sha256)
+        selected = [row for row in rows if row and row[0] == claim_key]
+        if (
+            hashlib.sha256(payload.encode()).hexdigest() != authorization_sha256
+            or authorization["target"] != SOURCE1970_OWNER
+            or authorization["root"] != SOURCE1970_ROOT
+            or authorization["task"] != SOURCE1970_TASK
+            or authorization["task_sha256"] != task_sha256
+            or authorization["semantic_key"] != semantic_key
+            or selected not in ([expected], [tombstone])
+            or any(path.exists() for path in forbidden_prior_claim_state(state, claim_key, authorization["notice_key"]))
+        ):
+            raise OSError("Source-1970 unused claim evidence changed")
+        expected_live_rows = [expected] if selected == [expected] else []
+        if (
+            [row for row in rows if len(row) >= 6 and row[5] == authorization["notice_key"]] != expected_live_rows
+            or [row for row in rows if len(row) == 7 and row[6] == semantic_key] != expected_live_rows
+        ):
+            raise OSError("Source-1970 unused claim is not the sole exact purpose claim")
+    matching_plan_rows = [
+        row
+        for row in rows
+        if row
+        and (
+            row[0] == plan.key
+            or len(row) >= 6
+            and row[5] == plan.notice_key
+            or len(row) == 7
+            and row[6] == plan.notice_semantic_key
+        )
+    ]
+    current_paths = (
+        authorization_dir / plan.key,
+        state / "completion-email-authorization-used" / plan.key,
+        state / "completion-email-delivered" / plan.key,
+        state / "completion-email-reconciled" / plan.key,
+        state / "completion-email-requests" / plan.key,
+        state / "completion-email-reconciliations" / plan.key,
+        state / "completion-notice-delivered" / plan.notice_key,
+        state / "ordinary-completion-by-notice" / plan.notice_key,
+    )
+    if matching_plan_rows or any(path.exists() for path in current_paths):
+        raise OSError("Source-1970 recovery conflicts with existing completion state")
+
+
 def transition_records(
     static: dict[str, str],
     *,
@@ -746,24 +1143,27 @@ def prepare_ordinary_pending_transition(
         raise OSError("ordinary pending recovery purpose digest does not match")
     if request.mode == "adopt-add" and (plan.outcome != "pending item created" or evidence):
         raise OSError("claim adoption is supported only for the exact no-evidence add purpose")
-    if request.mode in {"supersede-remove", "source1990-pangram-remove"} and plan.outcome != "pending item removed after verification":
+    if request.mode in {"supersede-remove", "source1990-pangram-remove", "source1970-eval-remove"} and plan.outcome != "pending item removed after verification":
         raise OSError("claim supersession is supported only for exact verified removal")
     if request.mode == "adopt-add" and request.extra_claim_key:
         raise OSError("claim adoption cannot retire an unrelated extra claim")
-    validate_prior_transition(request, plan.root, plan.task)
-    if request.mode == "source1990-pangram-remove":
-        validate_source1990_pangram_authority(plan.root, plan, items, evidence, request, current_text)
-    elif request.churn_commit:
-        validate_manager_churn(plan.root, plan.task, request, request.prior_manager_target, current_text)
-    elif canonical_tmux_target(request.prior_manager_target) != canonical_tmux_target(plan.manager_target):
-        raise OSError("manager churn requires exact Git evidence")
+    if request.mode == "source1970-eval-remove":
+        validate_source1970_eval_authority(plan.root, plan, items, evidence, request, current_text)
+    else:
+        validate_prior_transition(request, plan.root, plan.task)
+        if request.mode == "source1990-pangram-remove":
+            validate_source1990_pangram_authority(plan.root, plan, items, evidence, request, current_text)
+        elif request.churn_commit:
+            validate_manager_churn(plan.root, plan.task, request, request.prior_manager_target, current_text)
+        elif canonical_tmux_target(request.prior_manager_target) != canonical_tmux_target(plan.manager_target):
+            raise OSError("manager churn requires exact Git evidence")
     if not verify_ordinary_completion_in_sent(
         request.message_id,
         request.sent_subject_sha256,
         request.sent_body_sha256,
     ):
         raise OSError("ordinary pending recovery message is not exact verified Sent-Mail evidence")
-    if request.mode != "source1990-pangram-remove" and request.sent_body_sha256 != hashlib.sha256(plan.body.encode()).hexdigest():
+    if request.mode not in {"source1990-pangram-remove", "source1970-eval-remove"} and request.sent_body_sha256 != hashlib.sha256(plan.body.encode()).hexdigest():
         raise OSError("ordinary pending recovery Sent-Mail body does not match the canonical recovery notice")
     static = transition_static_values(plan.root, plan.task, plan.outcome, items, evidence, request)
     transition_key = static["transition_key"]
@@ -806,6 +1206,8 @@ def prepare_ordinary_pending_transition(
             require_private_directory(directory, label)
         ledger, rows, previous = claims_rows(state)
         relative = plan.task.relative_to(plan.root).as_posix()
+        if request.mode == "source1970-eval-remove":
+            validate_source1970_eval_state(state, plan, request, transition_key, rows)
         retirements: list[tuple[Path, Path, list[str], list[str], dict[str, str], bool]] = []
         for claim_key, claim_task_sha256, manager_target, semantic_key, authorization_sha256 in stale_claim_bindings(request):
             old = authorization_dir / claim_key
@@ -927,6 +1329,7 @@ def prepare_ordinary_pending_transition(
             rows = [replacements.get(tuple(row), row) for row in rows]
             rewrite_claims(ledger, previous, rows)
         current_forbidden = (
+            authorization_dir / plan.key,
             state / "completion-email-authorization-used" / plan.key,
             state / "completion-email-delivered" / plan.key,
             state / "completion-email-reconciled" / plan.key,
@@ -1028,6 +1431,164 @@ def request_from_transition_values(values: dict[str, str]) -> OrdinaryPendingRec
     )
 
 
+def ordinary_completion_record_values(payload: str) -> dict[str, str]:
+    """Parse one exact ordinary completion record."""
+
+    lines = payload.splitlines()
+    try:
+        values = dict(line.split("=", 1) for line in lines)
+    except ValueError as exc:
+        raise OSError("ordinary completion record is malformed") from exc
+    expected_names = {
+        "version",
+        "semantic_key",
+        "canonical_key",
+        "notice_key",
+        "root",
+        "task",
+        "owner",
+        "manager_owner",
+        "task_sha256",
+        "outcome_sha256",
+        "message_id",
+        "sent_subject_sha256",
+        "sent_body_sha256",
+    }
+    sha256_names = (
+        "semantic_key",
+        "canonical_key",
+        "notice_key",
+        "task_sha256",
+        "outcome_sha256",
+        "sent_subject_sha256",
+        "sent_body_sha256",
+    )
+    if (
+        len(values) != len(lines)
+        or set(values) != expected_names
+        or values["version"] != "v1"
+        or any(SHA256_RE.fullmatch(values[name]) is None for name in sha256_names)
+        or re.fullmatch(r"<[^<>\s]+>", values["message_id"]) is None
+    ):
+        raise OSError("ordinary completion record is malformed")
+    return values
+
+
+def validate_ordinary_pending_transition_record(
+    transition_key: str,
+    values: dict[str, str],
+    payload: str,
+) -> OrdinaryPendingRecoveryRequest:
+    """Validate one complete canonical transition record without trusting its filename."""
+
+    expected_names = {
+        "schema",
+        "transition_key",
+        "request_sha256",
+        "mode",
+        "purpose_sha256",
+        "root",
+        "task",
+        "before_task_sha256",
+        "before_queue_sha256",
+        "outcome_sha256",
+        "items_sha256",
+        "evidence_sha256",
+        "canonical_subject_sha256",
+        "canonical_body_sha256",
+        "prior_claim_key",
+        "prior_task_sha256",
+        "prior_manager_target",
+        "prior_semantic_key",
+        "prior_authorization_sha256",
+        "message_id",
+        "sent_subject_sha256",
+        "sent_body_sha256",
+        "churn_commit",
+        "churn_before_blob",
+        "churn_after_blob",
+        "churn_diff_sha256",
+        "prior_transition_key",
+        "extra_claim_key",
+        "extra_task_sha256",
+        "extra_manager_target",
+        "extra_semantic_key",
+        "extra_authorization_sha256",
+        "status",
+        "owner",
+        "manager_owner",
+        "semantic_key",
+        "after_task_sha256",
+        "after_queue_sha256",
+        "prior_notice_key",
+        "plan_notice_key",
+        "ordinary_record_sha256",
+        "ordinary_record",
+        "message_record_sha256",
+        "message_record",
+    }
+    try:
+        request = request_from_transition_values(values)
+        validate_recovery_request(request)
+        expected_key = digest_fields(
+            "ordinary-pending-transition-v1",
+            values["root"],
+            values["task"],
+            values["purpose_sha256"],
+            *request.__dict__.values(),
+        )
+        ordinary_values = ordinary_completion_record_values(values["ordinary_record"])
+    except (KeyError, ValueError) as exc:
+        raise OSError("ordinary pending transition is malformed") from exc
+    sha256_names = (
+        "purpose_sha256",
+        "before_task_sha256",
+        "before_queue_sha256",
+        "outcome_sha256",
+        "items_sha256",
+        "evidence_sha256",
+        "canonical_subject_sha256",
+        "canonical_body_sha256",
+        "semantic_key",
+        "after_task_sha256",
+        "after_queue_sha256",
+        "prior_notice_key",
+        "plan_notice_key",
+        "ordinary_record_sha256",
+        "message_record_sha256",
+    )
+    if (
+        set(values) != expected_names
+        or values["schema"] != "omo-ordinary-pending-transition/v1"
+        or values["transition_key"] != transition_key
+        or expected_key != transition_key
+        or values["status"] not in {"prepared", "committed"}
+        or values["before_task_sha256"] != request.expected_task_sha256
+        or values["before_queue_sha256"] != request.expected_queue_sha256
+        or values["purpose_sha256"] != request.purpose_sha256
+        or values["semantic_key"] != request.semantic_key
+        or ordinary_values["semantic_key"] != values["semantic_key"]
+        or ordinary_values["notice_key"] != values["plan_notice_key"]
+        or ordinary_values["root"] != values["root"]
+        or ordinary_values["task"] != values["task"]
+        or ordinary_values["owner"] != values["owner"]
+        or ordinary_values["manager_owner"] != values["manager_owner"]
+        or ordinary_values["task_sha256"] != values["before_task_sha256"]
+        or ordinary_values["outcome_sha256"] != values["outcome_sha256"]
+        or ordinary_values["message_id"] != request.message_id
+        or ordinary_values["sent_subject_sha256"] != request.sent_subject_sha256
+        or ordinary_values["sent_body_sha256"] != request.sent_body_sha256
+        or any(SHA256_RE.fullmatch(values[name]) is None for name in sha256_names)
+        or recovery_request_sha256(request) != values["request_sha256"]
+        or hashlib.sha256(values["ordinary_record"].encode()).hexdigest() != values["ordinary_record_sha256"]
+        or hashlib.sha256(values["message_record"].encode()).hexdigest() != values["message_record_sha256"]
+        or values["message_record"] != f"transition_key={transition_key}\n{values['ordinary_record']}"
+        or payload != canonical_json_record(values)
+    ):
+        raise OSError("ordinary pending transition does not match its canonical record")
+    return request
+
+
 def load_ordinary_pending_transition(
     root: Path,
     task: Path,
@@ -1046,34 +1607,12 @@ def load_ordinary_pending_transition(
     if loaded is None:
         return None
     values, payload = loaded
-    expected_names = set(static) | {
-        "status",
-        "owner",
-        "manager_owner",
-        "semantic_key",
-        "after_task_sha256",
-        "after_queue_sha256",
-        "prior_notice_key",
-        "plan_notice_key",
-        "ordinary_record_sha256",
-        "ordinary_record",
-        "message_record_sha256",
-        "message_record",
-    }
+    recorded_request = validate_ordinary_pending_transition_record(static["transition_key"], values, payload)
     if (
-        set(values) != expected_names
+        recorded_request != request
         or any(values.get(name) != value for name, value in static.items())
-        or values.get("status") not in {"prepared", "committed"}
         or values.get("after_task_sha256") != task_sha256
         or values.get("after_queue_sha256") != queue_sha256
-        or values.get("semantic_key") != request.semantic_key
-        or recovery_request_sha256_from_values(values) != values.get("request_sha256")
-        or hashlib.sha256(values.get("ordinary_record", "").encode()).hexdigest()
-        != values.get("ordinary_record_sha256")
-        or hashlib.sha256(values.get("message_record", "").encode()).hexdigest()
-        != values.get("message_record_sha256")
-        or values.get("message_record") != f"transition_key={static['transition_key']}\n{values.get('ordinary_record', '')}"
-        or payload != canonical_json_record(values)
     ):
         raise OSError("ordinary pending transition does not match the exact replay")
     prepared_values = {**values, "status": "prepared"}
@@ -1670,48 +2209,55 @@ def ordinary_completion_is_reconciled(plan: CompletionEmail) -> bool:
         payload = owned_private_file(marker, "ordinary completion reconciliation", 16_384).decode()
     except FileNotFoundError:
         return False
-    try:
-        values = dict(line.split("=", 1) for line in payload.splitlines())
-    except ValueError as exc:
-        raise OSError("ordinary completion reconciliation is malformed") from exc
-    expected_fields = {
-        "version",
-        "semantic_key",
-        "canonical_key",
-        "notice_key",
-        "root",
-        "task",
-        "owner",
-        "manager_owner",
-        "task_sha256",
-        "outcome_sha256",
-        "message_id",
-        "sent_subject_sha256",
-        "sent_body_sha256",
-    }
+    values = ordinary_completion_record_values(payload)
     if (
-        len(values) != len(payload.splitlines())
-        or set(values) != expected_fields
-        or values["version"] != "v1"
-        or values["semantic_key"] != plan.notice_semantic_key
+        values["semantic_key"] != plan.notice_semantic_key
         or values["notice_key"] != plan.notice_key
         or values["root"] != str(plan.root)
         or values["task"] != plan.task.relative_to(plan.root).as_posix()
         or canonical_tmux_target(values["owner"]) != canonical_tmux_target(plan.target)
         or canonical_tmux_target(values["manager_owner"]) != canonical_tmux_target(plan.manager_target)
-        or SHA256_RE.fullmatch(values["canonical_key"]) is None
-        or SHA256_RE.fullmatch(values["task_sha256"]) is None
-        or SHA256_RE.fullmatch(values["outcome_sha256"]) is None
-        or re.fullmatch(r"<[^<>\s]+>", values["message_id"]) is None
-        or SHA256_RE.fullmatch(values["sent_subject_sha256"]) is None
-        or SHA256_RE.fullmatch(values["sent_body_sha256"]) is None
     ):
         raise OSError("ordinary completion reconciliation does not match the current task")
     message_marker = completion_email_state_dir() / "ordinary-completion-by-message" / hashlib.sha256(
         values["message_id"].encode()
     ).hexdigest()
-    if owned_private_file(message_marker, "ordinary completion message evidence", 16_384).decode() != payload:
-        raise OSError("ordinary completion message evidence is missing or ambiguous")
+    message_payload = owned_private_file(message_marker, "ordinary completion message evidence", 16_384).decode()
+    if message_payload != payload:
+        transition_line, separator, ordinary_payload = message_payload.partition("\n")
+        transition_key = transition_line.removeprefix("transition_key=")
+        transition = read_transition_record(transition_key) if separator and SHA256_RE.fullmatch(transition_key) else None
+        if transition is None:
+            raise OSError("ordinary completion message evidence is missing or ambiguous")
+        transition_values, transition_payload = transition
+        transition_request = validate_ordinary_pending_transition_record(
+            transition_key,
+            transition_values,
+            transition_payload,
+        )
+        expected_ordinary_payload = ordinary_completion_record(
+            plan,
+            transition_request.message_id,
+            transition_request.sent_subject_sha256,
+            transition_request.sent_body_sha256,
+        )
+        if (
+            transition_values["status"] != "committed"
+            or transition_values["root"] != str(plan.root)
+            or transition_values["task"] != plan.task.relative_to(plan.root).as_posix()
+            or transition_values["owner"] != plan.target
+            or transition_values["manager_owner"] != plan.manager_target
+            or transition_values["before_task_sha256"] != plan.task_sha256
+            or transition_values["outcome_sha256"] != hashlib.sha256(plan.outcome.encode()).hexdigest()
+            or transition_values["canonical_subject_sha256"] != hashlib.sha256(plan.subject.encode()).hexdigest()
+            or transition_values["canonical_body_sha256"] != hashlib.sha256(plan.body.encode()).hexdigest()
+            or transition_values["plan_notice_key"] != plan.notice_key
+            or ordinary_payload != expected_ordinary_payload
+            or payload != expected_ordinary_payload
+            or transition_values["ordinary_record"] != expected_ordinary_payload
+            or transition_values["message_record"] != message_payload
+        ):
+            raise OSError("ordinary completion message evidence is missing or ambiguous")
     return True
 
 

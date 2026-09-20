@@ -2,7 +2,7 @@
 
 (authored by agents unless marked 🧑)
 
-`omo_pending.py recover-source1990-pangram` is the only public no-send recovery command.
+Public no-send recovery commands are incident-specific. They accept only their registered incident inputs and never invoke the email sender.
 
 - exact bindings
   - expected task bytes and ordered queue
@@ -25,3 +25,10 @@
   - it verifies immutable Source-1990 bytes plus the literal task, owner/manager, ordered items, queue/task/purpose digests, Sent message, claims, and churn proof
   - its current task binding additionally proves the exact authenticated post-authority Git transition from the earlier custody task; any other body drift stops before mutation
   - it does not infer authority from the email thread and accepts no other recovery
+- Source-1970 evaluation adapter
+  - `recover-source1970-eval` takes no incident parameters
+  - it binds the exact Source-1970 file and current `eval_sufficiency.md` bytes, blocked status, owner, manager, five-item live queue, missing sixth body record, and four-commit task lineage
+  - it authenticates all five delivered creation claims without changing them and retires only the unused missing-item add claim and unused removal claim
+  - its one global Message-ID record binds the five-item queue mutation and ordered six-item resolution before either claim or task mutation; later delivery checks accept it only through the exact canonical committed transition
+  - it records `prepared`, removes the five live items, appends the six-item delivered-answer evidence, fsyncs the empty queue, and records `committed`
+  - a crash after the task replacement replays only that exact prepared transition; drift or Message-ID reuse fails closed

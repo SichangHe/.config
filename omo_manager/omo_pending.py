@@ -55,6 +55,10 @@ from omo_manager.omo_completion_email import ordinary_pending_purpose
 from omo_manager.omo_completion_email import plan_sent_recovery_completion
 from omo_manager.omo_completion_email import prepare_ordinary_pending_transition
 from omo_manager.omo_completion_email import require_owner_completion
+from omo_manager.omo_completion_email import source1970_eval_evidence
+from omo_manager.omo_completion_email import source1970_eval_queue_items
+from omo_manager.omo_completion_email import source1970_eval_recovery_request
+from omo_manager.omo_completion_email import source1970_eval_resolution_items
 
 
 @dataclass(frozen=True)
@@ -186,6 +190,10 @@ def parse_args(argv: list[str]) -> Args:
         "recover-source1990-pangram",
         help="Apply the one Source-1990-authorized Pangram completion recovery without sending email.",
     )
+    _ = sub.add_parser(
+        "recover-source1970-eval",
+        help="Apply the one Source-1970-authorized evaluation completion recovery without sending email.",
+    )
     for recovery in (source1990,):
         recovery.add_argument("--item", action="append", required=True)
         recovery.add_argument("--expected-task-sha256", required=True)
@@ -253,6 +261,8 @@ def parse_args(argv: list[str]) -> Args:
         )
     if parsed.command == "recover-removal-notice":
         return Args("recover-removal-notice", recovery_id=parsed.recovery_id)
+    if parsed.command == "recover-source1970-eval":
+        return Args(parsed.command, source1970_eval_queue_items(), evidence=source1970_eval_evidence())
     if parsed.command == "recover-source1990-pangram":
         hashes = (
             parsed.expected_task_sha256,
@@ -421,8 +431,10 @@ def fsync_task_parent(path: Path) -> None:
 
 
 def sent_recovery_request(args: Args) -> OrdinaryPendingRecoveryRequest:
-    if args.command != "recover-source1990-pangram":
+    if args.command not in {"recover-source1990-pangram", "recover-source1970-eval"}:
         raise BlockingError("only authenticated incident recovery adapters are supported")
+    if args.command == "recover-source1970-eval":
+        return source1970_eval_recovery_request()
     mode = "source1990-pangram-remove"
     semantic_key = args.purpose_sha256
     return OrdinaryPendingRecoveryRequest(
@@ -458,10 +470,11 @@ def recover_sent_pending_transition(args: Args, root: Path, path: Path) -> int:
 
     if not args.items or human_authored_pending_items(args.items) != args.items or len(set(args.items)) != len(args.items):
         raise BlockingError("Sent recovery requires distinct Human-authored items")
-    if args.command != "recover-source1990-pangram":
+    if args.command not in {"recover-source1990-pangram", "recover-source1970-eval"}:
         raise BlockingError("only authenticated incident recovery adapters are supported")
     outcome = "pending item removed after verification"
     request = sent_recovery_request(args)
+    resolution_items = source1970_eval_resolution_items() if args.command == "recover-source1970-eval" else args.items
     with task_file_lock(path):
         before = path.stat()
         text = path.read_text(encoding="utf-8")
@@ -470,12 +483,12 @@ def recover_sent_pending_transition(args: Args, root: Path, path: Path) -> int:
             raise BlockingError("Sent recovery requires one legacy worker queue")
         current_task_sha256 = hashlib.sha256(text.encode()).hexdigest()
         current_queue_sha256 = pending_queue_sha256(metadata.pending_task_items)
-        if current_task_sha256 != args.expected_task_sha256:
+        if current_task_sha256 != request.expected_task_sha256:
             transition = load_ordinary_pending_transition(
                 root,
                 path,
                 outcome,
-                args.items,
+                resolution_items,
                 args.evidence,
                 request,
                 current_task_sha256,
@@ -486,9 +499,9 @@ def recover_sent_pending_transition(args: Args, root: Path, path: Path) -> int:
             commit_ordinary_pending_transition(transition, current_task_sha256)
             print(f"replayed committed {args.command} for {len(args.items)} pending item(s); no email sent")
             return 0
-        if current_queue_sha256 != args.expected_queue_sha256:
+        if current_queue_sha256 != request.expected_queue_sha256:
             raise BlockingError("Sent recovery ordered live queue changed")
-        if ordinary_pending_purpose(outcome, args.items, args.evidence) != args.purpose_sha256:
+        if ordinary_pending_purpose(outcome, resolution_items, args.evidence) != request.purpose_sha256:
             raise BlockingError("Sent recovery purpose digest changed")
         if metadata.pending_task_items != args.items:
             raise BlockingError("Sent recovery removal must cover the complete ordered live queue")
@@ -504,7 +517,7 @@ def recover_sent_pending_transition(args: Args, root: Path, path: Path) -> int:
             path,
             text,
             outcome,
-            items=args.items,
+            items=resolution_items,
             evidence=args.evidence,
             semantic_key=request.semantic_key,
         )
@@ -512,7 +525,7 @@ def recover_sent_pending_transition(args: Args, root: Path, path: Path) -> int:
             raise BlockingError("Sent recovery requires the exact pending-task owner")
         transition = prepare_ordinary_pending_transition(
             plan,
-            args.items,
+            resolution_items,
             args.evidence,
             after_task_sha256,
             after_queue_sha256,
@@ -556,7 +569,7 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
                 for item in current.pending_task_items:
                     print(item)
             return 0
-        if args.command == "recover-source1990-pangram":
+        if args.command in {"recover-source1990-pangram", "recover-source1970-eval"}:
             return recover_sent_pending_transition(args, root, path)
         answer_subject, answer_body = human_answer(args)
         if args.command == "recover-removal-notice":

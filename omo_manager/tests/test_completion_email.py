@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 import tempfile
 import unittest
@@ -76,8 +77,441 @@ def source1241_task(
 
 
 class CompletionEmailTest(unittest.TestCase):
+    def source1970_fixture(self, root: Path, state: Path) -> tuple[Path, str, dict[str, object], tuple[str, ...]]:
+        items = omo_completion_email.SOURCE1970_LIVE_ITEMS
+        rendered_items = "".join(f"  - '{item.replace(chr(39), chr(39) * 2)}'\n" for item in items)
+        text = (
+            "---\n"
+            "version: v1.0.0\n"
+            "status: blocked\n"
+            "blocked_on: test Source-1970 recovery\n"
+            "runat: dw:58\n"
+            "tool: codex\n"
+            "managerat: dw:60\n"
+            "is_manager: false\n"
+            "pending_task_items:\n"
+            f"{rendered_items}"
+            "---\n"
+            "Report results directly to the Human.\n"
+        )
+        task = root / omo_completion_email.SOURCE1970_TASK
+        task.write_text(text, encoding="utf-8")
+        delivered: list[tuple[str, str, str, str, str, str]] = []
+        used_dir = state / "completion-email-authorization-used"
+        used_dir.mkdir(mode=0o700, parents=True)
+        for index, item in enumerate(items):
+            semantic_key = hashlib.sha256(f"source1970-delivered-{index}".encode()).hexdigest()
+            plan = build_completion_email(
+                root,
+                task,
+                text,
+                "pending item created",
+                items=(item,),
+                semantic_key=semantic_key,
+            )
+            assert plan is not None
+            self.assertTrue(claim_completion_email(plan))
+            used = used_dir / plan.key
+            used.write_text(f"{plan.target}\t{task.name}\n", encoding="utf-8")
+            used.chmod(0o600)
+            mark_completion_email_delivered(plan)
+            authorization = state / "completion-email-authorizations" / plan.key
+            delivered.append(
+                (
+                    plan.key,
+                    plan.task_sha256,
+                    plan.manager_target,
+                    plan.notice_key,
+                    plan.notice_semantic_key,
+                    hashlib.sha256(authorization.read_bytes()).hexdigest(),
+                )
+            )
+
+        def unused_binding(outcome: str, claim_items: tuple[str, ...], semantic_label: str) -> tuple[str, str, str, str, str]:
+            plan = build_completion_email(
+                root,
+                task,
+                text,
+                outcome,
+                items=claim_items,
+                semantic_key=hashlib.sha256(semantic_label.encode()).hexdigest(),
+            )
+            assert plan is not None
+            self.assertTrue(claim_completion_email(plan))
+            authorization = state / "completion-email-authorizations" / plan.key
+            return (
+                plan.key,
+                plan.task_sha256,
+                plan.manager_target,
+                plan.notice_semantic_key,
+                hashlib.sha256(authorization.read_bytes()).hexdigest(),
+            )
+
+        stale_add = unused_binding("pending item created", (omo_completion_email.SOURCE1970_MISSING_ITEM,), "source1970-stale-add")
+        stale_removal = unused_binding("pending item completed", (items[0],), "source1970-stale-removal")
+        unrelated = unused_binding("pending item completed", (items[1],), "source1970-unrelated")
+        constants: dict[str, object] = {
+            "SOURCE1970_ROOT": str(root.resolve()),
+            "SOURCE1970_TASK_SHA256": hashlib.sha256(text.encode()).hexdigest(),
+            "SOURCE1970_BLOCKED_ON": "test Source-1970 recovery",
+            "SOURCE1970_DELIVERED_CREATION_CLAIMS": tuple(delivered),
+            "SOURCE1970_STALE_ADD_CLAIM": stale_add,
+            "SOURCE1970_STALE_REMOVAL_CLAIM": stale_removal,
+        }
+        return task, text, constants, (stale_add[0], stale_removal[0], unrelated[0], *(binding[0] for binding in delivered))
+
+    def test_source1970_production_preflight_is_read_only_and_reaches_sent(self) -> None:
+        root = Path(omo_completion_email.SOURCE1970_ROOT)
+        task = root / omo_completion_email.SOURCE1970_TASK
+        source = root / omo_completion_email.SOURCE1970_PATH
+        state = omo_completion_email.completion_email_state_dir()
+        text = task.read_text(encoding="utf-8")
+        request = omo_completion_email.source1970_eval_recovery_request()
+        outcome = "pending item removed after verification"
+        tracked = (task, source, state / "completion-email-claims.tsv")
+        before = tuple(path.read_bytes() for path in tracked)
+        transition_key = omo_completion_email.ordinary_pending_transition_key(
+            root,
+            task,
+            outcome,
+            omo_completion_email.SOURCE1970_RESOLUTION_ITEMS,
+            omo_completion_email.SOURCE1970_EVIDENCE,
+            request,
+        )
+        message_marker = state / "ordinary-completion-by-message" / hashlib.sha256(request.message_id.encode()).hexdigest()
+        state_tracked = (
+            message_marker,
+            state / "ordinary-pending-transitions" / transition_key,
+            state / "ordinary-completion-by-notice" / omo_completion_email.SOURCE1970_NOTICE_KEY,
+        )
+        state_before = tuple(path.read_bytes() if path.exists() else None for path in state_tracked)
+        if hashlib.sha256(text.encode()).hexdigest() == omo_completion_email.SOURCE1970_TASK_SHA256:
+            canonical = build_completion_email(
+                root,
+                task,
+                text,
+                outcome,
+                items=omo_completion_email.SOURCE1970_RESOLUTION_ITEMS,
+                evidence=omo_completion_email.SOURCE1970_EVIDENCE,
+                semantic_key=request.semantic_key,
+            )
+            assert canonical is not None
+            plan = replace(canonical, send_allowed=False)
+            self.assertFalse(message_marker.exists())
+            omo_completion_email.validate_source1970_eval_authority(
+                root,
+                plan,
+                omo_completion_email.SOURCE1970_RESOLUTION_ITEMS,
+                omo_completion_email.SOURCE1970_EVIDENCE,
+                request,
+                text,
+            )
+            _ledger, rows, _previous = omo_completion_email.claims_rows(state)
+            omo_completion_email.validate_source1970_eval_state(state, plan, request, transition_key, rows)
+        else:
+            metadata = parse_task_metadata(text, root)
+            assert metadata is not None
+            self.assertEqual((), metadata.pending_task_items)
+            transition = omo_completion_email.load_ordinary_pending_transition(
+                root,
+                task,
+                outcome,
+                omo_completion_email.SOURCE1970_RESOLUTION_ITEMS,
+                omo_completion_email.SOURCE1970_EVIDENCE,
+                request,
+                hashlib.sha256(text.encode()).hexdigest(),
+                digest_fields("pending-queue-v1", *metadata.pending_task_items),
+            )
+            assert transition is not None
+            self.assertEqual(transition_key, transition.key)
+            recorded = omo_completion_email.read_transition_record(transition.key)
+            assert recorded is not None
+            values, payload = recorded
+            omo_completion_email.validate_ordinary_pending_transition_record(transition_key, values, payload)
+            static = omo_completion_email.transition_static_values(
+                root,
+                task,
+                outcome,
+                omo_completion_email.SOURCE1970_RESOLUTION_ITEMS,
+                omo_completion_email.SOURCE1970_EVIDENCE,
+                request,
+            )
+            self.assertTrue(all(values.get(name) == value for name, value in static.items()))
+            self.assertEqual("committed", values["status"])
+            self.assertEqual(values["message_record"], message_marker.read_text(encoding="utf-8"))
+            notice_marker = state / "ordinary-completion-by-notice" / values["plan_notice_key"]
+            self.assertEqual(values["ordinary_record"], notice_marker.read_text(encoding="utf-8"))
+        self.assertTrue(
+            verify_ordinary_completion_in_sent(
+                request.message_id,
+                request.sent_subject_sha256,
+                request.sent_body_sha256,
+            )
+        )
+        self.assertEqual(before, tuple(path.read_bytes() for path in tracked))
+        self.assertEqual(state_before, tuple(path.read_bytes() if path.exists() else None for path in state_tracked))
+
+    def test_source1970_authority_rejects_task_and_message_drift(self) -> None:
+        root = Path(omo_completion_email.SOURCE1970_ROOT)
+        task = root / omo_completion_email.SOURCE1970_TASK
+        text = task.read_text(encoding="utf-8")
+        request = omo_completion_email.source1970_eval_recovery_request()
+        canonical = build_completion_email(
+            root,
+            task,
+            text,
+            "pending item removed after verification",
+            items=omo_completion_email.SOURCE1970_RESOLUTION_ITEMS,
+            evidence=omo_completion_email.SOURCE1970_EVIDENCE,
+            semantic_key=request.semantic_key,
+        )
+        assert canonical is not None
+        plan = replace(canonical, send_allowed=False)
+        with self.assertRaisesRegex(OSError, "does not bind"):
+            omo_completion_email.validate_source1970_eval_authority(
+                root,
+                plan,
+                omo_completion_email.SOURCE1970_RESOLUTION_ITEMS,
+                omo_completion_email.SOURCE1970_EVIDENCE,
+                request,
+                text + "drift\n",
+            )
+        with self.assertRaisesRegex(OSError, "does not bind"):
+            omo_completion_email.validate_source1970_eval_authority(
+                root,
+                plan,
+                omo_completion_email.SOURCE1970_RESOLUTION_ITEMS,
+                omo_completion_email.SOURCE1970_EVIDENCE,
+                replace(request, message_id="<different@example.test>"),
+                text,
+            )
+        parsed = omo_pending.parse_args(["recover-source1970-eval"])
+        self.assertEqual(omo_completion_email.SOURCE1970_LIVE_ITEMS, parsed.items)
+        with self.assertRaises(SystemExit):
+            omo_pending.parse_args(["recover-source1970-eval", "--message-id", request.message_id])
+
+    def test_source1970_cli_succeeds_replays_preserves_other_claims_and_never_sends(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
+                task, text, constants, keys = self.source1970_fixture(root, state)
+                stale_add, stale_removal, unrelated, *delivered = keys
+                before_rows = {
+                    row[0]: row
+                    for row in (line.split("\t") for line in (state / "completion-email-claims.tsv").read_text(encoding="utf-8").splitlines())
+                    if row[0] in {unrelated, *delivered}
+                }
+                unrelated_authorization = (state / "completion-email-authorizations" / unrelated).read_bytes()
+                with patch.multiple(omo_completion_email, **constants), patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
+                    "omo_manager.omo_pending.current_pending_task", return_value=task
+                ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task), patch(
+                    "omo_manager.omo_completion_email.validate_source1970_eval_authority"
+                ) as authority, patch(
+                    "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True
+                ), patch(
+                    "omo_manager.omo_pending.require_owner_completion"
+                ) as owner_sender, patch(
+                    "omo_manager.omo_completion_email.send_completion_email"
+                ) as sender, patch(
+                    "omo_manager.omo_completion_email.subprocess.run"
+                ) as email_process:
+                    args = omo_pending.parse_args(["recover-source1970-eval"])
+                    request = omo_pending.sent_recovery_request(args)
+                    plan = plan_sent_recovery_completion(
+                        root,
+                        task,
+                        text,
+                        "pending item removed after verification",
+                        items=omo_completion_email.SOURCE1970_RESOLUTION_ITEMS,
+                        evidence=omo_completion_email.SOURCE1970_EVIDENCE,
+                        semantic_key=request.semantic_key,
+                    )
+                    assert plan is not None
+                    self.assertEqual(0, omo_pending.run(args, root=root))
+                    metadata = parse_task_metadata(task.read_text(encoding="utf-8"), root)
+                    assert metadata is not None
+                    self.assertEqual((), metadata.pending_task_items)
+                    rows = [line.split("\t") for line in (state / "completion-email-claims.tsv").read_text(encoding="utf-8").splitlines()]
+                    current_rows = {row[0]: row for row in rows if row[0] in before_rows}
+                    self.assertEqual(before_rows, current_rows)
+                    self.assertEqual(unrelated_authorization, (state / "completion-email-authorizations" / unrelated).read_bytes())
+                    for key in (stale_add, stale_removal):
+                        selected = [row for row in rows if row[0] == key]
+                        self.assertEqual(1, len(selected))
+                        self.assertTrue(selected[0][1].startswith("retired:"))
+                        self.assertTrue((state / "completion-email-retired-authorizations" / key).is_file())
+                    transitions = list((state / "ordinary-pending-transitions").iterdir())
+                    messages = list((state / "ordinary-completion-by-message").iterdir())
+                    self.assertEqual(1, len(transitions))
+                    self.assertEqual(1, len(messages))
+                    self.assertIn('"status":"committed"', transitions[0].read_text(encoding="utf-8"))
+                    self.assertTrue(messages[0].read_text(encoding="utf-8").startswith("transition_key="))
+                    self.assertTrue(omo_completion_email.ordinary_completion_is_reconciled(plan))
+                    first_snapshot = {
+                        path.relative_to(root): path.read_bytes()
+                        for path in root.rglob("*")
+                        if path.is_file()
+                    }
+                    self.assertEqual(0, omo_pending.run(args, root=root))
+                    self.assertEqual(
+                        first_snapshot,
+                        {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()},
+                    )
+                authority.assert_called_once_with(
+                    root,
+                    plan,
+                    omo_completion_email.SOURCE1970_RESOLUTION_ITEMS,
+                    omo_completion_email.SOURCE1970_EVIDENCE,
+                    request,
+                    text,
+                )
+                owner_sender.assert_not_called()
+                sender.assert_not_called()
+                email_process.assert_not_called()
+
+    def test_source1970_reconciled_marker_rejects_malformed_or_cross_bound_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
+                task, text, constants, _keys = self.source1970_fixture(root, state)
+                with patch.multiple(omo_completion_email, **constants), patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
+                    "omo_manager.omo_pending.current_pending_task", return_value=task
+                ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task), patch(
+                    "omo_manager.omo_completion_email.validate_source1970_eval_authority"
+                ) as authority, patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+                    args = omo_pending.parse_args(["recover-source1970-eval"])
+                    request = omo_pending.sent_recovery_request(args)
+                    plan = plan_sent_recovery_completion(
+                        root,
+                        task,
+                        text,
+                        "pending item removed after verification",
+                        items=omo_completion_email.SOURCE1970_RESOLUTION_ITEMS,
+                        evidence=omo_completion_email.SOURCE1970_EVIDENCE,
+                        semantic_key=request.semantic_key,
+                    )
+                    assert plan is not None
+                    self.assertEqual(0, omo_pending.run(args, root=root))
+                    transition_path = next((state / "ordinary-pending-transitions").iterdir())
+                    original_payload = transition_path.read_text(encoding="utf-8")
+                    values = json.loads(original_payload)
+                    values["request_sha256"] = "0" * 64
+                    transition_path.write_text(
+                        json.dumps(values, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n",
+                        encoding="utf-8",
+                    )
+                    with self.assertRaisesRegex(OSError, "canonical record"):
+                        omo_completion_email.ordinary_completion_is_reconciled(plan)
+                    values = json.loads(original_payload)
+                    values["semantic_key"] = "1" * 64
+                    cross_request = omo_completion_email.request_from_transition_values(values)
+                    values["request_sha256"] = omo_completion_email.recovery_request_sha256(cross_request)
+                    cross_key = digest_fields(
+                        "ordinary-pending-transition-v1",
+                        values["root"],
+                        values["task"],
+                        values["purpose_sha256"],
+                        *cross_request.__dict__.values(),
+                    )
+                    values["transition_key"] = cross_key
+                    values["message_record"] = f"transition_key={cross_key}\n{values['ordinary_record']}"
+                    values["message_record_sha256"] = hashlib.sha256(values["message_record"].encode()).hexdigest()
+                    cross_path = transition_path.with_name(cross_key)
+                    transition_path.rename(cross_path)
+                    cross_path.write_text(omo_completion_email.canonical_json_record(values), encoding="utf-8")
+                    message_path = next((state / "ordinary-completion-by-message").iterdir())
+                    message_path.write_text(values["message_record"], encoding="utf-8")
+                    with self.assertRaisesRegex(OSError, "canonical record"):
+                        omo_completion_email.ordinary_completion_is_reconciled(plan)
+                authority.assert_called_once()
+
+    def test_source1970_composite_message_record_precedes_claim_and_task_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
+                task, text, constants, _keys = self.source1970_fixture(root, state)
+                ledger = state / "completion-email-claims.tsv"
+                claims_before = ledger.read_bytes()
+                with patch.multiple(omo_completion_email, **constants), patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
+                    "omo_manager.omo_pending.current_pending_task", return_value=task
+                ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task), patch(
+                    "omo_manager.omo_completion_email.validate_source1970_eval_authority"
+                ) as authority, patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+                    args = omo_pending.parse_args(["recover-source1970-eval"])
+
+                    def crash_before_claim_rewrite(_ledger: Path, _previous: str, _rows: list[list[str]]) -> None:
+                        messages = list((state / "ordinary-completion-by-message").iterdir())
+                        self.assertEqual(1, len(messages))
+                        self.assertTrue(messages[0].read_text(encoding="utf-8").startswith("transition_key="))
+                        self.assertEqual(text, task.read_text(encoding="utf-8"))
+                        raise RuntimeError("crash before claim rewrite")
+
+                    with patch("omo_manager.omo_completion_email.rewrite_claims", side_effect=crash_before_claim_rewrite):
+                        with self.assertRaisesRegex(RuntimeError, "crash before claim rewrite"):
+                            omo_pending.run(args, root=root)
+                    self.assertEqual(text, task.read_text(encoding="utf-8"))
+                    self.assertEqual(claims_before, ledger.read_bytes())
+                    self.assertEqual(0, omo_pending.run(args, root=root))
+                    metadata = parse_task_metadata(task.read_text(encoding="utf-8"), root)
+                    assert metadata is not None
+                    self.assertEqual((), metadata.pending_task_items)
+                self.assertEqual(2, authority.call_count)
+
+    def test_source1970_replays_prepared_transition_after_task_replace_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
+                task, _text, constants, _keys = self.source1970_fixture(root, state)
+                with patch.multiple(omo_completion_email, **constants), patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
+                    "omo_manager.omo_pending.current_pending_task", return_value=task
+                ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task), patch(
+                    "omo_manager.omo_completion_email.validate_source1970_eval_authority"
+                ) as authority, patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+                    args = omo_pending.parse_args(["recover-source1970-eval"])
+                    with patch("omo_manager.omo_pending.fsync_task_parent", side_effect=OSError("crash after task replace")):
+                        with self.assertRaisesRegex(OSError, "crash after task replace"):
+                            omo_pending.run(args, root=root)
+                    metadata = parse_task_metadata(task.read_text(encoding="utf-8"), root)
+                    assert metadata is not None
+                    self.assertEqual((), metadata.pending_task_items)
+                    transitions = list((state / "ordinary-pending-transitions").iterdir())
+                    self.assertEqual(1, len(transitions))
+                    self.assertIn('"status":"prepared"', transitions[0].read_text(encoding="utf-8"))
+                    self.assertEqual(0, omo_pending.run(args, root=root))
+                    self.assertIn('"status":"committed"', transitions[0].read_text(encoding="utf-8"))
+                authority.assert_called_once()
+
+    def test_source1970_rejects_global_message_id_reuse_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
+                task, text, constants, _keys = self.source1970_fixture(root, state)
+                message_dir = state / "ordinary-completion-by-message"
+                message_dir.mkdir(mode=0o700)
+                message = message_dir / hashlib.sha256(omo_completion_email.SOURCE1970_MESSAGE_ID.encode()).hexdigest()
+                message.write_text("different transition\n", encoding="utf-8")
+                message.chmod(0o600)
+                ledger = state / "completion-email-claims.tsv"
+                claims_before = ledger.read_bytes()
+                with patch.multiple(omo_completion_email, **constants), patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
+                    "omo_manager.omo_pending.current_pending_task", return_value=task
+                ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task), patch(
+                    "omo_manager.omo_completion_email.validate_source1970_eval_authority"
+                ) as authority, patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+                    args = omo_pending.parse_args(["recover-source1970-eval"])
+                    with self.assertRaisesRegex(OSError, "Message-ID is already bound"):
+                        omo_pending.run(args, root=root)
+                authority.assert_called_once()
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(claims_before, ledger.read_bytes())
+
     def test_source1990_production_identity_preflight_is_read_only(self) -> None:
-        """Production constants authenticate the current Pangram task without mutation."""
+        """Production constants authenticate the Pangram incident before or after its one-shot recovery."""
 
         root = Path("/ssd1/sichangheagent/work_logs")
         task = root / omo_completion_email.SOURCE1990_PANGRAM_TASK
@@ -96,28 +530,46 @@ class CompletionEmailTest(unittest.TestCase):
             "",
             *omo_completion_email.SOURCE1990_PANGRAM_EXTRA_CLAIM,
         )
-        plan = omo_completion_email.CompletionEmail(
-            root,
-            task,
-            omo_completion_email.SOURCE1990_PANGRAM_OWNER,
-            omo_completion_email.SOURCE1990_PANGRAM_MANAGER,
-            omo_completion_email.SOURCE1990_PANGRAM_TASK_SHA256,
-            "pending item removed after verification",
-            "",
-            "",
-            "preflight",
-            "preflight-notice",
-            omo_completion_email.SOURCE1990_PANGRAM_PURPOSE_SHA256,
-            send_allowed=False,
-        )
-        omo_completion_email.validate_source1990_pangram_authority(
-            root,
-            plan,
-            omo_completion_email.SOURCE1990_PANGRAM_ITEMS,
-            omo_completion_email.SOURCE1990_PANGRAM_EVIDENCE,
-            request,
-            current,
-        )
+        if hashlib.sha256(current.encode()).hexdigest() == omo_completion_email.SOURCE1990_PANGRAM_TASK_SHA256:
+            plan = omo_completion_email.CompletionEmail(
+                root,
+                task,
+                omo_completion_email.SOURCE1990_PANGRAM_OWNER,
+                omo_completion_email.SOURCE1990_PANGRAM_MANAGER,
+                omo_completion_email.SOURCE1990_PANGRAM_TASK_SHA256,
+                "pending item removed after verification",
+                "",
+                "",
+                "preflight",
+                "preflight-notice",
+                omo_completion_email.SOURCE1990_PANGRAM_PURPOSE_SHA256,
+                send_allowed=False,
+            )
+            omo_completion_email.validate_source1990_pangram_authority(
+                root,
+                plan,
+                omo_completion_email.SOURCE1990_PANGRAM_ITEMS,
+                omo_completion_email.SOURCE1990_PANGRAM_EVIDENCE,
+                request,
+                current,
+            )
+        else:
+            metadata = parse_task_metadata(current, root)
+            assert metadata is not None
+            self.assertEqual((), metadata.pending_task_items)
+            static = omo_completion_email.transition_static_values(
+                root,
+                task,
+                "pending item removed after verification",
+                omo_completion_email.SOURCE1990_PANGRAM_ITEMS,
+                omo_completion_email.SOURCE1990_PANGRAM_EVIDENCE,
+                request,
+            )
+            recorded = omo_completion_email.read_transition_record(static["transition_key"])
+            assert recorded is not None
+            values, _payload = recorded
+            self.assertTrue(all(values.get(name) == value for name, value in static.items()))
+            self.assertEqual("committed", values["status"])
         self.assertTrue(
             verify_ordinary_completion_in_sent(
                 request.message_id,
