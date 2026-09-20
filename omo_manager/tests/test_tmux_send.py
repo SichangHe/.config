@@ -3,6 +3,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from io import StringIO
 from pathlib import Path
@@ -44,6 +45,7 @@ from omo_manager.omo_tmux_send import (
     escape_agent_message_envelope_tags,
     existing_input_authorization,
     is_deterministic_codex_wrap,
+    is_empty_codex_input_text,
     launch_async,
     main,
     message_probes,
@@ -66,6 +68,7 @@ from omo_manager.omo_tmux_send import (
     run_control_to_codex,
     run_tmux,
     send_capacity_resume,
+    send_enter,
     send_enter_to_pinned_cursor,
     send_enter_to_pinned_runtime,
     send_overlay_enter_to_pinned_runtime,
@@ -80,6 +83,7 @@ from omo_manager.omo_tmux_send import (
     validate_error_transition,
     verify_authorized_existing_submit,
     verify_capacity_resume,
+    verify_placeholder_paste,
     verify_submit,
     wait_capacity_resume_paste,
     wait_paste_visible,
@@ -88,6 +92,7 @@ from omo_manager.omo_tmux_send import (
     wrapped_cancel_authorization,
     write_private_temp,
 )
+from omo_manager.omo_tmux_input_lock import TmuxRuntimeBinding
 
 SELECTED_MODEL_CAPACITY_SCREEN = [
     "⚠ Selected model is at capacity. Please try a different model.",
@@ -297,13 +302,55 @@ def options(**kwargs: object) -> CodexSendOptions:
     return CodexSendOptions(**values)
 
 
+def is_paste_command(command: list[str]) -> bool:
+    return command[:2] == ["tmux", "paste-buffer"] or (
+        command[:3] == ["tmux", "if-shell", "-F"] and len(command) > 6 and "paste-buffer" in command[6]
+    )
+
+
 class TmuxSendTests(unittest.TestCase):
     def setUp(self) -> None:
         self.state_tmp = tempfile.TemporaryDirectory()
         self.state_env = patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": self.state_tmp.name})
         self.state_env.start()
+        self.runtime_capture = patch(
+            "omo_manager.omo_tmux_send.capture_tmux_runtime_binding",
+            side_effect=self.default_tmux_runtime,
+        )
+        self.runtime_capture.start()
+        self.addCleanup(self.runtime_capture.stop)
         self.addCleanup(self.state_env.stop)
         self.addCleanup(self.state_tmp.cleanup)
+
+    def default_tmux_runtime(self, target: str) -> TmuxRuntimeBinding:
+        if target == "pb-newswatcher-agent:0.0":
+            return self.tmux_runtime(target, "%421", 3680846, "cursor-agent")
+        if target == "pb-newswatcher-agent:0":
+            return self.tmux_runtime(target, "%42", 4242, "cursor-agent")
+        return self.tmux_runtime(target, "%42", 4242, "bunx")
+
+    def tmux_runtime(
+        self,
+        target: str = "dw2:0.0",
+        pane_id: str = "%432",
+        pane_pid: int = 388967,
+        pane_command: str = "bunx",
+        *,
+        start_ticks: int = 7001,
+    ) -> TmuxRuntimeBinding:
+        return TmuxRuntimeBinding(target, pane_id, "@12", pane_pid, pane_command, Path("/workspace"), start_ticks)
+
+    def codex_runtime(
+        self,
+        target: str = "dw2:0.0",
+        pane_id: str = "%432",
+        pane_pid: int = 388967,
+        pane_command: str = "bunx",
+        *,
+        start_ticks: int = 7001,
+    ) -> CodexRuntimeBinding:
+        tmux_runtime = self.tmux_runtime(target, pane_id, pane_pid, pane_command, start_ticks=start_ticks)
+        return CodexRuntimeBinding(pane_id, pane_pid, pane_command, tmux=tmux_runtime)
 
     def test_exact_capacity_error_rejects_other_errors(self) -> None:
         capacity = ["Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]
@@ -351,7 +398,10 @@ class TmuxSendTests(unittest.TestCase):
             self.assertTrue(run_capacity_resume("cfg:1.0", options()))
 
         self.assertEqual("resume", loaded_text)
-        self.assertTrue(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+        paste = next(command for command in calls if is_paste_command(command))
+        self.assertIn("#{pane_current_path},/workspace", paste[5])
+        self.assertIn("/proc/4242/stat", paste[6])
+        self.assertIn('test "${20:-}" = 7001', paste[6])
 
     def test_run_capacity_resume_reports_missing_target(self) -> None:
         with patch("omo_manager.omo_tmux_send.exact_pane_id", return_value=""), self.assertRaisesRegex(RuntimeError, "target does not exist"):
@@ -372,7 +422,7 @@ class TmuxSendTests(unittest.TestCase):
         ):
             run_capacity_resume("hwl:4", options())
 
-        self.assertFalse(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+        self.assertFalse(any(is_paste_command(command) for command in calls))
         self.assertFalse(any(command[:2] == ["tmux", "send-keys"] for command in calls))
 
     def test_run_capacity_resume_refuses_pane_drift_after_buffer_load(self) -> None:
@@ -391,8 +441,29 @@ class TmuxSendTests(unittest.TestCase):
             run_capacity_resume("hwl:4", options())
 
         self.assertTrue(any(command[:2] == ["tmux", "load-buffer"] for command in calls))
-        self.assertFalse(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+        self.assertFalse(any(is_paste_command(command) for command in calls))
         self.assertFalse(any(command[:2] == ["tmux", "send-keys"] for command in calls))
+
+    def test_run_capacity_resume_rejects_same_pid_reuse_before_paste(self) -> None:
+        capacity = ["Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]
+        original = self.tmux_runtime("hwl:4", "%42", 4242, "bunx", start_ticks=7001)
+        reused = self.tmux_runtime("hwl:4", "%42", 4242, "bunx", start_ticks=7002)
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
+            "omo_manager.omo_tmux_send.exact_tail", return_value=(True, capacity)
+        ), patch(
+            "omo_manager.omo_tmux_send.capture_tmux_runtime_binding", side_effect=(original, original, reused)
+        ), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run), self.assertRaisesRegex(
+            RuntimeError, "pane changed before paste"
+        ):
+            run_capacity_resume("hwl:4", options())
+
+        self.assertFalse(any(is_paste_command(command) for command in calls))
 
     def test_run_capacity_resume_refuses_changed_second_capture(self) -> None:
         capacity = ["Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]
@@ -410,7 +481,7 @@ class TmuxSendTests(unittest.TestCase):
         ):
             run_capacity_resume("hwl:4", options())
 
-        self.assertFalse(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+        self.assertFalse(any(is_paste_command(command) for command in calls))
         self.assertFalse(any(command[:2] == ["tmux", "send-keys"] for command in calls))
 
     def test_run_capacity_resume_refuses_non_codex_layout_after_paste(self) -> None:
@@ -429,7 +500,7 @@ class TmuxSendTests(unittest.TestCase):
         ), self.assertRaisesRegex(RuntimeError, "error changed before submit"):
             run_capacity_resume("hwl:4", options())
 
-        self.assertTrue(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+        self.assertTrue(any(is_paste_command(command) for command in calls))
         self.assertFalse(any(command[:2] == ["tmux", "send-keys"] for command in calls))
 
     def test_run_capacity_resume_refuses_pane_drift_during_verification(self) -> None:
@@ -442,15 +513,31 @@ class TmuxSendTests(unittest.TestCase):
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        pane_ids = ["%42", "%42", "%42", "%42", "%42", "%42", "%43"]
-        with patch("omo_manager.omo_tmux_send.exact_pane_id", side_effect=pane_ids), patch(
-            "omo_manager.omo_tmux_send.exact_tail", side_effect=[(True, capacity), (True, capacity), (True, pasted), (True, running)]
+        original = self.tmux_runtime("hwl:4", "%42", 4242, "bunx", start_ticks=7001)
+        reused = self.tmux_runtime("hwl:4", "%42", 4242, "bunx", start_ticks=7002)
+        verifying = False
+        tails = iter(((True, capacity), (True, capacity), (True, pasted), (True, running)))
+
+        def fake_tail(*_args: object) -> tuple[bool, list[str]]:
+            nonlocal verifying
+            result = next(tails)
+            verifying = result[1] == running
+            return result
+
+        with patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
+            "omo_manager.omo_tmux_send.exact_tail", side_effect=fake_tail
+        ), patch(
+            "omo_manager.omo_tmux_send.capture_tmux_runtime_binding", side_effect=lambda _target: reused if verifying else original
         ), patch("omo_manager.omo_tmux_send.require_no_existing_input"), patch(
             "omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run
-        ), self.assertRaisesRegex(RuntimeError, "target pane changed during verification"):
+        ), self.assertRaisesRegex(RuntimeError, "runtime changed during verification"):
             run_capacity_resume("hwl:4", options())
 
-        sends = [command for command in calls if command[:2] == ["tmux", "send-keys"]]
+        sends = [
+            command
+            for command in calls
+            if command[:3] == ["tmux", "if-shell", "-F"] and "send-keys" in command[6] and "Enter" in command[6]
+        ]
         self.assertEqual(1, len(sends))
 
     def test_verify_capacity_resume_accepts_running_and_reports_persistent_capacity(self) -> None:
@@ -656,7 +743,9 @@ class TmuxSendTests(unittest.TestCase):
                 expected_pane_command="bunx",
             )
 
-            self.assertEqual(wrapped_cancel_authority(), wrapped_cancel_authorization(args))
+            runtime = self.codex_runtime("dw2:0", "%432", 388967, "bunx")
+            with patch("omo_manager.omo_tmux_send.exact_codex_runtime_binding", return_value=runtime):
+                self.assertEqual(wrapped_cancel_authority(runtime), wrapped_cancel_authorization(args))
             wrong = Args(
                 "dw2:0",
                 None,
@@ -800,6 +889,46 @@ class TmuxSendTests(unittest.TestCase):
 
         raw.assert_called_once_with("cfg:1.0", "system reminder\n", selected, before_paste=None)
 
+    def test_concurrent_pending_and_email_public_sends_serialize_one_target(self) -> None:
+        first_inside = threading.Event()
+        release_first = threading.Event()
+        second_inside = threading.Event()
+        calls: list[str] = []
+        errors: list[BaseException] = []
+
+        def fake_run(_target: str, message: str, _selected: CodexSendOptions, **_kwargs: object) -> None:
+            calls.append(message)
+            if message == "pending delivery\n":
+                first_inside.set()
+                if not release_first.wait(2):
+                    raise RuntimeError("test did not release first sender")
+            else:
+                second_inside.set()
+
+        def send(message: str) -> None:
+            try:
+                send_system_to_codex("cfg:987654.0", message, options())
+            except BaseException as exc:
+                errors.append(exc)
+
+        with patch("omo_manager.omo_tmux_send._run_tmux_payload", side_effect=fake_run):
+            pending = threading.Thread(target=send, args=("pending delivery\n",), daemon=True)
+            email = threading.Thread(target=send, args=("email delivery\n",), daemon=True)
+            pending.start()
+            self.assertTrue(first_inside.wait(1))
+            email.start()
+            try:
+                self.assertFalse(second_inside.wait(0.2))
+            finally:
+                release_first.set()
+            pending.join(2)
+            email.join(2)
+
+        self.assertFalse(pending.is_alive())
+        self.assertFalse(email.is_alive())
+        self.assertEqual([], errors)
+        self.assertEqual(["pending delivery\n", "email delivery\n"], calls)
+
     def test_omnigent_uncertain_delivery_claim_suppresses_exact_retry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": tmp}), patch(
             "omo_manager.omo_tmux_send.send_omnigent_message", side_effect=RuntimeError("timeout after queue")
@@ -909,7 +1038,7 @@ class TmuxSendTests(unittest.TestCase):
             "omo_manager.omo_tmux_send.require_no_existing_input"
         ), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch(
             "omo_manager.omo_tmux_send.verify_submit"
-        ) as verify, patch("omo_manager.omo_tmux_send.exact_managed_runtime_binding", return_value=CodexRuntimeBinding("%42", 4242, "bunx")), patch(
+        ) as verify, patch("omo_manager.omo_tmux_send.exact_managed_runtime_binding", return_value=self.codex_runtime("cfg:1.0", "%42", 4242)), patch(
             "omo_manager.omo_tmux_send.require_same_managed_runtime"
         ), patch("omo_manager.omo_tmux_send.tail", return_value=["› Use /skills to list available skills", "  gpt-5.6"]), patch(
             "omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run
@@ -955,7 +1084,10 @@ class TmuxSendTests(unittest.TestCase):
         verify.assert_not_called()
         record.assert_called_once_with("hcfg:1.0", "queued input")
         self.assertEqual(1, sum(command[1] == "paste-buffer" for command in commands))
-        self.assertEqual(2, sum(command[1] == "send-keys" and command[-1] == "Enter" for command in commands))
+        self.assertEqual(
+            2,
+            sum(command[:3] == ["tmux", "if-shell", "-F"] and "send-keys" in command[6] and "Enter" in command[6] for command in commands),
+        )
 
     def test_forced_delivery_record_blocks_later_ordinary_duplicate(self) -> None:
         record_recent_tmux_delivery("hcfg:1.0", "queued input")
@@ -969,7 +1101,7 @@ class TmuxSendTests(unittest.TestCase):
         selected = options(dangerously_bypass_all_sender_safety_checks=True)
 
         def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-            if command[1] == "send-keys" and command[-1] == "Enter":
+            if command[:3] == ["tmux", "if-shell", "-F"] and "send-keys" in command[6] and "Enter" in command[6]:
                 raise subprocess.CalledProcessError(1, command)
             return subprocess.CompletedProcess(command, 0)
 
@@ -1186,6 +1318,12 @@ class TmuxSendTests(unittest.TestCase):
         ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True):
             verify_submit("wl:1", "Handle pending watcher delivery\n", options())
 
+    def test_codex_animated_stock_placeholder_is_empty_only_with_spinner(self) -> None:
+        self.assertTrue(is_empty_codex_input_text("Use /skills to list available skills ⠋"))
+        self.assertTrue(is_empty_codex_input_text("Use /skills to list available skills\u2800⠙"))
+        self.assertFalse(is_empty_codex_input_text("Use /skills to list available skills "))
+        self.assertFalse(is_empty_codex_input_text("Use /skills to list available skills edited"))
+
     def test_verify_submit_retries_enter_for_cursor_collapsed_paste(self) -> None:
         tails = iter(
             [
@@ -1249,6 +1387,9 @@ class TmuxSendTests(unittest.TestCase):
             "omo_manager.omo_tmux_send.exact_pane_id", return_value="%7"
         ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True), patch(
             "omo_manager.omo_tmux_send.current_input_text", return_value="Explain this codebase"
+        ), patch(
+            "omo_manager.omo_tmux_send.capture_tmux_runtime_binding",
+            return_value=self.tmux_runtime("vlcliimprove:0", "%7", 4242, "bunx"),
         ):
             verify_authorized_existing_submit("vlcliimprove:0", authorization, options(), "%7", None)
 
@@ -1295,7 +1436,61 @@ class TmuxSendTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "different Codex error before paste"):
                 run_tmux("vl:2", "recover now", options(), before_paste=lambda: None)
 
-        self.assertFalse(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+        self.assertFalse(any(is_paste_command(command) for command in calls))
+
+    def test_run_tmux_rejects_same_pid_reuse_before_guarded_paste(self) -> None:
+        original = self.tmux_runtime("cfg:1.0", "%42", 4242, "bunx", start_ticks=7001)
+        reused = self.tmux_runtime("cfg:1.0", "%42", 4242, "bunx", start_ticks=7002)
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch(
+            "omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""
+        ), patch("omo_manager.omo_tmux_send.revalidate_error_transition"), patch(
+            "omo_manager.omo_tmux_send.require_no_existing_input"
+        ), patch(
+            "omo_manager.omo_tmux_send.capture_tmux_runtime_binding", side_effect=(original, reused)
+        ), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run), self.assertRaisesRegex(
+            RuntimeError, "runtime changed immediately before paste"
+        ):
+            run_tmux("cfg:1.0", "prompt\n", options())
+
+        self.assertFalse(any(is_paste_command(command) for command in calls))
+
+    def test_pinned_input_accepts_the_same_canonical_target_alias(self) -> None:
+        runtime = self.tmux_runtime("cfg:1.0", "%42", 4242, "bunx")
+        with patch(
+            "omo_manager.omo_tmux_send.capture_tmux_runtime_binding", return_value=runtime
+        ), patch(
+            "omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)
+        ) as run:
+            send_enter("cfg:1", runtime)
+
+        self.assertTrue(run.called)
+
+    def test_placeholder_verification_rejects_same_pid_reuse_after_capture(self) -> None:
+        runtime = self.tmux_runtime("cfg:1.0", "%42", 4242, "bunx", start_ticks=7001)
+        drifted = self.tmux_runtime("cfg:1.0", "%42", 4242, "bunx", start_ticks=7002)
+        lines = ["› Use /skills to list available skills", "  gpt-5.5"]
+        with patch(
+            "omo_manager.omo_tmux_send.capture_tmux_runtime_binding",
+            side_effect=[runtime, runtime, drifted],
+        ), patch(
+            "omo_manager.omo_tmux_send.tail_pane_id", return_value=lines
+        ), patch(
+            "omo_manager.omo_tmux_send.send_literal"
+        ) as literal, self.assertRaisesRegex(RuntimeError, "changed after placeholder capture"):
+            verify_placeholder_paste(
+                "cfg:1.0",
+                "Use /skills to list available skills",
+                options(),
+                runtime,
+            )
+
+        literal.assert_not_called()
 
     def test_run_tmux_rejects_unchanged_error_before_paste_or_enter(self) -> None:
         lines = ["────", "■ Error: authentication failed", "› Ask Codex to do anything", "  gpt-5.6-sol"]
@@ -1310,7 +1505,7 @@ class TmuxSendTests(unittest.TestCase):
         ), self.assertRaisesRegex(RuntimeError, "Codex error state before paste"):
             run_tmux("config:27", "queued delivery", options())
 
-        self.assertFalse(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+        self.assertFalse(any(is_paste_command(command) for command in calls))
         self.assertFalse(any(command[-1:] == ["Enter"] for command in calls))
 
     def test_error_transition_ignores_ordinary_agent_error_prose(self) -> None:
@@ -1346,7 +1541,7 @@ class TmuxSendTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "different Codex error before submit"):
                 run_tmux("vl:2", "Summarize recent commits", options())
 
-        self.assertTrue(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+        self.assertTrue(any(is_paste_command(command) for command in calls))
         self.assertFalse(any(command[-1:] == ["Enter"] for command in calls))
 
     def test_wait_paste_visible_allows_matching_preexisting_generic_error(self) -> None:
@@ -1396,11 +1591,14 @@ class TmuxSendTests(unittest.TestCase):
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.agent_message_source", return_value="helper"), patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.require_no_existing_input"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=False), patch("omo_manager.omo_tmux_send.wait_paste_visible"), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.tail", return_value=["› Use /skills to list available skills", "  gpt-5.5"]), patch("omo_manager.omo_tmux_send.exact_managed_runtime_binding", return_value=CodexRuntimeBinding("%42", 4242, "bunx")), patch("omo_manager.omo_tmux_send.require_same_managed_runtime"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.agent_message_source", return_value="helper"), patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.require_no_existing_input"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=False), patch("omo_manager.omo_tmux_send.wait_paste_visible"), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.tail", return_value=["› Use /skills to list available skills", "  gpt-5.5"]), patch("omo_manager.omo_tmux_send.exact_managed_runtime_binding", return_value=self.codex_runtime("cfg:1.0", "%42", 4242)), patch("omo_manager.omo_tmux_send.require_same_managed_runtime"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             run_tmux("cfg:1.0", "literal C-c $(bad)\n", options())
 
         self.assertIn(["tmux", "load-buffer", "-b", calls[0][3], calls[0][4]], calls)
-        self.assertIn(["tmux", "paste-buffer", "-b", calls[0][3], "-t", "cfg:1.0"], calls)
+        paste = next(command for command in calls if is_paste_command(command))
+        self.assertIn("#{pane_current_path},/workspace", paste[5])
+        self.assertIn("/proc/4242/stat", paste[6])
+        self.assertIn("paste-buffer", paste[6])
         self.assertTrue(any(command[:3] == ["tmux", "if-shell", "-F"] and "send-keys" in command[6] and "Enter" in command[6] for command in calls))
 
     def test_run_tmux_submits_exact_dw20_hard_wrapped_message(self) -> None:
@@ -1417,7 +1615,7 @@ class TmuxSendTests(unittest.TestCase):
             "omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=False
         ), patch(
             "omo_manager.omo_tmux_send.revalidate_error_transition", return_value=DW20_RETAINED_SCREEN
-        ), patch("omo_manager.omo_tmux_send.exact_managed_runtime_binding", return_value=CodexRuntimeBinding("%42", 4242, "bunx")), patch(
+        ), patch("omo_manager.omo_tmux_send.exact_managed_runtime_binding", return_value=self.codex_runtime("dw:20", "%42", 4242)), patch(
             "omo_manager.omo_tmux_send.require_same_managed_runtime"
         ), patch("omo_manager.omo_tmux_send.tail", return_value=DW20_RETAINED_SCREEN), patch(
             "omo_manager.omo_tmux_send.tail_pane_id", return_value=ready
@@ -1428,7 +1626,7 @@ class TmuxSendTests(unittest.TestCase):
         ):
             run_tmux("dw:20", DW20_MESSAGE, options())
 
-        enter.assert_called_once_with("dw:20", CodexRuntimeBinding("%42", 4242, "bunx"))
+        enter.assert_called_once_with("dw:20", self.codex_runtime("dw:20", "%42", 4242))
 
     def test_run_tmux_rechecks_input_immediately_before_paste(self) -> None:
         events: list[str] = []
@@ -1437,21 +1635,21 @@ class TmuxSendTests(unittest.TestCase):
             events.append("before_paste")
 
         def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-            events.append(command[1])
+            events.append("guarded-paste" if is_paste_command(command) else command[1])
             return subprocess.CompletedProcess(command, 0)
 
         def fake_inspect(_args: object) -> Report:
             events.append("capture-pane")
             return Report("ready", [], "", False)
 
-        with patch("omo_manager.omo_tmux_send.agent_message_source", return_value="helper"), patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.inspect", side_effect=fake_inspect), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.tail", return_value=["› Use /skills to list available skills", "  gpt-5.5"]), patch("omo_manager.omo_tmux_send.exact_managed_runtime_binding", return_value=CodexRuntimeBinding("%42", 4242, "bunx")), patch("omo_manager.omo_tmux_send.require_same_managed_runtime"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.agent_message_source", return_value="helper"), patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.inspect", side_effect=fake_inspect), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.tail", return_value=["› Use /skills to list available skills", "  gpt-5.5"]), patch("omo_manager.omo_tmux_send.exact_managed_runtime_binding", return_value=self.codex_runtime("cfg:1.0", "%42", 4242)), patch("omo_manager.omo_tmux_send.require_same_managed_runtime"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             run_tmux("cfg:1.0", "prompt\n", options(), before_paste=before_paste)
 
-        self.assertEqual(["load-buffer", "before_paste", "capture-pane", "paste-buffer"], events[:4])
+        self.assertEqual(["load-buffer", "before_paste", "capture-pane", "guarded-paste"], events[:4])
         self.assertIn("if-shell", events)
 
     def test_run_tmux_does_not_wait_for_compaction(self) -> None:
-        with patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.require_no_existing_input"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.tail", return_value=["› Use /skills to list available skills", "  gpt-5.5"]), patch("omo_manager.omo_tmux_send.exact_managed_runtime_binding", return_value=CodexRuntimeBinding("%42", 4242, "bunx")), patch("omo_manager.omo_tmux_send.require_same_managed_runtime"), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)):
+        with patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.require_no_existing_input"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.tail", return_value=["› Use /skills to list available skills", "  gpt-5.5"]), patch("omo_manager.omo_tmux_send.exact_managed_runtime_binding", return_value=self.codex_runtime("cfg:1.0", "%42", 4242)), patch("omo_manager.omo_tmux_send.require_same_managed_runtime"), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)):
             run_tmux("cfg:1.0", "prompt\n", options())
 
     def test_wait_paste_visible_rejects_partial_probe_match(self) -> None:
@@ -1477,22 +1675,25 @@ class TmuxSendTests(unittest.TestCase):
                 wait_paste_visible("cfg:1.0", message, options(), expected_codex_input_text=message),
             )
 
-    def test_wait_paste_visible_accepts_collapsed_pasted_content(self) -> None:
+    def test_wait_paste_visible_rejects_collapsed_pasted_content(self) -> None:
         lines = ["› [Pasted Content 2048 chars]", "  gpt-5.5"]
         with patch("omo_manager.omo_tmux_send.tail", return_value=lines):
-            wait_paste_visible("cfg:1.0", "line one\nline two\n", options())
+            with self.assertRaisesRegex(RuntimeError, "collapsed-paste rendering is not source proof"):
+                wait_paste_visible("cfg:1.0", "line one\nline two\n", options())
 
-    def test_wait_paste_visible_exact_source_accepts_collapsed_pasted_content(self) -> None:
+    def test_wait_paste_visible_exact_source_rejects_collapsed_pasted_content(self) -> None:
         message = "line one\nline two\n"
         lines = ["› [Pasted Content 2048 chars]", "  gpt-5.5"]
         with patch("omo_manager.omo_tmux_send.tail", return_value=lines):
-            wait_paste_visible("cfg:1.0", message, options(), expected_codex_input_text=message)
+            with self.assertRaisesRegex(RuntimeError, "collapsed-paste rendering is not source proof"):
+                wait_paste_visible("cfg:1.0", message, options(), expected_codex_input_text=message)
 
-    def test_wait_paste_visible_accepts_cursor_collapsed_pasted_text(self) -> None:
+    def test_wait_paste_visible_rejects_cursor_collapsed_pasted_text(self) -> None:
         with patch("omo_manager.omo_tmux_send.tail", return_value=cursor_agent_lines("[Pasted text #4 +13 lines]")), patch(
             "omo_manager.omo_tmux_send.exact_pane_id", return_value="%9"
         ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True):
-            wait_paste_visible("wl:1", "Pending was not pushed because tmux send treated the live Cursor manager pane as not a Codex pane.\n", options())
+            with self.assertRaisesRegex(RuntimeError, "collapsed-paste rendering is not source proof"):
+                wait_paste_visible("wl:1", "Pending was not pushed because tmux send treated the live Cursor manager pane as not a Codex pane.\n", options())
 
     def test_wait_paste_visible_recovers_matching_file_search_overlay_with_enter(self) -> None:
         message = "Manager notice includes Find and fix a bug in @filename"
@@ -1723,11 +1924,29 @@ class TmuxSendTests(unittest.TestCase):
             "omo_manager.omo_tmux_send.send_enter"
         ) as enter:
             self.assertEqual("existing_input", clear_existing_input_before_send("cfg:1.0", options(submit_verify_timeout_s=0.0)))
-        enter.assert_called_once_with("cfg:1.0")
+        enter.assert_called_once_with("cfg:1.0", self.default_tmux_runtime("cfg:1.0"))
 
     def test_clear_existing_input_before_send_fails_closed_when_inspect_fails(self) -> None:
         with patch("omo_manager.omo_tmux_send.authenticated_full_report", side_effect=RuntimeError("tmux unavailable")):
             self.assertEqual("inspect_failed", clear_existing_input_before_send("cfg:1.0", options()))
+
+    def test_clear_existing_input_rejects_same_pid_reuse_after_observation(self) -> None:
+        runtime = self.default_tmux_runtime("cfg:1.0")
+        drifted = self.tmux_runtime("cfg:1.0", "%42", 4242, "bunx", start_ticks=7002)
+        with patch(
+            "omo_manager.omo_tmux_send.capture_tmux_runtime_binding",
+            side_effect=[runtime, runtime, runtime, drifted],
+        ), patch(
+            "omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True
+        ), patch(
+            "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines",
+            return_value=["› Continue task", "  gpt-5.6-terra high · /tmp · Context 0% used"],
+        ), patch(
+            "omo_manager.omo_tmux_send.subprocess.run"
+        ) as run:
+            self.assertEqual("inspect_failed", clear_existing_input_before_send("cfg:1.0", options()))
+
+        run.assert_not_called()
 
     def test_clear_existing_input_never_enters_ready_retained_cursor_composer(self) -> None:
         lines = cursor_retained_composer_lines()
@@ -1788,7 +2007,13 @@ class TmuxSendTests(unittest.TestCase):
         lines = cursor_borderless_retained_80x24()
         rendering, retained = exact_retained_cursor_rendering(lines)
         expected = RetainedCursorComposerProof(
-            "%42", 4242, "cursor-agent", text_sha256(rendering), retained, len(retained.encode("utf-16-le")) // 2 + 1
+            "%42",
+            4242,
+            "cursor-agent",
+            text_sha256(rendering),
+            retained,
+            len(retained.encode("utf-16-le")) // 2 + 1,
+            self.default_tmux_runtime("pb-newswatcher-agent:0"),
         )
         with patch("omo_manager.omo_tmux_send.exact_cursor_runtime_binding", return_value=("%42", 4242, "cursor-agent")), patch(
             "omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True
@@ -1902,6 +2127,7 @@ class TmuxSendTests(unittest.TestCase):
             text_sha256(rendering),
             input_text,
             len(input_text.encode("utf-16-le")) // 2 + 1,
+            self.default_tmux_runtime("pb-newswatcher-agent:0.0"),
         )
         with patch(
             "omo_manager.omo_tmux_send.exact_cursor_runtime_binding", return_value=("%421", 3680846, "cursor-agent")
@@ -1951,6 +2177,9 @@ class TmuxSendTests(unittest.TestCase):
             "omo_manager.omo_tmux_send.exact_cursor_runtime_binding", return_value=("%421", 3680846, "agent")
         ), patch("omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True), patch(
             "omo_manager.omo_tmux_send.capture_raw_visible_pane_lines", return_value=lines
+        ), patch(
+            "omo_manager.omo_tmux_send.capture_tmux_runtime_binding",
+            return_value=self.tmux_runtime("pb-newswatcher-agent:0.0", "%421", 3680846, "agent"),
         ):
             with self.assertRaisesRegex(RuntimeError, "exact cursor-agent launcher"):
                 require_ready_partial_cursor_composer("pb-newswatcher-agent:0.0")
@@ -1976,7 +2205,13 @@ class TmuxSendTests(unittest.TestCase):
         rendering, input_text = exact_retained_cursor_rendering(cursor_partial_paste_80x24())
         expected_keys = len(input_text.encode("utf-16-le")) // 2 + 1
         proof = RetainedCursorComposerProof(
-            "%421", 3680846, "cursor-agent", text_sha256(rendering), input_text, expected_keys
+            "%421",
+            3680846,
+            "cursor-agent",
+            text_sha256(rendering),
+            input_text,
+            expected_keys,
+            self.default_tmux_runtime("pb-newswatcher-agent:0.0"),
         )
         calls: list[list[str]] = []
 
@@ -1999,7 +2234,15 @@ class TmuxSendTests(unittest.TestCase):
         enter.assert_not_called()
 
     def test_partial_cursor_clear_fails_before_mutation_on_proof_drift(self) -> None:
-        proof = RetainedCursorComposerProof("%421", 3680846, "cursor-agent", "a" * 64, "\nAwait\n</agent_message>", 300)
+        proof = RetainedCursorComposerProof(
+            "%421",
+            3680846,
+            "cursor-agent",
+            "a" * 64,
+            "\nAwait\n</agent_message>",
+            300,
+            self.default_tmux_runtime("pb-newswatcher-agent:0.0"),
+        )
         with patch(
             "omo_manager.omo_tmux_send.require_ready_partial_cursor_composer",
             side_effect=[proof, RuntimeError("target retained submitted Cursor composer changed before paste")],
@@ -2009,7 +2252,15 @@ class TmuxSendTests(unittest.TestCase):
         clear.assert_not_called()
 
     def test_partial_cursor_clear_propagates_empty_verification_failure_without_enter(self) -> None:
-        proof = RetainedCursorComposerProof("%421", 3680846, "cursor-agent", "a" * 64, "\nAwait\n</agent_message>", 300)
+        proof = RetainedCursorComposerProof(
+            "%421",
+            3680846,
+            "cursor-agent",
+            "a" * 64,
+            "\nAwait\n</agent_message>",
+            300,
+            self.default_tmux_runtime("pb-newswatcher-agent:0.0"),
+        )
         result = subprocess.CompletedProcess(["tmux"], 0, "", "")
         with patch(
             "omo_manager.omo_tmux_send.require_ready_partial_cursor_composer", side_effect=[proof, proof]
@@ -2046,7 +2297,14 @@ class TmuxSendTests(unittest.TestCase):
                 exact_cursor_runtime_binding("pb-newswatcher-agent:0.0")
 
     def test_retained_cursor_actions_atomically_bind_cursor_agent_pid_and_pane(self) -> None:
-        proof = RetainedCursorComposerProof("%421", 3680846, "cursor-agent", text_sha256("old"), "old")
+        proof = RetainedCursorComposerProof(
+            "%421",
+            3680846,
+            "cursor-agent",
+            text_sha256("old"),
+            "old",
+            runtime=self.default_tmux_runtime("pb-newswatcher-agent:0.0"),
+        )
         result = subprocess.CompletedProcess(["tmux"], 0, "", "")
         with patch("omo_manager.omo_tmux_send.require_ready_retained_cursor_composer", return_value=proof), patch(
             "omo_manager.omo_tmux_send.subprocess.run", return_value=result
@@ -2054,7 +2312,7 @@ class TmuxSendTests(unittest.TestCase):
             clear_retained_cursor_text("pb-newswatcher-agent:0.0", proof)
 
         command = run.call_args.args[0]
-        self.assertEqual(["tmux", "if-shell", "-F", "-t", "pb-newswatcher-agent:0.0"], command[:5])
+        self.assertEqual(["tmux", "if-shell", "-F", "-t", "%421"], command[:5])
         self.assertIn("#{pane_id},%421", command[5])
         self.assertIn("#{pane_pid},3680846", command[5])
         self.assertIn("#{pane_current_command},cursor-agent", command[5])
@@ -2062,7 +2320,14 @@ class TmuxSendTests(unittest.TestCase):
         self.assertNotIn("Enter", command[6])
 
     def test_retained_cursor_actions_fail_closed_on_action_time_command_drift(self) -> None:
-        proof = RetainedCursorComposerProof("%421", 3680846, "cursor-agent", text_sha256("old"), "old")
+        proof = RetainedCursorComposerProof(
+            "%421",
+            3680846,
+            "cursor-agent",
+            text_sha256("old"),
+            "old",
+            runtime=self.default_tmux_runtime("pb-newswatcher-agent:0.0"),
+        )
         failed = subprocess.CompletedProcess(["tmux"], 1, "", "")
         for action, error in (
             (lambda: clear_retained_cursor_text("pb-newswatcher-agent:0.0", proof), "non-submitting clear"),
@@ -2396,11 +2661,12 @@ class TmuxSendTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "follow-ups overlay"):
                 require_no_existing_input("wl:1")
 
-    def test_wait_paste_visible_accepts_cursor_followups_collapsed_chip(self) -> None:
+    def test_wait_paste_visible_rejects_cursor_followups_collapsed_chip(self) -> None:
         with patch("omo_manager.omo_tmux_send.tail", return_value=cursor_agent_followups_lines()), patch(
             "omo_manager.omo_tmux_send.exact_pane_id", return_value="%9"
         ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True):
-            wait_paste_visible("wl:1", "Pending was not pushed because tmux send treated the live Cursor manager pane as not a Codex pane.\n", options())
+            with self.assertRaisesRegex(RuntimeError, "collapsed-paste rendering is not source proof"):
+                wait_paste_visible("wl:1", "Pending was not pushed because tmux send treated the live Cursor manager pane as not a Codex pane.\n", options())
 
     def test_verify_submit_sends_enter_for_cursor_followups_overlay(self) -> None:
         tails = iter([cursor_agent_followups_lines(), cursor_agent_lines(running=True)])
@@ -2562,7 +2828,7 @@ class TmuxSendTests(unittest.TestCase):
                 ), patch("omo_manager.omo_tmux_send.send_enter") as enter:
                     submit_existing_to_codex("cfg:1.0", authorization, options(submit_verify_timeout_s=0))
 
-                enter.assert_called_once_with("%42")
+                enter.assert_called_once_with("cfg:1.0", self.default_tmux_runtime("cfg:1.0"))
 
     def test_submit_existing_rejects_unapproved_or_nonempty_trailing_rows_before_enter(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
@@ -2718,7 +2984,7 @@ class TmuxSendTests(unittest.TestCase):
         ), patch("omo_manager.omo_tmux_send.send_enter") as enter:
             submit_existing_to_codex("cfg:1.0", authorization, options(submit_verify_timeout_s=0))
 
-        enter.assert_called_once_with("%42")
+        enter.assert_called_once_with("cfg:1.0", self.default_tmux_runtime("cfg:1.0"))
 
     def test_file_authorized_trailing_blank_rejects_pane_drift_before_recovery(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("approved prompt\n"), "approved prompt\n")
@@ -2773,7 +3039,7 @@ class TmuxSendTests(unittest.TestCase):
         ) as enter:
             cancel_existing_codex_input("cfg:1.0", authorization, options())
 
-        cancel.assert_called_once_with("%42")
+        cancel.assert_called_once_with("cfg:1.0", self.default_tmux_runtime("cfg:1.0"))
         enter.assert_not_called()
 
     def test_file_cancel_trailing_blank_recovery_remains_exact(self) -> None:
@@ -2807,8 +3073,9 @@ class TmuxSendTests(unittest.TestCase):
         ) as enter, patch("omo_manager.omo_tmux_send.verify_authorized_existing_submit") as verify:
             submit_existing_to_codex("cfg:1.0", authorization, selected)
 
-        enter.assert_called_once_with("%42")
-        verify.assert_called_once_with("cfg:1.0", authorization, selected, "%42", None)
+        runtime = self.default_tmux_runtime("cfg:1.0")
+        enter.assert_called_once_with("cfg:1.0", runtime)
+        verify.assert_called_once_with("cfg:1.0", authorization, selected, "%42", None, runtime)
 
     def test_submit_existing_digest_accepts_complete_cursor_layout(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("approved prompt"))
@@ -2830,7 +3097,8 @@ class TmuxSendTests(unittest.TestCase):
             submit_existing_to_codex("cfg:1.0", authorization, options(submit_verify_timeout_s=0))
 
         enter.assert_not_called()
-        pinned_enter.assert_called_once_with("cfg:1.0", "%42")
+        runtime = self.default_tmux_runtime("cfg:1.0")
+        pinned_enter.assert_called_once_with("cfg:1.0", "%42", runtime.pane_pid, runtime.pane_command, runtime)
 
     def test_cursor_submit_rejects_final_alias_process_or_error_drift(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("approved prompt"))
@@ -2848,36 +3116,58 @@ class TmuxSendTests(unittest.TestCase):
 
     def test_pinned_cursor_enter_rejects_server_guard_failure(self) -> None:
         failed = subprocess.CompletedProcess(["tmux"], 1, stdout="", stderr="")
+        runtime = self.tmux_runtime("cfg:1.0", "%42", 4242, "agent")
 
-        with patch("omo_manager.omo_tmux_send.subprocess.run", return_value=failed), self.assertRaisesRegex(
+        with patch("omo_manager.omo_tmux_send.capture_tmux_runtime_binding", return_value=runtime), patch(
+            "omo_manager.omo_tmux_send.subprocess.run", return_value=failed
+        ), self.assertRaisesRegex(
             RuntimeError, "changed at submit-existing"
         ):
             send_enter_to_pinned_cursor("cfg:1.0", "%42")
 
     def test_pinned_cursor_enter_binds_pane_pid_and_command(self) -> None:
         succeeded = subprocess.CompletedProcess(["tmux"], 0, stdout="", stderr="")
-        with patch("omo_manager.omo_tmux_send.subprocess.run", return_value=succeeded) as run:
+        runtime = self.tmux_runtime("cfg:1.0", "%42", 4242, "cursor-agent")
+        with patch("omo_manager.omo_tmux_send.capture_tmux_runtime_binding", return_value=runtime), patch(
+            "omo_manager.omo_tmux_send.pane_has_exact_cursor_process", return_value=True
+        ), patch(
+            "omo_manager.omo_tmux_send.subprocess.run", return_value=succeeded
+        ) as run:
             send_enter_to_pinned_cursor("cfg:1.0", "%42", 4242, "cursor-agent")
 
         command = run.call_args.args[0]
-        self.assertEqual(["tmux", "if-shell", "-F", "-t", "cfg:1.0"], command[:5])
+        self.assertEqual(["tmux", "if-shell", "-F", "-t", "%42"], command[:5])
         self.assertIn("#{pane_id},%42", command[5])
         self.assertIn("#{pane_pid},4242", command[5])
         self.assertIn("#{pane_current_command},cursor-agent", command[5])
-        self.assertEqual("send-keys -t %42 Enter", command[6])
+        self.assertIn("/proc/4242/stat", command[6])
+        self.assertIn("send-keys -t %42 Enter", command[6])
 
     def test_pinned_runtime_enter_binds_pane_pid_and_command(self) -> None:
         succeeded = subprocess.CompletedProcess(["tmux"], 0, stdout="", stderr="")
-        runtime = CodexRuntimeBinding("%1797", 3010111, "bunx")
-        with patch("omo_manager.omo_tmux_send.subprocess.run", return_value=succeeded) as run:
+        runtime = self.codex_runtime("wl:1", "%1797", 3010111, "bunx")
+        with patch("omo_manager.omo_tmux_send.capture_tmux_runtime_binding", return_value=runtime.tmux), patch(
+            "omo_manager.omo_tmux_send.subprocess.run", return_value=succeeded
+        ) as run:
             send_enter_to_pinned_runtime("wl:1", runtime)
 
         command = run.call_args.args[0]
-        self.assertEqual(["tmux", "if-shell", "-F", "-t", "wl:1"], command[:5])
+        self.assertEqual(["tmux", "if-shell", "-F", "-t", "%1797"], command[:5])
         self.assertIn("#{pane_id},%1797", command[5])
         self.assertIn("#{pane_pid},3010111", command[5])
         self.assertIn("#{pane_current_command},bunx", command[5])
-        self.assertEqual("send-keys -t %1797 Enter", command[6])
+        self.assertIn("/proc/3010111/stat", command[6])
+        self.assertIn("send-keys -t %1797 Enter", command[6])
+
+    def test_pinned_runtime_enter_rejects_same_pid_reuse_before_key_mutation(self) -> None:
+        runtime = self.codex_runtime("wl:1", "%1797", 3010111, "bunx", start_ticks=7001)
+        reused = self.tmux_runtime("wl:1", "%1797", 3010111, "bunx", start_ticks=7002)
+        with patch("omo_manager.omo_tmux_send.capture_tmux_runtime_binding", return_value=reused), patch(
+            "omo_manager.omo_tmux_send.subprocess.run"
+        ) as run, self.assertRaisesRegex(RuntimeError, "changed at recovered submit"):
+            send_enter_to_pinned_runtime("wl:1", runtime)
+
+        run.assert_not_called()
 
     def test_cursor_followups_overlay_enter_uses_revalidated_runtime(self) -> None:
         runtime = CodexRuntimeBinding("%1797", 3010111, "agent")
@@ -3038,6 +3328,25 @@ class TmuxSendTests(unittest.TestCase):
 
         enter.assert_not_called()
 
+    def test_submit_existing_rejects_same_pid_reuse_after_final_capture(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
+        runtime = self.default_tmux_runtime("cfg:1.0")
+        drifted = self.tmux_runtime("cfg:1.0", "%42", 4242, "bunx", start_ticks=7002)
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input",
+            side_effect=[ExistingInputCapture("%42", "approved prompt"), ExistingInputCapture("%42", "approved prompt")],
+        ), patch(
+            "omo_manager.omo_tmux_send.revalidate_error_transition", return_value=["• Working", "  gpt-5.5"]
+        ), patch(
+            "omo_manager.omo_tmux_send.capture_tmux_runtime_binding",
+            side_effect=[runtime, runtime, runtime, drifted],
+        ), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter, self.assertRaisesRegex(RuntimeError, "runtime changed before submit-existing"):
+            submit_existing_to_codex("cfg:1.0", authorization, options())
+
+        enter.assert_not_called()
+
     def test_submit_existing_verifies_the_pinned_pane_after_target_rebinding(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
         with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
@@ -3050,7 +3359,7 @@ class TmuxSendTests(unittest.TestCase):
         ) as enter:
             submit_existing_to_codex("cfg:1.0", authorization, options())
 
-        enter.assert_called_once_with("%42")
+        enter.assert_called_once_with("cfg:1.0", self.default_tmux_runtime("cfg:1.0"))
         tail_pane.assert_called_once_with("%42", 2000)
 
     def test_submit_existing_reauthorizes_exact_input_before_retry_enter(self) -> None:
@@ -3070,7 +3379,10 @@ class TmuxSendTests(unittest.TestCase):
             [True, True, True],
             [call.kwargs.get("allow_codex_footer_spacer") for call in capture.call_args_list],
         )
-        self.assertEqual([("%42",), ("%42",)], [call.args for call in enter.call_args_list])
+        self.assertEqual(
+            [("cfg:1.0", self.default_tmux_runtime("cfg:1.0"))] * 2,
+            [call.args for call in enter.call_args_list],
+        )
 
     def test_submit_existing_accepts_completion_during_retry_reauthorization(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
@@ -3089,7 +3401,7 @@ class TmuxSendTests(unittest.TestCase):
         ) as enter:
             submit_existing_to_codex("cfg:1.0", authorization, options())
 
-        enter.assert_called_once_with("%42")
+        enter.assert_called_once_with("cfg:1.0", self.default_tmux_runtime("cfg:1.0"))
 
     def test_submit_existing_stops_retry_when_authorized_text_changes(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
@@ -3108,7 +3420,7 @@ class TmuxSendTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "exactly match"):
                 submit_existing_to_codex("cfg:1.0", authorization, options())
 
-        enter.assert_called_once_with("%42")
+        enter.assert_called_once_with("cfg:1.0", self.default_tmux_runtime("cfg:1.0"))
 
     def test_submit_existing_rejects_normalized_difference_before_enter(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
@@ -3143,7 +3455,7 @@ class TmuxSendTests(unittest.TestCase):
         ) as cancel, patch("omo_manager.omo_tmux_send.send_enter") as enter:
             cancel_existing_codex_input("cfg:1.0", authorization, options())
 
-        cancel.assert_called_once_with("%42")
+        cancel.assert_called_once_with("cfg:1.0", self.default_tmux_runtime("cfg:1.0"))
         enter.assert_not_called()
 
     def test_cancel_existing_clears_exact_input_with_codex_footer_spacer(self) -> None:
@@ -3162,7 +3474,7 @@ class TmuxSendTests(unittest.TestCase):
         ) as enter:
             cancel_existing_codex_input("cfg:1.0", authorization, options())
 
-        cancel.assert_called_once_with("%42")
+        cancel.assert_called_once_with("cfg:1.0", self.default_tmux_runtime("cfg:1.0"))
         enter.assert_not_called()
 
     def test_cancel_existing_requires_exact_trailing_newline_authorization(self) -> None:
@@ -3188,7 +3500,7 @@ class TmuxSendTests(unittest.TestCase):
         ) as enter:
             cancel_existing_codex_input("cfg:1.0", exact, options())
 
-        cancel.assert_called_once_with("%42")
+        cancel.assert_called_once_with("cfg:1.0", self.default_tmux_runtime("cfg:1.0"))
         enter.assert_not_called()
 
     def test_cancel_existing_rejects_overlay_with_codex_footer_spacer(self) -> None:
@@ -3227,33 +3539,41 @@ class TmuxSendTests(unittest.TestCase):
 
         cancel.assert_not_called()
 
-    def test_cancel_existing_rechecks_target_after_final_input_capture(self) -> None:
+    def test_cancel_existing_rejects_same_pid_reuse_after_final_input_capture(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("stale duplicate"), "stale duplicate")
+        runtime = self.default_tmux_runtime("cfg:1.0")
+        drifted = self.tmux_runtime("cfg:1.0", "%42", 4242, "bunx", start_ticks=7002)
         with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
             "omo_manager.omo_tmux_send.capture_complete_existing_input",
             side_effect=[ExistingInputCapture("%42", "stale duplicate"), ExistingInputCapture("%42", "stale duplicate")],
         ), patch("omo_manager.omo_tmux_send.tail_pane_id", return_value=["› stale duplicate", "  gpt-5.5"]), patch(
-            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%43"
+            "omo_manager.omo_tmux_send.capture_tmux_runtime_binding",
+            side_effect=[runtime, runtime, runtime, drifted],
         ), patch("omo_manager.omo_tmux_send.send_cancel_input") as cancel:
-            with self.assertRaisesRegex(RuntimeError, "pane changed before"):
+            with self.assertRaisesRegex(RuntimeError, "runtime changed before"):
                 cancel_existing_codex_input("cfg:1.0", authorization, options())
 
         cancel.assert_not_called()
 
-    def test_cancel_existing_rechecks_target_after_verification_capture(self) -> None:
+    def test_cancel_existing_rejects_same_pid_reuse_before_verification_capture(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("stale duplicate"), "stale duplicate")
+        runtime = self.default_tmux_runtime("cfg:1.0")
+        drifted = self.tmux_runtime("cfg:1.0", "%42", 4242, "bunx", start_ticks=7002)
         with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
             "omo_manager.omo_tmux_send.capture_complete_existing_input",
             side_effect=[ExistingInputCapture("%42", "stale duplicate"), ExistingInputCapture("%42", "stale duplicate")],
         ), patch("omo_manager.omo_tmux_send.tail_pane_id", return_value=["› stale duplicate", "  gpt-5.5"]), patch(
             "omo_manager.omo_tmux_send.capture_complete_input_lines", return_value=["› Use /skills to list available skills", "  gpt-5.5"]
-        ), patch("omo_manager.omo_tmux_send.exact_pane_id", side_effect=["%42", "%42", "%43"]), patch(
+        ), patch(
+            "omo_manager.omo_tmux_send.capture_tmux_runtime_binding",
+            side_effect=[runtime, runtime, runtime, runtime, drifted],
+        ), patch(
             "omo_manager.omo_tmux_send.send_cancel_input"
         ) as cancel:
-            with self.assertRaisesRegex(RuntimeError, "pane changed after"):
+            with self.assertRaisesRegex(RuntimeError, "runtime changed before input action"):
                 cancel_existing_codex_input("cfg:1.0", authorization, options())
 
-        cancel.assert_called_once_with("%42")
+        cancel.assert_called_once_with("cfg:1.0", runtime)
 
     def test_cancel_existing_refuses_human_owned_target_without_inspection(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("stale duplicate"))
@@ -3268,39 +3588,38 @@ class TmuxSendTests(unittest.TestCase):
         cancel.assert_not_called()
 
     def test_exact_codex_runtime_binding_authenticates_pane_pid_command_and_process(self) -> None:
-        result = subprocess.CompletedProcess(["tmux"], 0, stdout="%432\t388967\tbunx\n")
-        with patch("omo_manager.omo_tmux_send.subprocess.run", return_value=result), patch(
-            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%432"
-        ), patch(
+        runtime = self.tmux_runtime("dw2:0", "%432", 388967, "bunx")
+        with patch("omo_manager.omo_tmux_send.capture_tmux_runtime_binding", return_value=runtime), patch(
             "omo_manager.omo_tmux_send.exact_pane_process",
             return_value=("bunx", ["bunx", "@openai/codex"]),
         ):
-            self.assertEqual(CodexRuntimeBinding("%432", 388967, "bunx"), exact_codex_runtime_binding("dw2:0"))
+            self.assertEqual(CodexRuntimeBinding("%432", 388967, "bunx", tmux=runtime), exact_codex_runtime_binding("dw2:0"))
 
     def test_exact_codex_runtime_binding_rejects_identity_drift(self) -> None:
-        for output, pane_id, process in (
-            ("%433\t388967\tbunx\n", "%432", ("bunx", ["bunx", "@openai/codex"])),
-            ("%432\t388968\tpython\n", "%432", ("python", ["python", "worker.py"])),
-            ("%432\t388967\tbunx\n", "%432", None),
-            ("%432\t388967\tbunx\n", "%432", ("bunx", ["zsh", "-lc", "bunx @openai/codex"])),
+        initial = self.tmux_runtime("dw2:0", "%432", 388967, "bunx")
+        for drifted in (
+            self.tmux_runtime("dw2:0", "%433", 388967, "bunx"),
+            self.tmux_runtime("dw2:0", "%432", 388967, "bunx", start_ticks=7002),
         ):
-            result = subprocess.CompletedProcess(["tmux"], 0, stdout=output)
-            with self.subTest(output=output, process=process), patch(
-                "omo_manager.omo_tmux_send.subprocess.run", return_value=result
-            ), patch("omo_manager.omo_tmux_send.exact_pane_id", return_value=pane_id), patch(
-                "omo_manager.omo_tmux_send.exact_pane_process", return_value=process
-            ), patch(
-                "omo_manager.omo_tmux_send.shell_started_codex_binding",
-                side_effect=RuntimeError("target foreground Codex process cannot be authenticated"),
-            ), self.assertRaisesRegex(RuntimeError, "cannot be authenticated|not a direct authenticated launch"):
+            with self.subTest(drifted=drifted), patch(
+                "omo_manager.omo_tmux_send.capture_tmux_runtime_binding", side_effect=[initial, drifted]
+            ), self.assertRaisesRegex(RuntimeError, "cannot be authenticated"):
+                exact_codex_runtime_binding("dw2:0")
+
+        for process in (None, ("bunx", ["zsh", "-lc", "bunx @openai/codex"])):
+            with self.subTest(process=process), patch(
+                "omo_manager.omo_tmux_send.capture_tmux_runtime_binding", return_value=initial
+            ), patch("omo_manager.omo_tmux_send.exact_pane_process", return_value=process), self.assertRaisesRegex(
+                RuntimeError, "not a direct authenticated launch"
+            ):
                 exact_codex_runtime_binding("dw2:0")
 
     def test_exact_codex_runtime_binding_accepts_exact_shell_foreground_read_only(self) -> None:
-        result = subprocess.CompletedProcess(["tmux"], 0, stdout="%1270\t2962336\tbunx\n")
-        runtime = CodexRuntimeBinding("%1270", 2962336, "bunx", 2962466, 36393988, "d" * 64)
-        with patch("omo_manager.omo_tmux_send.subprocess.run", return_value=result), patch(
-            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%1270"
-        ), patch("omo_manager.omo_tmux_send.exact_pane_process", return_value=("bunx", [])), patch(
+        tmux_runtime = self.tmux_runtime("config:16", "%1270", 2962336, "bunx")
+        runtime = CodexRuntimeBinding("%1270", 2962336, "bunx", 2962466, 36393988, "d" * 64, tmux_runtime)
+        with patch("omo_manager.omo_tmux_send.capture_tmux_runtime_binding", return_value=tmux_runtime), patch(
+            "omo_manager.omo_tmux_send.exact_pane_process", return_value=("bunx", [])
+        ), patch(
             "omo_manager.omo_tmux_send.shell_started_codex_binding", return_value=runtime
         ):
             self.assertEqual(runtime, exact_codex_runtime_binding("config:16", allow_shell=True))
@@ -3314,8 +3633,10 @@ class TmuxSendTests(unittest.TestCase):
 
     def test_guarded_wrapped_cancel_uses_one_atomic_identity_predicate(self) -> None:
         result = subprocess.CompletedProcess(["tmux"], 0)
-        runtime = CodexRuntimeBinding("%432", 388967, "bunx")
-        with patch("omo_manager.omo_tmux_send.subprocess.run", return_value=result) as run:
+        runtime = self.codex_runtime("dw2:0", "%432", 388967, "bunx")
+        with patch("omo_manager.omo_tmux_send.capture_tmux_runtime_binding", return_value=runtime.tmux), patch(
+            "omo_manager.omo_tmux_send.subprocess.run", return_value=result
+        ) as run:
             send_guarded_wrapped_codex_cancel("dw2:0", runtime)
 
         argv = run.call_args.args[0]
@@ -3323,14 +3644,17 @@ class TmuxSendTests(unittest.TestCase):
         self.assertIn("#{pane_id},%432", argv[5])
         self.assertIn("#{pane_pid},388967", argv[5])
         self.assertIn("#{pane_current_command},bunx", argv[5])
-        self.assertEqual("send-keys -t %432 C-c", argv[6])
+        self.assertIn("/proc/388967/stat", argv[6])
+        self.assertIn("send-keys -t %432 C-c", argv[6])
         self.assertNotIn("Enter", argv)
 
     def test_guarded_wrapped_cancel_fails_closed_when_atomic_predicate_fails(self) -> None:
         result = subprocess.CompletedProcess(["tmux"], 1, stderr="identity changed")
-        runtime = CodexRuntimeBinding("%432", 388967, "bunx")
+        runtime = self.codex_runtime("dw2:0", "%432", 388967, "bunx")
 
-        with patch("omo_manager.omo_tmux_send.subprocess.run", return_value=result), self.assertRaisesRegex(
+        with patch("omo_manager.omo_tmux_send.capture_tmux_runtime_binding", return_value=runtime.tmux), patch(
+            "omo_manager.omo_tmux_send.subprocess.run", return_value=result
+        ), self.assertRaisesRegex(
             RuntimeError, "changed at wrapped cancellation"
         ):
             send_guarded_wrapped_codex_cancel("dw2:0", runtime)
@@ -3445,7 +3769,7 @@ class TmuxSendTests(unittest.TestCase):
         ) as cancel, patch("omo_manager.omo_tmux_send.send_enter") as enter:
             cancel_existing_codex_input("cfg:1.0", authorization, options())
 
-        cancel.assert_called_once_with("%42")
+        cancel.assert_called_once_with("cfg:1.0", self.default_tmux_runtime("cfg:1.0"))
         enter.assert_not_called()
 
     def test_cancel_existing_rejects_ambiguous_empty_input_after_ctrl_c(self) -> None:
@@ -3462,7 +3786,7 @@ class TmuxSendTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "partial"):
                 cancel_existing_codex_input("cfg:1.0", authorization, options())
 
-        cancel.assert_called_once_with("%42")
+        cancel.assert_called_once_with("cfg:1.0", self.default_tmux_runtime("cfg:1.0"))
 
     def test_cancel_existing_rejects_whitespace_changed_placeholder_after_ctrl_c(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("stale duplicate"), "stale duplicate")
@@ -3478,7 +3802,7 @@ class TmuxSendTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "exactly match"):
                 cancel_existing_codex_input("cfg:1.0", authorization, options())
 
-        cancel.assert_called_once_with("%42")
+        cancel.assert_called_once_with("cfg:1.0", self.default_tmux_runtime("cfg:1.0"))
 
     def test_run_tmux_flushes_existing_input_before_paste(self) -> None:
         calls: list[list[str]] = []
@@ -3503,7 +3827,7 @@ class TmuxSendTests(unittest.TestCase):
             side_effect=[("%42", old.lines, old), ("%42", old.lines, old), ("%42", cleared.lines, cleared)],
         ), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch(
             "omo_manager.omo_tmux_send.verify_submit"
-        ), patch("omo_manager.omo_tmux_send.exact_managed_runtime_binding", return_value=CodexRuntimeBinding("%42", 4242, "bunx")), patch(
+        ), patch("omo_manager.omo_tmux_send.exact_managed_runtime_binding", return_value=self.codex_runtime("cfg:1.0", "%42", 4242)), patch(
             "omo_manager.omo_tmux_send.require_same_managed_runtime"
         ), patch(
             "omo_manager.omo_tmux_send.tail", return_value=["• Working", "  gpt-5.5"]
@@ -3512,8 +3836,10 @@ class TmuxSendTests(unittest.TestCase):
         ):
             run_tmux("cfg:1.0", "prompt\n", options())
 
-        self.assertTrue(any(command[:3] == ["tmux", "send-keys", "-t"] and command[-1] == "Enter" for command in calls))
-        self.assertTrue(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+        self.assertTrue(
+            any(command[:3] == ["tmux", "if-shell", "-F"] and "send-keys" in command[6] and "Enter" in command[6] for command in calls)
+        )
+        self.assertTrue(any(is_paste_command(command) for command in calls))
 
     def test_run_tmux_pastes_then_retries_enter_on_same_retained_cursor_pane(self) -> None:
         events: list[tuple[str, str]] = []
@@ -3590,9 +3916,9 @@ class TmuxSendTests(unittest.TestCase):
         ), patch(
             "omo_manager.omo_tmux_send.revalidate_error_transition",
             return_value=["› first helper message", "  gpt-5.5"],
-        ), patch("omo_manager.omo_tmux_send.exact_managed_runtime_binding", return_value=CodexRuntimeBinding("%42", 4242, "bunx")), patch(
+        ), patch("omo_manager.omo_tmux_send.exact_managed_runtime_binding", return_value=self.codex_runtime("cfg:1.0", "%42", 4242)), patch(
             "omo_manager.omo_tmux_send.require_same_managed_runtime"
-        ), patch("omo_manager.omo_tmux_send.tail_pane_id", side_effect=[queued, cleared]), patch(
+        ), patch("omo_manager.omo_tmux_send.tail_pane_id", side_effect=[queued, cleared, cleared, cleared]), patch(
             "omo_manager.omo_tmux_send.time.sleep"
         ), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             run_tmux("cfg:1.0", "first helper message\n", options())
@@ -3627,7 +3953,7 @@ class TmuxSendTests(unittest.TestCase):
 
         paste.assert_not_called()
         submit.assert_not_called()
-        self.assertFalse(any(command[1] == "paste-buffer" for command in calls))
+        self.assertFalse(any(is_paste_command(command) for command in calls))
 
     def test_run_tmux_post_paste_rebind_never_enters_replacement_pane(self) -> None:
         calls: list[list[str]] = []
@@ -3685,7 +4011,7 @@ class TmuxSendTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "existing input appeared"):
                 run_tmux("cfg:1.0", "prompt\n", options(), before_paste=before_paste)
 
-        self.assertFalse(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+        self.assertFalse(any(is_paste_command(command) for command in calls))
 
     def test_run_tmux_submits_changed_running_composer_before_paste_verification(self) -> None:
         calls: list[list[str]] = []
@@ -3704,7 +4030,7 @@ class TmuxSendTests(unittest.TestCase):
             "  tab to queue message 28% context left",
         ]
         cleared = ["• Working", "› Use /skills to list available skills", "  gpt-5.6"]
-        runtime = CodexRuntimeBinding("%1797", 3010111, "bunx")
+        runtime = self.codex_runtime("wl:1", "%42", 4242, "bunx")
         with patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch(
             "omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""
         ) as clear, patch("omo_manager.omo_tmux_send.revalidate_error_transition"), patch(
@@ -3731,7 +4057,7 @@ class TmuxSendTests(unittest.TestCase):
         ):
             run_tmux("wl:1", "same manager instruction\n", options())
 
-        paste_calls = [command for command in calls if command[:2] == ["tmux", "paste-buffer"]]
+        paste_calls = [command for command in calls if is_paste_command(command)]
         load_calls = [command for command in calls if command[:2] == ["tmux", "load-buffer"]]
         self.assertEqual(1, len(paste_calls))
         self.assertEqual(1, len(load_calls))
@@ -3740,7 +4066,7 @@ class TmuxSendTests(unittest.TestCase):
 
     def test_run_tmux_normal_submit_never_enters_rebound_runtime(self) -> None:
         lines = ["› same manager instruction", "  gpt-5.6"]
-        runtime = CodexRuntimeBinding("%1797", 3010111, "bunx")
+        runtime = self.codex_runtime("wl:1", "%42", 4242, "bunx")
         with patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch(
             "omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""
         ), patch("omo_manager.omo_tmux_send.revalidate_error_transition", return_value=lines), patch(
@@ -3761,7 +4087,7 @@ class TmuxSendTests(unittest.TestCase):
 
     def test_run_tmux_does_not_submit_changed_plan_composer(self) -> None:
         lines = ["Create a plan? shift + tab use Plan mode esc dismiss", "› choose an option", "  gpt-5.6"]
-        runtime = CodexRuntimeBinding("%1797", 3010111, "bunx")
+        runtime = self.codex_runtime("wl:1", "%42", 4242, "bunx")
         with patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch(
             "omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""
         ), patch("omo_manager.omo_tmux_send.revalidate_error_transition"), patch(
@@ -3783,7 +4109,7 @@ class TmuxSendTests(unittest.TestCase):
 
         def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
             nonlocal paste_attempts
-            if command[:2] == ["tmux", "paste-buffer"]:
+            if is_paste_command(command):
                 paste_attempts += 1
                 if paste_attempts == 1:
                     raise subprocess.CalledProcessError(1, command)
@@ -3797,7 +4123,7 @@ class TmuxSendTests(unittest.TestCase):
             "omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True
         ), patch(
             "omo_manager.omo_tmux_send.verify_submit"
-        ), patch("omo_manager.omo_tmux_send.exact_managed_runtime_binding", return_value=CodexRuntimeBinding("%42", 4242, "bunx")), patch(
+        ), patch("omo_manager.omo_tmux_send.exact_managed_runtime_binding", return_value=self.codex_runtime("cfg:1.0", "%42", 4242)), patch(
             "omo_manager.omo_tmux_send.require_same_managed_runtime"
         ), patch(
             "omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run
@@ -3825,7 +4151,9 @@ class TmuxSendTests(unittest.TestCase):
         with patch("omo_manager.omo_tmux_send.tail", side_effect=lambda *_: next(tails)), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run), patch("omo_manager.omo_tmux_send.time.sleep"):
             verify_submit("cfg:1.0", "Read the dispatch prompt from /tmp/x and follow it exactly.\n", options(allow_plan_prompt_enter=True))
 
-        self.assertEqual([["tmux", "send-keys", "-t", "cfg:1.0", "Enter"]], calls)
+        self.assertEqual(1, len(calls))
+        self.assertEqual(["tmux", "if-shell", "-F", "-t", "%42"], calls[0][:5])
+        self.assertIn("send-keys -t %42 Enter", calls[0][6])
 
     def test_verify_submit_accepts_waiting_subagent_as_running_like_after_prompt_leaves(self) -> None:
         lines = [
@@ -3859,7 +4187,9 @@ class TmuxSendTests(unittest.TestCase):
         with patch("omo_manager.omo_tmux_send.tail", side_effect=lambda *_: next(tails)), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run), patch("omo_manager.omo_tmux_send.time.sleep"):
             verify_submit("cfg:1.0", "Read the dispatch prompt from /tmp/x and follow it exactly.\n", options())
 
-        self.assertEqual([["tmux", "send-keys", "-t", "cfg:1.0", "Enter"]], calls)
+        self.assertEqual(1, len(calls))
+        self.assertEqual(["tmux", "if-shell", "-F", "-t", "%42"], calls[0][:5])
+        self.assertIn("send-keys -t %42 Enter", calls[0][6])
 
     def test_verify_submit_exact_source_retries_collapsed_paste_until_input_clears(self) -> None:
         message = "Read the dispatch prompt from /tmp/x and follow it exactly.\n"
@@ -3898,6 +4228,24 @@ class TmuxSendTests(unittest.TestCase):
     def test_verify_submit_accepts_ready_when_prompt_is_gone(self) -> None:
         with patch("omo_manager.omo_tmux_send.tail", return_value=["› Use /skills to list available skills", "  gpt-5.5"]):
             verify_submit("cfg:1.0", "Read the dispatch prompt from /tmp/x and follow it exactly.\n", options())
+
+    def test_verify_submit_bound_runtime_catches_delayed_prompt_suffix(self) -> None:
+        runtime = CodexRuntimeBinding("%1", 42, "bunx")
+        clear = ["• Working", "› Use /skills to list available skills", "  gpt-5.5"]
+        delayed = ["• Working", "› delayed suffix", "  gpt-5.5"]
+        with patch("omo_manager.omo_tmux_send.require_same_managed_runtime"), patch(
+            "omo_manager.omo_tmux_send.tail_pane_id", side_effect=[clear, delayed, clear, clear, clear]
+        ), patch("omo_manager.omo_tmux_send.send_enter_to_pinned_runtime") as enter, patch(
+            "omo_manager.omo_tmux_send.time.sleep"
+        ):
+            verify_submit(
+                "cfg:1.0",
+                "Read the dispatch prompt from /tmp/x and follow it exactly.\n",
+                options(),
+                expected_runtime=runtime,
+            )
+
+        enter.assert_called_once_with("cfg:1.0", runtime)
 
     def test_launch_async_copies_payload_starts_worker_and_prints_result_dir(self) -> None:
         started: list[list[str]] = []

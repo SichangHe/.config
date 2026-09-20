@@ -12,6 +12,11 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from omo_manager.omo_tmux_input_lock import TmuxRuntimeBinding, capture_tmux_runtime_binding, guarded_tmux_runtime_command, tmux_input_lock
+except ModuleNotFoundError:
+    from omo_tmux_input_lock import TmuxRuntimeBinding, capture_tmux_runtime_binding, guarded_tmux_runtime_command, tmux_input_lock
+
 DEFAULT_COMPACTION_WAIT_TIMEOUT_S = float(os.environ.get("OMO_CODEX_COMPACTION_WAIT_TIMEOUT_S", "300"))
 COMPACTION_WAIT_INTERVAL_S = 0.5
 FILE_SEARCH_RECOVERY_INTERVAL_S = 0.05
@@ -35,6 +40,7 @@ WAKE_EXECUTION_BUDGET_REFUSAL_RE = re.compile(
     re.IGNORECASE,
 )
 VISIBLE_ERROR_MARKER_RE = re.compile(r"^\s*(?:[■□▢▣▪▫◼◻▰▱▮▯]\s*|⚠\ufe0f?\s*)")
+CODEX_START_MARKER_RE = re.compile(r"^\[omo-codex-start:\d+:\d+\]$")
 SEP_RE = re.compile(r"^─+$")
 WORKED_RE = re.compile(r"^─ Worked for .+ ─+$")
 READY_RE = re.compile(r"^[›»] Use /skills to list available skills$")
@@ -143,6 +149,22 @@ class PlanPromptRecovery:
     action: str
     before: str
     after: str
+
+
+class RuntimeBindingError(RuntimeError):
+    """One authenticated tmux runtime invariant failed."""
+
+
+class RuntimeNotManagedError(RuntimeBindingError):
+    """The bound pane does not own a supported managed-agent process."""
+
+
+class RuntimeNotCodexError(RuntimeBindingError):
+    """The bound pane does not own an exact Codex process."""
+
+
+class RuntimeReboundError(RuntimeBindingError):
+    """The target binding changed while it was being authenticated."""
 
 
 class ParsedArgs(argparse.Namespace):
@@ -601,7 +623,7 @@ def current_block(lines: list[str]) -> Block:
     body = lines[:-1] if has_codex_model_footer(lines) else lines[:]
     start = 0
     for idx in range(len(body) - 1, -1, -1):
-        if SEP_RE.match(body[idx]):
+        if SEP_RE.match(body[idx]) or CODEX_START_MARKER_RE.fullmatch(body[idx].strip()) is not None:
             start = idx + 1
             break
     block = [line.rstrip() for line in body[start:]]
@@ -1002,7 +1024,15 @@ def is_empty_input_text(lines: list[str], input_text: str) -> bool:
 
 
 def is_stock_placeholder_input_text(input_text: str) -> bool:
-    return input_text in CODEX_EMPTY_INPUT_TEXTS or input_text in CODEX_RUNNING_EMPTY_INPUT_TEXTS or input_text in CURSOR_AGENT_EMPTY_INPUT_TEXTS
+    placeholders = CODEX_EMPTY_INPUT_TEXTS | CODEX_RUNNING_EMPTY_INPUT_TEXTS | CURSOR_AGENT_EMPTY_INPUT_TEXTS
+    if input_text in placeholders:
+        return True
+    # 🧑 “dw:0 has input stuck in input box. ... How to prevent it from ever happening again?”
+    return any(
+        input_text.startswith(placeholder)
+        and all(character.isspace() or "\u2800" <= character <= "\u28ff" for character in input_text[len(placeholder) :])
+        for placeholder in placeholders
+    )
 
 
 def can_submit_stuck_input(lines: list[str]) -> bool:
@@ -1055,61 +1085,135 @@ def stuck_input_blocker(lines: list[str], input_text: str) -> str:
     return ""
 
 
+def exact_managed_runtime(target: str) -> TmuxRuntimeBinding:
+    """Bind one stable Codex or Cursor pane before mutating its input."""
+
+    try:
+        runtime = capture_tmux_runtime_binding(target)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        raise RuntimeBindingError("target runtime is ambiguous") from error
+    if not pane_has_exact_managed_agent_process(target, runtime.pane_id):
+        raise RuntimeNotManagedError("target is not one exact managed-agent process")
+    if capture_tmux_runtime_binding(target) != runtime:
+        raise RuntimeReboundError("target runtime changed during authentication")
+    return runtime
+
+
+def exact_codex_runtime(target: str) -> TmuxRuntimeBinding:
+    runtime = exact_managed_runtime(target)
+    if not pane_has_exact_codex_process(target, runtime.pane_id):
+        raise RuntimeNotCodexError("target is not one exact Codex process")
+    if capture_tmux_runtime_binding(target) != runtime:
+        raise RuntimeReboundError("target runtime changed during Codex authentication")
+    return runtime
+
+
+def runtime_recovery_failure(error: BaseException) -> str:
+    if isinstance(error, (RuntimeNotManagedError, RuntimeNotCodexError)):
+        return "not_safe:not_codex_process"
+    if isinstance(error, RuntimeReboundError):
+        return "not_safe:target_rebound"
+    return "not_safe:ambiguous_pane"
+
+
+def send_guarded_runtime_key(runtime: TmuxRuntimeBinding, key: str) -> bool:
+    """Send one key only to the complete bound runtime and revalidate it."""
+
+    action = f"send-keys -t {runtime.pane_id} {key}"
+    try:
+        result = subprocess.run(
+            guarded_tmux_runtime_command(runtime, action),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        return result.returncode == 0 and capture_tmux_runtime_binding(runtime.target) == runtime
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return False
+
+
 def submit_stuck_input_if_present(target: str, report: Report, n_lines: int = COMPACTION_WAIT_LINES, compaction_wait_timeout_s: float = DEFAULT_COMPACTION_WAIT_TIMEOUT_S) -> str:
+    """Submit only while every supported writer is excluded from this target."""
+
+    with tmux_input_lock(target):
+        return _submit_stuck_input_if_present(target, report, n_lines, compaction_wait_timeout_s)
+
+
+def _submit_stuck_input_if_present(target: str, report: Report, n_lines: int, compaction_wait_timeout_s: float) -> str:
     if report.status != "stuck_input":
         return ""
+    try:
+        runtime = exact_managed_runtime(target)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return "failed"
     try:
         latest = wait_while_compacting(target, n_lines, compaction_wait_timeout_s)
     except TimeoutError:
         return "not_safe:compacting"
+    try:
+        if capture_tmux_runtime_binding(target) != runtime:
+            return "failed"
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return "failed"
     if latest.status != "stuck_input":
         return "not_stuck"
     if not latest.can_submit_input:
         return f"not_safe:{latest.input_blocker or 'unknown'}"
-    pane_id = exact_pane_id(target)
-    if not pane_id:
-        return "failed"
     if has_file_search_overlay(latest.lines):
-        try:
-            recovered = subprocess.run(["tmux", "send-keys", "-t", pane_id, "Enter"], capture_output=True, text=True, timeout=5, check=False)
-        except (OSError, subprocess.SubprocessError):
-            return "failed"
-        if recovered.returncode != 0:
+        if not send_guarded_runtime_key(runtime, "Enter"):
             return "failed"
         try:
             after = wait_for_file_search_overlay_transition(target, n_lines, compaction_wait_timeout_s)
         except TimeoutError:
             return "not_safe:file_search_overlay"
+        try:
+            if capture_tmux_runtime_binding(target) != runtime:
+                return "failed"
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return "failed"
         if after.status in {"running", "waiting_subagent", "ready"}:
             return "sent_enter"
         if has_plan_prompt(after.lines):
             return "not_safe:plan_prompt"
         if after.status != "stuck_input" or not after.can_submit_input:
             return f"not_safe:{after.input_blocker or 'underlying_prompt_not_visible'}"
-    try:
-        result = subprocess.run(["tmux", "send-keys", "-t", pane_id, "Enter"], capture_output=True, text=True, timeout=5, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return "failed"
-    return "sent_enter" if result.returncode == 0 else "failed"
+    return "sent_enter" if send_guarded_runtime_key(runtime, "Enter") else "failed"
 
 
 def interrupt_waiting_subagent_if_present(target: str, report: Report, n_lines: int = COMPACTION_WAIT_LINES) -> str:
+    """Interrupt only while every supported writer is excluded from this target."""
+
+    with tmux_input_lock(target):
+        return _interrupt_waiting_subagent_if_present(target, report, n_lines)
+
+
+def _interrupt_waiting_subagent_if_present(target: str, report: Report, n_lines: int) -> str:
     if report.status != "waiting_subagent":
         return ""
+    try:
+        runtime = exact_managed_runtime(target)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return "failed"
     latest = report_from_lines(tail(target, n_lines), detect_waiting_subagent=True)
+    try:
+        if capture_tmux_runtime_binding(target) != runtime:
+            return "failed"
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return "failed"
     if latest.status != "waiting_subagent":
         return "not_waiting_subagent"
-    pane_id = exact_pane_id(target)
-    if not pane_id:
-        return "failed"
-    try:
-        result = subprocess.run(["tmux", "send-keys", "-t", pane_id, "Escape"], capture_output=True, text=True, timeout=5, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return "failed"
-    return "sent_escape" if result.returncode == 0 else "failed"
+    return "sent_escape" if send_guarded_runtime_key(runtime, "Escape") else "failed"
 
 
 def dismiss_plan_prompt_if_present(target: str, report: Report, n_lines: int = COMPACTION_WAIT_LINES) -> PlanPromptRecovery:
+    """Dismiss only while every supported writer is excluded from this target."""
+
+    with tmux_input_lock(target):
+        return _dismiss_plan_prompt_if_present(target, report, n_lines)
+
+
+def _dismiss_plan_prompt_if_present(target: str, report: Report, n_lines: int) -> PlanPromptRecovery:
     """Send one Escape after exact, fresh verification of the plan modal."""
 
     before = "plan_prompt" if report.status == "stuck_input" and has_active_plan_prompt(report.lines) else report.status
@@ -1121,32 +1225,33 @@ def dismiss_plan_prompt_if_present(target: str, report: Report, n_lines: int = C
     if before != "plan_prompt":
         return PlanPromptRecovery("not_safe:not_plan_prompt", before, "not_checked")
     try:
-        pane_id = exact_pane_id(target)
-    except (OSError, subprocess.SubprocessError):
-        return PlanPromptRecovery("not_safe:ambiguous_pane", before, "not_checked")
-    if not pane_id:
-        return PlanPromptRecovery("not_safe:ambiguous_pane", before, "not_checked")
+        runtime = exact_codex_runtime(target)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        return PlanPromptRecovery(runtime_recovery_failure(error), before, "not_checked")
     try:
-        fresh_lines = tail_pane_id(pane_id, n_lines)
+        fresh_lines = tail_pane_id(runtime.pane_id, n_lines)
     except (OSError, subprocess.SubprocessError):
         return PlanPromptRecovery("not_safe:capture_failed", before, "capture_failed")
     fresh = plan_prompt_classification(fresh_lines)
     if fresh != "plan_prompt":
         return PlanPromptRecovery("not_safe:stale_evidence", before, fresh)
-    try:
-        result = subprocess.run(["tmux", "send-keys", "-t", pane_id, "Escape"], capture_output=True, text=True, timeout=5, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return PlanPromptRecovery("failed", fresh, "not_checked")
-    if result.returncode != 0:
+    if not send_guarded_runtime_key(runtime, "Escape"):
         return PlanPromptRecovery("failed", fresh, "not_checked")
     try:
-        after = plan_prompt_classification(tail_pane_id(pane_id, n_lines))
+        after = plan_prompt_classification(tail_pane_id(runtime.pane_id, n_lines))
     except (OSError, subprocess.SubprocessError):
         after = "capture_failed"
     return PlanPromptRecovery("sent_escape", fresh, after)
 
 
 def dismiss_skills_menu_if_present(target: str, report: Report, n_lines: int = COMPACTION_WAIT_LINES) -> PlanPromptRecovery:
+    """Dismiss only while every supported writer is excluded from this target."""
+
+    with tmux_input_lock(target):
+        return _dismiss_skills_menu_if_present(target, report, n_lines)
+
+
+def _dismiss_skills_menu_if_present(target: str, report: Report, n_lines: int) -> PlanPromptRecovery:
     """Send one Escape after exact, fresh verification of the Skills menu."""
 
     before = "skills_menu" if has_active_skills_menu(report.lines) else report.status
@@ -1158,42 +1263,33 @@ def dismiss_skills_menu_if_present(target: str, report: Report, n_lines: int = C
     if before != "skills_menu":
         return PlanPromptRecovery("not_safe:not_skills_menu", before, "not_checked")
     try:
-        pane_id = exact_pane_id(target)
-    except (OSError, subprocess.SubprocessError):
-        return PlanPromptRecovery("not_safe:ambiguous_pane", before, "not_checked")
-    if not pane_id:
-        return PlanPromptRecovery("not_safe:ambiguous_pane", before, "not_checked")
+        runtime = exact_codex_runtime(target)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        return PlanPromptRecovery(runtime_recovery_failure(error), before, "not_checked")
     try:
-        if not pane_has_exact_codex_process(target, pane_id):
-            return PlanPromptRecovery("not_safe:not_codex_process", before, "not_checked")
-    except (OSError, subprocess.SubprocessError):
-        return PlanPromptRecovery("not_safe:not_codex_process", before, "not_checked")
-    try:
-        fresh_lines = tail_pane_id(pane_id, n_lines)
+        fresh_lines = tail_pane_id(runtime.pane_id, n_lines)
     except (OSError, subprocess.SubprocessError):
         return PlanPromptRecovery("not_safe:capture_failed", before, "capture_failed")
     fresh = skills_menu_classification(fresh_lines)
     if fresh != "skills_menu":
         return PlanPromptRecovery("not_safe:stale_evidence", before, fresh)
-    try:
-        if exact_pane_id(target) != pane_id:
-            return PlanPromptRecovery("not_safe:target_rebound", fresh, "not_checked")
-    except (OSError, subprocess.SubprocessError):
-        return PlanPromptRecovery("not_safe:target_rebound", fresh, "not_checked")
-    try:
-        result = subprocess.run(["tmux", "send-keys", "-t", pane_id, "Escape"], capture_output=True, text=True, timeout=5, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return PlanPromptRecovery("failed", fresh, "not_checked")
-    if result.returncode != 0:
+    if not send_guarded_runtime_key(runtime, "Escape"):
         return PlanPromptRecovery("failed", fresh, "not_checked")
     try:
-        after = skills_menu_classification(tail_pane_id(pane_id, n_lines))
+        after = skills_menu_classification(tail_pane_id(runtime.pane_id, n_lines))
     except (OSError, subprocess.SubprocessError):
         after = "capture_failed"
     return PlanPromptRecovery("sent_escape", fresh, after)
 
 
 def dismiss_usage_limit_menu_if_present(target: str, report: Report, n_lines: int = COMPACTION_WAIT_LINES) -> PlanPromptRecovery:
+    """Dismiss only while every supported writer is excluded from this target."""
+
+    with tmux_input_lock(target):
+        return _dismiss_usage_limit_menu_if_present(target, report, n_lines)
+
+
+def _dismiss_usage_limit_menu_if_present(target: str, report: Report, n_lines: int) -> PlanPromptRecovery:
     """Send one Escape after exact, fresh verification of the usage-limit menu."""
 
     before = "usage_limit_menu" if has_active_usage_limit_menu(report.lines) else report.status
@@ -1205,36 +1301,20 @@ def dismiss_usage_limit_menu_if_present(target: str, report: Report, n_lines: in
     if before != "usage_limit_menu":
         return PlanPromptRecovery("not_safe:not_usage_limit_menu", before, "not_checked")
     try:
-        pane_id = exact_pane_id(target)
-    except (OSError, subprocess.SubprocessError):
-        return PlanPromptRecovery("not_safe:ambiguous_pane", before, "not_checked")
-    if not pane_id:
-        return PlanPromptRecovery("not_safe:ambiguous_pane", before, "not_checked")
+        runtime = exact_codex_runtime(target)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        return PlanPromptRecovery(runtime_recovery_failure(error), before, "not_checked")
     try:
-        if not pane_has_exact_codex_process(target, pane_id):
-            return PlanPromptRecovery("not_safe:not_codex_process", before, "not_checked")
-    except (OSError, subprocess.SubprocessError):
-        return PlanPromptRecovery("not_safe:not_codex_process", before, "not_checked")
-    try:
-        fresh_lines = tail_pane_id(pane_id, n_lines)
+        fresh_lines = tail_pane_id(runtime.pane_id, n_lines)
     except (OSError, subprocess.SubprocessError):
         return PlanPromptRecovery("not_safe:capture_failed", before, "capture_failed")
     fresh = usage_limit_menu_classification(fresh_lines)
     if fresh != "usage_limit_menu":
         return PlanPromptRecovery("not_safe:stale_evidence", before, fresh)
-    try:
-        if exact_pane_id(target) != pane_id:
-            return PlanPromptRecovery("not_safe:target_rebound", fresh, "not_checked")
-    except (OSError, subprocess.SubprocessError):
-        return PlanPromptRecovery("not_safe:target_rebound", fresh, "not_checked")
-    try:
-        result = subprocess.run(["tmux", "send-keys", "-t", pane_id, "Escape"], capture_output=True, text=True, timeout=5, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return PlanPromptRecovery("failed", fresh, "not_checked")
-    if result.returncode != 0:
+    if not send_guarded_runtime_key(runtime, "Escape"):
         return PlanPromptRecovery("failed", fresh, "not_checked")
     try:
-        after = usage_limit_menu_classification(tail_pane_id(pane_id, n_lines))
+        after = usage_limit_menu_classification(tail_pane_id(runtime.pane_id, n_lines))
     except (OSError, subprocess.SubprocessError):
         after = "capture_failed"
     return PlanPromptRecovery("sent_escape", fresh, after)
@@ -1242,6 +1322,13 @@ def dismiss_usage_limit_menu_if_present(target: str, report: Report, n_lines: in
 
 # 🧑 "Watcher needs to deal with stuff like this and refuse the quota refresh, or raise the problem to an agent which would directly use tmux commands"
 def refuse_quota_reset_if_present(target: str, report: Report, n_lines: int = COMPACTION_WAIT_LINES) -> PlanPromptRecovery:
+    """Refuse only while every supported writer is excluded from this target."""
+
+    with tmux_input_lock(target):
+        return _refuse_quota_reset_if_present(target, report, n_lines)
+
+
+def _refuse_quota_reset_if_present(target: str, report: Report, n_lines: int) -> PlanPromptRecovery:
     """Confirm `No` only on a freshly verified Codex quota-reset prompt."""
 
     selection = quota_reset_prompt_selection(report.lines)
@@ -1254,64 +1341,35 @@ def refuse_quota_reset_if_present(target: str, report: Report, n_lines: int = CO
     if not selection:
         return PlanPromptRecovery("not_safe:not_quota_reset_prompt", before, "not_checked")
     try:
-        pane_id = exact_pane_id(target)
-    except (OSError, subprocess.SubprocessError):
-        return PlanPromptRecovery("not_safe:ambiguous_pane", before, "not_checked")
-    if not pane_id:
-        return PlanPromptRecovery("not_safe:ambiguous_pane", before, "not_checked")
+        runtime = exact_codex_runtime(target)
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        return PlanPromptRecovery(runtime_recovery_failure(error), before, "not_checked")
     try:
-        if not pane_has_exact_codex_process(target, pane_id):
-            return PlanPromptRecovery("not_safe:not_codex_process", before, "not_checked")
-    except (OSError, subprocess.SubprocessError):
-        return PlanPromptRecovery("not_safe:not_codex_process", before, "not_checked")
-    try:
-        fresh_lines = tail_pane_id(pane_id, n_lines)
+        fresh_lines = tail_pane_id(runtime.pane_id, n_lines)
     except (OSError, subprocess.SubprocessError):
         return PlanPromptRecovery("not_safe:capture_failed", before, "capture_failed")
     fresh_selection = quota_reset_prompt_selection(fresh_lines)
     if not fresh_selection:
         return PlanPromptRecovery("not_safe:stale_evidence", before, quota_reset_prompt_classification(fresh_lines))
-    try:
-        if exact_pane_id(target) != pane_id:
-            return PlanPromptRecovery("not_safe:target_rebound", before, "not_checked")
-    except (OSError, subprocess.SubprocessError):
-        return PlanPromptRecovery("not_safe:target_rebound", before, "not_checked")
     if fresh_selection == "yes":
-        try:
-            down = subprocess.run(["tmux", "send-keys", "-t", pane_id, "Down"], capture_output=True, text=True, timeout=5, check=False)
-        except (OSError, subprocess.SubprocessError):
-            return PlanPromptRecovery("not_safe:send_failed", before, "not_checked")
-        if down.returncode != 0:
+        if not send_guarded_runtime_key(runtime, "Down"):
             return PlanPromptRecovery("not_safe:send_failed", before, "not_checked")
         try:
-            fresh_lines = tail_pane_id(pane_id, n_lines)
-            if exact_pane_id(target) != pane_id or quota_reset_prompt_selection(fresh_lines) != "no":
+            fresh_lines = tail_pane_id(runtime.pane_id, n_lines)
+            if quota_reset_prompt_selection(fresh_lines) != "no":
                 return PlanPromptRecovery("not_safe:no_not_selected", before, quota_reset_prompt_classification(fresh_lines))
         except (OSError, subprocess.SubprocessError):
             return PlanPromptRecovery("not_safe:no_not_selected", before, "capture_failed")
     try:
-        if exact_pane_id(target) != pane_id:
-            return PlanPromptRecovery("not_safe:target_rebound", before, "not_checked")
-        if not pane_has_exact_codex_process(target, pane_id):
-            return PlanPromptRecovery("not_safe:not_codex_process", before, "not_checked")
-    except (OSError, subprocess.SubprocessError):
-        return PlanPromptRecovery("not_safe:not_codex_process", before, "not_checked")
-    try:
-        final_lines = tail_pane_id(pane_id, n_lines)
+        final_lines = tail_pane_id(runtime.pane_id, n_lines)
         if quota_reset_prompt_selection(final_lines) != "no":
             return PlanPromptRecovery("not_safe:no_not_selected", before, quota_reset_prompt_classification(final_lines))
-        if exact_pane_id(target) != pane_id or not pane_has_exact_codex_process(target, pane_id):
-            return PlanPromptRecovery("not_safe:target_rebound", before, "not_checked")
     except (OSError, subprocess.SubprocessError):
         return PlanPromptRecovery("not_safe:no_not_selected", before, "capture_failed")
-    try:
-        result = subprocess.run(["tmux", "send-keys", "-t", pane_id, "Enter"], capture_output=True, text=True, timeout=5, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return PlanPromptRecovery("not_safe:send_failed", before, "not_checked")
-    if result.returncode != 0:
+    if not send_guarded_runtime_key(runtime, "Enter"):
         return PlanPromptRecovery("not_safe:send_failed", before, "not_checked")
     try:
-        after = quota_reset_prompt_classification(tail_pane_id(pane_id, n_lines))
+        after = quota_reset_prompt_classification(tail_pane_id(runtime.pane_id, n_lines))
     except (OSError, subprocess.SubprocessError):
         after = "capture_failed"
     return PlanPromptRecovery("sent_enter", before, after)

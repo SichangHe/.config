@@ -4,12 +4,13 @@ import base64
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import tempfile
 import threading
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,7 @@ from omo_manager.omo_codex_start import (
     LEGACY_FAILED_ROTATION_AUDIT_FIELDS,
     LEGACY_SESSION_META_TIMESTAMPS,
     Pane,
+    PromptHandoffError,
     RECOVERY_EVENT_DIRNAME,
     RECOVERY_RECEIPT_DIRNAME,
     SOURCE1717_STALE_HISTORY_AUDIT_SHA256,
@@ -64,6 +66,7 @@ from omo_manager.omo_codex_start import (
     require_same_shell,
     require_update_prompt,
     verify_restart_continuity,
+    verify_same_process,
     verify_task_binding,
     reserve_reconciliation_receipt,
     reserve_rotation_audit,
@@ -73,6 +76,7 @@ from omo_manager.omo_codex_start import (
     skip_codex_update_prompt,
     start,
     stop_unverified_replacement,
+    task_text_with_session_id,
     task_path,
     validate_task,
     validate_audit_bound_replacement_process,
@@ -313,6 +317,7 @@ class CodexStartTests(unittest.TestCase):
         runat: str = "cfg:2",
         status: str = "blocked",
         manager: bool = False,
+        managerat: str = "cfg:1",
         tool: str = "codex",
         pending: list[str] | None = None,
         task_file: str = "worker.md",
@@ -323,7 +328,7 @@ class CodexStartTests(unittest.TestCase):
             "blocked_on": "model capacity" if status == "blocked" else None,
             "runat": runat,
             "tool": tool,
-            "managerat": "cfg:1",
+            "managerat": managerat,
             "is_manager": manager,
             "pending_task_items": pending if pending is not None else [],
         }
@@ -394,8 +399,10 @@ class CodexStartTests(unittest.TestCase):
     def test_resolve_pane_accepts_exact_window_and_pane_targets(self) -> None:
         result = subprocess.CompletedProcess([], 0, "wl:18.0\t%18\t@18\tzsh\t/tmp\t4242\n", "")
         for target in ("wl:18", "wl:18.0"):
-            with self.subTest(target=target), patch("omo_manager.omo_codex_start.run", return_value=result):
-                self.assertEqual(Pane("wl:18.0", "%18", "@18", "zsh", Path("/tmp"), 4242), resolve_pane(target))
+            with self.subTest(target=target), patch("omo_manager.omo_codex_start.run", return_value=result), patch(
+                "omo_manager.omo_codex_start.process_start_ticks", return_value=7001
+            ):
+                self.assertEqual(Pane("wl:18.0", "%18", "@18", "zsh", Path("/tmp"), 4242, 7001), resolve_pane(target))
 
     def test_resolve_pane_rejects_ambiguous_identity_fallbacks(self) -> None:
         mismatches = (("wl:18", "wl:1.0"), ("wl:18", "other:18.0"), ("wl:18.1", "wl:18.0"))
@@ -404,6 +411,17 @@ class CodexStartTests(unittest.TestCase):
                 result = subprocess.CompletedProcess([], 0, f"{resolved}\t%18\t@18\tzsh\t/tmp\t4242\n", "")
                 with patch("omo_manager.omo_codex_start.run", return_value=result), self.assertRaisesRegex(StartError, "does not exist exactly"):
                     resolve_pane(requested)
+
+    def test_same_process_rejects_workdir_and_start_tick_drift(self) -> None:
+        expected = Pane("wl:18.0", "%18", "@18", "bunx", Path("/tmp/work"), 4242, 7001)
+        for changed, message in (
+            (replace(expected, workdir=Path("/tmp/other")), "pane or window identity"),
+            (replace(expected, start_ticks=7002), "process start identity"),
+        ):
+            with self.subTest(message=message), patch("omo_manager.omo_codex_start.resolve_pane", return_value=changed), self.assertRaisesRegex(
+                StartError, message
+            ):
+                verify_same_process(expected)
 
     def test_resolve_pane_reports_empty_tmux_expansion_as_missing_target(self) -> None:
         result = subprocess.CompletedProcess([], 0, ":.\t\t\t\t\t\n", "")
@@ -606,7 +624,7 @@ class CodexStartTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
             self.write_task(root)
-            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root, 4242)
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root, 4242, 7001)
             completed = subprocess.CompletedProcess([], 0, "", "")
             with (
                 patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
@@ -618,18 +636,12 @@ class CodexStartTests(unittest.TestCase):
             ):
                 result = start(self.args(root, confirm_empty_shell=False, recover_update_prompt=True))
             self.assertEqual("running", result)
-            run.assert_called_once_with(
-                [
-                    "tmux",
-                    "if-shell",
-                    "-F",
-                    "-t",
-                    "%2",
-                    "#{&&:#{==:#{window_id},@2},#{==:#{session_name}:#{window_index}.#{pane_index},cfg:2.0},#{==:#{pane_pid},4242},#{==:#{pane_current_command},bunx}}",
-                    "send-keys -t %2 2 Enter",
-                    "run-shell 'exit 1'",
-                ]
-            )
+            guarded = run.call_args.args[0]
+            self.assertEqual(["tmux", "if-shell", "-F", "-t", "%2"], guarded[:5])
+            self.assertIn("#{pane_current_path}," + str(root), guarded[5])
+            self.assertIn("/proc/4242/stat", guarded[6])
+            self.assertIn('test "${20:-}" = 7001', guarded[6])
+            self.assertIn("send-keys -t %2 2 Enter", guarded[6])
             wait.assert_called_once_with(pane, 45.0)
             respawn.assert_not_called()
             launch.assert_not_called()
@@ -672,7 +684,7 @@ class CodexStartTests(unittest.TestCase):
     def test_resume_cwd_prompt_requires_exact_paths_and_resumed_session(self) -> None:
         session_directory = Path("/tmp/session")
         current_directory = Path("/tmp/current")
-        pane = Pane("cfg:2.0", "%2", "@2", "bunx", current_directory, 4242)
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", current_directory, 4242, 7001)
         lines = self.resume_cwd_prompt_lines(session_directory, current_directory)
         cases = (
             (self.SESSION_ID, Path("/tmp/other"), current_directory, "saved session directory"),
@@ -710,7 +722,7 @@ class CodexStartTests(unittest.TestCase):
     def test_resume_cwd_prompt_atomically_selects_only_nonpersistent_choice(self) -> None:
         session_directory = Path("/tmp/session")
         current_directory = Path("/tmp/current")
-        pane = Pane("cfg:2.0", "%2", "@2", "bunx", current_directory, 4242)
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", current_directory, 4242, 7001)
         completed = subprocess.CompletedProcess([], 0, "", "")
         for choice, key in (("session", "1"), ("current", "2")):
             with (
@@ -721,18 +733,12 @@ class CodexStartTests(unittest.TestCase):
                 patch("omo_manager.omo_codex_start.run", return_value=completed) as run,
             ):
                 choose_resume_cwd_prompt(pane, self.SESSION_ID, session_directory, choice)
-            run.assert_called_once_with(
-                [
-                    "tmux",
-                    "if-shell",
-                    "-F",
-                    "-t",
-                    "%2",
-                    "#{&&:#{==:#{window_id},@2},#{==:#{session_name}:#{window_index}.#{pane_index},cfg:2.0},#{==:#{pane_pid},4242},#{==:#{pane_current_command},bunx}}",
-                    f"send-keys -t %2 {key} Enter",
-                    "run-shell 'exit 1'",
-                ]
-            )
+            guarded = run.call_args.args[0]
+            self.assertEqual(["tmux", "if-shell", "-F", "-t", "%2"], guarded[:5])
+            self.assertIn("#{pane_current_path}," + str(current_directory), guarded[5])
+            self.assertIn("/proc/4242/stat", guarded[6])
+            self.assertIn('test "${20:-}" = 7001', guarded[6])
+            self.assertIn(f"send-keys -t %2 {key} Enter", guarded[6])
 
     def test_resume_cwd_recovery_continues_same_resumed_session(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
@@ -1128,6 +1134,39 @@ class CodexStartTests(unittest.TestCase):
                 ]
             )
 
+    def test_child_set_assertions_require_rotate_submanager_for_every_other_mode(self) -> None:
+        ordinary = [
+            "--task-file",
+            "worker.md",
+            "--target",
+            "cfg:2",
+            "--model",
+            "gpt-5.6-terra",
+            "--reasoning-effort",
+            "max",
+        ]
+        worker_rotation = [
+            *ordinary,
+            "--rotate-worker",
+            "--expected-task-sha256",
+            "a" * 64,
+            "--expected-status",
+            "blocked",
+            "--expected-owner-target",
+            "cfg:1",
+            "--expected-pending-item",
+            "preserve exact queue",
+            "--protected-target",
+            "protected:9",
+            "--audit-output",
+            "/tmp/rotation.audit",
+        ]
+        assertions = (("--expect-no-children",), ("--expected-child-task", f"child.md={'b' * 64}"))
+        for mode in (ordinary, [*ordinary, "--session-id", self.SESSION_ID], worker_rotation):
+            for assertion in assertions:
+                with self.subTest(mode=mode, assertion=assertion), self.assertRaises(SystemExit):
+                    parse_args([*mode, *assertion])
+
     def test_rotate_worker_starts_fresh_in_same_pane_and_preserves_long_running_task(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
@@ -1164,13 +1203,249 @@ class CodexStartTests(unittest.TestCase):
             prompt.assert_called_once()
             deliver.assert_called_once()
             self.assertEqual("$ /test/getagentsmd\nagent instructions", prompt.call_args.args[1])
-            self.assertEqual(task_before, (root / "worker.md").read_bytes())
+            self.assertNotEqual(task_before, (root / "worker.md").read_bytes())
+            self.assertIn(f"session_id: {new_session}\n", (root / "worker.md").read_text(encoding="utf-8"))
             audit = root / "rotation.audit"
             self.assertEqual(0o600, audit.stat().st_mode & 0o777)
             audit_text = audit.read_text(encoding="utf-8")
             self.assertIn(f"new-session-id: {new_session}\nterminal-replacement-pane-pid: 5252\nterminal-replacement-command: bun\n", audit_text)
             self.assertIn("terminal-authoritative-owner-count: 1\n", audit_text)
-            self.assertIn("terminal-prompt-delivery: authorized-after-terminal-sole-owner-proof\nfinal-result: success\n", audit_text)
+            self.assertIn("terminal-prompt-delivery: verified-after-terminal-sole-owner-proof\nfinal-result: success\n", audit_text)
+
+    def test_rotation_rejects_stale_composer_before_status_or_respawn(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            pane = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242, 7001)
+            calls: list[list[str]] = []
+
+            def run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                calls.append(argv)
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.inspect", return_value=Report("stuck_input", ["working"], "stale task")),
+                patch("omo_manager.omo_codex_start.exact_tail", side_effect=((True, ["history"]), (True, ["› stale task", "  gpt-5.6-terra high"]))),
+                patch("omo_manager.omo_codex_start.run", side_effect=run),
+                patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
+                self.assertRaisesRegex(StartError, "composer is not empty"),
+            ):
+                start(self.rotation_args(root))
+
+            self.assertFalse(any(call[:3] == ["tmux", "if-shell", "-F"] for call in calls))
+            respawn.assert_not_called()
+
+    def test_rotate_submanager_childless_and_childful_preserve_hierarchy_and_runtime_binding(self) -> None:
+        for childful in (False, True):
+            with self.subTest(childful=childful), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                self.write_task(root, runat="config:27", manager=True, pending=["preserve exact queue"])
+                manager_before = (root / "worker.md").read_text(encoding="utf-8")
+                child_refs = ("worker_a.md", "worker_b.md") if childful else ()
+                for index, child_ref in enumerate(child_refs, start=1):
+                    self.write_task(root, runat=f"dw:{index}", status="running", managerat="config:27", pending=[f"child {index}"], task_file=child_ref)
+                todo_text = "current:\n\nworker.md config:27\n" + "".join(
+                    f"{child_ref} dw:{index}\n" for index, child_ref in enumerate(child_refs, start=1)
+                )
+                (root / "TODO.md").write_text(todo_text, encoding="utf-8")
+                child_bytes = {child_ref: (root / child_ref).read_bytes() for child_ref in child_refs}
+                initial = Pane("config:27.0", "%27", "@27", "bunx", root, 4242, 7001)
+                replacement = Pane("config:27.0", "%27", "@27", "bun", root, 5252, 8002)
+                current = initial
+                lock_depth = 0
+                old_session = self.SESSION_ID
+                new_session = "119f670b-6a2f-7463-b9be-9aa6ff0cec43"
+
+                @__import__("contextlib").contextmanager
+                def input_lock(target: str):
+                    nonlocal lock_depth
+                    self.assertEqual("config:27.0", target)
+                    lock_depth += 1
+                    try:
+                        yield
+                    finally:
+                        lock_depth -= 1
+
+                def resolve(_target: str) -> Pane:
+                    return current
+
+                def respawn(_pane: Pane, command: str) -> None:
+                    nonlocal current
+                    self.assertEqual(1, lock_depth)
+                    self.assertNotIn(" resume ", command)
+                    current = replacement
+
+                sessions = iter(((old_session, ""), (new_session, "")))
+
+                def query(*_args: object) -> tuple[str, str]:
+                    self.assertEqual(1, lock_depth)
+                    return next(sessions)
+
+                delivered: list[Pane] = []
+
+                def deliver(pane: Pane, _prompt: Path) -> None:
+                    self.assertEqual(1, lock_depth)
+                    delivered.append(pane)
+
+                expected_children = tuple(
+                    (child_ref, hashlib.sha256(child_bytes[child_ref]).hexdigest()) for child_ref in child_refs
+                )
+                args = self.rotation_args(
+                    root,
+                    target="config:27",
+                    rotate_worker=False,
+                    rotate_submanager=True,
+                    expected_child_tasks=expected_children,
+                    expect_no_children=not childful,
+                )
+                with (
+                    patch("omo_manager.omo_codex_start.tmux_input_lock", side_effect=input_lock),
+                    patch("omo_manager.omo_codex_start.load_local_env", return_value={"OMO_MANAGER_TMUX_TARGET": "wl:1"}),
+                    patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                    patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                    patch("omo_manager.omo_codex_start.query_status_session_id", side_effect=query),
+                    patch("omo_manager.omo_codex_start.prompt_text", return_value="submanager prompt\n"),
+                    patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
+                    patch("omo_manager.omo_codex_start.wait_started", return_value="running"),
+                    patch("omo_manager.omo_codex_start.send_prompt", side_effect=deliver),
+                ):
+                    self.assertEqual("running", start(args))
+
+                metadata = __import__("omo_manager.omo_task_metadata", fromlist=["parse_task_metadata"]).parse_task_metadata(
+                    (root / "worker.md").read_text(encoding="utf-8"), root
+                )
+                self.assertIsNotNone(metadata)
+                self.assertEqual(new_session, metadata.session_id)
+                self.assertEqual(("preserve exact queue",), metadata.pending_task_items)
+                self.assertEqual("cfg:1", metadata.managerat)
+                self.assertEqual(
+                    task_text_with_session_id(manager_before, new_session, replace_existing=True),
+                    (root / "worker.md").read_text(encoding="utf-8"),
+                )
+                self.assertEqual([replacement], delivered)
+                self.assertEqual(root, delivered[0].workdir)
+                self.assertEqual(todo_text, (root / "TODO.md").read_text(encoding="utf-8"))
+                self.assertEqual(child_bytes, {child_ref: (root / child_ref).read_bytes() for child_ref in child_refs})
+                self.assertEqual(0, lock_depth)
+
+    def test_rotate_submanager_rejects_exact_child_drift_before_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, runat="config:27", manager=True, pending=["preserve exact queue"])
+            self.write_task(root, runat="dw:1", status="running", managerat="config:27", pending=["child"], task_file="child.md")
+            (root / "TODO.md").write_text("current:\n\nworker.md config:27\nchild.md dw:1\n", encoding="utf-8")
+            child = root / "child.md"
+            initial = Pane("config:27.0", "%27", "@27", "bunx", root, 4242, 7001)
+            replacement = Pane("config:27.0", "%27", "@27", "bun", root, 5252, 8002)
+            current = initial
+
+            def resolve(_target: str) -> Pane:
+                return current
+
+            def respawn(_pane: Pane, _command: str) -> None:
+                nonlocal current
+                current = replacement
+                child.write_text(child.read_text(encoding="utf-8") + "drift\n", encoding="utf-8")
+
+            args = self.rotation_args(
+                root,
+                target="config:27",
+                rotate_worker=False,
+                rotate_submanager=True,
+                expected_child_tasks=(("child.md", hashlib.sha256(child.read_bytes()).hexdigest()),),
+            )
+            with (
+                patch("omo_manager.omo_codex_start.load_local_env", return_value={"OMO_MANAGER_TMUX_TARGET": "wl:1"}),
+                patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                patch("omo_manager.omo_codex_start.query_status_session_id", return_value=(self.SESSION_ID, "")),
+                patch("omo_manager.omo_codex_start.prompt_text", return_value="submanager prompt\n"),
+                patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
+                patch("omo_manager.omo_codex_start.send_prompt") as deliver,
+                self.assertRaisesRegex(StartError, "child assertion|snapshot"),
+            ):
+                start(args)
+            deliver.assert_not_called()
+            self.assertNotIn("session_id:", (root / "worker.md").read_text(encoding="utf-8"))
+
+    def test_rotate_submanager_refuses_configured_main_manager(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, runat="wl:1", manager=True, pending=["preserve exact queue"])
+            pane = Pane("wl:1.0", "%1", "@1", "bunx", root, 4242, 7001)
+            args = self.rotation_args(
+                root,
+                target="wl:1",
+                rotate_worker=False,
+                rotate_submanager=True,
+                expect_no_children=True,
+            )
+            with (
+                patch("omo_manager.omo_codex_start.load_local_env", return_value={"OMO_MANAGER_TMUX_TARGET": "wl:1"}),
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
+                self.assertRaisesRegex(StartError, "configured main manager"),
+            ):
+                start(args)
+            respawn.assert_not_called()
+
+    def test_rotation_prompt_failure_stops_exact_task_bound_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            initial = Pane("cfg:2.0", "%2", "@2", "bunx", root, 4242, 7001)
+            replacement = Pane("cfg:2.0", "%2", "@2", "bun", root, 5252, 8002)
+            shell = Pane("cfg:2.0", "%2", "@2", "sh", root, 6262, 9003)
+            current = initial
+            input_lock_held = False
+
+            @contextmanager
+            def input_lock(target: str):
+                nonlocal input_lock_held
+                self.assertEqual("cfg:2.0", target)
+                input_lock_held = True
+                try:
+                    yield
+                finally:
+                    input_lock_held = False
+
+            def resolve(_target: str) -> Pane:
+                return current
+
+            def respawn(_pane: Pane, _command: str) -> None:
+                nonlocal current
+                current = replacement
+
+            def stop(pane: Pane, _wait_s: float) -> Pane:
+                nonlocal current
+                self.assertTrue(input_lock_held)
+                self.assertEqual(replacement, pane)
+                current = shell
+                return shell
+
+            sessions = iter(((self.SESSION_ID, ""), ("119f670b-6a2f-7463-b9be-9aa6ff0cec43", "")))
+            with (
+                patch("omo_manager.omo_codex_start.tmux_input_lock", side_effect=input_lock),
+                patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                patch("omo_manager.omo_codex_start.query_status_session_id", side_effect=lambda *_args: next(sessions)),
+                patch("omo_manager.omo_codex_start.prompt_text", return_value="worker prompt\n"),
+                patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
+                patch("omo_manager.omo_codex_start.wait_started", return_value="running"),
+                patch("omo_manager.omo_codex_start.send_prompt", side_effect=PromptHandoffError("initial prompt remained in the composer after the delivery deadline")),
+                patch("omo_manager.omo_codex_start.stop_unverified_replacement", side_effect=stop) as contain,
+                self.assertRaisesRegex(PromptHandoffError, "delivery deadline"),
+            ):
+                start(self.rotation_args(root))
+
+            self.assertFalse(input_lock_held)
+            contain.assert_called_once_with(replacement, 45.0)
+            audit = (root / "rotation.audit").read_text(encoding="utf-8")
+            self.assertIn("failure-kind: post-respawn-prompt-handoff-failed\n", audit)
+            self.assertIn("replacement-disposition: stopped-to-shell\n", audit)
+            self.assertIn("stopped-pane-pid: 6262\nstopped-command: sh\n", audit)
+            self.assertIn("final-result: failed\n", audit)
 
     def test_rotate_worker_checkpoints_supported_codex_processes_after_wrapper(self) -> None:
         for command in ("bun", "bunx", "codex"):
@@ -1377,17 +1652,14 @@ class CodexStartTests(unittest.TestCase):
             shell = replace(initial, command="sh", pane_pid=6262)
             rotated = False
             stopped = False
-            captures = iter(
-                (
-                    (True, ["old screen"]),
-                    (True, ["› Use /skills to list available skills", "  gpt-5.6-terra high"]),
-                    (True, ["old screen", "/status", "no session row"]),
-                )
-            )
+            ready = (True, ["› Use /skills to list available skills", "  gpt-5.6-terra high"])
+            captures = iter(((True, ["old screen"]), (True, ["old screen", "/status", "no session row"])))
             last_capture = (True, ["old screen", "/status", "no session row"])
 
-            def capture_tail(*_args: object) -> tuple[bool, list[str]]:
+            def capture_tail(_target: str, n_lines: int) -> tuple[bool, list[str]]:
                 nonlocal last_capture
+                if n_lines == 2000:
+                    return ready
                 try:
                     last_capture = next(captures)
                 except StopIteration:
@@ -1408,7 +1680,9 @@ class CodexStartTests(unittest.TestCase):
                 joined = " ".join(command)
                 if "OMO_STATUS_ACCEPTED_" in joined:
                     submitted += 1
-                    accepted = next(part for part in joined.split() if part.startswith("OMO_STATUS_ACCEPTED_"))
+                    accepted = re.search(r"OMO_STATUS_ACCEPTED_[A-Za-z0-9_-]+", joined)
+                    assert accepted is not None
+                    accepted = accepted.group(0)
                     return subprocess.CompletedProcess(command, 0, accepted + "\n", "")
                 if "/bin/sh" in joined:
                     stopped = True
@@ -1482,11 +1756,13 @@ class CodexStartTests(unittest.TestCase):
         old = self.SESSION_ID
         other = "119f670b-6a2f-7463-b9be-9aa6ff0cec43"
         ready = (True, ["› Use /skills to list available skills", "  gpt-5.6-terra high · /tmp · Context 0% used"])
-        captures = iter(((True, ["before"]), ready, (True, ["before", "/status", f"Session: {old}", f"Session: {other}"])))
+        captures = iter(((True, ["before"]), (True, ["before", "/status", f"Session: {old}", f"Session: {other}"])))
         last_capture = (True, ["before", "/status", f"Session: {old}", f"Session: {other}"])
 
-        def capture_tail(*_args: object) -> tuple[bool, list[str]]:
+        def capture_tail(_target: str, n_lines: int) -> tuple[bool, list[str]]:
             nonlocal last_capture
+            if n_lines == 2000:
+                return ready
             try:
                 last_capture = next(captures)
             except StopIteration:
@@ -1498,7 +1774,9 @@ class CodexStartTests(unittest.TestCase):
             del timeout_s
             joined = " ".join(command)
             if "OMO_STATUS_ACCEPTED_" in joined:
-                accepted = next(part for part in joined.split() if part.startswith("OMO_STATUS_ACCEPTED_"))
+                accepted = re.search(r"OMO_STATUS_ACCEPTED_[A-Za-z0-9_-]+", joined)
+                assert accepted is not None
+                accepted = accepted.group(0)
                 return subprocess.CompletedProcess(command, 0, accepted + "\n", "")
             return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -2425,7 +2703,7 @@ class CodexStartTests(unittest.TestCase):
             audit = root / "rotation.audit"
             audit_before = audit.read_bytes()
             self.assertNotIn(b"replacement-observed:", audit_before)
-            self.assertNotIn(b"failure-kind:", audit_before)
+            self.assertIn(b"failure-kind: post-respawn-before-prompt-failed\n", audit_before)
             for eligibility in ("absent", "forged"):
                 with self.subTest(eligibility=eligibility):
                     if eligibility == "forged":
@@ -2544,7 +2822,7 @@ class CodexStartTests(unittest.TestCase):
             self.assertFalse((root / "reconciliation.receipt").exists())
 
     def test_reconciliation_status_query_guards_every_input_in_tmux_server(self) -> None:
-        pane = Pane("cfg:2.0", "%2", "@2", "bun", Path("/tmp"), 5252)
+        pane = Pane("cfg:2.0", "%2", "@2", "bun", Path("/tmp"), 5252, 7001)
         commands: list[list[str]] = []
 
         def tmux(command: list[str], *, timeout_s: float = 10.0) -> subprocess.CompletedProcess[str]:
@@ -2566,6 +2844,9 @@ class CodexStartTests(unittest.TestCase):
             self.assertIn("#{==:#{window_id},@2}", condition)
             self.assertIn("#{==:#{pane_pid},5252}", condition)
             self.assertIn("#{==:#{pane_current_command},bun}", condition)
+            self.assertIn("#{==:#{pane_current_path},/tmp}", condition)
+            self.assertIn("/proc/5252/stat", command[6])
+            self.assertIn('test "${20:-}" = 7001', command[6])
         self.assertFalse(any(command[1] in {"paste-buffer", "send-keys"} for command in commands))
 
     def test_reconciliation_status_query_does_not_submit_from_unsafe_ui(self) -> None:
@@ -2613,6 +2894,27 @@ class CodexStartTests(unittest.TestCase):
                 ):
                     query_reconciliation_session_id(pane, 240, 10.0)
                 self.assertEqual(2, sum("if-shell" in command for command in commands))
+
+    def test_reconciliation_status_timeout_clears_exact_retained_input(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bun", Path("/tmp"), 5252, 7001)
+        with (
+            patch("omo_manager.omo_codex_start.require_prompt_ready"),
+            patch("omo_manager.omo_codex_start.reconciliation_capture", side_effect=("before\n", "before\n")),
+            patch("omo_manager.omo_codex_start.guarded_reconciliation_tmux"),
+            patch("omo_manager.omo_codex_start.prompt_state", return_value=("running", [], "/status")),
+            patch("omo_manager.omo_codex_start.clear_retained_status_query") as clear,
+            patch("omo_manager.omo_codex_start.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
+            patch("omo_manager.omo_codex_start.time.monotonic", side_effect=(0.0, 0.0, 1.0)),
+            patch("omo_manager.omo_codex_start.time.monotonic_ns", return_value=1234),
+            patch("omo_manager.omo_codex_start.time.sleep"),
+            self.assertRaisesRegex(StartError, "exact retained input was cleared"),
+        ):
+            query_reconciliation_session_id(pane, 240, 0.5)
+
+        clear.assert_called_once()
+        self.assertEqual(pane, clear.call_args.args[0])
+        self.assertIn("#{pane_current_path},/tmp", clear.call_args.args[1])
+        self.assertTrue(clear.call_args.args[2].endswith("-1234"))
 
     def test_reconciliation_owner_scan_excludes_concurrent_membership_change(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
@@ -2945,12 +3247,13 @@ class CodexStartTests(unittest.TestCase):
             prompt.assert_called_once()
             deliver.assert_called_once()
             self.assertEqual("$ /test/getagentsmd\nagent instructions", prompt.call_args.args[1])
-            self.assertEqual(task_before, (root / "worker.md").read_bytes())
+            self.assertNotEqual(task_before, (root / "worker.md").read_bytes())
+            self.assertIn(f"session_id: {new_session}\n", (root / "worker.md").read_text(encoding="utf-8"))
             audit = (root / "rotation.audit").read_text(encoding="utf-8")
             self.assertIn("old-session-id: unavailable-asserted-legacy\nlegacy-missing-session-id: asserted-and-observed\n", audit)
             self.assertIn(f"new-session-id: {new_session}\nterminal-replacement-pane-pid: 5252\nterminal-replacement-command: bun\n", audit)
             self.assertIn("terminal-authoritative-owner-count: 1\n", audit)
-            self.assertIn("terminal-prompt-delivery: authorized-after-terminal-sole-owner-proof\nfinal-result: success\n", audit)
+            self.assertIn("terminal-prompt-delivery: verified-after-terminal-sole-owner-proof\nfinal-result: success\n", audit)
 
     def test_legacy_rotation_refuses_false_or_missing_legacy_assertion(self) -> None:
         for case in ("assertion absent", "UUID recoverable"):
@@ -3071,6 +3374,7 @@ class CodexStartTests(unittest.TestCase):
                     patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"),
                     patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
                     patch("omo_manager.omo_codex_start.wait_started", side_effect=startup_error if case == "post-respawn failure" else None, return_value="running"),
+                    patch("omo_manager.omo_codex_start.send_prompt"),
                     patch("omo_manager.omo_codex_start.finish_rotation_audit", side_effect=StartError("audit finalization failed")),
                     self.assertRaises(StartError) as raised,
                 ):
@@ -3082,7 +3386,10 @@ class CodexStartTests(unittest.TestCase):
                     self.assertTrue(any("audit remains completion-unknown" in note for note in getattr(raised.exception, "__notes__", ())))
                 else:
                     self.assertIn("audit finalization failed", str(raised.exception))
-                self.assertEqual(task_before, (root / "worker.md").read_bytes())
+                if case == "post-respawn failure":
+                    self.assertEqual(task_before, (root / "worker.md").read_bytes())
+                else:
+                    self.assertNotEqual(task_before, (root / "worker.md").read_bytes())
                 audit_text = (root / "rotation.audit").read_text(encoding="utf-8")
                 self.assertIn("completion: unknown-until-finalized", audit_text)
                 self.assertNotIn("final-result:", audit_text)
@@ -3197,7 +3504,7 @@ class CodexStartTests(unittest.TestCase):
                 with patch("omo_manager.omo_codex_start.resolve_pane", return_value=changed_pane), self.assertRaises(StartError):
                     verify_rotation_snapshot(changed_args, snapshot)
 
-    def test_rotation_withholds_delivery_until_audit_and_terminal_sole_owner_proof(self) -> None:
+    def test_rotation_delivers_after_terminal_sole_owner_proof_before_success_audit(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
             self.write_task(root, status="blocked", pending=["preserve exact queue"])
@@ -3233,9 +3540,11 @@ class CodexStartTests(unittest.TestCase):
                     failure_kind: str = "",
                     terminal_owner_task: str = "",
                     terminal_replacement: Pane | None = None,
+                    **kwargs: object,
                 ) -> None:
-                    deliver.assert_not_called()
-                    real_finish(path, prepared, result, new_session_id, failure_kind, terminal_owner_task, terminal_replacement)
+                    if result == "success":
+                        deliver.assert_called_once()
+                    real_finish(path, prepared, result, new_session_id, failure_kind, terminal_owner_task, terminal_replacement, **kwargs)
 
                 with patch("omo_manager.omo_codex_start.finish_rotation_audit", side_effect=finish):
                     self.assertEqual("running", start(self.rotation_args(root)))
@@ -3282,10 +3591,13 @@ class CodexStartTests(unittest.TestCase):
                     failure_kind: str = "",
                     terminal_owner_task: str = "",
                     terminal_replacement: Pane | None = None,
+                    **kwargs: object,
                 ) -> None:
+                    real_finish(path, prepared, result, new_session_id, failure_kind, terminal_owner_task, terminal_replacement, **kwargs)
+
+                def deliver_prompt(*_args: object) -> None:
                     nonlocal current
-                    real_finish(path, prepared, result, new_session_id, failure_kind, terminal_owner_task, terminal_replacement)
-                    if phase == "before prompt" and result == "success":
+                    if phase == "before prompt":
                         current = second
 
                 with (
@@ -3296,19 +3608,18 @@ class CodexStartTests(unittest.TestCase):
                     patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
                     patch("omo_manager.omo_codex_start.wait_started", side_effect=wait),
                     patch("omo_manager.omo_codex_start.finish_rotation_audit", side_effect=finish),
-                    patch("omo_manager.omo_codex_start.send_prompt") as deliver,
-                    self.assertRaisesRegex(StartError, "atomic rotation snapshot"),
+                    patch("omo_manager.omo_codex_start.send_prompt", side_effect=deliver_prompt) as deliver,
+                    self.assertRaisesRegex(StartError, "atomic rotation snapshot|pane identity changed after session UUID binding"),
                 ):
                     start(self.rotation_args(root))
-                deliver.assert_not_called()
+                if phase == "before prompt":
+                    deliver.assert_called_once()
+                else:
+                    deliver.assert_not_called()
                 audit = (root / "rotation.audit").read_text(encoding="utf-8")
                 self.assertIn("replacement-pane-pid: 5252\nreplacement-command: bun\n", audit)
                 self.assertNotIn("terminal-replacement-pane-pid: 6262", audit)
-                if phase == "before prompt":
-                    self.assertIn("terminal-replacement-pane-pid: 5252\nterminal-replacement-command: bun\n", audit)
-                    self.assertIn("final-result: success\n", audit)
-                else:
-                    self.assertIn("final-result: failed\n", audit)
+                self.assertIn("final-result: failed\n", audit)
 
     def test_rotate_worker_revalidates_binding_after_audit_reservation(self) -> None:
         for case in ("task", "queue", "manager", "sole owner"):
@@ -3784,7 +4095,7 @@ class CodexStartTests(unittest.TestCase):
         event_path = root / RECOVERY_EVENT_DIRNAME / "durable-delivery.event"
         with patch("omo_manager.omo_pending_watch.record_terminal_delivery_failure", return_value=event_path) as record:
             result = terminal_delivery_failure(root, "cfg:2.0", "delivery-1", definite)
-        record.assert_called_once_with(root, "cfg:2.0", "delivery-1", str(definite))
+        record.assert_called_once_with(root, "cfg:2.0", "delivery-1", str(definite), None)
         self.assertEqual(
             f"target is not a Codex pane before submit: cfg:2.0; recovery event recorded at `{event_path}`",
             result.error,
@@ -3976,7 +4287,7 @@ class CodexStartTests(unittest.TestCase):
         self.assertIn("resume 019f670b-6a2f-7463-b9be-9aa6ff0cec43", command)
 
     def test_respawn_replaces_process_and_preserves_pane_identity(self) -> None:
-        pane = Pane("cfg:2.0", "%2", "@2", "bun", Path("/tmp/work logs"), 4242)
+        pane = Pane("cfg:2.0", "%2", "@2", "bun", Path("/tmp/work logs"), 4242, 7001)
         completed = subprocess.CompletedProcess([], 0, "", "")
         with (
             patch("omo_manager.omo_codex_start.run", return_value=completed) as run,
@@ -3984,18 +4295,13 @@ class CodexStartTests(unittest.TestCase):
             patch("omo_manager.omo_codex_start.verify_same_pane") as verify_pane,
         ):
             respawn_codex(pane, "exec codex resume session")
-        run.assert_called_once_with(
-            [
-                "tmux",
-                "if-shell",
-                "-F",
-                "-t",
-                "%2",
-                "#{&&:#{==:#{pane_id},%2},#{==:#{window_id},@2},#{==:#{session_name}:#{window_index}.#{pane_index},cfg:2.0},#{==:#{pane_pid},4242},#{==:#{pane_current_command},bun}}",
-                "respawn-pane -k -t %2 -c '/tmp/work logs' 'exec codex resume session'",
-                "run-shell 'exit 1'",
-            ]
-        )
+        command = run.call_args.args[0]
+        self.assertEqual(["tmux", "if-shell", "-F", "-t", "%2"], command[:5])
+        self.assertIn("#{pane_pid},4242", command[5])
+        self.assertIn("#{pane_current_path},/tmp/work logs", command[5])
+        self.assertIn("/proc/4242/stat", command[6])
+        self.assertIn('test "${20:-}" = 7001', command[6])
+        self.assertIn("respawn-pane -k -t %2", command[6])
         verify_process.assert_called_once_with(pane)
         verify_pane.assert_called_once_with(pane)
 
@@ -4028,7 +4334,7 @@ class CodexStartTests(unittest.TestCase):
                 patch("omo_manager.omo_codex_start.verify_restart_continuity") as continuity,
             ):
                 self.assertEqual("running", start(args))
-            capture.assert_called_once_with("%2", 240, 10.0)
+            capture.assert_called_once_with(pane, 240, 10.0)
             continuity.assert_called_once()
             command = respawn.call_args.args[1]
             self.assertIn("resume 019f670b-6a2f-7463-b9be-9aa6ff0cec43", command)

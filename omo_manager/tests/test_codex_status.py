@@ -1,11 +1,13 @@
 import subprocess
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import call, patch
+from unittest.mock import patch
 
-from omo_manager.omo_codex_status import Args, PlanPromptRecovery, Report, can_submit_stuck_input, current_block, current_input_text, dismiss_plan_prompt_if_present, dismiss_skills_menu_if_present, dismiss_usage_limit_menu_if_present, exact_pane_id, final_assistant_output, has_active_quota_reset_prompt, has_quota_reset_prompt_hint, has_active_skills_menu, has_active_usage_limit_menu, has_compacting_indicator, has_cursor_followups_overlay, has_resume_paused_goal_prompt, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, pane_has_exact_codex_process, pane_has_exact_cursor_process, parse_args, quota_reset_prompt_selection, refuse_quota_reset_if_present, report_from_lines, status, submit_stuck_input_if_present, tail, tail_pane_id, visible_error_lines
+from omo_manager.omo_codex_status import Args, PlanPromptRecovery, Report, can_submit_stuck_input, current_block, current_input_text, dismiss_plan_prompt_if_present, dismiss_skills_menu_if_present, dismiss_usage_limit_menu_if_present, exact_pane_id, final_assistant_output, has_active_quota_reset_prompt, has_quota_reset_prompt_hint, has_active_skills_menu, has_active_usage_limit_menu, has_compacting_indicator, has_cursor_followups_overlay, has_resume_paused_goal_prompt, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, pane_has_exact_codex_process, pane_has_exact_cursor_process, pane_has_exact_managed_agent_process, parse_args, quota_reset_prompt_selection, refuse_quota_reset_if_present, report_from_lines, status, submit_stuck_input_if_present, tail, tail_pane_id, visible_error_lines
 from omo_manager.omo_tmux_send import error_signature, exact_capacity_error
+from omo_manager.omo_tmux_input_lock import TmuxRuntimeBinding
 
 
 def cursor_agent_status_lines(prompt: str = 'Add a follow-up', *, running: bool = False) -> list[str]:
@@ -42,6 +44,45 @@ def cursor_retained_composer_lines(*, prompt: str = 'Read and execute PB watcher
 
 
 class CodexStatusTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.runtime = TmuxRuntimeBinding("cfg:1.0", "%7", "@1", 4242, "bunx", Path("/tmp"), 7001)
+        original_managed_process = pane_has_exact_managed_agent_process
+        original_codex_process = pane_has_exact_codex_process
+        self.runtime_capture = patch("omo_manager.omo_codex_status.capture_tmux_runtime_binding", return_value=self.runtime)
+        self.managed_process = patch(
+            "omo_manager.omo_codex_status.pane_has_exact_managed_agent_process",
+            side_effect=lambda target, pane_id: (
+                True if target == "cfg:1.0" and pane_id == "%7" else original_managed_process(target, pane_id)
+            ),
+        )
+        self.codex_process = patch(
+            "omo_manager.omo_codex_status.pane_has_exact_codex_process",
+            side_effect=lambda target, pane_id: (
+                True if target == "cfg:1.0" and pane_id == "%7" else original_codex_process(target, pane_id)
+            ),
+        )
+        self.runtime_capture.start()
+        self.managed_process.start()
+        self.codex_process.start()
+
+    def tearDown(self) -> None:
+        self.codex_process.stop()
+        self.managed_process.stop()
+        self.runtime_capture.stop()
+
+    def assert_guarded_key_call(self, run, key: str, index: int = 0) -> None:
+        invocation = run.call_args_list[index]
+        command = invocation.args[0]
+        self.assertEqual(["tmux", "if-shell", "-F", "-t", "%7"], command[:5])
+        self.assertIn("#{pane_current_path},/tmp", command[5])
+        self.assertIn("/proc/4242/stat", command[6])
+        self.assertIn('test "${20:-}" = 7001', command[6])
+        self.assertIn(f"send-keys -t %7 {key}", command[6])
+        self.assertEqual(
+            {"capture_output": True, "text": True, "timeout": 5, "check": False},
+            invocation.kwargs,
+        )
+
     def test_exact_shell_started_codex_process_uses_terminal_foreground_group(self) -> None:
         def write_stat(root: Path, pid: int, name: str, ppid: int, group: int, session: int, tty: int, foreground: int, start: int) -> None:
             process = root / str(pid)
@@ -779,7 +820,66 @@ class CodexStatusTests(unittest.TestCase):
         report = report_from_lines(lines, detect_waiting_subagent=True)
         with patch('omo_manager.omo_codex_status.tail', return_value=lines), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
             self.assertEqual('sent_escape', interrupt_waiting_subagent_if_present('cfg:1.0', report))
-        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Escape'], capture_output=True, text=True, timeout=5, check=False)
+        self.assert_guarded_key_call(run, 'Escape')
+
+    def test_interrupt_waiting_subagent_holds_input_lock_through_recheck_and_send(self) -> None:
+        lines = [
+            '• Waiting for 019f3875-05fe-7583-ac1a-48abda94c6f9',
+            '• Working (21s • esc to interrupt)',
+            '• Messages to be submitted after next tool call (press esc to interrupt and send immediately)',
+            '› Implement {feature}',
+            '  gpt-5.5',
+        ]
+        report = report_from_lines(lines, detect_waiting_subagent=True)
+        locked = False
+
+        @contextmanager
+        def input_lock(target: str):
+            nonlocal locked
+            self.assertEqual('cfg:1.0', target)
+            locked = True
+            try:
+                yield
+            finally:
+                locked = False
+
+        def capture(*_args):
+            self.assertTrue(locked)
+            return lines
+
+        def send(*_args, **_kwargs):
+            self.assertTrue(locked)
+            return subprocess.CompletedProcess(['tmux'], 0)
+
+        with patch('omo_manager.omo_codex_status.tmux_input_lock', side_effect=input_lock), patch(
+            'omo_manager.omo_codex_status.tail', side_effect=capture
+        ), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch(
+            'omo_manager.omo_codex_status.subprocess.run', side_effect=send
+        ):
+            self.assertEqual('sent_escape', interrupt_waiting_subagent_if_present('cfg:1.0', report))
+        self.assertFalse(locked)
+
+    def test_interrupt_waiting_subagent_rejects_same_pid_reuse_after_capture(self) -> None:
+        lines = [
+            '• Waiting for 019f3875-05fe-7583-ac1a-48abda94c6f9',
+            '• Working (21s • esc to interrupt)',
+            '• Messages to be submitted after next tool call (press esc to interrupt and send immediately)',
+            '› Implement {feature}',
+            '  gpt-5.5',
+        ]
+        report = report_from_lines(lines, detect_waiting_subagent=True)
+        drifted = TmuxRuntimeBinding("cfg:1.0", "%7", "@1", 4242, "bunx", Path("/tmp"), 7002)
+        with patch('omo_manager.omo_codex_status.tail', return_value=lines), patch(
+            'omo_manager.omo_codex_status.capture_tmux_runtime_binding',
+            side_effect=[self.runtime, self.runtime, drifted],
+        ), patch(
+            'omo_manager.omo_codex_status.pane_has_exact_managed_agent_process', return_value=True
+        ), patch(
+            'omo_manager.omo_codex_status.subprocess.run'
+        ) as run:
+            self.assertEqual('failed', interrupt_waiting_subagent_if_present('cfg:1.0', report))
+
+        run.assert_not_called()
 
     def test_status_running_while_waiting_for_background_terminal_with_review_placeholder(self) -> None:
         lines = ['• Waiting for background terminal · 1 background terminal running · /ps to view · /stop to close', '', '› Run /review on my current changes', '  gpt-5.5']
@@ -939,7 +1039,7 @@ class CodexStatusTests(unittest.TestCase):
         with patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.tail_pane_id', side_effect=[modal, after]), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
             recovery = dismiss_plan_prompt_if_present('cfg:1.0', report)
         self.assertEqual(PlanPromptRecovery('sent_escape', 'plan_prompt', 'stuck_input'), recovery)
-        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Escape'], capture_output=True, text=True, timeout=5, check=False)
+        self.assert_guarded_key_call(run, 'Escape')
 
     def test_dismiss_plan_prompt_fails_closed_for_human_target(self) -> None:
         modal = ['› Continue task', '', '  Create a plan?  shift + tab use Plan mode   esc dismiss']
@@ -982,7 +1082,9 @@ class CodexStatusTests(unittest.TestCase):
 
     def test_dismiss_plan_prompt_fails_closed_for_ambiguous_pane(self) -> None:
         modal = ['› Continue task', '', '  Create a plan?  shift + tab use Plan mode   esc dismiss']
-        with patch('omo_manager.omo_codex_status.exact_pane_id', return_value=''), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+        with patch('omo_manager.omo_codex_status.capture_tmux_runtime_binding', side_effect=RuntimeError('ambiguous')), patch(
+            'omo_manager.omo_codex_status.subprocess.run'
+        ) as run:
             recovery = dismiss_plan_prompt_if_present('cfg:1.0', report_from_lines(modal))
         self.assertEqual(PlanPromptRecovery('not_safe:ambiguous_pane', 'plan_prompt', 'not_checked'), recovery)
         run.assert_not_called()
@@ -994,7 +1096,7 @@ class CodexStatusTests(unittest.TestCase):
         with patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True), patch('omo_manager.omo_codex_status.tail_pane_id', side_effect=[menu, after]), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
             recovery = dismiss_skills_menu_if_present('cfg:1.0', report_from_lines(menu))
         self.assertEqual(PlanPromptRecovery('sent_escape', 'skills_menu', 'stuck_input'), recovery)
-        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Escape'], capture_output=True, text=True, timeout=5, check=False)
+        self.assert_guarded_key_call(run, 'Escape')
 
     def test_dismiss_skills_menu_fails_closed_when_menu_is_historical(self) -> None:
         historical = ['Skills', 'Choose an action', '› 1. List skills', '  2. Enable/Disable Skills', 'Press enter to confirm or esc to go back', '› Continue task', '  gpt-5.6-terra']
@@ -1023,7 +1125,8 @@ class CodexStatusTests(unittest.TestCase):
             not_codex = dismiss_skills_menu_if_present('cfg:1.0', report_from_lines(menu))
         self.assertEqual(PlanPromptRecovery('not_safe:not_codex_process', 'skills_menu', 'not_checked'), not_codex)
         run.assert_not_called()
-        with patch('omo_manager.omo_codex_status.exact_pane_id', side_effect=['%7', '%8']), patch('omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True), patch('omo_manager.omo_codex_status.tail_pane_id', return_value=menu), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+        drifted = TmuxRuntimeBinding("cfg:1.0", "%7", "@1", 4242, "bunx", Path("/tmp"), 7002)
+        with patch('omo_manager.omo_codex_status.capture_tmux_runtime_binding', side_effect=[self.runtime, self.runtime, drifted]), patch('omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True), patch('omo_manager.omo_codex_status.tail_pane_id', return_value=menu), patch('omo_manager.omo_codex_status.subprocess.run') as run:
             rebound = dismiss_skills_menu_if_present('cfg:1.0', report_from_lines(menu))
         self.assertEqual(PlanPromptRecovery('not_safe:target_rebound', 'skills_menu', 'not_checked'), rebound)
         run.assert_not_called()
@@ -1035,7 +1138,7 @@ class CodexStatusTests(unittest.TestCase):
         with patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True), patch('omo_manager.omo_codex_status.tail_pane_id', side_effect=[menu, after]), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
             recovery = dismiss_usage_limit_menu_if_present('cfg:1.0', report_from_lines(menu))
         self.assertEqual(PlanPromptRecovery('sent_escape', 'usage_limit_menu', 'ready'), recovery)
-        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Escape'], capture_output=True, text=True, timeout=5, check=False)
+        self.assert_guarded_key_call(run, 'Escape')
 
     def test_usage_limit_menu_accepts_either_single_selection(self) -> None:
         common = ['Usage limit reached', 'Your included usage is exhausted. Choose an option below to continue.']
@@ -1063,7 +1166,8 @@ class CodexStatusTests(unittest.TestCase):
             not_codex = dismiss_usage_limit_menu_if_present('cfg:1.0', report_from_lines(menu))
         self.assertEqual(PlanPromptRecovery('not_safe:not_codex_process', 'usage_limit_menu', 'not_checked'), not_codex)
         run.assert_not_called()
-        with patch('omo_manager.omo_codex_status.exact_pane_id', side_effect=['%7', '%8']), patch('omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True), patch('omo_manager.omo_codex_status.tail_pane_id', return_value=menu), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+        drifted = TmuxRuntimeBinding("cfg:1.0", "%7", "@1", 4242, "bunx", Path("/tmp"), 7002)
+        with patch('omo_manager.omo_codex_status.capture_tmux_runtime_binding', side_effect=[self.runtime, self.runtime, drifted]), patch('omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True), patch('omo_manager.omo_codex_status.tail_pane_id', return_value=menu), patch('omo_manager.omo_codex_status.subprocess.run') as run:
             rebound = dismiss_usage_limit_menu_if_present('cfg:1.0', report_from_lines(menu))
         self.assertEqual(PlanPromptRecovery('not_safe:target_rebound', 'usage_limit_menu', 'not_checked'), rebound)
         run.assert_not_called()
@@ -1089,13 +1193,9 @@ class CodexStatusTests(unittest.TestCase):
         ) as run:
             recovery = refuse_quota_reset_if_present('cfg:1.0', report_from_lines(yes))
         self.assertEqual(PlanPromptRecovery('sent_enter', 'quota_reset_prompt', 'ready'), recovery)
-        self.assertEqual(
-            [
-                call(['tmux', 'send-keys', '-t', '%7', 'Down'], capture_output=True, text=True, timeout=5, check=False),
-                call(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False),
-            ],
-            run.call_args_list,
-        )
+        self.assertEqual(2, run.call_count)
+        self.assert_guarded_key_call(run, 'Down', 0)
+        self.assert_guarded_key_call(run, 'Enter', 1)
 
         with patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch(
             'omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True
@@ -1104,7 +1204,7 @@ class CodexStatusTests(unittest.TestCase):
         ) as run:
             recovery = refuse_quota_reset_if_present('cfg:1.0', report_from_lines(no))
         self.assertEqual(PlanPromptRecovery('sent_enter', 'quota_reset_prompt', 'ready'), recovery)
-        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+        self.assert_guarded_key_call(run, 'Enter')
 
         with patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch(
             'omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True
@@ -1130,7 +1230,7 @@ class CodexStatusTests(unittest.TestCase):
         ) as run:
             recovery = refuse_quota_reset_if_present('cfg:1.0', report_from_lines(yes))
         self.assertEqual(PlanPromptRecovery('not_safe:no_not_selected', 'quota_reset_prompt', 'quota_reset_prompt'), recovery)
-        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Down'], capture_output=True, text=True, timeout=5, check=False)
+        self.assert_guarded_key_call(run, 'Down')
 
         changed = [*yes[:-1], 'Press y to spend the reset']
         self.assertFalse(has_active_quota_reset_prompt(changed))
@@ -1154,7 +1254,8 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual(PlanPromptRecovery('not_safe:not_codex_process', 'quota_reset_prompt', 'not_checked'), not_codex)
         send.assert_not_called()
 
-        with patch('omo_manager.omo_codex_status.exact_pane_id', side_effect=['%7', '%8']), patch(
+        drifted = TmuxRuntimeBinding("cfg:1.0", "%7", "@1", 4242, "bunx", Path("/tmp"), 7002)
+        with patch('omo_manager.omo_codex_status.capture_tmux_runtime_binding', side_effect=[self.runtime, self.runtime, drifted]), patch(
             'omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True
         ), patch('omo_manager.omo_codex_status.tail_pane_id', return_value=yes), patch(
             'omo_manager.omo_codex_status.subprocess.run'
@@ -1309,6 +1410,46 @@ class CodexStatusTests(unittest.TestCase):
         lines = ['────', 'old', '─ Worked for 1s ─', '────', 'new work', '  gpt-5.5']
         self.assertEqual('running', status(lines, current_block(lines)))
         self.assertEqual(['new work'], last_output(lines))
+
+    def test_fresh_start_boundary_excludes_predecessor_error(self) -> None:
+        lines = [
+            '────',
+            '■ Error: predecessor failed',
+            '› Ask Codex to do anything',
+            '[omo-codex-start:2860991:1789852241340480110]',
+            '╭─╮',
+            '│ >_ OpenAI Codex (v0.155.1) │',
+            '╰─╯',
+            '› Ask Codex to do anything',
+            '  gpt-6-astra xhigh',
+        ]
+        self.assertEqual('ready', report_from_lines(lines).status)
+        self.assertEqual([], visible_error_lines(current_block(lines).lines))
+
+    def test_fresh_start_boundary_keeps_successor_error(self) -> None:
+        lines = [
+            '■ Error: predecessor failed',
+            '[omo-codex-start:2860991:1789852241340480110]',
+            '■ Error: successor failed',
+            '› Ask Codex to do anything',
+            '  gpt-6-astra xhigh',
+        ]
+        self.assertEqual('error', report_from_lines(lines).status)
+        self.assertEqual(['■ Error: successor failed'], visible_error_lines(current_block(lines).lines))
+
+    def test_animated_braille_placeholder_is_empty_input(self) -> None:
+        lines = [
+            '› Ask Codex to do anything⡀     ⠁ ⢀',
+            '  ⠄  ⠠       ⠐',
+            '  gpt-6-astra xhigh',
+        ]
+        self.assertEqual('ready', report_from_lines(lines).status)
+        self.assertFalse(can_submit_stuck_input(lines))
+
+    def test_animated_placeholder_rejects_real_suffix(self) -> None:
+        lines = ['› Ask Codex to do anything⡀ now run this', '  gpt-6-astra xhigh']
+        self.assertEqual('stuck_input', report_from_lines(lines).status)
+        self.assertTrue(can_submit_stuck_input(lines))
 
     def test_status_error_from_output(self) -> None:
         lines = ['────', 'Traceback', '  gpt-5.5']
@@ -1688,7 +1829,68 @@ class CodexStatusTests(unittest.TestCase):
         report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
         with patch('omo_manager.omo_codex_status.tail', return_value=['› Continue task', '  gpt-5.5']), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
             self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
-        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+        self.assert_guarded_key_call(run, 'Enter')
+
+    def test_submit_stuck_input_rejects_same_pid_reuse_after_capture(self) -> None:
+        report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
+        drifted = TmuxRuntimeBinding("cfg:1.0", "%7", "@1", 4242, "bunx", Path("/tmp"), 7002)
+        with patch('omo_manager.omo_codex_status.tail', return_value=['› Continue task', '  gpt-5.5']), patch(
+            'omo_manager.omo_codex_status.capture_tmux_runtime_binding',
+            side_effect=[self.runtime, self.runtime, drifted],
+        ), patch(
+            'omo_manager.omo_codex_status.pane_has_exact_managed_agent_process', return_value=True
+        ), patch(
+            'omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)
+        ) as run:
+            self.assertEqual('failed', submit_stuck_input_if_present('cfg:1.0', report))
+
+        run.assert_not_called()
+
+    def test_submit_stuck_input_rejects_same_pid_reuse_after_guarded_send(self) -> None:
+        report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
+        drifted = TmuxRuntimeBinding("cfg:1.0", "%7", "@1", 4242, "bunx", Path("/tmp"), 7002)
+        with patch('omo_manager.omo_codex_status.tail', return_value=['› Continue task', '  gpt-5.5']), patch(
+            'omo_manager.omo_codex_status.capture_tmux_runtime_binding',
+            side_effect=[self.runtime, self.runtime, self.runtime, drifted],
+        ), patch(
+            'omo_manager.omo_codex_status.pane_has_exact_managed_agent_process', return_value=True
+        ), patch(
+            'omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)
+        ) as run:
+            self.assertEqual('failed', submit_stuck_input_if_present('cfg:1.0', report))
+
+        self.assert_guarded_key_call(run, 'Enter')
+
+    def test_submit_stuck_input_holds_input_lock_through_recheck_and_send(self) -> None:
+        report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
+        lines = ['› Continue task', '  gpt-5.5']
+        locked = False
+
+        @contextmanager
+        def input_lock(target: str):
+            nonlocal locked
+            self.assertEqual('cfg:1.0', target)
+            locked = True
+            try:
+                yield
+            finally:
+                locked = False
+
+        def capture(*_args):
+            self.assertTrue(locked)
+            return lines
+
+        def send(*_args, **_kwargs):
+            self.assertTrue(locked)
+            return subprocess.CompletedProcess(['tmux'], 0)
+
+        with patch('omo_manager.omo_codex_status.tmux_input_lock', side_effect=input_lock), patch(
+            'omo_manager.omo_codex_status.tail', side_effect=capture
+        ), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch(
+            'omo_manager.omo_codex_status.subprocess.run', side_effect=send
+        ):
+            self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
+        self.assertFalse(locked)
 
     def test_submit_stuck_input_does_not_resubmit_retained_cursor_composer(self) -> None:
         report = Report('stuck_input', ['stale'], 'stale', True)
@@ -1714,8 +1916,9 @@ class CodexStatusTests(unittest.TestCase):
         with patch('omo_manager.omo_codex_status.tail', side_effect=[overlay, overlay, underlying]), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run, patch('omo_manager.omo_codex_status.time.sleep'):
             self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
 
-        expected = ['tmux', 'send-keys', '-t', '%7', 'Enter']
-        self.assertEqual([expected, expected], [call.args[0] for call in run.call_args_list])
+        self.assertEqual(2, run.call_count)
+        self.assert_guarded_key_call(run, 'Enter', 0)
+        self.assert_guarded_key_call(run, 'Enter', 1)
 
     def test_submit_stuck_input_recovers_changed_search_overlay(self) -> None:
         expected_overlay = [
@@ -1780,7 +1983,7 @@ class CodexStatusTests(unittest.TestCase):
         with patch('omo_manager.omo_codex_status.tail', side_effect=[overlay, overlay, running]), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run, patch('omo_manager.omo_codex_status.time.sleep'):
             self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
 
-        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+        self.assert_guarded_key_call(run, 'Enter')
 
     def test_submit_search_overlay_sends_one_recovery_enter_while_frames_stay_stale(self) -> None:
         overlay = [
@@ -1794,13 +1997,13 @@ class CodexStatusTests(unittest.TestCase):
         with patch('omo_manager.omo_codex_status.tail', side_effect=[overlay, overlay]), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run, patch('omo_manager.omo_codex_status.time.monotonic', side_effect=[0.0, 0.0, 2.0]):
             self.assertEqual('not_safe:file_search_overlay', submit_stuck_input_if_present('cfg:1.0', report, compaction_wait_timeout_s=1.0))
 
-        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+        self.assert_guarded_key_call(run, 'Enter')
 
     def test_submit_stuck_input_if_present_sends_enter_for_terminal_enter_prompt(self) -> None:
         report = Report('stuck_input', ['Press Enter to continue...'], '', True)
         with patch('omo_manager.omo_codex_status.tail', return_value=['────', 'done', '─ Worked for 1s ─', '  gpt-5.5', 'Press Enter to continue...']), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
             self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
-        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+        self.assert_guarded_key_call(run, 'Enter')
 
     def test_submit_stuck_input_if_present_confirms_selected_resume_goal(self) -> None:
         lines = [
@@ -1817,7 +2020,7 @@ class CodexStatusTests(unittest.TestCase):
         with patch('omo_manager.omo_codex_status.tail', return_value=lines), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
             self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
 
-        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+        self.assert_guarded_key_call(run, 'Enter')
 
     def test_submit_stuck_input_if_present_rechecks_changed_resume_selection(self) -> None:
         resume_lines = [
@@ -1865,7 +2068,7 @@ class CodexStatusTests(unittest.TestCase):
         ]
         with patch('omo_manager.omo_codex_status.tail', return_value=lines), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
             self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
-        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+        self.assert_guarded_key_call(run, 'Enter')
 
     def test_submit_stuck_input_if_present_reports_compaction_timeout_as_unsafe(self) -> None:
         report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
@@ -1877,7 +2080,7 @@ class CodexStatusTests(unittest.TestCase):
         report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
         with patch('omo_manager.omo_codex_status.tail', return_value=['• Working', '', '› Continue task', '  gpt-5.5']), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
             self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
-        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+        self.assert_guarded_key_call(run, 'Enter')
 
     def test_submit_stuck_input_if_present_waits_for_compaction_then_sends_enter(self) -> None:
         report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
@@ -1899,7 +2102,7 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual(2, captures)
         self.assertEqual([2000, 2000], line_counts)
         sleep.assert_called_once()
-        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+        self.assert_guarded_key_call(run, 'Enter')
 
     def test_submit_stuck_input_if_present_ignores_non_stuck_report(self) -> None:
         report = Report('ready', ['› Use /skills to list available skills'], 'Use /skills to list available skills', False)
