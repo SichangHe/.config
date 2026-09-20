@@ -430,6 +430,320 @@ def registered_cleanup_fixture(
     return task, current, route_evidence, registration
 
 
+def registered_split_transition_fixture(
+    root: Path,
+    *,
+    replay_id: str,
+) -> tuple[
+    Path,
+    tuple[dict[str, object], ...],
+    omo_report_receipt.RootRetainedSplitNoMailEvidence,
+    omo_report_receipt.RegisteredSplitNoMailTransition,
+]:
+    """Create one exact manager/owner split transition with Git custody."""
+
+    owner_target = "cfg:7"
+    manager_target = "vl:2"
+    owner_session = "00000000-0000-0000-0000-000000000011"
+    manager_session = "00000000-0000-0000-0000-000000000012"
+    owner_cwd = root.parent / "worker"
+    manager_cwd = root.parent / "manager"
+    completion_key = "3" * 64
+    task = root / "worker.md"
+    source = (
+        "---\n"
+        "version: v1.0.0\n"
+        "status: blocked\n"
+        "blocked_on: manager reconciliation\n"
+        f"runat: {owner_target}\n"
+        "tool: codex\n"
+        f"managerat: {manager_target}\n"
+        "is_manager: false\n"
+        "pending_task_items:\n"
+        "  - First completed item.\n"
+        "  - Second completed item.\n"
+        f"session_id: {owner_session}\n"
+        "---\n"
+        "task body\n"
+    ).encode()
+    removal_notes = (
+        b"(verified removed pending item: First completed item.)\n"
+        b"(verified removed pending item: Second completed item.)\n"
+    )
+    reconciled = source.replace(
+        b"pending_task_items:\n  - First completed item.\n  - Second completed item.",
+        b"pending_task_items: []",
+        1,
+    ) + removal_notes
+    directive = (
+        f"Manager reconciliation succeeded. Complete through the owner path using {completion_key}. "
+        "Do not email the Human again.\n"
+    ).encode()
+    running = reconciled.replace(b"status: blocked\n", b"status: running\n", 1).replace(
+        b"blocked_on: manager reconciliation\n",
+        b"",
+        1,
+    ) + directive
+    current = running.replace(b"status: running\n", b"status: done\n", 1)
+    source_todo = f"current:\nworker.md {owner_target}\n\nprevious:\n".encode()
+    done_todo = f"current:\n\nprevious:\nworker.md {owner_target}\n".encode()
+
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.com"], check=True)
+
+    def commit(task_payload: bytes, todo_payload: bytes, message: str) -> str:
+        task.write_bytes(task_payload)
+        (root / "TODO.md").write_bytes(todo_payload)
+        subprocess.run(["git", "-C", str(root), "add", "--", "worker.md", "TODO.md"], check=True)
+        subprocess.run(["git", "-C", str(root), "commit", "-qm", message], check=True)
+        return subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    source_commit = commit(source, source_todo, "source")
+    reconciled_commit = commit(reconciled, source_todo, "reconciled")
+    running_commit = commit(running, source_todo, "running")
+    done_commit = commit(current, done_todo, "done")
+
+    envelope = root.parent / "agent_done_registered.md"
+    envelope_payload = f"registered report {replay_id}\n".encode()
+    envelope.write_bytes(envelope_payload)
+    envelope.chmod(0o600)
+    acceptance = {
+        "accepted": False,
+        "manager_acknowledged": False,
+        "reason": "routed; manager acknowledgment pending",
+        "replay_id": replay_id,
+        "retry_required": True,
+        "routing": {
+            "task": str(task),
+            "producer_target": owner_target,
+            "requested_manager_target": manager_target,
+        },
+        "schema": "omo-report-acceptance/v1",
+        "status": "done",
+        "transfer_receipt": {
+            "authority": {
+                "source_task": str(task),
+                "producer_target": owner_target,
+            },
+            "queue_item": {
+                "replay_id": replay_id,
+                "pointer": f"(from agent {owner_target} {envelope})",
+            },
+        },
+    }
+
+    def session(session_id: str, cwd: Path) -> dict[str, object]:
+        return {
+            "ordinal": 0,
+            "type": "session_meta",
+            "payload": {
+                "id": session_id,
+                "session_id": session_id,
+                "cwd": str(cwd),
+                "originator": "codex-tui",
+                "source": "cli",
+                "thread_source": "user",
+            },
+        }
+
+    def execution(
+        ordinal: int,
+        session_id: str,
+        cwd: Path,
+        command: str,
+        stdout: str,
+    ) -> dict[str, object]:
+        return {
+            "ordinal": ordinal,
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": session_id,
+                "item": {
+                    "type": "CommandExecution",
+                    "command": ["/bin/sh", "-lc", command],
+                    "cwd": f"file://{cwd}",
+                    "source": "unified_exec_startup",
+                    "status": "completed",
+                    "stdout": stdout,
+                    "stderr": "",
+                    "aggregated_output": stdout,
+                    "formatted_output": stdout,
+                    "exit_code": 0,
+                },
+            },
+        }
+
+    owner_records = [
+        session(owner_session, owner_cwd),
+        execution(
+            2,
+            owner_session,
+            owner_cwd,
+            "omo_report.sh --status done --message-file /tmp/report.md",
+            canonical_json(acceptance).decode(),
+        ),
+        {
+            "ordinal": 5,
+            "type": "response_item",
+            "payload": {"type": "message", "content": directive.decode()},
+        },
+        execution(
+            8,
+            owner_session,
+            owner_cwd,
+            f"omo_task_status.py worker.md running --root {root}",
+            "",
+        ),
+        execution(
+            11,
+            owner_session,
+            owner_cwd,
+            (
+                f"omo_task_status.py worker.md --root {root} --complete-live-no-mail "
+                f"--active-target {owner_target} --manager-target {manager_target} "
+                f"--expected-task-sha256 {hashlib.sha256(running).hexdigest()} "
+                f"--expected-todo-sha256 {hashlib.sha256(source_todo).hexdigest()} "
+                "--expected-pane-id %700"
+            ),
+            f"Completed live worker metadata for {owner_target} without email or pane mutation.\nStatus set to done.\n",
+        ),
+    ]
+    removal_line = (
+        "removed 1 pending item(s) from worker.md; Verify the removed pending item was actually done or cancelled; "
+        "consider evaluator agents for uncertain verification.\n"
+    )
+    manager_records = [
+        session(manager_session, manager_cwd),
+        execution(
+            1,
+            manager_session,
+            root,
+            "printf pre-review",
+            "",
+        ),
+        execution(
+            2,
+            manager_session,
+            root,
+            f"rg report {envelope}; omo_task_edit.py summary worker.md",
+            "task_file: worker.md\nstatus: blocked\n",
+        ),
+        {
+            "ordinal": 3,
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "output": [{"type": "input_text", "text": f"{envelope} {replay_id}"}],
+            },
+        },
+        execution(
+            5,
+            manager_session,
+            root,
+            "omo_task_edit.py pending-list worker.md; omo_task_edit.py pending-remove worker.md",
+            removal_line * 2
+            + (
+                "task_file: worker.md\nstatus: blocked\nrunat: cfg:7\nmanagerat: vl:2\n"
+                "is_manager: false\npending_task_items: []\n"
+            ),
+        ),
+        {
+            "ordinal": 8,
+            "type": "response_item",
+            "payload": {"type": "message", "content": f"Agent report received: {envelope}"},
+        },
+        {
+            "ordinal": 11,
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "item": {"type": "FileChange", "changes": {"directive": directive.decode()}},
+            },
+        },
+    ]
+    owner_transcript = root.parent / f"rollout-owner-{owner_session}.jsonl"
+    manager_transcript = root.parent / f"rollout-manager-{manager_session}.jsonl"
+    owner_transcript.write_bytes(b"".join(canonical_json(record) for record in owner_records))
+    manager_transcript.write_bytes(b"".join(canonical_json(record) for record in manager_records))
+    owner_transcript.chmod(0o600)
+    manager_transcript.chmod(0o600)
+    evidence = omo_report_receipt.capture_root_retained_split_no_mail_evidence(
+        owner_transcript,
+        manager_transcript,
+    )
+    registration = omo_report_receipt.RegisteredSplitNoMailTransition(
+        task_ref="worker.md",
+        replay_id=replay_id,
+        owner_target=owner_target,
+        manager_target=manager_target,
+        pane_id="%700",
+        completion_key=completion_key,
+        source_task_sha256=hashlib.sha256(source).hexdigest(),
+        source_task_size_bytes=len(source),
+        source_todo_sha256=hashlib.sha256(source_todo).hexdigest(),
+        source_todo_size_bytes=len(source_todo),
+        reconciled_task_sha256=hashlib.sha256(reconciled).hexdigest(),
+        running_task_sha256=hashlib.sha256(running).hexdigest(),
+        current_task_sha256=hashlib.sha256(current).hexdigest(),
+        current_task_size_bytes=len(current),
+        pre_completion_todo_sha256=hashlib.sha256(source_todo).hexdigest(),
+        done_todo_sha256=hashlib.sha256(done_todo).hexdigest(),
+        source_commit=source_commit,
+        reconciled_commit=reconciled_commit,
+        running_commit=running_commit,
+        done_commit=done_commit,
+        report_envelope=envelope,
+        report_envelope_sha256=hashlib.sha256(envelope_payload).hexdigest(),
+        report_envelope_size_bytes=len(envelope_payload),
+        owner_transcript=owner_transcript,
+        owner_session_id=owner_session,
+        owner_session_cwd=owner_cwd,
+        owner_record_sha256=tuple(
+            (int(record["ordinal"]), hashlib.sha256(canonical_json(record)).hexdigest())
+            for record in owner_records[1:]
+        ),
+        report_event_ordinal=2,
+        owner_directive_ordinal=5,
+        running_event_ordinal=8,
+        completion_event_ordinal=11,
+        manager_transcript=manager_transcript,
+        manager_session_id=manager_session,
+        manager_session_cwd=manager_cwd,
+        manager_record_sha256=tuple(
+            (int(record["ordinal"]), hashlib.sha256(canonical_json(record)).hexdigest())
+            for record in manager_records[1:]
+        ),
+        review_event_ordinal=2,
+        review_output_ordinal=3,
+        removal_event_ordinal=5,
+        consumed_message_ordinal=8,
+        manager_directive_ordinal=11,
+        verified_removal_note_count=2,
+    )
+    route_evidence = (
+        {
+            "exists": True,
+            "path": str(task),
+            "sha256": hashlib.sha256(source).hexdigest(),
+            "size_bytes": len(source),
+        },
+        {
+            "exists": True,
+            "path": str(root / "TODO.md"),
+            "sha256": hashlib.sha256(source_todo).hexdigest(),
+            "size_bytes": len(source_todo),
+        },
+    )
+    return task, route_evidence, evidence, registration
+
+
 def export_archived_report(
     case: ReportFixture,
     envelope: Path,
@@ -5129,6 +5443,168 @@ return 75
                         manager_target,
                     )
 
+    def test_registered_split_no_mail_transition_authenticates_exact_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            replay_id = "4" * 64
+            task, route_evidence, evidence, registration = registered_split_transition_fixture(
+                root,
+                replay_id=replay_id,
+            )
+
+            with patch.object(
+                omo_report_receipt,
+                "REGISTERED_SPLIT_NO_MAIL_TRANSITIONS",
+                (registration,),
+            ):
+                inferred, provenance = omo_report_receipt.infer_archived_task_path(
+                    root,
+                    task,
+                    route_evidence,
+                    replay_id,
+                    "vl:2",
+                    evidence,
+                )
+                todo = root / "TODO.md"
+                todo.write_text(
+                    todo.read_text(encoding="utf-8").replace(
+                        "current:\n",
+                        "current:\nunrelated.md other:1\n",
+                        1,
+                    ),
+                    encoding="utf-8",
+                )
+                subprocess.run(["git", "-C", str(root), "add", "--", "TODO.md"], check=True)
+                subprocess.run(["git", "-C", str(root), "commit", "-qm", "unrelated TODO"], check=True)
+                with registration.owner_transcript.open("ab") as stream:
+                    stream.write(canonical_json({"ordinal": 12, "type": "event_msg", "payload": {}}))
+                same_task, after_append = omo_report_receipt.infer_archived_task_path(
+                    root,
+                    task,
+                    route_evidence,
+                    replay_id,
+                    "vl:2",
+                    evidence,
+                )
+
+            self.assertEqual(task, inferred)
+            self.assertEqual(task, same_task)
+            self.assertNotEqual(provenance, after_append)
+            binding = provenance["commitment_binding"]
+            after_binding = after_append["commitment_binding"]
+            self.assertEqual("registered-exact-split-owner-manager-no-mail", binding["kind"])
+            self.assertEqual("%700", binding["pane_id"])
+            self.assertEqual(2, binding["verified_removal_note_count"])
+            self.assertTrue(binding["no_listed_human_mail_command"])
+            self.assertGreater(
+                after_binding["owner_transcript_observed_size_bytes"],
+                binding["owner_transcript_observed_size_bytes"],
+            )
+
+    def test_registered_split_no_mail_transition_rejects_mismatch(self) -> None:
+        for defect in (
+            "dirty task",
+            "dirty TODO",
+            "changed record",
+            "wrong pane",
+            "email command",
+            "mail command",
+            "pre-review mail command",
+            "parent Git root",
+        ):
+            with self.subTest(defect=defect), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "logs"
+                root.mkdir()
+                replay_id = "5" * 64
+                task, route_evidence, evidence, registration = registered_split_transition_fixture(
+                    root,
+                    replay_id=replay_id,
+                )
+                if defect == "dirty task":
+                    task.write_bytes(task.read_bytes() + b"drift\n")
+                elif defect == "dirty TODO":
+                    with (root / "TODO.md").open("a", encoding="utf-8") as stream:
+                        stream.write("unrelated.md other:1\n")
+                elif defect == "changed record":
+                    registration.manager_transcript.write_bytes(
+                        registration.manager_transcript.read_bytes().replace(
+                            b'"ordinal":3',
+                            b'"ordinal":4',
+                            1,
+                        )
+                    )
+                    evidence = omo_report_receipt.capture_root_retained_split_no_mail_evidence(
+                        registration.owner_transcript,
+                        registration.manager_transcript,
+                    )
+                elif defect == "wrong pane":
+                    registration = replace(registration, pane_id="%701")
+                elif defect == "pre-review mail command":
+                    records = [
+                        json.loads(line)
+                        for line in registration.manager_transcript.read_text(encoding="utf-8").splitlines()
+                    ]
+                    pre_review = next(record for record in records if record.get("ordinal") == 1)
+                    pre_review["payload"]["item"]["command"][-1] = "mail person@example.test"
+                    registration.manager_transcript.write_bytes(
+                        b"".join(canonical_json(record) for record in records)
+                    )
+                    pre_review_digest = hashlib.sha256(canonical_json(pre_review)).hexdigest()
+                    registration = replace(
+                        registration,
+                        manager_record_sha256=tuple(
+                            (ordinal, pre_review_digest if ordinal == 1 else digest)
+                            for ordinal, digest in registration.manager_record_sha256
+                        ),
+                    )
+                    evidence = omo_report_receipt.capture_root_retained_split_no_mail_evidence(
+                        registration.owner_transcript,
+                        registration.manager_transcript,
+                    )
+                elif defect == "parent Git root":
+                    (root / ".git").rename(root.parent / ".git")
+                    (root.parent / "worker.md").write_bytes(task.read_bytes())
+                    (root.parent / "TODO.md").write_bytes((root / "TODO.md").read_bytes())
+                    (root.parent / ".gitignore").write_text("logs/\n", encoding="utf-8")
+                else:
+                    mail_command = (
+                        "email_me.py --manager-human"
+                        if defect == "email command"
+                        else "mail person@example.test"
+                    )
+                    with registration.manager_transcript.open("ab") as stream:
+                        stream.write(
+                            canonical_json(
+                                {
+                                    "ordinal": 12,
+                                    "type": "event_msg",
+                                    "payload": {
+                                        "item": {
+                                            "command": ["/bin/sh", "-lc", mail_command]
+                                        }
+                                    },
+                                }
+                            )
+                        )
+
+                with patch.object(
+                    omo_report_receipt,
+                    "REGISTERED_SPLIT_NO_MAIL_TRANSITIONS",
+                    (registration,),
+                ), self.assertRaisesRegex(
+                    ReceiptError,
+                    "registered split|session transcript prefix",
+                ):
+                    omo_report_receipt.infer_archived_task_path(
+                        root,
+                        task,
+                        route_evidence,
+                        replay_id,
+                        "vl:2",
+                        evidence,
+                    )
+
     def test_root_retained_export_preserves_configured_main_manager_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -6840,7 +7316,7 @@ return 75
             self.assertEqual("cfg:7", receipt["routing"]["producer_target"])
             self.assertEqual(hashlib.sha256(case.message.read_bytes()).hexdigest(), receipt["input"]["sha256"])
             self.assertEqual(
-                {"omo_pending_digest", "omo_task_lock"},
+                {"omo_omnigent_identity", "omo_pending_digest", "omo_task_lock"},
                 set(receipt["helper"]["dependencies"]),
             )
             self.assertEqual(

@@ -174,6 +174,51 @@ class RegisteredRootRetainedCleanup:
 
 
 @dataclass(frozen=True)
+class RegisteredSplitNoMailTransition:
+    task_ref: str
+    replay_id: str
+    owner_target: str
+    manager_target: str
+    pane_id: str
+    completion_key: str
+    source_task_sha256: str
+    source_task_size_bytes: int
+    source_todo_sha256: str
+    source_todo_size_bytes: int
+    reconciled_task_sha256: str
+    running_task_sha256: str
+    current_task_sha256: str
+    current_task_size_bytes: int
+    pre_completion_todo_sha256: str
+    done_todo_sha256: str
+    source_commit: str
+    reconciled_commit: str
+    running_commit: str
+    done_commit: str
+    report_envelope: Path
+    report_envelope_sha256: str
+    report_envelope_size_bytes: int
+    owner_transcript: Path
+    owner_session_id: str
+    owner_session_cwd: Path
+    owner_record_sha256: tuple[tuple[int, str], ...]
+    report_event_ordinal: int
+    owner_directive_ordinal: int
+    running_event_ordinal: int
+    completion_event_ordinal: int
+    manager_transcript: Path
+    manager_session_id: str
+    manager_session_cwd: Path
+    manager_record_sha256: tuple[tuple[int, str], ...]
+    review_event_ordinal: int
+    review_output_ordinal: int
+    removal_event_ordinal: int
+    consumed_message_ordinal: int
+    manager_directive_ordinal: int
+    verified_removal_note_count: int
+
+
+@dataclass(frozen=True)
 class RegisteredInterimAcknowledgment:
     task_ref: str
     manager_ref: str
@@ -220,6 +265,95 @@ REGISTERED_ROOT_RETAINED_CLEANUPS = (
         cleanup_line_numbers=(36, 35),
     ),
 )
+
+# 🧑 "The pending watcher is broken."
+REGISTERED_SPLIT_NO_MAIL_TRANSITIONS = (
+    RegisteredSplitNoMailTransition(
+        task_ref="madhyastha_plot.md",
+        replay_id="30a0604c0e35360e031670154270fcb91358b87766c581506ce815c00294b959",
+        owner_target="dw:0",
+        manager_target="dw:61",
+        pane_id="%3540",
+        completion_key="935be251361cf89b5016b581c70a421a2a455f0c75b123eef9a70e4f2689f24e",
+        source_task_sha256="dff12da0ad912091462db3d6515469714db98be7801fe464a394c26f0cafd517",
+        source_task_size_bytes=6103,
+        source_todo_sha256="efd2465b7971c7625487c2ee93aea675cc75d767641ccdd6522d2d8c8153c8e3",
+        source_todo_size_bytes=3837,
+        reconciled_task_sha256="abd87dec56e0608e15228947a73656054010dfb89eeff8829ffd55388b91d503",
+        running_task_sha256="9a286f0218d125d1d182f017abff5e9931252b49681cc63f11d1f9e7a4709df7",
+        current_task_sha256="a9a09f8c9ed5f0208bce6d1ca5704a6d04c373b34759a943ae82c7bc87b59135",
+        current_task_size_bytes=8266,
+        pre_completion_todo_sha256="e26d45e6e143b95017e49c74393d48a68f09647887f4e54545cb507f687b93b0",
+        done_todo_sha256="35b21ae20a63bf5eb29871d7f9287e823100df390233abb91bed8080b9f54e8e",
+        source_commit="442d3e70a560f4409ecedb44802a2bd7729e8534",
+        reconciled_commit="d8c6cb98eb6b5248abbf03e3b9d3d54bea189d16",
+        running_commit="bc19f2f2381628a71ead71e92fc55885b430f020",
+        done_commit="57065809214fb54b45ba96f05cd3dc2f59d4f828",
+        report_envelope=Path(
+            "/tmp/omo-agent-messages-30033/"
+            "agent_done_0a9aed87a02f0f8dab0eaa0d3b4025b2c63b8e5cc175e204252d4c18f94edab5.md"
+        ),
+        report_envelope_sha256="fdb3a049acbd816a2ed788a8da2aa9836bf0eae754ca127f173f951585aa3e02",
+        report_envelope_size_bytes=2645,
+        owner_transcript=Path(
+            "/home/sichanghe/.codex/sessions/2026/09/19/"
+            "rollout-2026-09-19T12-23-21-01a0bb1f-8855-7a13-a34e-9f1ded9b72ce.jsonl"
+        ),
+        owner_session_id="01a0bb1f-8855-7a13-a34e-9f1ded9b72ce",
+        owner_session_cwd=Path("/ssd1/sichangheagent/dw1"),
+        owner_record_sha256=(
+            (2440, "03803703ab34b424c78c6d5c1ab731614a678d9bc71bdaf969af26d17c602d59"),
+            (2442, "64d5240910192b88b9465ba77e03a0993ca1481bcf5d34f0e0f8a20b38fab59d"),
+            (2443, "77885b7bd376f817296b3b75dd10584fbfb8fed16e5e81432a4391b2486951bc"),
+            (2473, "98ea81e40f47b7d678f8d3ade485986035864dc5623b516b3275eef920114c7e"),
+            (2475, "74d77e314bef5c4cb3dc75db43077ed6841dcca525f522d614c719fdcc285709"),
+            (2476, "942dee7ec576e87203e37af14c4906648c196dbc91ccadc708ffed2ffec0d4d9"),
+            (2507, "0a15de7a2d08fbf8797a10d8765a29905021006c2582ce301df15191723b4568"),
+            (2508, "23e13e5436ead9f5b6d534db00d570bf66fa87b582e74a7c659af578e34e9730"),
+            (2553, "20bf36e94aed9e7c5a552b437178e1313e9486371b5f6b336d1489f3c3d91c95"),
+            (2555, "40a88b00ccad42ec61531b02c03be2dc9d644ff660797a126184e8779cf24984"),
+            (2556, "45ef751a9dab71e5861f41fb08a36f8d6758b88e097a92bcb41c28bca457b368"),
+            (2567, "246b05680a6cc58c830db9caa6a53da26e8215d8d4e06de410652d035b51c1d9"),
+            (2569, "7d7b904865c115743ee27f937cd22c6fb023a132c42e262e5fc5ea5fa52c4e7a"),
+            (2570, "7de5a8e1f7c7e2baa4102d2c769898445b3c82e5bb39d2cec0c38b63221ec8d8"),
+        ),
+        report_event_ordinal=2442,
+        owner_directive_ordinal=2507,
+        running_event_ordinal=2555,
+        completion_event_ordinal=2569,
+        manager_transcript=Path(
+            "/home/sichanghe/.codex/sessions/2026/09/19/"
+            "rollout-2026-09-19T13-27-44-01a0bb5a-7b07-7802-bc30-862f3666f5bb.jsonl"
+        ),
+        manager_session_id="01a0bb5a-7b07-7802-bc30-862f3666f5bb",
+        manager_session_cwd=Path("/ssd1/sichangheagent/dw"),
+        manager_record_sha256=(
+            (2587, "5500a93c88ea6a3a67cfbd28420e439b59a040759a351765d7bf6191d67fe69e"),
+            (2588, "16003c25aff0e1ea4d017b8b2be9a9ea35b6e0c388ed8168bf80fee8b79cb903"),
+            (2591, "74af15786be48a32945aea1fb59b8773e6976a9dc658bf4d1236b7906a62d2a1"),
+            (2593, "fe128e5ec7f26326073d40ef9ae72f7550fcfa9cf137a10131de51807fa3d97e"),
+            (2594, "118d2e60b2185a713e75c081c3ffeccf04104f36a26fe6c72d221d251fac9ff4"),
+            (2600, "70b9a74908c31f6cec88bfabe05cf8d0bb69ead8c44848b0d385b9ca694210cf"),
+            (2602, "fd67a725db9a7e65a7dc50aead3c75aed3a9e4ba7f4b8ca42244ffaddfc8179f"),
+            (2610, "5967c3f0658c25477577660375b935a3d16f57f8c9fcb2df2d40bf1c29d6bd2b"),
+            (2620, "196ef812b9ebe4a830625830777260ad482f01f3bc8aa23ad88382feedead871"),
+            (2621, "ac6eb7a345c893b7db69ea48394d5560f42e527d2a335f36ff5bee9eb7a6463e"),
+            (2632, "d4c837a22719b78d72f7a3d2b7bd8ea31ce3f90b930f7dc0b921c3c7ed51a943"),
+            (2633, "a00aaf170bb75eef224cc0f265cb778f29321483bddc6b33dad93405c6f1b714"),
+            (2635, "492c343f945fad3f913771f2e32386972d78f1501f4c432b301325b1b3822eb4"),
+            (2637, "476fc12155210301c915e8520db71ff05cbe655da453d751bc004475080090eb"),
+            (2639, "b8dc1618049ac67175f1d538ec9f3c5ea311174fdae74bd316de17178a354407"),
+            (2641, "fac2790eb8278fa27491a7ef8609b1427dfb134cf131a4d4eeb6d560513e236d"),
+        ),
+        review_event_ordinal=2593,
+        review_output_ordinal=2594,
+        removal_event_ordinal=2610,
+        consumed_message_ordinal=2620,
+        manager_directive_ordinal=2633,
+        verified_removal_note_count=18,
+    ),
+)
+
 
 REGISTERED_INTERIM_ACKNOWLEDGMENTS = (
     RegisteredInterimAcknowledgment(
@@ -5808,6 +5942,91 @@ def read_append_only_session_prefix(
     return payload
 
 
+def read_append_only_session_snapshot(
+    evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | RootRetainedSplitNoMailEvidence,
+    *,
+    manager: bool = False,
+    maximum: int = MAX_SESSION_PREFIX_BYTES,
+) -> bytes:
+    """Read one stable current transcript snapshot rooted in a bound prefix."""
+
+    prefix = read_append_only_session_prefix(evidence, manager=manager, maximum=maximum)
+    if manager and isinstance(evidence, RootRetainedSplitNoMailEvidence):
+        path = evidence.manager_transcript
+        expected_size = evidence.manager_transcript_prefix_size_bytes
+    elif manager:
+        raise ReceiptError("root-retained evidence has no manager transcript")
+    else:
+        path = evidence.transcript
+        expected_size = evidence.transcript_prefix_size_bytes
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise ReceiptError("root-retained session transcript is unavailable") from exc
+    try:
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_nlink != 1
+            or stat.S_IMODE(before.st_mode) & 0o022
+            or before.st_size < expected_size
+            or before.st_size > maximum
+        ):
+            raise ReceiptError("root-retained session transcript is not one safe owned file")
+        snapshot_size = before.st_size
+
+        def read_snapshot() -> bytes:
+            remaining = snapshot_size
+            chunks: list[bytes] = []
+            while remaining:
+                chunk = os.read(fd, min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            return b"".join(chunks)
+
+        payload = read_snapshot()
+        _ = os.lseek(fd, 0, os.SEEK_SET)
+        repeated = read_snapshot()
+        after = os.fstat(fd)
+        current = path.lstat()
+    except OSError as exc:
+        raise ReceiptError("root-retained session transcript changed while it was read") from exc
+    finally:
+        os.close(fd)
+    before_identity = (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    )
+    after_identity = (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+    if (
+        before_identity != after_identity
+        or len(payload) != snapshot_size
+        or repeated != payload
+        or payload[:expected_size] != prefix
+        or not payload.endswith(b"\n")
+        or (after.st_dev, after.st_ino) != (current.st_dev, current.st_ino)
+        or not stat.S_ISREG(current.st_mode)
+        or current.st_uid != os.getuid()
+        or current.st_nlink != 1
+        or stat.S_IMODE(current.st_mode) & 0o022
+    ):
+        raise ReceiptError("root-retained session transcript snapshot changed or is invalid")
+    return payload
+
+
 def capture_session_prefix(path: Path, field: str) -> tuple[Path, bytes]:
     """Capture one complete stable prefix from an owned append-only transcript."""
 
@@ -5978,7 +6197,7 @@ def command_mentions_email_helper(command: object) -> bool:
     return isinstance(command, list) and any(
         isinstance(part, str)
         and re.search(
-            r"(?:^|[^A-Za-z0-9_.-])(?:email_me\.py|sendmail|mailx|s-nail|mutt|swaks|smtplib)(?:$|[^A-Za-z0-9_.-])",
+            r"(?:^|[^A-Za-z0-9_.-])(?:email_me\.py|sendmail|mail|mailx|s-nail|mutt|swaks|smtplib)(?:$|[^A-Za-z0-9_.-])",
             part,
         )
         for part in command
@@ -8159,6 +8378,486 @@ def registered_cleanup_transcript_binding(
     }
 
 
+def registered_split_no_mail_transition_provenance(
+    root: Path,
+    original_task: Path,
+    original_ref: str,
+    current_payload: bytes,
+    todo_path: Path,
+    todo_payload: bytes,
+    expected_row: str,
+    previous_headers: int,
+    matching_rows: list[tuple[str, str]],
+    source_sha256: str,
+    source_size: int,
+    source_todo_sha256: str,
+    source_todo_size: int,
+    replay_id: str,
+    manager_target: str,
+    evidence: RootRetainedEvidence | RootRetainedNoMailEvidence | RootRetainedSplitNoMailEvidence | None,
+) -> dict[str, object] | None:
+    """Authenticate one exact multi-item manager/owner no-mail transition."""
+
+    matches = [
+        transition
+        for transition in REGISTERED_SPLIT_NO_MAIL_TRANSITIONS
+        if transition.task_ref == original_ref and transition.replay_id == replay_id
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise ReceiptError("registered split no-mail transition is ambiguous")
+    transition = matches[0]
+    current_sha256 = hashlib.sha256(current_payload).hexdigest()
+    snapshot = frontmatter_snapshot(current_payload)
+    if (
+        not isinstance(evidence, RootRetainedSplitNoMailEvidence)
+        or evidence.transcript != transition.owner_transcript
+        or evidence.manager_transcript != transition.manager_transcript
+        or Path(original_ref).parent != Path(".")
+        or original_task != root / transition.task_ref
+        or manager_target != transition.manager_target
+        or source_sha256 != transition.source_task_sha256
+        or source_size != transition.source_task_size_bytes
+        or source_todo_sha256 != transition.source_todo_sha256
+        or source_todo_size != transition.source_todo_size_bytes
+        or current_sha256 != transition.current_task_sha256
+        or len(current_payload) != transition.current_task_size_bytes
+        or snapshot is None
+        or snapshot[0].get("status") != "done"
+        or snapshot[0].get("runat") != transition.owner_target
+        or snapshot[0].get("managerat") != manager_target
+        or snapshot[0].get("tool") != "codex"
+        or snapshot[0].get("is_manager") != "false"
+        or snapshot[0].get("pending_task_items") != "[]"
+        or snapshot[0].get("session_id") != transition.owner_session_id
+        or "blocked_on" in snapshot[0]
+        or previous_headers != 1
+        or matching_rows != [("previous", expected_row)]
+    ):
+        raise ReceiptError("registered split no-mail task transition does not match exact terminal state")
+
+    owner_snapshot = read_append_only_session_snapshot(evidence)
+    manager_snapshot = read_append_only_session_snapshot(evidence, manager=True)
+    owner_records = root_retained_jsonl_records(owner_snapshot, "registered split owner snapshot")
+    manager_records = root_retained_jsonl_records(manager_snapshot, "registered split manager snapshot")
+
+    def selected_records(
+        records: list[dict[str, object]],
+        bindings: tuple[tuple[int, str], ...],
+        role: str,
+    ) -> dict[int, dict[str, object]]:
+        wanted = dict(bindings)
+        if len(wanted) != len(bindings) or any(HASH_RE.fullmatch(digest) is None for digest in wanted.values()):
+            raise ReceiptError(f"registered split {role} record registry is invalid")
+        selected: dict[int, dict[str, object]] = {}
+        observed_ordinals: list[int] = []
+        for record in records:
+            ordinal = record.get("ordinal")
+            if not isinstance(ordinal, int):
+                raise ReceiptError(f"registered split {role} record ordinal is invalid")
+            observed_ordinals.append(ordinal)
+            if ordinal not in wanted:
+                continue
+            if ordinal in selected:
+                raise ReceiptError(f"registered split {role} record ordinal is ambiguous")
+            if hashlib.sha256(canonical_json(record)).hexdigest() != wanted[ordinal]:
+                raise ReceiptError(f"registered split {role} record changed")
+            selected[ordinal] = record
+        if observed_ordinals != sorted(set(observed_ordinals)):
+            raise ReceiptError(f"registered split {role} record order changed")
+        if set(selected) != set(wanted):
+            raise ReceiptError(f"registered split {role} record is missing")
+        return selected
+
+    owner_selected = selected_records(owner_records, transition.owner_record_sha256, "owner")
+    manager_selected = selected_records(manager_records, transition.manager_record_sha256, "manager")
+
+    def session_identity(
+        records: list[dict[str, object]],
+        transcript: Path,
+        session_id: str,
+        cwd: Path,
+        role: str,
+    ) -> None:
+        matches = [record for record in records if record.get("type") == "session_meta"]
+        payload = matches[0].get("payload") if matches else None
+        if (
+            len(matches) != 1
+            or records.index(matches[0]) != 0
+            or matches[0].get("ordinal") != 0
+            or not isinstance(payload, dict)
+            or payload.get("id") != session_id
+            or payload.get("session_id") != session_id
+            or payload.get("cwd") != str(cwd)
+            or payload.get("originator") != "codex-tui"
+            or payload.get("source") != "cli"
+            or payload.get("thread_source") not in {None, "user"}
+            or any(key in payload for key in ("forked_from_id", "parent_thread_id"))
+            or not transcript.name.endswith(f"-{session_id}.jsonl")
+        ):
+            raise ReceiptError(f"registered split {role} transcript is not the exact top-level session")
+
+    session_identity(
+        owner_records,
+        evidence.transcript,
+        transition.owner_session_id,
+        transition.owner_session_cwd,
+        "owner",
+    )
+    session_identity(
+        manager_records,
+        evidence.manager_transcript,
+        transition.manager_session_id,
+        transition.manager_session_cwd,
+        "manager",
+    )
+
+    envelope_payload = regular_file_bytes(
+        transition.report_envelope,
+        maximum=MAX_ENVELOPE_BYTES,
+        field="registered split report envelope",
+    )
+    if (
+        len(envelope_payload) != transition.report_envelope_size_bytes
+        or hashlib.sha256(envelope_payload).hexdigest() != transition.report_envelope_sha256
+    ):
+        raise ReceiptError("registered split report envelope changed")
+
+    def successful_execution(
+        record: dict[str, object],
+        session_id: str,
+        cwd: Path,
+        role: str,
+    ) -> tuple[str, str]:
+        payload = record.get("payload")
+        item = payload.get("item") if isinstance(payload, dict) else None
+        command = item.get("command") if isinstance(item, dict) else None
+        stdout = item.get("stdout") if isinstance(item, dict) else None
+        if (
+            record.get("type") != "event_msg"
+            or not isinstance(payload, dict)
+            or payload.get("type") != "item_completed"
+            or payload.get("thread_id") != session_id
+            or not isinstance(item, dict)
+            or item.get("type") != "CommandExecution"
+            or item.get("status") != "completed"
+            or item.get("exit_code") != 0
+            or item.get("stderr") != ""
+            or item.get("cwd") != f"file://{cwd}"
+            or item.get("source") != "unified_exec_startup"
+            or not isinstance(command, list)
+            or not command
+            or not all(isinstance(part, str) for part in command)
+            or not isinstance(stdout, str)
+            or item.get("aggregated_output") != stdout
+            or item.get("formatted_output") != stdout
+        ):
+            raise ReceiptError(f"registered split {role} execution is invalid")
+        return command[-1], stdout
+
+    report_command, report_stdout = successful_execution(
+        owner_selected[transition.report_event_ordinal],
+        transition.owner_session_id,
+        transition.owner_session_cwd,
+        "report",
+    )
+    try:
+        acceptance = json.loads(report_stdout)
+    except json.JSONDecodeError as exc:
+        raise ReceiptError("registered split report acceptance is invalid") from exc
+    routing = acceptance.get("routing") if isinstance(acceptance, dict) else None
+    transfer = acceptance.get("transfer_receipt") if isinstance(acceptance, dict) else None
+    queue_item = transfer.get("queue_item") if isinstance(transfer, dict) else None
+    authority = transfer.get("authority") if isinstance(transfer, dict) else None
+    if (
+        not isinstance(acceptance, dict)
+        or canonical_json(acceptance) != report_stdout.encode()
+        or "omo_report.sh --status done --message-file" not in report_command
+        or acceptance.get("schema") != ACCEPTANCE_SCHEMA
+        or acceptance.get("accepted") is not False
+        or acceptance.get("manager_acknowledged") is not False
+        or acceptance.get("retry_required") is not True
+        or acceptance.get("status") != "done"
+        or acceptance.get("replay_id") != replay_id
+        or acceptance.get("reason") != "routed; manager acknowledgment pending"
+        or not isinstance(routing, dict)
+        or routing.get("task") != str(original_task)
+        or routing.get("producer_target") != transition.owner_target
+        or routing.get("requested_manager_target") != manager_target
+        or not isinstance(queue_item, dict)
+        or queue_item.get("replay_id") != replay_id
+        or queue_item.get("pointer")
+        != f"(from agent {transition.owner_target} {transition.report_envelope})"
+        or not isinstance(authority, dict)
+        or authority.get("source_task") != str(original_task)
+        or authority.get("producer_target") != transition.owner_target
+    ):
+        raise ReceiptError("registered split report acceptance changed")
+
+    review_command, review_stdout = successful_execution(
+        manager_selected[transition.review_event_ordinal],
+        transition.manager_session_id,
+        root,
+        "manager review",
+    )
+    review_payload = manager_selected[transition.review_output_ordinal].get("payload")
+    review_blocks = review_payload.get("output") if isinstance(review_payload, dict) else None
+    review_output = "".join(
+        str(block.get("text", ""))
+        for block in review_blocks
+        if isinstance(block, dict)
+    ) if isinstance(review_blocks, list) else ""
+    if (
+        f"omo_task_edit.py summary {transition.task_ref}" not in review_command
+        or f"task_file: {transition.task_ref}\nstatus: blocked\n" not in review_stdout
+        or review_output.count(str(transition.report_envelope)) < 1
+        or replay_id not in review_output
+    ):
+        raise ReceiptError("registered split manager review changed")
+
+    removal_command, removal_stdout = successful_execution(
+        manager_selected[transition.removal_event_ordinal],
+        transition.manager_session_id,
+        root,
+        "manager removal",
+    )
+    removal_line = (
+        f"removed 1 pending item(s) from {transition.task_ref}; Verify the removed pending item was actually "
+        "done or cancelled; consider evaluator agents for uncertain verification.\n"
+    )
+    if (
+        "omo_task_edit.py pending-list" not in removal_command
+        or "omo_task_edit.py pending-remove" not in removal_command
+        or removal_stdout
+        != removal_line * transition.verified_removal_note_count
+        + (
+            f"task_file: {transition.task_ref}\n"
+            "status: blocked\n"
+            f"runat: {transition.owner_target}\n"
+            f"managerat: {transition.manager_target}\n"
+            "is_manager: false\n"
+            "pending_task_items: []\n"
+        )
+    ):
+        raise ReceiptError("registered split manager removal changed")
+
+    consumed_text = json.dumps(
+        manager_selected[transition.consumed_message_ordinal],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    directive_text = json.dumps(
+        manager_selected[transition.manager_directive_ordinal],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    owner_directive_text = json.dumps(
+        owner_selected[transition.owner_directive_ordinal],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    if (
+        str(transition.report_envelope) not in consumed_text
+        or transition.completion_key not in directive_text
+        or "Do not email the Human again." not in directive_text
+        or transition.completion_key not in owner_directive_text
+        or "Do not email the Human again." not in owner_directive_text
+    ):
+        raise ReceiptError("registered split consumption or completion directive changed")
+
+    running_command, running_stdout = successful_execution(
+        owner_selected[transition.running_event_ordinal],
+        transition.owner_session_id,
+        transition.owner_session_cwd,
+        "owner running transition",
+    )
+    completion_command, completion_stdout = successful_execution(
+        owner_selected[transition.completion_event_ordinal],
+        transition.owner_session_id,
+        transition.owner_session_cwd,
+        "owner completion",
+    )
+    if (
+        f"omo_task_status.py {transition.task_ref} running --root {root}" not in running_command
+        or running_stdout != ""
+        or "--complete-live-no-mail" not in completion_command
+        or f"--active-target {transition.owner_target}" not in completion_command
+        or f"--manager-target {manager_target}" not in completion_command
+        or f"--expected-task-sha256 {transition.running_task_sha256}" not in completion_command
+        or f"--expected-todo-sha256 {transition.pre_completion_todo_sha256}" not in completion_command
+        or f"--expected-pane-id {transition.pane_id}" not in completion_command
+        or completion_stdout
+        != f"Completed live worker metadata for {transition.owner_target} without email or pane mutation.\nStatus set to done.\n"
+    ):
+        raise ReceiptError("registered split owner completion changed")
+
+    owner_start = min(dict(transition.owner_record_sha256))
+    manager_start = min(dict(transition.manager_record_sha256))
+    bounded_records = (
+        *(record for record in owner_records if owner_start <= record["ordinal"]),
+        *(record for record in manager_records if manager_start <= record["ordinal"]),
+    )
+    for record in bounded_records:
+        payload = record.get("payload")
+        item = payload.get("item") if isinstance(payload, dict) else None
+        raw_input = payload.get("input") if isinstance(payload, dict) else None
+        if command_mentions_email_helper(item.get("command") if isinstance(item, dict) else None) or (
+            record.get("type") == "response_item"
+            and isinstance(payload, dict)
+            and payload.get("type") == "custom_tool_call"
+            and payload.get("name") == "exec"
+            and isinstance(raw_input, str)
+            and re.search(
+                r"(?:^|[^A-Za-z0-9_.-])(?:email_me\.py|sendmail|mail|mailx|s-nail|mutt|swaks|smtplib)(?:$|[^A-Za-z0-9_.-])",
+                raw_input,
+            )
+        ):
+            raise ReceiptError("registered split transition contains a Human email command")
+
+    def git(*arguments: str) -> bytes:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(root), *arguments],
+                capture_output=True,
+                timeout=30,
+                check=True,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ReceiptError("registered split Git custody is unavailable") from exc
+        return result.stdout
+
+    try:
+        resolved_root = root.resolve(strict=True)
+        git_top_level = Path(os.fsdecode(git("rev-parse", "--show-toplevel").strip())).resolve(strict=True)
+    except (OSError, UnicodeError) as exc:
+        raise ReceiptError("registered split Git top-level identity is unavailable") from exc
+    if not root.is_absolute() or root != resolved_root or git_top_level != resolved_root:
+        raise ReceiptError("registered split Git top-level does not match the work-log root")
+
+    commits = (
+        transition.source_commit,
+        transition.reconciled_commit,
+        transition.running_commit,
+        transition.done_commit,
+    )
+    for earlier, later in zip(commits, commits[1:]):
+        try:
+            subprocess.run(
+                ["git", "-C", str(root), "merge-base", "--is-ancestor", earlier, later],
+                capture_output=True,
+                timeout=30,
+                check=True,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ReceiptError("registered split Git commit sequence changed") from exc
+    try:
+        subprocess.run(
+            ["git", "-C", str(root), "merge-base", "--is-ancestor", transition.done_commit, "HEAD"],
+            capture_output=True,
+            timeout=30,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ReceiptError("registered split terminal commit is not retained") from exc
+
+    task_payloads = tuple(git("show", f"{commit}:{original_ref}") for commit in commits)
+    todo_payloads = tuple(git("show", f"{commit}:TODO.md") for commit in commits)
+    task_hashes = tuple(hashlib.sha256(payload).hexdigest() for payload in task_payloads)
+    todo_hashes = tuple(hashlib.sha256(payload).hexdigest() for payload in todo_payloads)
+    head_before = git("rev-parse", "--verify", "HEAD").strip()
+    head_task = git("show", f"HEAD:{original_ref}")
+    head_todo = git("show", "HEAD:TODO.md")
+    current_status = git(
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--",
+        original_ref,
+        "TODO.md",
+    )
+    head_after = git("rev-parse", "--verify", "HEAD").strip()
+    if (
+        task_hashes
+        != (
+            transition.source_task_sha256,
+            transition.reconciled_task_sha256,
+            transition.running_task_sha256,
+            transition.current_task_sha256,
+        )
+        or todo_hashes[0] != transition.source_todo_sha256
+        or todo_hashes[1:3]
+        != (transition.pre_completion_todo_sha256, transition.pre_completion_todo_sha256)
+        or todo_hashes[3] != transition.done_todo_sha256
+        or len(task_payloads[0]) != transition.source_task_size_bytes
+        or task_payloads[3] != current_payload
+        or head_before != head_after
+        or re.fullmatch(rb"[0-9a-f]{40}|[0-9a-f]{64}", head_before) is None
+        or head_task != current_payload
+        or head_todo != todo_payload
+        or current_status
+        or regular_file_bytes(original_task, maximum=MAX_ROUTE_FILE_BYTES, field="completed task")
+        != current_payload
+        or regular_file_bytes(todo_path, maximum=MAX_ROUTE_FILE_BYTES, field="TODO") != todo_payload
+    ):
+        raise ReceiptError("registered split Git custody changed or is not clean")
+    running_to_done, replacements = re.subn(
+        rb"(?m)^status: running$",
+        b"status: done",
+        task_payloads[2],
+        count=1,
+    )
+    source_frontmatter = task_payloads[0].split(b"---", 2)[1]
+    current_frontmatter = current_payload.split(b"---", 2)[1]
+    if (
+        replacements != 1
+        or running_to_done != current_payload
+        or source_frontmatter.count(b"\n  - ") != transition.verified_removal_note_count
+        or current_frontmatter.count(b"\n  - ") != 0
+        or current_payload.count(b"\n(verified removed pending item:")
+        - task_payloads[0].count(b"\n(verified removed pending item:")
+        != transition.verified_removal_note_count
+    ):
+        raise ReceiptError("registered split task evolution changed")
+
+    return {
+        "schema": "omo-report-terminal-task-transition/v1",
+        "task_ref": original_ref,
+        "committed_running_sha256": source_sha256,
+        "committed_running_size_bytes": source_size,
+        "current_done_sha256": current_sha256,
+        "current_done_size_bytes": len(current_payload),
+        "todo_previous_row": expected_row,
+        "commitment_binding": {
+            "kind": "registered-exact-split-owner-manager-no-mail",
+            "replay_id": replay_id,
+            "session_id": transition.owner_session_id,
+            "pane_id": transition.pane_id,
+            "owner_transcript": str(evidence.transcript),
+            "owner_transcript_prefix_sha256": evidence.transcript_prefix_sha256,
+            "owner_transcript_prefix_size_bytes": evidence.transcript_prefix_size_bytes,
+            "owner_transcript_observed_sha256": hashlib.sha256(owner_snapshot).hexdigest(),
+            "owner_transcript_observed_size_bytes": len(owner_snapshot),
+            "manager_session_id": transition.manager_session_id,
+            "manager_target": manager_target,
+            "manager_transcript": str(evidence.manager_transcript),
+            "manager_transcript_prefix_sha256": evidence.manager_transcript_prefix_sha256,
+            "manager_transcript_prefix_size_bytes": evidence.manager_transcript_prefix_size_bytes,
+            "manager_transcript_observed_sha256": hashlib.sha256(manager_snapshot).hexdigest(),
+            "manager_transcript_observed_size_bytes": len(manager_snapshot),
+            "report_envelope_sha256": transition.report_envelope_sha256,
+            "source_commit": transition.source_commit,
+            "reconciled_commit": transition.reconciled_commit,
+            "running_commit": transition.running_commit,
+            "done_commit": transition.done_commit,
+            "owner_record_sha256": dict(transition.owner_record_sha256),
+            "manager_record_sha256": dict(transition.manager_record_sha256),
+            "no_listed_human_mail_command": True,
+            "verified_removal_note_count": transition.verified_removal_note_count,
+        },
+    }
+
+
 def registered_root_retained_cleanup_provenance(
     root: Path,
     original_task: Path,
@@ -8350,6 +9049,26 @@ def infer_archived_task_path(
                     previous_headers += 1
             elif original_ref in stripped.split():
                 matching_rows.append((section, line))
+        registered_split = registered_split_no_mail_transition_provenance(
+            root,
+            original_task,
+            original_ref,
+            current_payload,
+            todo_path,
+            todo_payload,
+            expected_row,
+            previous_headers,
+            matching_rows,
+            str(source_sha256),
+            source_size,
+            str(todo_records[0]["sha256"]),
+            int(todo_records[0].get("size_bytes", 0)),
+            replay_id,
+            manager_target,
+            root_retained_evidence,
+        )
+        if registered_split is not None:
+            return original_task, registered_split
         if (
             replacements == 1
             and len(restored_running) == source_size
