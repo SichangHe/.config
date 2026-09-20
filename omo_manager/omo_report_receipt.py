@@ -6204,6 +6204,21 @@ def command_mentions_email_helper(command: object) -> bool:
     )
 
 
+def command_execution_mentions_email(record: dict[str, object]) -> bool:
+    """Detect Human-mail clients only in an actual completed command record."""
+
+    payload = record.get("payload")
+    item = payload.get("item") if isinstance(payload, dict) else None
+    return (
+        record.get("type") == "event_msg"
+        and isinstance(payload, dict)
+        and payload.get("type") == "item_completed"
+        and isinstance(item, dict)
+        and item.get("type") == "CommandExecution"
+        and command_mentions_email_helper(item.get("command"))
+    )
+
+
 def custom_exec_shell_command(raw_input: str) -> str:
     """Extract the exact shell command from a canonical Codex exec call."""
 
@@ -8699,20 +8714,7 @@ def registered_split_no_mail_transition_provenance(
         *(record for record in manager_records if manager_start <= record["ordinal"]),
     )
     for record in bounded_records:
-        payload = record.get("payload")
-        item = payload.get("item") if isinstance(payload, dict) else None
-        raw_input = payload.get("input") if isinstance(payload, dict) else None
-        if command_mentions_email_helper(item.get("command") if isinstance(item, dict) else None) or (
-            record.get("type") == "response_item"
-            and isinstance(payload, dict)
-            and payload.get("type") == "custom_tool_call"
-            and payload.get("name") == "exec"
-            and isinstance(raw_input, str)
-            and re.search(
-                r"(?:^|[^A-Za-z0-9_.-])(?:email_me\.py|sendmail|mail|mailx|s-nail|mutt|swaks|smtplib)(?:$|[^A-Za-z0-9_.-])",
-                raw_input,
-            )
-        ):
+        if command_execution_mentions_email(record):
             raise ReceiptError("registered split transition contains a Human email command")
 
     def git(*arguments: str) -> bytes:

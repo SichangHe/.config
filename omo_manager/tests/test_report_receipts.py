@@ -5478,7 +5478,25 @@ return 75
                 subprocess.run(["git", "-C", str(root), "add", "--", "TODO.md"], check=True)
                 subprocess.run(["git", "-C", str(root), "commit", "-qm", "unrelated TODO"], check=True)
                 with registration.owner_transcript.open("ab") as stream:
-                    stream.write(canonical_json({"ordinal": 12, "type": "event_msg", "payload": {}}))
+                    stream.write(
+                        canonical_json(
+                            {
+                                "ordinal": 12,
+                                "type": "response_item",
+                                "payload": {
+                                    "type": "custom_tool_call",
+                                    "name": "exec",
+                                    "status": "completed",
+                                    "call_id": "call_harmless_patch",
+                                    "input": (
+                                        'const patch = "*** Begin Patch\\n+Preserve Source-1994 '
+                                        'mail/work state.\\n*** End Patch"; '
+                                        "text(await tools.apply_patch(patch));"
+                                    ),
+                                },
+                            }
+                        )
+                    )
                 same_task, after_append = omo_report_receipt.infer_archived_task_path(
                     root,
                     task,
@@ -5510,6 +5528,7 @@ return 75
             "wrong pane",
             "email command",
             "mail command",
+            "failed mail command",
             "pre-review mail command",
             "parent Git root",
         ):
@@ -5573,6 +5592,8 @@ return 75
                         if defect == "email command"
                         else "mail person@example.test"
                     )
+                    failed = defect == "failed mail command"
+                    command_output = "mail: delivery failed\n" if failed else ""
                     with registration.manager_transcript.open("ab") as stream:
                         stream.write(
                             canonical_json(
@@ -5580,9 +5601,20 @@ return 75
                                     "ordinal": 12,
                                     "type": "event_msg",
                                     "payload": {
+                                        "type": "item_completed",
+                                        "thread_id": registration.manager_session_id,
                                         "item": {
-                                            "command": ["/bin/sh", "-lc", mail_command]
-                                        }
+                                            "type": "CommandExecution",
+                                            "command": ["/bin/sh", "-lc", mail_command],
+                                            "cwd": f"file://{registration.manager_session_cwd}",
+                                            "source": "unified_exec_startup",
+                                            "status": "failed" if failed else "completed",
+                                            "stdout": "",
+                                            "stderr": command_output,
+                                            "aggregated_output": command_output,
+                                            "formatted_output": command_output,
+                                            "exit_code": 1 if failed else 0,
+                                        },
                                     },
                                 }
                             )
