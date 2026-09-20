@@ -162,6 +162,7 @@ def audit(root: Path, *, include_terminal: bool = False, terminal_dispositions: 
     except (UnicodeError, TaskFrontmatterError) as exc:
         raise TaskFrontmatterError(f"cannot read root TODO file: {exc}") from exc
     todo_rows: dict[Path, list[tuple[str, str]]] = defaultdict(list)
+    todo_row_lines: dict[Path, list[str]] = defaultdict(list)
     local_todo_rows = {(row.task_file, row.section, row.line, row.target) for row in local_rows}
     todo_path_findings: list[Finding] = []
     for row in parse_task_lines(todo_path):
@@ -185,6 +186,7 @@ def audit(root: Path, *, include_terminal: bool = False, terminal_dispositions: 
                 )
             )
         todo_rows[candidate].append((row.section, row.target))
+        todo_row_lines[candidate].append(row.line)
 
     paths = task_files(root)
     task_snapshots: dict[Path, FileSnapshot] = {}
@@ -221,7 +223,20 @@ def audit(root: Path, *, include_terminal: bool = False, terminal_dispositions: 
     for path, metadata in metadata_by_path.items():
         relative = path.relative_to(root).as_posix()
         rows = todo_rows.get(path, [])
+        row_lines = todo_row_lines.get(path, [])
         archived = not rows and (path in archived_paths or is_monthly_archive_path(root, path))
+        retired_terminal = metadata.status == "done" and metadata.runat == RETIRED_RUNAT
+        retired_terminal_valid = rows == [("todo:previous", "")] and row_lines == [relative]
+        if retired_terminal and not retired_terminal_valid:
+            findings.append(
+                Finding(
+                    "retired_todo_invalid",
+                    relative,
+                    (relative,),
+                    "done retired task requires exactly one canonical targetless previous row",
+                    "owner_reconciliation",
+                )
+            )
         if metadata.status == "done" and metadata.pending_task_items and not archived:
             findings.append(
                 Finding(
@@ -274,7 +289,9 @@ def audit(root: Path, *, include_terminal: bool = False, terminal_dispositions: 
             else:
                 kind, action, detail = "zero_todo", "owner_reconciliation", f"status={metadata.status}"
             findings.append(Finding(kind, relative, (relative,), detail, action))
-        elif rows[0][1] and canonical_target(rows[0][1]) != canonical_target(metadata.runat):
+        elif rows[0][1] and canonical_target(rows[0][1]) != canonical_target(metadata.runat) and not (
+            retired_terminal and retired_terminal_valid
+        ):
             findings.append(
                 Finding(
                     "todo_runat_mismatch",

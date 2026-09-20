@@ -40,6 +40,12 @@ class TaskMetadataRunatTests(unittest.TestCase):
                 self.assertEqual("omnigent://019f0000-0000-7000-8000-000000000123", metadata.runat)
                 self.assertEqual("omnigent", runat_kind(metadata.runat))
 
+    def test_done_retired_is_valid_terminal_metadata(self) -> None:
+        metadata = parse_task_metadata(task("v1.0.0", "retired").replace("status: running", "status: done"))
+        assert metadata is not None
+        self.assertEqual("done", metadata.status)
+        self.assertEqual("retired", metadata.runat)
+
     def test_tmux_targets_keep_precedence_and_canonicalization(self) -> None:
         for target, canonical in (("wl:2", "wl:2"), ("wl:2.0", "wl:2"), ("omnigent:123", "omnigent:123")):
             with self.subTest(target=target):

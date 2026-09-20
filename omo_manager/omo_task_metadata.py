@@ -392,8 +392,8 @@ def parse_common(values: Mapping[str, object], allowed: set[str]) -> tuple[str, 
     target_kind = runat_kind(runat)
     if target_kind is None:
         raise TaskFrontmatterError("`runat` must be a tmux target, an `omnigent://SESSION_ID` target, or `retired`.")
-    if runat == RETIRED_RUNAT and status != "blocked":
-        raise TaskFrontmatterError("`runat: retired` is only valid when `status` is `blocked`.")
+    if runat == RETIRED_RUNAT and status not in {"blocked", "done"}:
+        raise TaskFrontmatterError("`runat: retired` is only valid when `status` is `blocked` or `done`.")
     if TARGET_RE.fullmatch(managerat) is None:
         raise TaskFrontmatterError("`managerat` must be a tmux target.")
     if canonical_target(runat) == canonical_target(managerat):

@@ -85,6 +85,34 @@ class TaskAuditTests(unittest.TestCase):
 
             self.assertEqual("", output.getvalue())
 
+    def test_done_retired_targetless_previous_row_is_valid_terminal_custody(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\n\nprevious:\nretired.md\n", encoding="utf-8")
+            (root / "retired.md").write_text(task("done", "retired"), encoding="utf-8")
+            findings = audit(root)
+            self.assertNotIn("todo_invalid_task", {finding.kind for finding in findings})
+            self.assertNotIn("todo_runat_mismatch", {finding.kind for finding in findings})
+
+    def test_done_retired_requires_one_canonical_previous_row(self) -> None:
+        rows = (
+            "current:\nretired.md\n",
+            "human pending:\nretired.md\n",
+            "low priority:\nretired.md\n",
+            "previous:\nretired.md retired\n",
+            "previous:\nretired.md\nretired.md\n",
+            "previous:\n./retired.md\n",
+            "current:\n",
+        )
+        for row in rows:
+            with self.subTest(row=row):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    (root / "TODO.md").write_text(row, encoding="utf-8")
+                    (root / "retired.md").write_text(task("done", "retired"), encoding="utf-8")
+                    findings = audit(root)
+                    self.assertIn("retired_todo_invalid", {finding.kind for finding in findings})
+
     def test_reviewed_nineteen_record_manifest_distinguishes_archives(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
