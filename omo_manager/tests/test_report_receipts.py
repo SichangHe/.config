@@ -5497,6 +5497,40 @@ return 75
                             }
                         )
                     )
+                    stream.write(
+                        canonical_json(
+                            {
+                                "ordinal": 13,
+                                "type": "event_msg",
+                                "payload": {
+                                    "type": "item_completed",
+                                    "thread_id": registration.owner_session_id,
+                                    "item": {
+                                        "type": "CommandExecution",
+                                        "command": [
+                                            "/bin/sh",
+                                            "-lc",
+                                            (
+                                                "omo_task_status.py worker.md "
+                                                f"--root {root} --describe-done-live-no-mail "
+                                                "--active-target cfg:7 --manager-target vl:2 "
+                                                "--manager-consumed-report-receipt /tmp/receipt.json "
+                                                f"--manager-consumed-report-receipt-sha256 {'6' * 64}"
+                                            ),
+                                        ],
+                                        "cwd": f"file://{registration.owner_session_cwd}",
+                                        "source": "unified_exec_startup",
+                                        "status": "completed",
+                                        "stdout": "described without closure\n",
+                                        "stderr": "",
+                                        "aggregated_output": "described without closure\n",
+                                        "formatted_output": "described without closure\n",
+                                        "exit_code": 0,
+                                    },
+                                },
+                            }
+                        )
+                    )
                 same_task, after_append = omo_report_receipt.infer_archived_task_path(
                     root,
                     task,
@@ -5508,16 +5542,15 @@ return 75
 
             self.assertEqual(task, inferred)
             self.assertEqual(task, same_task)
-            self.assertNotEqual(provenance, after_append)
+            self.assertEqual(provenance, after_append)
             binding = provenance["commitment_binding"]
-            after_binding = after_append["commitment_binding"]
             self.assertEqual("registered-exact-split-owner-manager-no-mail", binding["kind"])
             self.assertEqual("%700", binding["pane_id"])
             self.assertEqual(2, binding["verified_removal_note_count"])
             self.assertTrue(binding["no_listed_human_mail_command"])
             self.assertGreater(
-                after_binding["owner_transcript_observed_size_bytes"],
-                binding["owner_transcript_observed_size_bytes"],
+                registration.owner_transcript.stat().st_size,
+                evidence.transcript_prefix_size_bytes,
             )
 
     def test_registered_split_no_mail_transition_rejects_mismatch(self) -> None:
