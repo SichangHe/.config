@@ -220,6 +220,23 @@ SOURCE1970_TASK_LINEAGE = (
         "fc893edfeea1cdf7bef2b841faa592afc58fa14edcc3f2984d4093077eb79181",
     ),
 )
+# 🧑 Human: "do not send another Human email"
+WATCHER_PANGRAM_ROOT = "/ssd1/sichangheagent/work_logs"
+WATCHER_PANGRAM_TASK = "watcher_repair.md"
+WATCHER_PANGRAM_OWNER = "config:35"
+WATCHER_PANGRAM_MANAGER = "config:39"
+WATCHER_PANGRAM_TASK_SHA256 = "63450d03e6d018adcbb61de8b66dfc5a87906bfb562a7c4090d2a85d94e4be0c"
+WATCHER_PANGRAM_QUEUE_SHA256 = "aeb8c79d387d8f249e3211cee3693219bc510732ce86af03be7f10f2a0d3f091"
+WATCHER_PANGRAM_ITEMS = (
+    "🧑 manager_mail/85c5dff58359-1987.txt: Human asks “WDYM” about whether the already-sent Pangram answer authorizes removal of the four completed Pangram queue items or whether a new canonical completion notice should be sent; explain the concrete difference in plain language and ask only the necessary decision.",
+    "🧑 manager_mail/85c5dff58359-1990.txt: Human says that if they instructed something be marked done and the helper refused for invalid reasons, fix the helper to allow that instruction to be carried out; apply this to the blocked Pangram four-item completion reconciliation.",
+    "🧑 Human Source-1990: Fix the helper to adopt the already-delivered Pangram answer as authority for removing the exact four completed Pangram items, without duplicate email or weaker unrelated checks; review, refresh, commit, push, execute once, and email the final outcome.",
+)
+WATCHER_PANGRAM_EVIDENCE = "All three completed Pangram watcher items are covered by reviewed Human email Message-ID <178986360706.501782.14851785859358257146@gmail.com>."
+WATCHER_PANGRAM_PURPOSE_SHA256 = "9366574c427ed18f3c59ae6508004a21650b7dc950a1337e5843b6f187441dd0"
+WATCHER_PANGRAM_MESSAGE_ID = "<178986360706.501782.14851785859358257146@gmail.com>"
+WATCHER_PANGRAM_SUBJECT_SHA256 = "cd842f23f3b0e1430792d88348c9b437a287d03045477ccab5e0473fe6f6f666"
+WATCHER_PANGRAM_BODY_SHA256 = "fb06fce5e82484b26f643e59b2ab83e65a0bcf256bcbece5578a3d9db71dc2ae"
 NO_CONTACT_RE = re.compile(
     r"\bsource[- ]985\b|\bno[- ]contact\b|\b(?:do not|must not|never) (?:send )?(?:any )?(?:human(?:-facing)? )?(?:email|mail|message|report|outreach|contact)\b|\b(?:do not|must not|never)\b[^.\n]{0,200}\b(?:send )?(?:any )?human (?:email|mail|message|report|outreach|contact)\b|\b(?:do not|must not|never)\b[^.\n]{0,100}\b(?:email|report|respond|write)\b[^.\n]{0,100}\bhuman\b|\b(?:no|forbid(?:s|den)?) human-facing reports?\b|\bhuman reporting (?:is )?(?:suppressed|forbidden|prohibited|paused)\b|\bwithout human email\b|\breport only privately\b|\bprivate reports? only\b",
     re.IGNORECASE,
@@ -411,6 +428,26 @@ def source1970_eval_recovery_request() -> OrdinaryPendingRecoveryRequest:
     )
 
 
+def watcher_pangram_recovery_request() -> OrdinaryPendingRecoveryRequest:
+    """Return the one reviewed-Sent, no-claim watcher reconciliation request."""
+
+    return OrdinaryPendingRecoveryRequest(
+        "watcher-pangram-reviewed-sent-remove",
+        WATCHER_PANGRAM_TASK_SHA256,
+        WATCHER_PANGRAM_QUEUE_SHA256,
+        WATCHER_PANGRAM_PURPOSE_SHA256,
+        WATCHER_PANGRAM_PURPOSE_SHA256,
+        "",
+        "",
+        "",
+        "",
+        "",
+        WATCHER_PANGRAM_MESSAGE_ID,
+        WATCHER_PANGRAM_SUBJECT_SHA256,
+        WATCHER_PANGRAM_BODY_SHA256,
+    )
+
+
 def ordinary_pending_transition_key(
     root: Path,
     task: Path,
@@ -573,22 +610,36 @@ def transition_static_values(
 
 
 def validate_recovery_request(request: OrdinaryPendingRecoveryRequest) -> None:
-    if request.mode not in {"adopt-add", "supersede-remove", "source1990-pangram-remove", "source1970-eval-remove"}:
+    if request.mode not in {
+        "adopt-add",
+        "supersede-remove",
+        "source1990-pangram-remove",
+        "source1970-eval-remove",
+        "watcher-pangram-reviewed-sent-remove",
+    }:
         raise ValueError("ordinary pending recovery mode is invalid")
     hashes = (
         request.expected_task_sha256,
         request.expected_queue_sha256,
         request.purpose_sha256,
         request.semantic_key,
-        request.prior_claim_key,
-        request.prior_task_sha256,
-        request.prior_semantic_key,
-        request.prior_authorization_sha256,
         request.sent_subject_sha256,
         request.sent_body_sha256,
     )
     if any(SHA256_RE.fullmatch(value) is None for value in hashes):
         raise ValueError("ordinary pending recovery requires exact lowercase SHA-256 bindings")
+    prior = (
+        request.prior_claim_key,
+        request.prior_task_sha256,
+        request.prior_manager_target,
+        request.prior_semantic_key,
+        request.prior_authorization_sha256,
+    )
+    if request.mode == "watcher-pangram-reviewed-sent-remove":
+        if any(prior):
+            raise ValueError("reviewed-Sent recovery cannot adopt a completion claim")
+    elif not all(prior) or any(SHA256_RE.fullmatch(value) is None for value in (prior[0], prior[1], prior[3], prior[4])):
+        raise ValueError("ordinary pending recovery requires an exact stale completion claim")
     if request.prior_transition_key and SHA256_RE.fullmatch(request.prior_transition_key) is None:
         raise ValueError("prior transition key must be a lowercase SHA-256 digest")
     if re.fullmatch(r"<[^<>\s]+>", request.message_id) is None:
@@ -604,7 +655,7 @@ def validate_recovery_request(request: OrdinaryPendingRecoveryRequest) -> None:
         raise ValueError("extra stale claim bindings must be supplied together")
     if any(extra) and any(SHA256_RE.fullmatch(value) is None for value in (extra[0], extra[1], extra[3], extra[4])):
         raise ValueError("extra stale claim bindings require exact lowercase SHA-256 values")
-    if request.extra_claim_key == request.prior_claim_key:
+    if request.extra_claim_key and request.extra_claim_key == request.prior_claim_key:
         raise ValueError("extra stale claim must differ from the primary prior claim")
     churn = (
         request.churn_commit,
@@ -730,6 +781,65 @@ def validate_source1990_pangram_authority(
         SOURCE1990_PANGRAM_MANAGER,
         current_text,
     )
+
+
+def validate_watcher_pangram_reviewed_sent_authority(
+    root: Path,
+    plan: CompletionEmail,
+    items: tuple[str, ...],
+    evidence: str,
+    request: OrdinaryPendingRecoveryRequest,
+    current_text: str,
+) -> None:
+    """Bind the one no-contact watcher cleanup to its reviewed Sent message."""
+
+    try:
+        relative = plan.task.resolve().relative_to(root.resolve()).as_posix()
+        metadata = parse_task_metadata(current_text, root)
+    except (TaskFrontmatterError, ValueError) as exc:
+        raise OSError("watcher Pangram task metadata is invalid") from exc
+    if (
+        str(root.resolve()) != WATCHER_PANGRAM_ROOT
+        or relative != WATCHER_PANGRAM_TASK
+        or metadata is None
+        or metadata.status != "running"
+        or plan.target != WATCHER_PANGRAM_OWNER
+        or plan.manager_target != WATCHER_PANGRAM_MANAGER
+        or plan.task_sha256 != WATCHER_PANGRAM_TASK_SHA256
+        or hashlib.sha256(current_text.encode()).hexdigest() != WATCHER_PANGRAM_TASK_SHA256
+        or sum(
+            metadata.pending_task_items[index : index + len(WATCHER_PANGRAM_ITEMS)] == WATCHER_PANGRAM_ITEMS
+            for index in range(len(metadata.pending_task_items))
+        ) != 1
+        or items != WATCHER_PANGRAM_ITEMS
+        or evidence != WATCHER_PANGRAM_EVIDENCE
+        or plan.outcome != "pending item removed after verification"
+        or plan.send_allowed
+        or request.mode != "watcher-pangram-reviewed-sent-remove"
+        or request.expected_task_sha256 != WATCHER_PANGRAM_TASK_SHA256
+        or request.expected_queue_sha256 != WATCHER_PANGRAM_QUEUE_SHA256
+        or request.purpose_sha256 != WATCHER_PANGRAM_PURPOSE_SHA256
+        or request.semantic_key != WATCHER_PANGRAM_PURPOSE_SHA256
+        or request.message_id != WATCHER_PANGRAM_MESSAGE_ID
+        or request.sent_subject_sha256 != WATCHER_PANGRAM_SUBJECT_SHA256
+        or request.sent_body_sha256 != WATCHER_PANGRAM_BODY_SHA256
+        or any(stale_claim_bindings(request))
+        or any(
+            (
+                request.prior_transition_key,
+                request.churn_commit,
+                request.churn_before_blob,
+                request.churn_after_blob,
+                request.churn_diff_sha256,
+                request.extra_claim_key,
+                request.extra_task_sha256,
+                request.extra_manager_target,
+                request.extra_semantic_key,
+                request.extra_authorization_sha256,
+            )
+        )
+    ):
+        raise OSError("watcher Pangram authority does not bind this exact reviewed-Sent recovery")
 
 
 def validate_source1970_task_lineage(
@@ -928,6 +1038,8 @@ def claim_tombstone(
 def stale_claim_bindings(request: OrdinaryPendingRecoveryRequest) -> tuple[tuple[str, str, str, str, str], ...]:
     """Return every exact unused claim that this recovery must permanently retire."""
 
+    if request.mode == "watcher-pangram-reviewed-sent-remove":
+        return ()
     bindings = [
         (
             request.prior_claim_key,
@@ -1143,11 +1255,18 @@ def prepare_ordinary_pending_transition(
         raise OSError("ordinary pending recovery purpose digest does not match")
     if request.mode == "adopt-add" and (plan.outcome != "pending item created" or evidence):
         raise OSError("claim adoption is supported only for the exact no-evidence add purpose")
-    if request.mode in {"supersede-remove", "source1990-pangram-remove", "source1970-eval-remove"} and plan.outcome != "pending item removed after verification":
+    if request.mode in {
+        "supersede-remove",
+        "source1990-pangram-remove",
+        "source1970-eval-remove",
+        "watcher-pangram-reviewed-sent-remove",
+    } and plan.outcome != "pending item removed after verification":
         raise OSError("claim supersession is supported only for exact verified removal")
     if request.mode == "adopt-add" and request.extra_claim_key:
         raise OSError("claim adoption cannot retire an unrelated extra claim")
-    if request.mode == "source1970-eval-remove":
+    if request.mode == "watcher-pangram-reviewed-sent-remove":
+        validate_watcher_pangram_reviewed_sent_authority(plan.root, plan, items, evidence, request, current_text)
+    elif request.mode == "source1970-eval-remove":
         validate_source1970_eval_authority(plan.root, plan, items, evidence, request, current_text)
     else:
         validate_prior_transition(request, plan.root, plan.task)
@@ -1163,7 +1282,11 @@ def prepare_ordinary_pending_transition(
         request.sent_body_sha256,
     ):
         raise OSError("ordinary pending recovery message is not exact verified Sent-Mail evidence")
-    if request.mode not in {"source1990-pangram-remove", "source1970-eval-remove"} and request.sent_body_sha256 != hashlib.sha256(plan.body.encode()).hexdigest():
+    if request.mode not in {
+        "source1990-pangram-remove",
+        "source1970-eval-remove",
+        "watcher-pangram-reviewed-sent-remove",
+    } and request.sent_body_sha256 != hashlib.sha256(plan.body.encode()).hexdigest():
         raise OSError("ordinary pending recovery Sent-Mail body does not match the canonical recovery notice")
     static = transition_static_values(plan.root, plan.task, plan.outcome, items, evidence, request)
     transition_key = static["transition_key"]
@@ -1176,7 +1299,7 @@ def prepare_ordinary_pending_transition(
     transition_dir = state / "ordinary-pending-transitions"
     message_dir = state / "ordinary-completion-by-message"
     notice_dir = state / "ordinary-completion-by-notice"
-    for directory in (retired_dir, transition_dir, message_dir, notice_dir):
+    for directory in (authorization_dir, retired_dir, transition_dir, message_dir, notice_dir):
         directory.mkdir(mode=0o700, exist_ok=True)
     fsync_directory(state)
     transition_path = transition_dir / transition_key
@@ -1250,7 +1373,7 @@ def prepare_ordinary_pending_transition(
                     live,
                 )
             )
-        authorization = retirements[0][4]
+        authorization = retirements[0][4] if retirements else {"notice_key": plan.notice_key}
         prepared, committed = transition_records(
             static,
             plan=plan,
@@ -1280,11 +1403,12 @@ def prepare_ordinary_pending_transition(
             recorded_message = ""
         if recorded_message not in {"", message_record}:
             raise OSError("ordinary pending recovery Message-ID is already bound to different evidence")
-        selected = [row for row in rows if row and row[0] == request.prior_claim_key]
-        expected_claim = retirements[0][2]
-        tombstone = retirements[0][3]
-        if selected not in ([expected_claim], [tombstone]):
-            raise OSError("prior completion claim is missing or ambiguous")
+        if retirements:
+            selected = [row for row in rows if row and row[0] == request.prior_claim_key]
+            expected_claim = retirements[0][2]
+            tombstone = retirements[0][3]
+            if selected not in ([expected_claim], [tombstone]):
+                raise OSError("prior completion claim is missing or ambiguous")
         if request.mode == "adopt-add":
             same_purpose = (
                 authorization["subject_sha256"] == hashlib.sha256(plan.subject.encode()).hexdigest()
@@ -1894,7 +2018,7 @@ def _build_completion_email(
         or metadata.runat == "retired"
         or metadata.runat.partition(":")[0].startswith("h")
         or guest_hees_target(metadata.runat)
-        or contact_forbidden
+        or (contact_forbidden and not sent_recovery)
         or (pending_item_notice and not human_pending_item_notice)
         or (not task_close and not pending_item_notice and DIRECT_HUMAN_REPORT_RE.search(policy_text) is None)
     ):

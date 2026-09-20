@@ -5,8 +5,10 @@ import json
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from dataclasses import replace
 from email.message import EmailMessage
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -3018,6 +3020,160 @@ work
                         self.assertFalse(send_completion_email(plan))
                     email.assert_not_called()
                     self.assertFalse((state / "completion-email-claims.tsv").exists())
+
+    def watcher_pangram_fixture(self, root: Path) -> tuple[Path, str, tuple[str, ...]]:
+        items = omo_completion_email.WATCHER_PANGRAM_ITEMS
+        queue = tuple(f"unrelated item {index}" for index in range(7)) + items + ("unrelated item after",)
+        rendered = "".join(f"  - '{item.replace(chr(39), chr(39) * 2)}'\n" for item in queue)
+        text = (
+            "---\n"
+            "version: v1.0.0\n"
+            "status: running\n"
+            "runat: config:35\n"
+            "tool: codex\n"
+            "managerat: config:39\n"
+            "is_manager: false\n"
+            "pending_task_items:\n"
+            f"{rendered}"
+            "---\n"
+            "do not send another Human email\n"
+        )
+        task = root / "watcher_repair.md"
+        task.write_text(text, encoding="utf-8")
+        return task, text, queue
+
+    def test_watcher_pangram_reviewed_sent_removes_only_exact_items_without_sending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            (state / "completion-email-claims.tsv").write_text("", encoding="utf-8")
+            (state / "completion-email-claims.tsv").chmod(0o600)
+            task, text, queue = self.watcher_pangram_fixture(root)
+            constants = {
+                "WATCHER_PANGRAM_ROOT": str(root.resolve()),
+                "WATCHER_PANGRAM_TASK_SHA256": hashlib.sha256(text.encode()).hexdigest(),
+                "WATCHER_PANGRAM_QUEUE_SHA256": omo_pending.pending_queue_sha256(queue),
+                "WATCHER_PANGRAM_PURPOSE_SHA256": ordinary_pending_purpose(
+                    "pending item removed after verification",
+                    omo_completion_email.WATCHER_PANGRAM_ITEMS,
+                    omo_completion_email.WATCHER_PANGRAM_EVIDENCE,
+                ),
+            }
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch.multiple(
+                omo_completion_email, **constants
+            ), patch("omo_manager.omo_pending.current_pending_task", return_value=task), patch(
+                "omo_manager.omo_completion_email.current_pending_task", return_value=task
+            ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True), patch(
+                "omo_manager.omo_completion_email.subprocess.run"
+            ) as email_process:
+                normal = build_completion_email(
+                    root,
+                    task,
+                    text,
+                    "pending item removed after verification",
+                    items=omo_completion_email.WATCHER_PANGRAM_ITEMS,
+                    evidence=omo_completion_email.WATCHER_PANGRAM_EVIDENCE,
+                    semantic_key=constants["WATCHER_PANGRAM_PURPOSE_SHA256"],
+                )
+                self.assertIsNone(normal)
+                plan = plan_sent_recovery_completion(
+                    root,
+                    task,
+                    text,
+                    "pending item removed after verification",
+                    items=omo_completion_email.WATCHER_PANGRAM_ITEMS,
+                    evidence=omo_completion_email.WATCHER_PANGRAM_EVIDENCE,
+                    semantic_key=constants["WATCHER_PANGRAM_PURPOSE_SHA256"],
+                )
+                assert plan is not None
+                self.assertFalse(plan.send_allowed)
+                with self.assertRaisesRegex(OSError, "cannot send"):
+                    send_completion_email(plan)
+                self.assertEqual(0, omo_pending.run(omo_pending.parse_args(["recover-watcher-pangram-reviewed-sent"]), root))
+                email_process.assert_not_called()
+            metadata = parse_task_metadata(task.read_text(encoding="utf-8"), root)
+            assert metadata is not None
+            self.assertEqual((*queue[:7], queue[-1]), metadata.pending_task_items)
+
+    def test_watcher_pangram_reviewed_sent_rejects_drift_and_message_reuse_before_task_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            (state / "completion-email-claims.tsv").write_text("", encoding="utf-8")
+            (state / "completion-email-claims.tsv").chmod(0o600)
+            task, text, queue = self.watcher_pangram_fixture(root)
+            constants = {
+                "WATCHER_PANGRAM_ROOT": str(root.resolve()),
+                "WATCHER_PANGRAM_TASK_SHA256": hashlib.sha256(text.encode()).hexdigest(),
+                "WATCHER_PANGRAM_QUEUE_SHA256": omo_pending.pending_queue_sha256(queue),
+                "WATCHER_PANGRAM_PURPOSE_SHA256": ordinary_pending_purpose(
+                    "pending item removed after verification",
+                    omo_completion_email.WATCHER_PANGRAM_ITEMS,
+                    omo_completion_email.WATCHER_PANGRAM_EVIDENCE,
+                ),
+            }
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch.multiple(
+                omo_completion_email, **constants
+            ), patch("omo_manager.omo_pending.current_pending_task", return_value=task), patch(
+                "omo_manager.omo_completion_email.current_pending_task", return_value=task
+            ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+                args = omo_pending.parse_args(["recover-watcher-pangram-reviewed-sent"])
+                request = omo_pending.sent_recovery_request(args)
+                plan = plan_sent_recovery_completion(
+                    root,
+                    task,
+                    text,
+                    "pending item removed after verification",
+                    items=args.items,
+                    evidence=args.evidence,
+                    semantic_key=request.semantic_key,
+                )
+                assert plan is not None
+                with self.assertRaisesRegex(OSError, "does not bind"):
+                    omo_completion_email.validate_watcher_pangram_reviewed_sent_authority(
+                        root, plan, args.items, args.evidence, replace(request, sent_body_sha256="0" * 64), text
+                    )
+                task.write_text(text + "task drift\n", encoding="utf-8")
+                with self.assertRaisesRegex(omo_pending.BlockingError, "task bytes changed"):
+                    omo_pending.run(args, root)
+                self.assertEqual(text + "task drift\n", task.read_text(encoding="utf-8"))
+                task.write_text(text, encoding="utf-8")
+                message_dir = state / "ordinary-completion-by-message"
+                message_dir.mkdir(mode=0o700, parents=True)
+                marker = message_dir / hashlib.sha256(request.message_id.encode()).hexdigest()
+                marker.write_text("different transition\n", encoding="utf-8")
+                marker.chmod(0o600)
+                with self.assertRaisesRegex(OSError, "Message-ID is already bound"):
+                    omo_pending.run(args, root)
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+
+    def test_pending_remove_reports_adopted_notice_without_claiming_a_resend(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            task.write_text(task_text().replace("  - finish review", "  - 🧑 finish review"), encoding="utf-8")
+            output = StringIO()
+            with patch("omo_manager.omo_pending.current_pending_task", return_value=task), patch(
+                "omo_manager.omo_pending.plan_completion_email", return_value=object()
+            ), patch("omo_manager.omo_pending.completion_email_is_delivered", return_value=True), patch(
+                "omo_manager.omo_pending.require_owner_completion", return_value=True
+            ), redirect_stdout(output):
+                self.assertEqual(
+                    0,
+                    omo_pending.run(
+                        omo_pending.Args(
+                            "remove",
+                            ("🧑 finish review",),
+                            evidence="verified existing Sent-Mail evidence",
+                            completion_key="a" * 64,
+                        ),
+                        root,
+                    ),
+                )
+            self.assertIn("Verified the Human completion notice.", output.getvalue())
+            self.assertNotIn("Emailed the human", output.getvalue())
 
     def test_manager_summary_rule_does_not_override_explicit_direct_human_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

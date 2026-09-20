@@ -59,6 +59,9 @@ from omo_manager.omo_completion_email import source1970_eval_evidence
 from omo_manager.omo_completion_email import source1970_eval_queue_items
 from omo_manager.omo_completion_email import source1970_eval_recovery_request
 from omo_manager.omo_completion_email import source1970_eval_resolution_items
+from omo_manager.omo_completion_email import watcher_pangram_recovery_request
+from omo_manager.omo_completion_email import WATCHER_PANGRAM_EVIDENCE
+from omo_manager.omo_completion_email import WATCHER_PANGRAM_ITEMS
 
 
 @dataclass(frozen=True)
@@ -194,6 +197,10 @@ def parse_args(argv: list[str]) -> Args:
         "recover-source1970-eval",
         help="Apply the one Source-1970-authorized evaluation completion recovery without sending email.",
     )
+    _ = sub.add_parser(
+        "recover-watcher-pangram-reviewed-sent",
+        help="Apply the one reviewed-Sent Pangram watcher cleanup without sending email.",
+    )
     for recovery in (source1990,):
         recovery.add_argument("--item", action="append", required=True)
         recovery.add_argument("--expected-task-sha256", required=True)
@@ -263,6 +270,8 @@ def parse_args(argv: list[str]) -> Args:
         return Args("recover-removal-notice", recovery_id=parsed.recovery_id)
     if parsed.command == "recover-source1970-eval":
         return Args(parsed.command, source1970_eval_queue_items(), evidence=source1970_eval_evidence())
+    if parsed.command == "recover-watcher-pangram-reviewed-sent":
+        return Args(parsed.command, WATCHER_PANGRAM_ITEMS, evidence=WATCHER_PANGRAM_EVIDENCE)
     if parsed.command == "recover-source1990-pangram":
         hashes = (
             parsed.expected_task_sha256,
@@ -431,10 +440,16 @@ def fsync_task_parent(path: Path) -> None:
 
 
 def sent_recovery_request(args: Args) -> OrdinaryPendingRecoveryRequest:
-    if args.command not in {"recover-source1990-pangram", "recover-source1970-eval"}:
+    if args.command not in {
+        "recover-source1990-pangram",
+        "recover-source1970-eval",
+        "recover-watcher-pangram-reviewed-sent",
+    }:
         raise BlockingError("only authenticated incident recovery adapters are supported")
     if args.command == "recover-source1970-eval":
         return source1970_eval_recovery_request()
+    if args.command == "recover-watcher-pangram-reviewed-sent":
+        return watcher_pangram_recovery_request()
     mode = "source1990-pangram-remove"
     semantic_key = args.purpose_sha256
     return OrdinaryPendingRecoveryRequest(
@@ -470,7 +485,11 @@ def recover_sent_pending_transition(args: Args, root: Path, path: Path) -> int:
 
     if not args.items or human_authored_pending_items(args.items) != args.items or len(set(args.items)) != len(args.items):
         raise BlockingError("Sent recovery requires distinct Human-authored items")
-    if args.command not in {"recover-source1990-pangram", "recover-source1970-eval"}:
+    if args.command not in {
+        "recover-source1990-pangram",
+        "recover-source1970-eval",
+        "recover-watcher-pangram-reviewed-sent",
+    }:
         raise BlockingError("only authenticated incident recovery adapters are supported")
     outcome = "pending item removed after verification"
     request = sent_recovery_request(args)
@@ -503,7 +522,7 @@ def recover_sent_pending_transition(args: Args, root: Path, path: Path) -> int:
             raise BlockingError("Sent recovery ordered live queue changed")
         if ordinary_pending_purpose(outcome, resolution_items, args.evidence) != request.purpose_sha256:
             raise BlockingError("Sent recovery purpose digest changed")
-        if metadata.pending_task_items != args.items:
+        if args.command != "recover-watcher-pangram-reviewed-sent" and metadata.pending_task_items != args.items:
             raise BlockingError("Sent recovery removal must cover the complete ordered live queue")
         updated, count = remove_pending_items(text, args.items)
         updated = append_comment(updated, pending_remove_evidence_comment(count, args.evidence))
@@ -569,7 +588,7 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
                 for item in current.pending_task_items:
                     print(item)
             return 0
-        if args.command in {"recover-source1990-pangram", "recover-source1970-eval"}:
+        if args.command in {"recover-source1990-pangram", "recover-source1970-eval", "recover-watcher-pangram-reviewed-sent"}:
             return recover_sent_pending_transition(args, root, path)
         answer_subject, answer_body = human_answer(args)
         if args.command == "recover-removal-notice":
@@ -723,7 +742,7 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
                 _ = blocking_request(root, {"operation": "reconcile"})
                 print(f"resolved pending item {args.item_id} as {args.outcome}")
                 if email is not None:
-                    print("Emailed the human with the exact resolved work and evidence.")
+                    print("Verified the Human completion notice.")
                 return 0
             if args.command == "wake-ack":
                 item_id, item_text = acknowledge(document, args.notice_id)
@@ -816,7 +835,7 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
         replace_if_unchanged(path, updated, before)
         print(f"removed {count} pending item(s); verify each item was actually done or cancelled")
         if email is not None:
-            print("Emailed the human with the exact removed work and evidence.")
+            print("Verified the Human completion notice.")
         return 0
 
 

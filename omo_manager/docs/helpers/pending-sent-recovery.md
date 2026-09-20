@@ -18,7 +18,8 @@ Public no-send recovery commands are incident-specific. They accept only their r
   - a repeat replays only the matching prepared transaction and never sends mail
 - limits
   - verification reads Gmail Sent Mail and requires exactly one message from the configured agent address to the configured Human address
-  - no-contact policy is still evaluated; recovery merely permits adoption of evidence that was already delivered
+  - new-email planning still obeys no-contact policy
+  - a no-send recovery plan can inspect exact pre-existing Sent evidence despite that policy, but has `send_allowed=false` and the sender rejects it
   - a message can bind one recovery only; its marker includes the transition key, so a second request or replay with different bindings stops before mutation
 - Source-1990 Pangram adapter
   - `recover-source1990-pangram` is one incident-specific direct-Human authority adapter
@@ -32,3 +33,8 @@ Public no-send recovery commands are incident-specific. They accept only their r
   - its one global Message-ID record binds the five-item queue mutation and ordered six-item resolution before either claim or task mutation; later delivery checks accept it only through the exact canonical committed transition
   - it records `prepared`, removes the five live items, appends the six-item delivered-answer evidence, fsyncs the empty queue, and records `committed`
   - a crash after the task replacement replays only that exact prepared transition; drift or Message-ID reuse fails closed
+- watcher Pangram reviewed-Sent adapter
+  - `recover-watcher-pangram-reviewed-sent` takes no incident parameters and never invokes the sender
+  - it binds only the current `watcher_repair.md` bytes, `config:35` owner, `config:39` manager, complete ordered queue, and its exact three-item subset
+  - it requires the reviewed Sent Message-ID, subject digest, and body digest; it does not accept a canonical-notice body substitute or a completion claim
+  - it removes only that subset, preserves every other queue item, and records a prepared/committed Message-ID-bound transaction for exact replay
