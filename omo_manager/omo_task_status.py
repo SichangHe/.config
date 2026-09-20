@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import hashlib
 import json
 import os
@@ -235,6 +236,47 @@ SOURCE1982_MISSING_RECORDS = (
     ("manager_hierarchy.md", "config:26", "cancelled by Human fleet consolidation; administrative historical-state reconciliation is not worth new work"),
     ("mail_cleanup_x.md", "wl:124", "cancelled by Human fleet consolidation; repeated automated mailbox-threshold notices do not justify a worker"),
 )
+# 🧑 "Your queue is empty and Human delivery is complete. Close token_usage_1998.md now through the supported normal lifecycle command"
+SOURCE1998_TASK = "token_usage_1998.md"
+SOURCE1998_TARGET = "config:45"
+SOURCE1998_MANAGER = "config:27"
+SOURCE1998_ROOT = Path("/ssd1/sichangheagent/work_logs")
+SOURCE1998_AUTHORITY = "manager_mail/85c5dff58359-1998.txt"
+SOURCE1998_AUTHORITY_SHA256 = "12e5ad1aaefb6eae7f1e265f2d41c6da1c6b21bdf8a36427dc7efa643d5a433d"
+SOURCE1998_AUTHORITY_TEXT = (
+    "Subject: How did we use sooo many tokens today\n\n"
+    "Use Codex session records etc. to understand what’s going on and how we prevent this\n"
+    "Be very smart about it and do this with the minimum cost, e.g. avoid reading large chunks of agent history and letting cheap subagent grep them if needed"
+)
+SOURCE1998_AUTHORITY_BYTES = SOURCE1998_AUTHORITY_TEXT.replace("prevent this\nBe", "prevent this\r\nBe").encode()
+SOURCE1998_TASK_SHA256 = "73f6a26b8d2a441f5fc97481713b5db87dc3e31ed6b762e266efdffd9fae9eb6"
+SOURCE1998_TODO_SHA256 = "cdb2544e0fb53d7e93055bf5107922e385fb77b377e43128c5f501aceab42cfc"
+SOURCE1998_TASK_AFTER_SHA256 = "dd2c12389f993b3d63b3bfae20d698bebe0ac0b00ba663752a0b7c0adf272468"
+SOURCE1998_TODO_AFTER_SHA256 = "14326f1a72e445ec3ae4a89694e9a15a5c1b65cbd1c5a80b8071f1fc83b09946"
+SOURCE1998_HUMAN_BODY = (
+    "Use Codex session records etc. to understand what’s going on and how we prevent this\n"
+    "Be very smart about it and do this with the minimum cost, e.g. avoid reading large chunks of agent history and letting cheap subagent grep them if needed"
+)
+SOURCE1998_HUMAN_ENVELOPE = (
+    '<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1998.txt:3-4">\n'
+    f"{SOURCE1998_HUMAN_BODY}"
+    "</human_instruction>"
+)
+SOURCE1998_BLOCKER = "watcher_repair.md supported no-duplicate lifecycle reconciliation for exited config:45 after verified Source-1998 completion"
+SOURCE1998_CLOSE_FAILURE = "done_close_failed: target is not a supported live Codex pane: %3556 status=not_codex"
+SOURCE1998_COMPLETION_KEY = "1febfdf1f5688e80e251eec8924b3279132710b51ab273c795c9f8100eff3789"
+SOURCE1998_COMPLETION_MESSAGE_ID = "178986213812.273680.7537227440533580493@gmail.com"
+SOURCE1998_SESSION_ID = "01a0bbfe-ac16-7c01-a46b-e3a60decacad"
+SOURCE1998_PANE_ID = "%3556"
+SOURCE1998_PANE_PID = 4192552
+SOURCE1998_PANE_COMMAND = "fish"
+SOURCE1998_PANE_CWD = "/home/sichangheagent/.config"
+SOURCE1998_PANE_START_TICKS = 128730636
+SOURCE1998_TRANSCRIPT = Path(
+    "/home/sichanghe/.codex/sessions/2026/09/19/rollout-2026-09-19T16-27-04-01a0bbfe-ac16-7c01-a46b-e3a60decacad.jsonl"
+)
+SOURCE1998_TRANSCRIPT_SHA256 = "a234d436733d21e2063e7d3e2f421018c998f8663ee30a9cbd526140dda80f89"
+SOURCE1998_TRANSACTION = ".omo-source1998-reconcile.json"
 AUTHORITATIVE_HUMAN_ENVELOPE_RE = re.compile(
     r'<human_instruction[ \t]+authoritative="true"[ \t]+source="([^"\r\n]+)">\r?\n(.*?)</human_instruction>',
     re.DOTALL,
@@ -330,6 +372,7 @@ class Args:
     manager_consumed_report_receipt_sha256: str = ""
     completion_key: str = ""
     reconcile_dependency_blocked_current: bool = False
+    reconcile_source1998_done: bool = False
     dependency_sha256: str = ""
     dangerously_ignore_checks: bool = False
 
@@ -363,6 +406,7 @@ class ParsedArgs(argparse.Namespace):
     reconcile_long_running_human_index: bool = False
     reconcile_blocked_index: bool = False
     reconcile_dependency_blocked_current: bool = False
+    reconcile_source1998_done: bool = False
     closure_repository: Path | None = None
     dirty_path_handoff: Path | None = None
     restore_terminal_target: bool = False
@@ -489,6 +533,12 @@ shutdown.""",
         action="store_true",
         help="Move one digest-bound v1 task blocked on one active task from TODO human pending to current without changing task or pane state.",
     )
+    _ = parser.add_argument(
+        "--reconcile-source-1998-done",
+        dest="reconcile_source1998_done",
+        action="store_true",
+        help="Finish the exact authenticated Source-1998 exited-shell record without sending mail or mutating its pane.",
+    )
     _ = parser.add_argument("--session-id", default="", help="Session id captured by the prior close, if available.")
     _ = parser.add_argument("--replacement-task", type=Path, help="Active replacement task file; required with --finish-replaced-done.")
     _ = parser.add_argument("--replacement-custody-audit", type=Path, help="Accepted Source-1938 audit proving the exact dw:32/dw:33 custody history; only with --finish-replaced-done.")
@@ -568,8 +618,8 @@ shutdown.""",
     if any(consumed_receipt) and (not all(consumed_receipt) or not (parsed.close_done_live_no_mail or parsed.describe_done_live_no_mail)):
         parser.error("manager-consumed report evidence requires both receipt arguments with a done-live no-mail operation.")
     session_transcript = (parsed.session_transcript, parsed.session_transcript_sha256.strip())
-    if any(session_transcript) and (not all(session_transcript) or not parsed.recover_exited_shell_done):
-        parser.error("session transcript evidence requires both arguments with --recover-exited-shell-done.")
+    if any(session_transcript) and (not all(session_transcript) or not (parsed.recover_exited_shell_done or parsed.reconcile_source1998_done)):
+        parser.error("session transcript evidence requires both arguments with an exited-shell recovery mode.")
     if parsed.session_transcript is not None and (
         not parsed.session_transcript.is_absolute()
         or parsed.session_transcript.resolve(strict=False) != parsed.session_transcript
@@ -607,6 +657,7 @@ shutdown.""",
         parsed.reconcile_long_running_human_index,
         parsed.reconcile_blocked_index,
         parsed.reconcile_dependency_blocked_current,
+        parsed.reconcile_source1998_done,
         parsed.restore_terminal_target,
         parsed.close_shared_target,
         parsed.cancel_shared_target,
@@ -648,6 +699,7 @@ shutdown.""",
                 parsed.reconcile_long_running_human_index,
                 parsed.reconcile_blocked_index,
                 parsed.reconcile_dependency_blocked_current,
+                parsed.reconcile_source1998_done,
                 parsed.restore_terminal_target,
                 parsed.close_shared_target,
                 parsed.close_retired_done,
@@ -911,7 +963,13 @@ shutdown.""",
             parsed.authority_envelope,
             parsed.authority_envelope_sha256,
         )
-    ) and not (parsed.cancel_shared_target or parsed.complete_live_no_mail or parsed.close_active_task_tree_no_mail or parsed.close_done_live_no_mail):
+    ) and not (
+        parsed.cancel_shared_target
+        or parsed.complete_live_no_mail
+        or parsed.close_active_task_tree_no_mail
+        or parsed.close_done_live_no_mail
+        or parsed.reconcile_source1998_done
+    ):
         parser.error("park-unlinked task, TODO, receipt, pane, and authority assertions require a park operation.")
     if parsed.retire_blocked_target:
         parser.error("--retire-blocked-target is disabled: preserve the historical target and resolve ownership without writing retired semantics.")
@@ -1525,6 +1583,82 @@ shutdown.""",
         if any(unrelated) or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None:
             parser.error("--reconcile-blocked-index requires lowercase --source-sha256 and only an optional exact --blocked-on assertion.")
         return Args(parsed.root.resolve(), parsed.task_file, "", parsed.blocked_on.strip(), reconcile_blocked_index=True, source_sha256=parsed.source_sha256.strip())
+    if parsed.reconcile_source1998_done:
+        unrelated = (
+            parsed.status,
+            parsed.blocked_on,
+            parsed.finish_closed_done,
+            parsed.finish_replaced_done,
+            parsed.recover_exited_shell_done,
+            parsed.replacement_task,
+            parsed.replacement_custody_audit,
+            parsed.stale_target,
+            parsed.replacement_target,
+            parsed.stale_sha256,
+            parsed.replacement_sha256,
+            parsed.replacement_status,
+            parsed.protected_target,
+            parsed.stopped_evidence,
+            parsed.replacement_pane_evidence,
+            parsed.audit_output,
+            parsed.closure_repository,
+            parsed.dirty_path_handoff,
+            parsed.historical_target,
+            parsed.task_sha256,
+            parsed.historical_commit,
+            parsed.shared_target,
+            parsed.protected_shared_task,
+            parsed.protected_shared_sha256,
+            parsed.active_target,
+            parsed.manager_target,
+            parsed.source_sha256,
+            parsed.human_close_authorization_source,
+            parsed.human_close_authorization_sha256,
+            parsed.expected_receipt_sha256,
+            parsed.expected_pane_id,
+            parsed.expected_pane_pid,
+            parsed.expected_pane_start_ticks,
+            parsed.expected_session_id,
+            parsed.manager_consumed_report_receipt,
+            parsed.manager_consumed_report_receipt_sha256,
+            parsed.authority_file,
+            parsed.authority_lines,
+            parsed.authority_sha256,
+            parsed.no_mail_intent,
+            parsed.authority_envelope,
+            parsed.authority_envelope_sha256,
+            parsed.missing_target,
+            parsed.dangerously_ignore_checks,
+        )
+        if (
+            any(unrelated)
+            or parsed.completion_key.strip() != SOURCE1998_COMPLETION_KEY
+            or parsed.root.resolve() != SOURCE1998_ROOT
+            or parsed.terminal_evidence.strip() != SOURCE1998_CLOSE_FAILURE
+            or parsed.session_id.strip() != SOURCE1998_SESSION_ID
+            or parsed.pane_id.strip() != SOURCE1998_PANE_ID
+            or parsed.session_transcript is None
+            or parsed.session_transcript.resolve(strict=False) != SOURCE1998_TRANSCRIPT
+            or parsed.session_transcript_sha256.strip() != SOURCE1998_TRANSCRIPT_SHA256
+            or parsed.expected_task_sha256.strip() != SOURCE1998_TASK_SHA256
+            or parsed.expected_todo_sha256.strip() != SOURCE1998_TODO_SHA256
+        ):
+            parser.error("Source-1998 reconciliation requires the fixed completion, session, pane, transcript, and current task/TODO bindings.")
+        return Args(
+            parsed.root.resolve(),
+            parsed.task_file,
+            "done",
+            "",
+            session_id=SOURCE1998_SESSION_ID,
+            pane_id=SOURCE1998_PANE_ID,
+            terminal_evidence=SOURCE1998_CLOSE_FAILURE,
+            session_transcript=SOURCE1998_TRANSCRIPT,
+            session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256,
+            completion_key=SOURCE1998_COMPLETION_KEY,
+            expected_task_sha256=parsed.expected_task_sha256.strip(),
+            expected_todo_sha256=parsed.expected_todo_sha256.strip(),
+            reconcile_source1998_done=True,
+        )
     if parsed.recover_exited_shell_done:
         if parsed.status not in {None, "", "done"}:
             parser.error("--recover-exited-shell-done only supports status `done`.")
@@ -7620,6 +7754,323 @@ def validate_interrupted_done_evidence(args: Args, path: Path, text: str, metada
     validate_interrupted_done_session(args, path, interrupted_done_session_payload(args, path))
 
 
+def source1998_authority_snapshot(root: Path) -> tuple[bytes, os.stat_result]:
+    """Read the fixed Human source without accepting a caller-selected locator."""
+
+    authority = root / SOURCE1998_AUTHORITY
+    try:
+        before = authority.lstat()
+        payload = authority.read_bytes()
+        after = authority.lstat()
+    except OSError as exc:
+        raise TaskFrontmatterError(f"Source-1998 Human authority is unavailable: {exc}") from exc
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) & 0o077
+        or not same_file_state(before, after)
+        or hashlib.sha256(payload).hexdigest() != SOURCE1998_AUTHORITY_SHA256
+        or payload != SOURCE1998_AUTHORITY_BYTES
+    ):
+        raise TaskFrontmatterError("Source-1998 Human authority bytes are not the fixed reviewed source.")
+    return payload, after
+
+
+def source1998_pane_snapshot() -> tuple[str, int, str, str, str, int]:
+    """Observe the exact retained shell pane without sending input or stopping it."""
+
+    result = tmux(
+        [
+            "display-message",
+            "-p",
+            "-t",
+            SOURCE1998_TARGET,
+            "#{pane_id}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}\t#{session_name}:#{window_index}.#{pane_index}",
+        ]
+    )
+    fields = result.stdout.rstrip("\n").split("\t") if result.returncode == 0 else []
+    if len(fields) != 5 or not fields[1].isdecimal():
+        raise TaskFrontmatterError("Source-1998 retained pane identity is unavailable.")
+    pane_id_value, raw_pid, command, cwd, symbolic = fields
+    pid = int(raw_pid)
+    start_ticks = process_start_ticks(pid)
+    if (
+        pane_id_value != SOURCE1998_PANE_ID
+        or pid != SOURCE1998_PANE_PID
+        or command != SOURCE1998_PANE_COMMAND
+        or cwd != SOURCE1998_PANE_CWD
+        or symbolic != "config:45.0"
+        or start_ticks != SOURCE1998_PANE_START_TICKS
+    ):
+        raise TaskFrontmatterError("Source-1998 retained pane is not the exact reviewed fish shell identity.")
+    return pane_id_value, pid, command, cwd, symbolic, start_ticks
+
+
+def validate_source1998_envelope(text: str) -> None:
+    """Require the sole exact authoritative envelope bound to Source-1998."""
+
+    matches = AUTHORITATIVE_HUMAN_ENVELOPE_RE.findall(text)
+    closing_tags = re.findall(r"</human_instruction[^>]*>", text)
+    if text.count(SOURCE1998_HUMAN_ENVELOPE) != 1 or text.count("<human_instruction") != 1 or closing_tags != ["</human_instruction>"] or len(matches) != 1 or matches[0] != (f"{SOURCE1998_AUTHORITY}:3-4", SOURCE1998_HUMAN_BODY):
+        raise TaskFrontmatterError("Source-1998 reconciliation requires the sole canonical Human envelope.")
+
+
+def source1998_todo_target_claims(root: Path, target: str) -> tuple[Path, ...]:
+    """Return every active TODO row that explicitly claims the fixed target."""
+
+    claims: list[Path] = []
+    for task in parse_task_lines(root / "TODO.md"):
+        if task.section not in {"todo:current", "todo:human pending", "todo:low priority"} or not task.target or not same_tmux_target(task.target, target):
+            continue
+        candidate = (root / task.task_file).resolve(strict=False)
+        if candidate != root and root in candidate.parents:
+            claims.append(candidate)
+    return tuple(claims)
+
+
+def validate_source1998_transcript(args: Args, path: Path) -> None:
+    """Require the one delivered completion and the final killed retry in one session."""
+
+    payload = interrupted_done_session_payload(args, path)
+    validate_interrupted_done_session(args, path, payload)
+    try:
+        records = [json.loads(line) for line in payload.decode().splitlines()]
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TaskFrontmatterError("Source-1998 transcript is not valid UTF-8 JSONL.") from exc
+    deliveries = []
+    for record in records:
+        event = record.get("payload") if isinstance(record, dict) else None
+        if not isinstance(event, dict) or record.get("type") != "event_msg" or event.get("type") != "item_completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "CommandExecution":
+            continue
+        if not interrupted_done_command_matches(item.get("command"), args, path):
+            continue
+        expected = (
+            f"Emailed the human\nMessage-ID: <{SOURCE1998_COMPLETION_MESSAGE_ID}>\n"
+            "omo_task_status.py: responsible-owner completion email requested; retry after owner delivery\n"
+        )
+        if item.get("stdout") == expected and item.get("status") == "failed" and item.get("exit_code") == 2:
+            deliveries.append(item)
+    if len(deliveries) != 1:
+        raise TaskFrontmatterError("Source-1998 transcript does not bind exactly one reviewed completion delivery.")
+
+
+def source1998_transaction_record(task_before: bytes, task_after: bytes, todo_before: bytes, todo_after: bytes) -> dict[str, str]:
+    """Build the exact durable Source-1998 two-file transition record."""
+
+    return {
+        "schema": "omo-source1998-reconcile/v1",
+        "task": SOURCE1998_TASK,
+        "todo": "TODO.md",
+        "target": SOURCE1998_TARGET,
+        "task_before": base64.b64encode(task_before).decode("ascii"),
+        "task_after": base64.b64encode(task_after).decode("ascii"),
+        "todo_before": base64.b64encode(todo_before).decode("ascii"),
+        "todo_after": base64.b64encode(todo_after).decode("ascii"),
+    }
+
+
+def source1998_transaction_payload(record: dict[str, str]) -> tuple[bytes, bytes, bytes, bytes]:
+    """Decode and validate one exact Source-1998 transition record."""
+
+    expected = {"schema", "task", "todo", "target", "task_before", "task_after", "todo_before", "todo_after"}
+    if set(record) != expected or any(not isinstance(value, str) for value in record.values()):
+        raise TaskFrontmatterError("Source-1998 durable transition record is malformed.")
+    if record["schema"] != "omo-source1998-reconcile/v1" or record["task"] != SOURCE1998_TASK or record["todo"] != "TODO.md" or record["target"] != SOURCE1998_TARGET:
+        raise TaskFrontmatterError("Source-1998 durable transition record is not the fixed operation.")
+    try:
+        decoded = tuple(base64.b64decode(record[key], validate=True) for key in ("task_before", "task_after", "todo_before", "todo_after"))
+    except (ValueError, binascii.Error) as exc:
+        raise TaskFrontmatterError("Source-1998 durable transition record has invalid file bytes.") from exc
+    if any(not value for value in decoded):
+        raise TaskFrontmatterError("Source-1998 durable transition record has empty file bytes.")
+    return decoded  # type: ignore[return-value]
+
+
+def source1998_write_transaction(path: Path, record: dict[str, str]) -> None:
+    """Durably publish the Source-1998 prepared transition before either file changes."""
+
+    payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if path.exists():
+        state = path.lstat()
+        if not stat.S_ISREG(state.st_mode) or state.st_uid != os.getuid() or stat.S_IMODE(state.st_mode) & 0o077 or path.read_bytes() != payload:
+            raise TaskFrontmatterError("an unrelated Source-1998 transition record already exists.")
+        return
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile("wb", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fchmod(handle.fileno(), 0o600)
+            os.fsync(handle.fileno())
+            temporary = Path(handle.name)
+        os.replace(temporary, path)
+        temporary = None
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def source1998_read_transaction(path: Path) -> tuple[dict[str, str], tuple[bytes, bytes, bytes, bytes]] | None:
+    """Read one prepared Source-1998 transition, or no record before preparation."""
+
+    try:
+        before = path.lstat()
+        payload = path.read_bytes()
+        after = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise TaskFrontmatterError(f"Source-1998 durable transition record is unavailable: {exc}") from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or stat.S_IMODE(before.st_mode) & 0o077 or not same_file_state(before, after):
+        raise TaskFrontmatterError("Source-1998 durable transition record is not a stable owner-private file.")
+    try:
+        record = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TaskFrontmatterError("Source-1998 durable transition record is not valid JSON.") from exc
+    if not isinstance(record, dict):
+        raise TaskFrontmatterError("Source-1998 durable transition record is not an object.")
+    typed = {key: value for key, value in record.items() if isinstance(key, str) and isinstance(value, str)}
+    if len(typed) != len(record):
+        raise TaskFrontmatterError("Source-1998 durable transition record has invalid fields.")
+    return typed, source1998_transaction_payload(typed)
+
+
+def source1998_remove_transaction(path: Path) -> None:
+    """Remove and durably publish completion of a Source-1998 transition."""
+
+    path.unlink(missing_ok=True)
+    directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def source1998_apply_transaction(path: Path, todo: Path, marker: Path, payload: tuple[bytes, bytes, bytes, bytes]) -> None:
+    """Apply or replay the prepared Source-1998 transition without ambiguous partial state."""
+
+    task_before, task_after, todo_before, todo_after = payload
+    if hashlib.sha256(task_after).hexdigest() != SOURCE1998_TASK_AFTER_SHA256 or hashlib.sha256(todo_after).hexdigest() != SOURCE1998_TODO_AFTER_SHA256:
+        raise TaskFrontmatterError("Source-1998 durable transition postimages are not the reviewed exact result.")
+    current_task = path.read_bytes()
+    current_todo = todo.read_bytes()
+    task_state = "before" if current_task == task_before else "after" if current_task == task_after else "other"
+    todo_state = "before" if current_todo == todo_before else "after" if current_todo == todo_after else "other"
+    if "other" in {task_state, todo_state}:
+        raise TaskFrontmatterError("Source-1998 task or TODO bytes do not match the prepared transition.")
+    if task_state == "after" and todo_state == "after":
+        source1998_remove_transaction(marker)
+        return
+    if todo_state == "before":
+        replace_if_unchanged_locked(todo, todo_after.decode("utf-8"), todo.stat())
+    if task_state == "before":
+        replace_if_unchanged_locked(path, task_after.decode("utf-8"), path.stat())
+    if path.read_bytes() != task_after or todo.read_bytes() != todo_after:
+        raise TaskFrontmatterError("Source-1998 durable transition did not reach its exact committed state.")
+    source1998_remove_transaction(marker)
+
+
+def reconcile_source1998_done(args: Args, path: Path, text: str, before: os.stat_result) -> str:
+    """Finish only the fixed Source-1998 record while preserving its retained shell pane."""
+
+    todo = args.root / "TODO.md"
+    marker = args.root / SOURCE1998_TRANSACTION
+    if (
+        args.root.resolve() != SOURCE1998_ROOT
+        or relative_task_ref(args.root, path) != SOURCE1998_TASK
+        or args.completion_key != SOURCE1998_COMPLETION_KEY
+        or args.session_id != SOURCE1998_SESSION_ID
+        or args.pane_id != SOURCE1998_PANE_ID
+        or args.terminal_evidence != SOURCE1998_CLOSE_FAILURE
+        or args.session_transcript != SOURCE1998_TRANSCRIPT
+        or args.session_transcript_sha256 != SOURCE1998_TRANSCRIPT_SHA256
+        or not todo.is_file()
+    ):
+        raise TaskFrontmatterError("Source-1998 reconciliation arguments do not bind the fixed task, current bytes, session, pane, and transcript.")
+    with root_membership_lock(args.root), task_target_lock(args.root, SOURCE1998_TARGET):
+        with ExitStack() as locks:
+            for locked_path in sorted({path, todo, marker}, key=str):
+                locks.enter_context(task_file_lock(locked_path))
+            transaction = source1998_read_transaction(marker)
+            if transaction is not None:
+                record, payload = transaction
+                task_before, _task_after, todo_before, _todo_after = payload
+                if (
+                    args.expected_task_sha256 != SOURCE1998_TASK_SHA256
+                    or args.expected_todo_sha256 != SOURCE1998_TODO_SHA256
+                    or hashlib.sha256(task_before).hexdigest() != SOURCE1998_TASK_SHA256
+                    or hashlib.sha256(todo_before).hexdigest() != SOURCE1998_TODO_SHA256
+                ):
+                    raise TaskFrontmatterError("Source-1998 durable transition does not bind the supplied pre-transition digests.")
+                source1998_apply_transaction(path, todo, marker, payload)
+                return SOURCE1998_TARGET
+            current_before = path.stat()
+            current_bytes = path.read_bytes()
+            todo_before = todo.stat()
+            todo_bytes = todo.read_bytes()
+            current_text = current_bytes.decode("utf-8")
+            todo_text = todo_bytes.decode("utf-8")
+            if (
+                not same_file_state(before, current_before)
+                or current_text != text
+                or args.expected_task_sha256 != SOURCE1998_TASK_SHA256
+                or args.expected_todo_sha256 != SOURCE1998_TODO_SHA256
+                or hashlib.sha256(current_bytes).hexdigest() != SOURCE1998_TASK_SHA256
+                or hashlib.sha256(todo_bytes).hexdigest() != SOURCE1998_TODO_SHA256
+            ):
+                raise TaskFrontmatterError("Source-1998 task or TODO changed before reconciliation; retry after rereading both files.")
+            metadata = parse_task_metadata(current_text, args.root)
+            if (
+                metadata is None
+                or metadata.version == V2_VERSION
+                or metadata.status != "blocked"
+                or metadata.blocked_on != SOURCE1998_BLOCKER
+                or metadata.runat != SOURCE1998_TARGET
+                or metadata.managerat != SOURCE1998_MANAGER
+                or metadata.tool != "codex"
+                or metadata.session_id != SOURCE1998_SESSION_ID
+                or metadata.is_manager
+                or metadata.pending_task_items
+                or has_pending_marker(current_text)
+            ):
+                raise TaskFrontmatterError("Source-1998 reconciliation requires the exact blocked queue-empty task and Human envelope.")
+            validate_source1998_envelope(current_text)
+            current_metadata = parse_task_metadata(current_text, args.root)
+            if current_metadata != metadata:
+                raise TaskFrontmatterError("Source-1998 task metadata changed before reconciliation; retry.")
+            owners = authoritative_active_target_task_paths(args.root, SOURCE1998_TARGET)
+            source_path = path.resolve(strict=False)
+            additional_owners = tuple(owner for owner in owners if owner != source_path)
+            todo_claims = source1998_todo_target_claims(args.root, SOURCE1998_TARGET)
+            if additional_owners or todo_claims != (source_path,):
+                refs = ", ".join(relative_task_ref(args.root, owner) for owner in (*additional_owners, *todo_claims)) or "none"
+                raise TaskFrontmatterError(f"Source-1998 target has an unrelated active owner or TODO claim: {refs}.")
+            authority_payload, authority_state = source1998_authority_snapshot(args.root)
+            pane_state = source1998_pane_snapshot()
+            validate_source1998_transcript(args, path)
+            updated_todo = reconcile_todo_text(args.root, path, todo_text, SOURCE1998_TARGET, "previous", ("current", "human pending"))
+            updated_task = update_frontmatter_status(current_text, "done", "", args.root)
+            latest_authority, latest_authority_state = source1998_authority_snapshot(args.root)
+            latest_pane_state = source1998_pane_snapshot()
+            if latest_authority != authority_payload or not same_file_state(authority_state, latest_authority_state) or latest_pane_state != pane_state:
+                raise TaskFrontmatterError("Source-1998 authority or retained pane changed before reconciliation; retry.")
+            validate_source1998_transcript(args, path)
+            if updated_todo == todo_text:
+                raise TaskFrontmatterError("Source-1998 reconciliation requires the sole current TODO row to move to previous.")
+            record = source1998_transaction_record(current_bytes, updated_task.encode("utf-8"), todo_bytes, updated_todo.encode("utf-8"))
+            source1998_write_transaction(marker, record)
+            source1998_apply_transaction(path, todo, marker, source1998_transaction_payload(record))
+    return SOURCE1998_TARGET
+
+
 def recover_exited_shell_done(args: Args, path: Path, text: str, before: os.stat_result) -> tuple[str, str]:
     """Close one proven exited worker shell and finish its done bookkeeping."""
 
@@ -7846,6 +8297,7 @@ def automatic_done_email_eligible(args: Args, initial_status: str | None) -> boo
             args.close_active_task_tree_no_mail,
             args.close_done_live_no_mail,
             args.describe_done_live_no_mail,
+            args.reconcile_source1998_done,
         )
     )
     return args.status == "done" and not special_done and initial_status is not None and initial_status != "done"
@@ -7868,6 +8320,7 @@ def run(args: Args) -> int:
     closed_active_task_tree_no_mail = False
     closed_done_live_no_mail = False
     described_done_live_no_mail = False
+    source1998_reconciled = False
     try:
         path = task_path(args.root, args.task_file)
         before = path.stat()
@@ -7906,6 +8359,9 @@ def run(args: Args) -> int:
             reattested_park = True
         elif args.reconcile_dependency_blocked_current:
             reconcile_dependency_blocked_current(args, path, text, before)
+        elif args.reconcile_source1998_done:
+            target = reconcile_source1998_done(args, path, text, before)
+            source1998_reconciled = True
         elif args.reconcile_blocked_index:
             reconcile_previous_blocked_index(args, path, text, before)
         elif args.retire_blocked_target:
@@ -8036,6 +8492,8 @@ def run(args: Args) -> int:
             print(f"Finalized stopped stale task {target} without signaling it or the live successor pane.")
         elif args.close_retired_done:
             print(f"Finalized retired task metadata with historical target {target}; no pane was signalled.")
+        elif source1998_reconciled:
+            print(f"Finalized the authenticated Source-1998 task metadata for {target}; retained shell pane and sent no email.")
         elif target and not shared_target_closure:
             print(done_close_message(target, session_id))
         if not closed_done_live_no_mail:

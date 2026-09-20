@@ -75,8 +75,24 @@ from omo_manager.omo_task_status import validate_done_live_todo
 from omo_manager.omo_task_status import validate_done_live_human_close_authorization
 from omo_manager.omo_task_status import validate_source1845_absent_recovery
 from omo_manager.omo_task_status import validate_source1845_todo_custody
+from omo_manager.omo_task_status import validate_source1998_envelope
 from omo_manager.omo_task_status import SOURCE1845_AUDIT_PATH_SHA256
 from omo_manager.omo_task_status import SOURCE1845_PREPARED_AUDIT_SHA256
+from omo_manager.omo_task_status import SOURCE1998_COMPLETION_KEY
+from omo_manager.omo_task_status import SOURCE1998_AUTHORITY_BYTES
+from omo_manager.omo_task_status import SOURCE1998_CLOSE_FAILURE
+from omo_manager.omo_task_status import SOURCE1998_PANE_ID
+from omo_manager.omo_task_status import SOURCE1998_PANE_CWD
+from omo_manager.omo_task_status import SOURCE1998_PANE_COMMAND
+from omo_manager.omo_task_status import SOURCE1998_PANE_PID
+from omo_manager.omo_task_status import SOURCE1998_PANE_START_TICKS
+from omo_manager.omo_task_status import SOURCE1998_SESSION_ID
+from omo_manager.omo_task_status import SOURCE1998_HUMAN_ENVELOPE
+from omo_manager.omo_task_status import SOURCE1998_TASK_SHA256
+from omo_manager.omo_task_status import SOURCE1998_TODO_SHA256
+from omo_manager.omo_task_status import source1998_todo_target_claims
+from omo_manager.omo_task_status import SOURCE1998_TRANSCRIPT
+from omo_manager.omo_task_status import SOURCE1998_TRANSCRIPT_SHA256
 from omo_manager.omo_task_status import Args as StatusArgs
 from omo_manager.omo_codex_stop import ExitedCodexShell
 from omo_manager.omo_codex_stop import done_live_close_started_path
@@ -9219,6 +9235,194 @@ manager note
 
         self.assertTrue(args.reconcile_blocked_index)
         self.assertEqual(blocker, args.blocked_on)
+
+    def test_source1998_reconciliation_requires_all_fixed_bindings(self) -> None:
+        valid = [
+                "--reconcile-source-1998-done",
+                "--completion-key",
+                SOURCE1998_COMPLETION_KEY,
+                "--session-id",
+                SOURCE1998_SESSION_ID,
+                "--pane-id",
+                SOURCE1998_PANE_ID,
+                "--terminal-evidence",
+                SOURCE1998_CLOSE_FAILURE,
+                "--session-transcript",
+                str(SOURCE1998_TRANSCRIPT),
+                "--session-transcript-sha256",
+                SOURCE1998_TRANSCRIPT_SHA256,
+                "--expected-task-sha256",
+                SOURCE1998_TASK_SHA256,
+                "--expected-todo-sha256",
+                SOURCE1998_TODO_SHA256,
+                "token_usage_1998.md",
+            ]
+        args = parse_args(valid)
+        self.assertTrue(args.reconcile_source1998_done)
+        self.assertEqual(SOURCE1998_TASK_SHA256, args.expected_task_sha256)
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args(["--root", "/tmp/clone", *valid])
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args(
+                [
+                    "--reconcile-source-1998-done",
+                    "--completion-key",
+                    "a" * 64,
+                    "--session-id",
+                    SOURCE1998_SESSION_ID,
+                    "--pane-id",
+                    SOURCE1998_PANE_ID,
+                    "--terminal-evidence",
+                    SOURCE1998_CLOSE_FAILURE,
+                    "--session-transcript",
+                    str(SOURCE1998_TRANSCRIPT),
+                    "--session-transcript-sha256",
+                    SOURCE1998_TRANSCRIPT_SHA256,
+                    "--expected-task-sha256",
+                    "a" * 64,
+                    "--expected-todo-sha256",
+                    "b" * 64,
+                    "token_usage_1998.md",
+                ]
+            )
+
+    def test_source1998_reconciliation_rejects_unrelated_task_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "other.md"
+            task = task_frontmatter(status="blocked", blocked_on="watcher_repair.md", runat="config:45") + "body\n"
+            todo = "current:\nother.md config:45\n\nhuman pending:\n\nprevious:\n"
+            path.write_text(task, encoding="utf-8")
+            (root / "TODO.md").write_text(todo, encoding="utf-8")
+            args = StatusArgs(
+                root,
+                Path("other.md"),
+                "done",
+                "",
+                session_id=SOURCE1998_SESSION_ID,
+                reconcile_source1998_done=True,
+                pane_id=SOURCE1998_PANE_ID,
+                session_transcript=SOURCE1998_TRANSCRIPT,
+                session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256,
+                completion_key=SOURCE1998_COMPLETION_KEY,
+                expected_task_sha256=hashlib.sha256(task.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo.encode()).hexdigest(),
+            )
+            with redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertEqual(task, path.read_text(encoding="utf-8"))
+            self.assertEqual(todo, (root / "TODO.md").read_text(encoding="utf-8"))
+
+    def test_source1998_reconciliation_moves_the_sole_current_row_and_finishes_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "token_usage_1998.md"
+            authority = root / "manager_mail" / "85c5dff58359-1998.txt"
+            authority.parent.mkdir()
+            task = Path("/ssd1/sichangheagent/work_logs/token_usage_1998.md").read_bytes()
+            todo = Path("/ssd1/sichangheagent/work_logs/TODO.md").read_bytes()
+            path.write_bytes(task)
+            (root / "TODO.md").write_bytes(todo)
+            authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+            args = StatusArgs(
+                root=root,
+                task_file=Path("token_usage_1998.md"),
+                status="done",
+                blocked_on="",
+                session_id=SOURCE1998_SESSION_ID,
+                reconcile_source1998_done=True,
+                pane_id=SOURCE1998_PANE_ID,
+                session_transcript=SOURCE1998_TRANSCRIPT,
+                session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256,
+                completion_key=SOURCE1998_COMPLETION_KEY,
+                terminal_evidence=SOURCE1998_CLOSE_FAILURE,
+                expected_task_sha256=SOURCE1998_TASK_SHA256,
+                expected_todo_sha256=SOURCE1998_TODO_SHA256,
+            )
+            pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+            real_replace = replace_if_unchanged_locked
+
+            def fail_task_write(target: Path, replacement: str, state: os.stat_result) -> os.stat_result:
+                if target == path:
+                    raise RuntimeError("simulated kill between Source-1998 file publishes")
+                return real_replace(target, replacement, state)
+
+            evidence = (
+                patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root),
+                patch("omo_manager.omo_task_status.source1998_authority_snapshot", return_value=(SOURCE1998_AUTHORITY_BYTES, authority.stat())),
+                patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane),
+                patch("omo_manager.omo_task_status.validate_source1998_transcript"),
+            )
+            with evidence[0], evidence[1], evidence[2], evidence[3], patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=fail_task_write), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertTrue((root / ".omo-source1998-reconcile.json").is_file())
+            self.assertIn("status: blocked\n", path.read_text(encoding="utf-8"))
+            self.assertIn("previous:\ntoken_usage_1998.md config:45\n", (root / "TODO.md").read_text(encoding="utf-8"))
+            marker = root / ".omo-source1998-reconcile.json"
+            prepared_marker = marker.read_bytes()
+            tampered = json.loads(prepared_marker)
+            tampered["task_after"] = tampered["task_before"]
+            marker.write_text(json.dumps(tampered, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+            with evidence[0], evidence[1], evidence[2], evidence[3], redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            marker.write_bytes(prepared_marker)
+            with evidence[0], evidence[1], evidence[2], evidence[3], redirect_stderr(io.StringIO()):
+                self.assertEqual(0, run(args))
+            finished = path.read_text(encoding="utf-8")
+            updated_todo = (root / "TODO.md").read_text(encoding="utf-8")
+            self.assertIn("status: done\n", finished)
+            self.assertNotIn("blocked_on:", finished)
+            self.assertIn("previous:\ntoken_usage_1998.md config:45\n", updated_todo)
+            self.assertNotIn("current:\ntoken_usage_1998.md", updated_todo)
+            self.assertFalse((root / ".omo-source1998-reconcile.json").exists())
+
+    def test_source1998_reconciliation_rejects_an_extra_authoritative_envelope(self) -> None:
+        with self.assertRaisesRegex(TaskFrontmatterError, "sole canonical Human envelope"):
+            validate_source1998_envelope(SOURCE1998_HUMAN_ENVELOPE + "\n" + SOURCE1998_HUMAN_ENVELOPE)
+        with self.assertRaisesRegex(TaskFrontmatterError, "sole canonical Human envelope"):
+            validate_source1998_envelope(SOURCE1998_HUMAN_ENVELOPE + "\n</human_instruction>")
+        for closing in ("</human_instruction >", "</human_instruction\t>"):
+            with self.assertRaisesRegex(TaskFrontmatterError, "sole canonical Human envelope"):
+                validate_source1998_envelope(SOURCE1998_HUMAN_ENVELOPE.replace("</human_instruction>", closing))
+
+    def test_source1998_reconciliation_rejects_authoritative_collision_outside_current(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "token_usage_1998.md"
+            other = root / "other.md"
+            task = Path("/ssd1/sichangheagent/work_logs/token_usage_1998.md").read_bytes()
+            other_text = task_frontmatter(status="running", runat="config:45", managerat="config:27") + "unrelated owner\n"
+            todo = Path("/ssd1/sichangheagent/work_logs/TODO.md").read_bytes()
+            path.write_bytes(task)
+            other.write_text(other_text, encoding="utf-8")
+            (root / "TODO.md").write_bytes(todo)
+            args = StatusArgs(
+                root=root,
+                task_file=Path("token_usage_1998.md"),
+                status="done",
+                blocked_on="",
+                session_id=SOURCE1998_SESSION_ID,
+                reconcile_source1998_done=True,
+                pane_id=SOURCE1998_PANE_ID,
+                session_transcript=SOURCE1998_TRANSCRIPT,
+                session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256,
+                completion_key=SOURCE1998_COMPLETION_KEY,
+                terminal_evidence=SOURCE1998_CLOSE_FAILURE,
+                expected_task_sha256=SOURCE1998_TASK_SHA256,
+                expected_todo_sha256=SOURCE1998_TODO_SHA256,
+            )
+            with patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertEqual(task, path.read_bytes())
+            self.assertEqual(todo, (root / "TODO.md").read_bytes())
+
+    def test_source1998_todo_claim_rejects_target_mismatch_in_task_frontmatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            other = root / "other.md"
+            other.write_text(task_frontmatter(status="running", runat="config:99") + "mismatched owner\n", encoding="utf-8")
+            (root / "TODO.md").write_text("current:\n\nhuman pending:\nother.md config:45\n\nlow priority:\n\nprevious:\n", encoding="utf-8")
+            self.assertEqual((other.resolve(),), source1998_todo_target_claims(root, "config:45"))
 
     def test_cli_finish_closed_done_failure_stays_blocked_retryable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
