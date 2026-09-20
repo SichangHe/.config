@@ -237,6 +237,86 @@ WATCHER_PANGRAM_PURPOSE_SHA256 = "9366574c427ed18f3c59ae6508004a21650b7dc950a133
 WATCHER_PANGRAM_MESSAGE_ID = "<178986360706.501782.14851785859358257146@gmail.com>"
 WATCHER_PANGRAM_SUBJECT_SHA256 = "cd842f23f3b0e1430792d88348c9b437a287d03045477ccab5e0473fe6f6f666"
 WATCHER_PANGRAM_BODY_SHA256 = "fb06fce5e82484b26f643e59b2ab83e65a0bcf256bcbece5578a3d9db71dc2ae"
+# 🧑 Human: "Do not resend answers or completion email, alter mailbox contents, or create another owner."
+MAIL_COMPRESS_ROOT = "/ssd1/sichangheagent/work_logs"
+MAIL_COMPRESS_TASK = "mail_compress_1984.md"
+MAIL_COMPRESS_OWNER = "config:44"
+MAIL_COMPRESS_MANAGER = "config:27"
+MAIL_COMPRESS_STATUS = "blocked"
+MAIL_COMPRESS_BLOCKED_ON = "watcher_repair.md no-duplicate reconciliation for three completed Human items"
+MAIL_COMPRESS_TASK_SHA256 = "a534248df9f63bc41cde508ab8748a03ea56c5b3d3d6fcbd2353db8d94bfb125"
+MAIL_COMPRESS_QUEUE_SHA256 = "d37cc4a0ed6ee075241b80bbf1e6f14421a9cb1cb35425e27220b2821ca81453"
+MAIL_COMPRESS_REMOVED_ITEM = "🧑 Mailbox compression; then give a prioritized list of email subjects to search for to handle."
+MAIL_COMPRESS_ITEMS = (
+    "🧑 Have you trashed a single mail yet? Do it soon. Do them in small batches and in a streaming fashion. Don’t collect all and then try to understand every one of them",
+    "🧑 Did the instruction tell you the wrong way? If so, propose how to fix",
+)
+MAIL_COMPRESS_PRESERVED_ITEMS = (
+    "Automated manager-mail total-cleanup notice 35b77d01ee49f67da725de4b8f887e9a: retained manager mail 59 exceeds 29 (17 unread; 21 recent Human messages). Include it in the existing Source-1984 documented task-by-task streaming compression workflow; exclude PB digest streams and retain current requests, decisions, results, status, recent/unread/active/Human-pending/long-report/uncertain mail. No additional Human acknowledgement.",
+    "Automated unread-compression notice 3b65c4bf405d95d4d91d171579b18c17: unread manager mail 17 exceeds 16 (59 total; 21 recent Human messages). Within the existing Source-1984 owner, compress only unread manager-sent mail; retain full-read memos; send replacement summaries first; move only explicitly superseded source UIDs to recoverable Trash; preserve PB digest streams and protected mail. No additional Human acknowledgement or owner.",
+)
+MAIL_COMPRESS_STOP_LINE = (
+    "Stop all completion-removal and email retries now. Preserve the current two-item queue, existing Sent report, mailbox contents, "
+    "task ownership, and lifecycle state. A reviewed fail-closed reconciliation is being rebound to the current exact task bytes. "
+    "Do not generate a new key, remove another item, send email, or close the task until the reviewed owner command is delivered."
+)
+MAIL_COMPRESS_EVIDENCE = (
+    "Streaming-batches item covered by Sent Message-ID <178987084528.1360890.2067587032136961379@gmail.com>; instruction-diagnosis "
+    "item answered in reviewed final Human report Message-ID <178986953082.1215897.7976112813418478695@gmail.com>."
+)
+MAIL_COMPRESS_PURPOSE_SHA256 = "709692ddcdb50a2ac78159578bf26746e025397c2bf5dd310821e4f420fa79f5"
+MAIL_COMPRESS_MESSAGE_ID = "<178986953082.1215897.7976112813418478695@gmail.com>"
+MAIL_COMPRESS_SUBJECT_SHA256 = "0fb049394eeedce00216f51130ca734f5fc4bc185caacb0d727c41ca28dc8de5"
+MAIL_COMPRESS_BODY_SHA256 = "bc58a3d6ac3bec64617d3b914b6881404c731f9719e22ff28d5f3042a72dab83"
+MAIL_COMPRESS_FAILED_CLAIMS = (
+    (
+        "a41f5cc5cde838d39fc9b14fb066d9897f1fb5660fb12e2b6d34a8f4fa31d270",
+        "54b9e8bb475fe03412f0eccc7758a4c059654afd9a01dca9a1dbf75dadc47808",
+        MAIL_COMPRESS_MANAGER,
+        "8d76287d8fb87408e3d7145dfcd5e883511593d86bb21141f9726c0100ce8ba0",
+        "bf8db52466d80d5eefa6822a1fe77a5079538f9fab2b7a99953bb5dad12ba1e9",
+    ),
+    (
+        "7fe3271727e24881dbd055ac2d03ff526dd9fed83076922fd348629ba669828a",
+        "54b9e8bb475fe03412f0eccc7758a4c059654afd9a01dca9a1dbf75dadc47808",
+        MAIL_COMPRESS_MANAGER,
+        "8efd24c7230731a243bece567aa0b66dd7314c13fca19a49e118effb9c23cf79",
+        "6f2726d3a8761179e870bd9c57cb37e623a694b1a3826b32f27e46ad2444a837",
+    ),
+    (
+        "d711b9c3b78ac2dd92a87703830f728f3c51aeb2525627fc7f75a263e1a73b58",
+        "961e9714d0d33afae12407663dac0a8f9a56736db0b816c436f919c1c43762e0",
+        MAIL_COMPRESS_MANAGER,
+        "918a5caa88304cb0174e425d902f4db286a46db783b8cf5b3e9211f8f3e19e92",
+        "ea3020a0ca14ddb38093f484729f0207e98ad11252231c0173eb54576f94c957",
+    ),
+)
+MAIL_COMPRESS_DELIVERED_CLAIMS = (
+    (
+        MAIL_COMPRESS_REMOVED_ITEM,
+        "d20d7dc4ff66ae7f6ef8f47235874633a796485c885fe27781da719fa28b2b09",
+        "54b9e8bb475fe03412f0eccc7758a4c059654afd9a01dca9a1dbf75dadc47808",
+        MAIL_COMPRESS_MANAGER,
+        "fc2abe2e71d4e74dd9a7bceff12a078074fef274d2f6057fc048c833b998aecb",
+        "ddd2e982e7d2b88a170d1cb35707ea68622b5380d0a5a372d33a91b658a18c5d",
+        "ef127c7172e748737d8f22c17f2c911cdc93d55f8263517a3a69ed812eab0c74",
+        "<178987078745.1356021.16640730800506464393@gmail.com>",
+        MAIL_COMPRESS_SUBJECT_SHA256,
+        "bf9def237039b42f3d807e8bc9c396468c2736fc953cc1862270fa06ca350c8d",
+    ),
+    (
+        MAIL_COMPRESS_ITEMS[0],
+        "e4265ef815f8a99b78f13ada2711353bbd42f94d76d1cb7fbe27861a85656fb2",
+        "10cea70430577873e089dc76822fd7d1fcfd44396539244fce7bfc709fd6114e",
+        MAIL_COMPRESS_MANAGER,
+        "2c77cac3ad746b320e9decefcd71674bce1cb4e9c57f5be011befbca070e353e",
+        "55ecdc8566ca7a2c9d3ae067ded1a11565d23451c4e2a5f7d1888f0ac6adbe9c",
+        "4725f69639d36b7c9dfc340ee8fc6fe39f223eb6a6f764dc6d07119fa8327e7e",
+        "<178987084528.1360890.2067587032136961379@gmail.com>",
+        MAIL_COMPRESS_SUBJECT_SHA256,
+        "101d6eeb42072434210f53bab33388c3f5285a8ecfc8f419100edafc3ba1b04e",
+    ),
+)
 NO_CONTACT_RE = re.compile(
     r"\bsource[- ]985\b|\bno[- ]contact\b|\b(?:do not|must not|never) (?:send )?(?:any )?(?:human(?:-facing)? )?(?:email|mail|message|report|outreach|contact)\b|\b(?:do not|must not|never)\b[^.\n]{0,200}\b(?:send )?(?:any )?human (?:email|mail|message|report|outreach|contact)\b|\b(?:do not|must not|never)\b[^.\n]{0,100}\b(?:email|report|respond|write)\b[^.\n]{0,100}\bhuman\b|\b(?:no|forbid(?:s|den)?) human-facing reports?\b|\bhuman reporting (?:is )?(?:suppressed|forbidden|prohibited|paused)\b|\bwithout human email\b|\breport only privately\b|\bprivate reports? only\b",
     re.IGNORECASE,
@@ -448,6 +528,35 @@ def watcher_pangram_recovery_request() -> OrdinaryPendingRecoveryRequest:
     )
 
 
+def mail_compress_recovery_request() -> OrdinaryPendingRecoveryRequest:
+    """Return the immutable request for the stopped mailbox-compression reconciliation."""
+
+    return OrdinaryPendingRecoveryRequest(
+        "mail-compress-reviewed-sent-remove",
+        MAIL_COMPRESS_TASK_SHA256,
+        MAIL_COMPRESS_QUEUE_SHA256,
+        MAIL_COMPRESS_PURPOSE_SHA256,
+        MAIL_COMPRESS_PURPOSE_SHA256,
+        *MAIL_COMPRESS_FAILED_CLAIMS[0],
+        MAIL_COMPRESS_MESSAGE_ID,
+        MAIL_COMPRESS_SUBJECT_SHA256,
+        MAIL_COMPRESS_BODY_SHA256,
+        extra_claim_key=MAIL_COMPRESS_FAILED_CLAIMS[1][0],
+        extra_task_sha256=MAIL_COMPRESS_FAILED_CLAIMS[1][1],
+        extra_manager_target=MAIL_COMPRESS_FAILED_CLAIMS[1][2],
+        extra_semantic_key=MAIL_COMPRESS_FAILED_CLAIMS[1][3],
+        extra_authorization_sha256=MAIL_COMPRESS_FAILED_CLAIMS[1][4],
+    )
+
+
+def recovery_incident_values(request: OrdinaryPendingRecoveryRequest) -> tuple[str, ...]:
+    """Bind incident-only evidence without changing earlier transition records."""
+
+    if request.mode != "mail-compress-reviewed-sent-remove":
+        return ()
+    return tuple(value for binding in (*MAIL_COMPRESS_FAILED_CLAIMS[2:], *MAIL_COMPRESS_DELIVERED_CLAIMS) for value in binding)
+
+
 def ordinary_pending_transition_key(
     root: Path,
     task: Path,
@@ -463,11 +572,12 @@ def ordinary_pending_transition_key(
         task.resolve().relative_to(root.resolve()).as_posix(),
         purpose,
         *request.__dict__.values(),
+        *recovery_incident_values(request),
     )
 
 
 def recovery_request_sha256(request: OrdinaryPendingRecoveryRequest) -> str:
-    return digest_fields("ordinary-pending-request-v1", *request.__dict__.values())
+    return digest_fields("ordinary-pending-request-v1", *request.__dict__.values(), *recovery_incident_values(request))
 
 
 def pending_transition_path(key: str) -> Path:
@@ -616,6 +726,7 @@ def validate_recovery_request(request: OrdinaryPendingRecoveryRequest) -> None:
         "source1990-pangram-remove",
         "source1970-eval-remove",
         "watcher-pangram-reviewed-sent-remove",
+        "mail-compress-reviewed-sent-remove",
     }:
         raise ValueError("ordinary pending recovery mode is invalid")
     hashes = (
@@ -842,6 +953,64 @@ def validate_watcher_pangram_reviewed_sent_authority(
         raise OSError("watcher Pangram authority does not bind this exact reviewed-Sent recovery")
 
 
+def validate_mail_compress_authority(
+    root: Path,
+    plan: CompletionEmail,
+    items: tuple[str, ...],
+    evidence: str,
+    request: OrdinaryPendingRecoveryRequest,
+    current_text: str,
+) -> None:
+    """Bind the stopped cleanup to its exact owner, full queue, and existing Sent messages."""
+
+    try:
+        relative = plan.task.resolve().relative_to(root.resolve()).as_posix()
+        metadata = parse_task_metadata(current_text, root)
+    except (TaskFrontmatterError, ValueError) as exc:
+        raise OSError("mail-compression recovery task metadata is invalid") from exc
+    expected_plan = _build_completion_email(
+        root,
+        plan.task,
+        current_text,
+        "pending item removed after verification",
+        items=MAIL_COMPRESS_ITEMS,
+        evidence=MAIL_COMPRESS_EVIDENCE,
+        semantic_key=MAIL_COMPRESS_PURPOSE_SHA256,
+        sent_recovery=True,
+    )
+    if (
+        str(root.resolve()) != MAIL_COMPRESS_ROOT
+        or relative != MAIL_COMPRESS_TASK
+        or metadata is None
+        or metadata.version != "v1.0.0"
+        or metadata.status != MAIL_COMPRESS_STATUS
+        or metadata.blocked_on != MAIL_COMPRESS_BLOCKED_ON
+        or metadata.runat != MAIL_COMPRESS_OWNER
+        or metadata.managerat != MAIL_COMPRESS_MANAGER
+        or metadata.is_manager
+        or metadata.pending_task_items != (*MAIL_COMPRESS_ITEMS, *MAIL_COMPRESS_PRESERVED_ITEMS)
+        or digest_fields("pending-queue-v1", *metadata.pending_task_items) != MAIL_COMPRESS_QUEUE_SHA256
+        or current_text.splitlines().count(MAIL_COMPRESS_STOP_LINE) != 1
+        or hashlib.sha256(current_text.encode()).hexdigest() != MAIL_COMPRESS_TASK_SHA256
+        or items != MAIL_COMPRESS_ITEMS
+        or evidence != MAIL_COMPRESS_EVIDENCE
+        or request != mail_compress_recovery_request()
+        or stale_claim_bindings(request) != MAIL_COMPRESS_FAILED_CLAIMS
+        or tuple(binding[0] for binding in MAIL_COMPRESS_DELIVERED_CLAIMS)
+        != (MAIL_COMPRESS_REMOVED_ITEM, MAIL_COMPRESS_ITEMS[0])
+        or ordinary_pending_purpose(plan.outcome, items, evidence) != MAIL_COMPRESS_PURPOSE_SHA256
+        or plan != expected_plan
+        or plan.target != MAIL_COMPRESS_OWNER
+        or plan.manager_target != MAIL_COMPRESS_MANAGER
+        or plan.task_sha256 != MAIL_COMPRESS_TASK_SHA256
+        or plan.send_allowed
+    ):
+        raise OSError("mail-compression authority does not bind this exact reviewed-Sent recovery")
+    for *_claim, message_id, subject_sha256, body_sha256 in MAIL_COMPRESS_DELIVERED_CLAIMS:
+        if not verify_ordinary_completion_in_sent(message_id, subject_sha256, body_sha256):
+            raise OSError("mail-compression delivered claim lacks exact Sent-Mail evidence")
+
+
 def validate_source1970_task_lineage(
     root: Path,
     task: Path,
@@ -1059,6 +1228,8 @@ def stale_claim_bindings(request: OrdinaryPendingRecoveryRequest) -> tuple[tuple
                 request.extra_authorization_sha256,
             )
         )
+    if request.mode == "mail-compress-reviewed-sent-remove":
+        bindings.extend(MAIL_COMPRESS_FAILED_CLAIMS[2:])
     return tuple(bindings)
 
 
@@ -1202,6 +1373,114 @@ def validate_source1970_eval_state(
         raise OSError("Source-1970 recovery conflicts with existing completion state")
 
 
+def validate_mail_compress_state(
+    state: Path,
+    plan: CompletionEmail,
+    request: OrdinaryPendingRecoveryRequest,
+    rows: list[list[str]],
+) -> None:
+    """Authenticate both delivered claims and keep them separate from retired failed claims."""
+
+    authorization_dir = state / "completion-email-authorizations"
+    retired_dir = state / "completion-email-retired-authorizations"
+    used_dir = state / "completion-email-authorization-used"
+    delivery_dir = state / "completion-email-delivered"
+    notice_delivery_dir = state / "completion-notice-delivered"
+    for directory, label in (
+        (authorization_dir, "completion authorization directory"),
+        (retired_dir, "retired completion authorization directory"),
+        (used_dir, "completion authorization use directory"),
+        (delivery_dir, "completion delivery directory"),
+        (notice_delivery_dir, "completion notice delivery directory"),
+    ):
+        require_private_directory(directory, label)
+    relative = plan.task.relative_to(plan.root).as_posix()
+    for (
+        item,
+        claim_key,
+        task_sha256,
+        manager_target,
+        notice_key,
+        semantic_key,
+        authorization_sha256,
+        _message_id,
+        _subject_sha256,
+        _body_sha256,
+    ) in MAIL_COMPRESS_DELIVERED_CLAIMS:
+        expected = [
+            claim_key,
+            MAIL_COMPRESS_OWNER,
+            MAIL_COMPRESS_TASK,
+            manager_target,
+            task_sha256,
+            notice_key,
+            semantic_key,
+        ]
+        authorization_payload = owned_private_file(
+            authorization_dir / claim_key,
+            "mail-compression delivered authorization",
+            4096,
+        ).decode()
+        expected_authorization = {
+            "version": "1",
+            "target": MAIL_COMPRESS_OWNER,
+            "root": str(plan.root),
+            "task": relative,
+            "task_sha256": task_sha256,
+            "notice_key": notice_key,
+            "semantic_key": semantic_key,
+            "subject_sha256": hashlib.sha256(b"").hexdigest(),
+            "body_sha256": hashlib.sha256(
+                pending_item_notice_body("pending item removed after verification", (item,)).encode()
+            ).hexdigest(),
+        }
+        if (
+            [row for row in rows if row and row[0] == claim_key] != [expected]
+            or [row for row in rows if len(row) >= 6 and row[5] == notice_key] != [expected]
+            or [row for row in rows if len(row) == 7 and row[6] == semantic_key] != [expected]
+            or hashlib.sha256(authorization_payload.encode()).hexdigest() != authorization_sha256
+            or authorization_values(authorization_payload) != expected_authorization
+            or owned_private_file(used_dir / claim_key, "mail-compression authorization use", 4096).decode()
+            != f"{MAIL_COMPRESS_OWNER}\t{MAIL_COMPRESS_TASK}\n"
+            or owned_private_file(delivery_dir / claim_key, "mail-compression delivery", 4096).decode()
+            != f"{MAIL_COMPRESS_OWNER}\t{MAIL_COMPRESS_TASK}\t{task_sha256}\n"
+            or owned_private_file(
+                notice_delivery_dir / notice_key,
+                "mail-compression notice delivery",
+                4096,
+            ).decode()
+            != f"{claim_key}\t{MAIL_COMPRESS_OWNER}\t{MAIL_COMPRESS_TASK}\t{task_sha256}\n"
+            or (retired_dir / claim_key).exists()
+        ):
+            raise OSError("mail-compression delivered claim evidence changed")
+    if stale_claim_bindings(request) != MAIL_COMPRESS_FAILED_CLAIMS:
+        raise OSError("mail-compression failed claim bindings changed")
+    matching_plan_rows = [
+        row
+        for row in rows
+        if row
+        and (
+            row[0] == plan.key
+            or len(row) >= 6
+            and row[5] == plan.notice_key
+            or len(row) == 7
+            and row[6] == plan.notice_semantic_key
+        )
+    ]
+    current_paths = (
+        authorization_dir / plan.key,
+        state / "completion-email-authorization-used" / plan.key,
+        state / "completion-email-delivered" / plan.key,
+        state / "completion-email-reconciled" / plan.key,
+        state / "completion-email-requests" / plan.key,
+        state / "completion-email-reconciliations" / plan.key,
+        state / "completion-notice-delivered" / plan.notice_key,
+        state / "ordinary-completion-by-notice" / plan.notice_key,
+    )
+    if matching_plan_rows or any(path.exists() for path in current_paths):
+        raise OSError("mail-compression recovery conflicts with existing completion state")
+
+
 def transition_records(
     static: dict[str, str],
     *,
@@ -1260,6 +1539,7 @@ def prepare_ordinary_pending_transition(
         "source1990-pangram-remove",
         "source1970-eval-remove",
         "watcher-pangram-reviewed-sent-remove",
+        "mail-compress-reviewed-sent-remove",
     } and plan.outcome != "pending item removed after verification":
         raise OSError("claim supersession is supported only for exact verified removal")
     if request.mode == "adopt-add" and request.extra_claim_key:
@@ -1268,6 +1548,8 @@ def prepare_ordinary_pending_transition(
         validate_watcher_pangram_reviewed_sent_authority(plan.root, plan, items, evidence, request, current_text)
     elif request.mode == "source1970-eval-remove":
         validate_source1970_eval_authority(plan.root, plan, items, evidence, request, current_text)
+    elif request.mode == "mail-compress-reviewed-sent-remove":
+        validate_mail_compress_authority(plan.root, plan, items, evidence, request, current_text)
     else:
         validate_prior_transition(request, plan.root, plan.task)
         if request.mode == "source1990-pangram-remove":
@@ -1286,6 +1568,7 @@ def prepare_ordinary_pending_transition(
         "source1990-pangram-remove",
         "source1970-eval-remove",
         "watcher-pangram-reviewed-sent-remove",
+        "mail-compress-reviewed-sent-remove",
     } and request.sent_body_sha256 != hashlib.sha256(plan.body.encode()).hexdigest():
         raise OSError("ordinary pending recovery Sent-Mail body does not match the canonical recovery notice")
     static = transition_static_values(plan.root, plan.task, plan.outcome, items, evidence, request)
@@ -1331,6 +1614,8 @@ def prepare_ordinary_pending_transition(
         relative = plan.task.relative_to(plan.root).as_posix()
         if request.mode == "source1970-eval-remove":
             validate_source1970_eval_state(state, plan, request, transition_key, rows)
+        elif request.mode == "mail-compress-reviewed-sent-remove":
+            validate_mail_compress_state(state, plan, request, rows)
         retirements: list[tuple[Path, Path, list[str], list[str], dict[str, str], bool]] = []
         for claim_key, claim_task_sha256, manager_target, semantic_key, authorization_sha256 in stale_claim_bindings(request):
             old = authorization_dir / claim_key
@@ -1660,6 +1945,7 @@ def validate_ordinary_pending_transition_record(
             values["task"],
             values["purpose_sha256"],
             *request.__dict__.values(),
+            *recovery_incident_values(request),
         )
         ordinary_values = ordinary_completion_record_values(values["ordinary_record"])
     except (KeyError, ValueError) as exc:

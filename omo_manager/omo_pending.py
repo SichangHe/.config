@@ -50,6 +50,7 @@ from omo_manager.omo_completion_email import completion_email_is_delivered
 from omo_manager.omo_completion_email import commit_ordinary_pending_transition
 from omo_manager.omo_completion_email import digest_fields
 from omo_manager.omo_completion_email import load_ordinary_pending_transition
+from omo_manager.omo_completion_email import mail_compress_recovery_request
 from omo_manager.omo_completion_email import OrdinaryPendingRecoveryRequest
 from omo_manager.omo_completion_email import ordinary_pending_purpose
 from omo_manager.omo_completion_email import plan_sent_recovery_completion
@@ -62,6 +63,8 @@ from omo_manager.omo_completion_email import source1970_eval_resolution_items
 from omo_manager.omo_completion_email import watcher_pangram_recovery_request
 from omo_manager.omo_completion_email import WATCHER_PANGRAM_EVIDENCE
 from omo_manager.omo_completion_email import WATCHER_PANGRAM_ITEMS
+from omo_manager.omo_completion_email import MAIL_COMPRESS_EVIDENCE
+from omo_manager.omo_completion_email import MAIL_COMPRESS_ITEMS
 
 
 @dataclass(frozen=True)
@@ -201,6 +204,10 @@ def parse_args(argv: list[str]) -> Args:
         "recover-watcher-pangram-reviewed-sent",
         help="Apply the one reviewed-Sent Pangram watcher cleanup without sending email.",
     )
+    _ = sub.add_parser(
+        "recover-mail-compress-reviewed-sent",
+        help="Apply the stopped mailbox-compression reviewed-Sent reconciliation without sending email.",
+    )
     for recovery in (source1990,):
         recovery.add_argument("--item", action="append", required=True)
         recovery.add_argument("--expected-task-sha256", required=True)
@@ -272,6 +279,8 @@ def parse_args(argv: list[str]) -> Args:
         return Args(parsed.command, source1970_eval_queue_items(), evidence=source1970_eval_evidence())
     if parsed.command == "recover-watcher-pangram-reviewed-sent":
         return Args(parsed.command, WATCHER_PANGRAM_ITEMS, evidence=WATCHER_PANGRAM_EVIDENCE)
+    if parsed.command == "recover-mail-compress-reviewed-sent":
+        return Args(parsed.command, MAIL_COMPRESS_ITEMS, evidence=MAIL_COMPRESS_EVIDENCE)
     if parsed.command == "recover-source1990-pangram":
         hashes = (
             parsed.expected_task_sha256,
@@ -444,12 +453,15 @@ def sent_recovery_request(args: Args) -> OrdinaryPendingRecoveryRequest:
         "recover-source1990-pangram",
         "recover-source1970-eval",
         "recover-watcher-pangram-reviewed-sent",
+        "recover-mail-compress-reviewed-sent",
     }:
         raise BlockingError("only authenticated incident recovery adapters are supported")
     if args.command == "recover-source1970-eval":
         return source1970_eval_recovery_request()
     if args.command == "recover-watcher-pangram-reviewed-sent":
         return watcher_pangram_recovery_request()
+    if args.command == "recover-mail-compress-reviewed-sent":
+        return mail_compress_recovery_request()
     mode = "source1990-pangram-remove"
     semantic_key = args.purpose_sha256
     return OrdinaryPendingRecoveryRequest(
@@ -489,6 +501,7 @@ def recover_sent_pending_transition(args: Args, root: Path, path: Path) -> int:
         "recover-source1990-pangram",
         "recover-source1970-eval",
         "recover-watcher-pangram-reviewed-sent",
+        "recover-mail-compress-reviewed-sent",
     }:
         raise BlockingError("only authenticated incident recovery adapters are supported")
     outcome = "pending item removed after verification"
@@ -522,7 +535,11 @@ def recover_sent_pending_transition(args: Args, root: Path, path: Path) -> int:
             raise BlockingError("Sent recovery ordered live queue changed")
         if ordinary_pending_purpose(outcome, resolution_items, args.evidence) != request.purpose_sha256:
             raise BlockingError("Sent recovery purpose digest changed")
-        if args.command != "recover-watcher-pangram-reviewed-sent" and metadata.pending_task_items != args.items:
+        subset_recoveries = {
+            "recover-watcher-pangram-reviewed-sent",
+            "recover-mail-compress-reviewed-sent",
+        }
+        if args.command not in subset_recoveries and metadata.pending_task_items != args.items:
             raise BlockingError("Sent recovery removal must cover the complete ordered live queue")
         updated, count = remove_pending_items(text, args.items)
         updated = append_comment(updated, pending_remove_evidence_comment(count, args.evidence))
@@ -588,7 +605,12 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
                 for item in current.pending_task_items:
                     print(item)
             return 0
-        if args.command in {"recover-source1990-pangram", "recover-source1970-eval", "recover-watcher-pangram-reviewed-sent"}:
+        if args.command in {
+            "recover-source1990-pangram",
+            "recover-source1970-eval",
+            "recover-watcher-pangram-reviewed-sent",
+            "recover-mail-compress-reviewed-sent",
+        }:
             return recover_sent_pending_transition(args, root, path)
         answer_subject, answer_body = human_answer(args)
         if args.command == "recover-removal-notice":

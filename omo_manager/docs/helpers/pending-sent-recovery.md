@@ -38,3 +38,9 @@ Public no-send recovery commands are incident-specific. They accept only their r
   - it binds only the current `watcher_repair.md` bytes, `config:35` owner, `config:39` manager, complete ordered queue, and its exact three-item subset
   - it requires the reviewed Sent Message-ID, subject digest, and body digest; it does not accept a canonical-notice body substitute or a completion claim
   - it removes only that subset, preserves every other queue item, and records a prepared/committed Message-ID-bound transaction for exact replay
+- mailbox-compression reviewed-Sent adapter
+  - `recover-mail-compress-reviewed-sent` takes no incident parameters and never invokes the sender
+  - it binds the stopped `mail_compress_1984.md` bytes, `config:44` owner, `config:27` manager, and full ordered queue after the first Human item was already removed
+  - it authenticates the original reviewed final report for the instruction-diagnosis item and the existing deletion notice for the streaming-batches item
+  - it preserves both delivered claims and both agent-authored watcher notices byte-for-byte, retires all three earlier failed claims, and removes only the remaining two Human items
+  - task, queue, claim, authorization, or Sent-message drift is rejected before task mutation

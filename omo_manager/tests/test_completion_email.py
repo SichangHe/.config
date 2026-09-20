@@ -3149,6 +3149,242 @@ work
                     omo_pending.run(args, root)
                 self.assertEqual(text, task.read_text(encoding="utf-8"))
 
+    def mail_compress_fixture(
+        self,
+        root: Path,
+        state: Path,
+    ) -> tuple[Path, str, dict[str, object], tuple[str, ...], tuple[str, ...]]:
+        items = omo_completion_email.MAIL_COMPRESS_ITEMS
+
+        def task_payload(queue: tuple[str, ...], body: str) -> str:
+            rendered = "".join(f"  - '{item.replace(chr(39), chr(39) * 2)}'\n" for item in queue)
+            return (
+                "---\n"
+                "version: v1.0.0\n"
+                "status: blocked\n"
+                f"blocked_on: {omo_completion_email.MAIL_COMPRESS_BLOCKED_ON}\n"
+                "runat: config:44\n"
+                "tool: codex\n"
+                "managerat: config:27\n"
+                "is_manager: false\n"
+                "pending_task_items:\n"
+                f"{rendered}"
+                "---\n"
+                f"{body}"
+            )
+
+        task = root / omo_completion_email.MAIL_COMPRESS_TASK
+        initial = task_payload((omo_completion_email.MAIL_COMPRESS_REMOVED_ITEM, *items), "mailbox work complete\n")
+        task.write_text(initial, encoding="utf-8")
+
+        def stale_binding(item: str, label: str) -> tuple[str, str, str, str, str]:
+            semantic_key = hashlib.sha256(f"mail-compress-failed-{label}".encode()).hexdigest()
+            plan = build_completion_email(
+                root,
+                task,
+                task.read_text(encoding="utf-8"),
+                "pending item removed after verification",
+                items=(item,),
+                evidence=f"failed {label}",
+                semantic_key=semantic_key,
+            )
+            assert plan is not None
+            self.assertTrue(claim_completion_email(plan))
+            authorization = state / "completion-email-authorizations" / plan.key
+            return (
+                plan.key,
+                plan.task_sha256,
+                plan.manager_target,
+                plan.notice_semantic_key,
+                hashlib.sha256(authorization.read_bytes()).hexdigest(),
+            )
+
+        failed_main = stale_binding(omo_completion_email.MAIL_COMPRESS_REMOVED_ITEM, "main")
+        failed_streaming = stale_binding(items[0], "streaming")
+        failed_diagnosis = stale_binding(items[1], "diagnosis")
+
+        def delivered_binding(item: str, label: str, message_id: str) -> tuple[str, ...]:
+            semantic_key = hashlib.sha256(f"mail-compress-delivered-{label}".encode()).hexdigest()
+            plan = build_completion_email(
+                root,
+                task,
+                task.read_text(encoding="utf-8"),
+                "pending item removed after verification",
+                items=(item,),
+                evidence=f"delivered {label}",
+                semantic_key=semantic_key,
+            )
+            assert plan is not None
+            self.assertTrue(claim_completion_email(plan))
+            used_dir = state / "completion-email-authorization-used"
+            used_dir.mkdir(mode=0o700, exist_ok=True)
+            used = used_dir / plan.key
+            used.write_text(f"{plan.target}\t{task.name}\n", encoding="utf-8")
+            used.chmod(0o600)
+            mark_completion_email_delivered(plan)
+            authorization = state / "completion-email-authorizations" / plan.key
+            return (
+                item,
+                plan.key,
+                plan.task_sha256,
+                plan.manager_target,
+                plan.notice_key,
+                plan.notice_semantic_key,
+                hashlib.sha256(authorization.read_bytes()).hexdigest(),
+                message_id,
+                hashlib.sha256(f"{label} subject".encode()).hexdigest(),
+                hashlib.sha256(f"{label} body".encode()).hexdigest(),
+            )
+
+        delivered_main = delivered_binding(
+            omo_completion_email.MAIL_COMPRESS_REMOVED_ITEM,
+            "main",
+            "<mail-compress-main@example.test>",
+        )
+        task.write_text(task_payload(items, "mailbox work complete\nfirst item removed\n"), encoding="utf-8")
+        delivered_streaming = delivered_binding(
+            items[0],
+            "streaming",
+            "<mail-compress-streaming@example.test>",
+        )
+        text = task_payload(
+            (*items, *omo_completion_email.MAIL_COMPRESS_PRESERVED_ITEMS),
+            f"mailbox work complete\nfirst item removed\n{omo_completion_email.MAIL_COMPRESS_STOP_LINE}\n",
+        )
+        task.write_text(text, encoding="utf-8")
+        failed = (failed_streaming, failed_diagnosis, failed_main)
+        delivered = (delivered_main, delivered_streaming)
+        constants: dict[str, object] = {
+            "MAIL_COMPRESS_ROOT": str(root.resolve()),
+            "MAIL_COMPRESS_TASK_SHA256": hashlib.sha256(text.encode()).hexdigest(),
+            "MAIL_COMPRESS_QUEUE_SHA256": digest_fields(
+                "pending-queue-v1",
+                *items,
+                *omo_completion_email.MAIL_COMPRESS_PRESERVED_ITEMS,
+            ),
+            "MAIL_COMPRESS_PURPOSE_SHA256": ordinary_pending_purpose(
+                "pending item removed after verification",
+                items,
+                omo_completion_email.MAIL_COMPRESS_EVIDENCE,
+            ),
+            "MAIL_COMPRESS_FAILED_CLAIMS": failed,
+            "MAIL_COMPRESS_DELIVERED_CLAIMS": delivered,
+            "MAIL_COMPRESS_MESSAGE_ID": "<mail-compress-final@example.test>",
+            "MAIL_COMPRESS_SUBJECT_SHA256": hashlib.sha256(b"final subject").hexdigest(),
+            "MAIL_COMPRESS_BODY_SHA256": hashlib.sha256(b"final body").hexdigest(),
+        }
+        return task, text, constants, tuple(binding[0] for binding in failed), tuple(binding[1] for binding in delivered)
+
+    def test_mail_compress_reviewed_sent_reconciles_two_items_without_sending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
+                task, text, constants, failed_keys, delivered_keys = self.mail_compress_fixture(root, state)
+                delivered_before = {
+                    path.relative_to(state): path.read_bytes()
+                    for key in delivered_keys
+                    for directory in (
+                        "completion-email-authorizations",
+                        "completion-email-authorization-used",
+                        "completion-email-delivered",
+                    )
+                    if (path := state / directory / key).is_file()
+                }
+                with patch.multiple(omo_completion_email, **constants), patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
+                    "omo_manager.omo_pending.current_pending_task", return_value=task
+                ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task), patch(
+                    "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True
+                ) as sent, patch("omo_manager.omo_pending.require_owner_completion") as owner_sender, patch(
+                    "omo_manager.omo_completion_email.send_completion_email"
+                ) as sender, patch("omo_manager.omo_completion_email.subprocess.run") as email_process:
+                    args = omo_pending.parse_args(["recover-mail-compress-reviewed-sent"])
+                    request = omo_pending.sent_recovery_request(args)
+                    plan = plan_sent_recovery_completion(
+                        root,
+                        task,
+                        text,
+                        "pending item removed after verification",
+                        items=args.items,
+                        evidence=args.evidence,
+                        semantic_key=request.semantic_key,
+                    )
+                    assert plan is not None
+                    self.assertFalse(plan.send_allowed)
+                    self.assertEqual(0, omo_pending.run(args, root))
+                    metadata = parse_task_metadata(task.read_text(encoding="utf-8"), root)
+                    assert metadata is not None
+                    self.assertEqual(omo_completion_email.MAIL_COMPRESS_PRESERVED_ITEMS, metadata.pending_task_items)
+                    rows = [
+                        line.split("\t")
+                        for line in (state / "completion-email-claims.tsv").read_text(encoding="utf-8").splitlines()
+                    ]
+                    for key in failed_keys:
+                        selected = [row for row in rows if row[0] == key]
+                        self.assertEqual(1, len(selected))
+                        self.assertTrue(selected[0][1].startswith("retired:"))
+                        self.assertTrue((state / "completion-email-retired-authorizations" / key).is_file())
+                    self.assertEqual(
+                        delivered_before,
+                        {
+                            path.relative_to(state): path.read_bytes()
+                            for key in delivered_keys
+                            for directory in (
+                                "completion-email-authorizations",
+                                "completion-email-authorization-used",
+                                "completion-email-delivered",
+                            )
+                            if (path := state / directory / key).is_file()
+                        },
+                    )
+                    first_snapshot = {
+                        path.relative_to(root): path.read_bytes()
+                        for path in root.rglob("*")
+                        if path.is_file()
+                    }
+                    self.assertEqual(0, omo_pending.run(args, root))
+                    self.assertEqual(
+                        first_snapshot,
+                        {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()},
+                    )
+                self.assertEqual(3, sent.call_count)
+                owner_sender.assert_not_called()
+                sender.assert_not_called()
+                email_process.assert_not_called()
+
+    def test_mail_compress_reviewed_sent_rejects_drift_before_task_or_claim_mutation(self) -> None:
+        for drift in ("task", "sent", "delivered-claim"):
+            with self.subTest(drift=drift), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                state = root / "state"
+                with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
+                    task, text, constants, _failed_keys, delivered_keys = self.mail_compress_fixture(root, state)
+                    ledger = state / "completion-email-claims.tsv"
+                    if drift == "task":
+                        task.write_text(text + "drift\n", encoding="utf-8")
+                    elif drift == "delivered-claim":
+                        marker = state / "completion-email-delivered" / delivered_keys[1]
+                        marker.write_text("changed\n", encoding="utf-8")
+                    before_task = task.read_bytes()
+                    before_claims = ledger.read_bytes()
+                    sent_patch = patch(
+                        "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent",
+                        side_effect=[True, False] if drift == "sent" else None,
+                        return_value=drift != "sent",
+                    )
+                    with patch.multiple(omo_completion_email, **constants), patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
+                        "omo_manager.omo_pending.current_pending_task", return_value=task
+                    ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task), sent_patch, patch(
+                        "omo_manager.omo_completion_email.subprocess.run"
+                    ) as email_process:
+                        args = omo_pending.parse_args(["recover-mail-compress-reviewed-sent"])
+                        error = "task bytes changed|Sent-Mail evidence|delivered claim evidence changed"
+                        with self.assertRaisesRegex((OSError, omo_pending.BlockingError), error):
+                            omo_pending.run(args, root)
+                    self.assertEqual(before_task, task.read_bytes())
+                    self.assertEqual(before_claims, ledger.read_bytes())
+                    email_process.assert_not_called()
+
     def test_pending_remove_reports_adopted_notice_without_claiming_a_resend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
