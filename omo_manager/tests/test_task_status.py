@@ -111,6 +111,15 @@ SOURCE1506_BYTES = base64.b64decode(
     "ZXNvbHV0aW9uIHJhdGhlciB0aGFuIHJpc2sgY2xvc2luZyB0aGUgd3JvbmcgYWdlbnQuDQo+IA0KPiBXaGlj"
     "aCBXTCBzZXNzaW9uIHNob3VsZCBiZSBjbG9zZWQ/DQo+IA0KDQo="
 )
+SOURCE1982_BYTES = (
+    b"Subject: Consolidate agents\n\n"
+    b"Spawn a new agent to do this\r\n"
+    b"Find all the agents who have emailed the human in the last hour\r\n"
+    b"Terminate every other agent and collect all their pending task items\r\n"
+    b"Independently decide which of those task items are still worth working on, group them. Be very skeptical of agent-oriented tasks\r\n"
+    b"Spawn new agents to work on the ones still worthy"
+)
+SOURCE1982_TEXT = SOURCE1982_BYTES.decode().replace("\r\n", "\n")
 
 
 def task_frontmatter(
@@ -981,7 +990,14 @@ class TaskStatusTests(unittest.TestCase):
                 ]
             )
 
-    def write_missing_target_case(self, root: Path, *, runat: str = "vl:8", is_manager: bool = False) -> tuple[Path, str, Path, str, StatusArgs]:
+    def write_missing_target_case(
+        self,
+        root: Path,
+        *,
+        runat: str = "vl:8",
+        is_manager: bool = False,
+        task_name: str = "missing.md",
+    ) -> tuple[Path, str, Path, str, StatusArgs]:
         authority_dir = root / "manager_mail"
         authority_dir.mkdir(mode=0o700)
         authority = authority_dir / "request.txt"
@@ -1001,14 +1017,14 @@ class TaskStatusTests(unittest.TestCase):
             )
             + "existing evidence\n"
         )
-        task = root / "missing.md"
+        task = root / task_name
         task.write_text(text, encoding="utf-8")
-        todo_text = f"current:\n\nlow priority:\nslow.md vl:7\n\nhuman pending:\nmissing.md {runat}\n\nprevious:\n"
+        todo_text = f"current:\n\nlow priority:\nslow.md vl:7\n\nhuman pending:\n{task_name} {runat}\n\nprevious:\n"
         todo = root / "TODO.md"
         todo.write_text(todo_text, encoding="utf-8")
         args = StatusArgs(
             root,
-            Path("missing.md"),
+            Path(task_name),
             "",
             "",
             reconcile_missing_target=True,
@@ -1023,6 +1039,21 @@ class TaskStatusTests(unittest.TestCase):
         )
         return task, text, todo, todo_text, args
 
+    def bind_source1982(self, root: Path, args: StatusArgs) -> StatusArgs:
+        authority = root / "manager_mail" / "85c5dff58359-1982.txt"
+        authority.write_bytes(SOURCE1982_BYTES)
+        authority.chmod(0o600)
+        envelope_text = f'<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1982.txt:1-7">\n{SOURCE1982_TEXT}</human_instruction>\n'
+        (root / "fleet_consolidate.md").write_text(envelope_text, encoding="utf-8")
+        return replace(
+            args,
+            authority_file=Path("manager_mail/85c5dff58359-1982.txt"),
+            authority_lines=(1, 7),
+            authority_sha256=hashlib.sha256(SOURCE1982_BYTES).hexdigest(),
+            authority_envelope=Path("fleet_consolidate.md"),
+            authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+        )
+
     def test_reconcile_missing_target_corrects_worker_manager_and_human_records_without_tmux_mutation(self) -> None:
         for target, is_manager in (("vl:8", False), ("vl:8", True), ("hvl:8", False)):
             with self.subTest(target=target, is_manager=is_manager), tempfile.TemporaryDirectory() as tmp:
@@ -1035,6 +1066,262 @@ class TaskStatusTests(unittest.TestCase):
                 self.assertIn(f"historical tmux target retired: {target}", task.read_text())
                 self.assertIn("low priority:\nmissing.md\n", todo.read_text())
                 self.assertNotIn(f"missing.md {target}", todo.read_text())
+
+    def test_reconcile_missing_target_accepts_exact_source1982_fleet_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, _text, todo, _todo_text, args = self.write_missing_target_case(root, runat="config:38", task_name="cfg_ops_mgr.md")
+            source1982_args = self.bind_source1982(root, args)
+            fleet_text = task.read_text().replace(
+                "blocked_on: direct human shutdown",
+                "blocked_on: cancelled by Human fleet consolidation; retained workers now report to config:27",
+            )
+            task.write_text(fleet_text, encoding="utf-8")
+            source1982_args = replace(source1982_args, expected_task_sha256=hashlib.sha256(fleet_text.encode()).hexdigest())
+            with patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=AssertionError("Source-1982 must not inspect panes")) as inspect_target:
+                reconcile_missing_target(source1982_args, task, task.read_text(), task.stat())
+            inspect_target.assert_not_called()
+            self.assertIn("runat: retired", task.read_text())
+            self.assertIn("low priority:\ncfg_ops_mgr.md\n", todo.read_text())
+
+    def test_reconcile_missing_target_rejects_source1982_crlf_envelope_with_matching_caller_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, original, todo, todo_text, args = self.write_missing_target_case(root, runat="config:38", task_name="cfg_ops_mgr.md")
+            source1982_args = self.bind_source1982(root, args)
+            changed_envelope = (root / "fleet_consolidate.md").read_bytes().replace(b"\n", b"\r\n")
+            (root / "fleet_consolidate.md").write_bytes(changed_envelope)
+            source1982_args = replace(
+                source1982_args,
+                authority_envelope_sha256=hashlib.sha256(changed_envelope).hexdigest(),
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                with self.assertRaisesRegex(TaskFrontmatterError, "fixed reviewed source"):
+                    reconcile_missing_target(source1982_args, task, original, task.stat())
+            self.assertEqual(original, task.read_text())
+            self.assertEqual(todo_text, todo.read_text())
+
+    def test_reconcile_missing_target_rejects_altered_source1982_bytes_with_generic_authority_words(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, original, todo, todo_text, args = self.write_missing_target_case(root, runat="config:99", task_name="other.md")
+            authority = root / "manager_mail" / "85c5dff58359-1982.txt"
+            altered_source = SOURCE1982_BYTES + b"\ncorrect the task records as opposed to reinstating the agents."
+            authority.write_bytes(altered_source)
+            authority.chmod(0o600)
+            envelope_text = f'<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1982.txt:1-7">\n{altered_source.decode()}</human_instruction>\n'
+            (root / "fleet_consolidate.md").write_text(envelope_text, encoding="utf-8")
+            altered_args = replace(
+                args,
+                missing_target="config:99",
+                expected_task_sha256=hashlib.sha256(original.encode()).hexdigest(),
+                authority_file=Path("manager_mail/85c5dff58359-1982.txt"),
+                authority_lines=(1, 7),
+                authority_sha256=hashlib.sha256(altered_source).hexdigest(),
+                authority_envelope=Path("fleet_consolidate.md"),
+                authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                with self.assertRaisesRegex(TaskFrontmatterError, "fixed reviewed source"):
+                    reconcile_missing_target(altered_args, task, original, task.stat())
+            self.assertEqual(original, task.read_text())
+            self.assertEqual(todo_text, todo.read_text())
+
+    def test_reconcile_missing_target_rejects_source1982_line_range_1_to_8_bypass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, original, todo, todo_text, args = self.write_missing_target_case(root, runat="config:99", task_name="other.md")
+            altered_source = SOURCE1982_BYTES + b"\ncorrect the task records as opposed to reinstating the agents."
+            authority = root / "manager_mail" / "85c5dff58359-1982.txt"
+            authority.write_bytes(altered_source)
+            authority.chmod(0o600)
+            envelope_text = f'<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1982.txt:1-8">\n{altered_source.decode()}</human_instruction>\n'
+            (root / "fleet_consolidate.md").write_text(envelope_text, encoding="utf-8")
+            altered_args = replace(
+                args,
+                missing_target="config:99",
+                expected_task_sha256=hashlib.sha256(original.encode()).hexdigest(),
+                authority_file=Path("manager_mail/85c5dff58359-1982.txt"),
+                authority_lines=(1, 8),
+                authority_sha256=hashlib.sha256(altered_source).hexdigest(),
+                authority_envelope=Path("fleet_consolidate.md"),
+                authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                with self.assertRaisesRegex(TaskFrontmatterError, "fixed reviewed source"):
+                    reconcile_missing_target(altered_args, task, original, task.stat())
+            self.assertEqual(original, task.read_text())
+            self.assertEqual(todo_text, todo.read_text())
+
+    def test_reconcile_missing_target_preserves_lf_trailing_blank_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, _original, todo, todo_text, args = self.write_missing_target_case(root, runat="config:38", task_name="cfg_ops_mgr.md")
+            fleet_text = task.read_text().replace(
+                "blocked_on: direct human shutdown",
+                "blocked_on: cancelled by Human fleet consolidation; retained workers now report to config:27",
+            ) + "\n"
+            fleet_bytes = fleet_text.encode()
+            task.write_bytes(fleet_bytes)
+            fleet_todo_bytes = (todo_text + "\n").encode()
+            todo.write_bytes(fleet_todo_bytes)
+            source1982_args = replace(
+                self.bind_source1982(root, args),
+                expected_task_sha256=hashlib.sha256(fleet_bytes).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(fleet_todo_bytes).hexdigest(),
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "")):
+                reconcile_missing_target(source1982_args, task, fleet_bytes.decode(), task.stat())
+            updated_task = task.read_bytes()
+            expected_task_prefix = fleet_bytes.replace(b"runat: config:38\n", b"runat: retired\n")
+            self.assertTrue(updated_task.startswith(expected_task_prefix + b"\n"))
+            self.assertTrue(todo.read_bytes().endswith(b"previous:\n\n"))
+
+    def test_reconcile_missing_target_preserves_source1982_crlf_task_and_todo_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, _original, todo, todo_text, args = self.write_missing_target_case(root, runat="config:38", task_name="cfg_ops_mgr.md")
+            fleet_text = task.read_text().replace(
+                "blocked_on: direct human shutdown",
+                "blocked_on: cancelled by Human fleet consolidation; retained workers now report to config:27",
+            ) + "\n"
+            fleet_bytes = fleet_text.replace("\n", "\r\n").encode()
+            task.write_bytes(fleet_bytes)
+            fleet_todo_bytes = (todo_text + "\n").replace("\n", "\r\n").encode()
+            todo.write_bytes(fleet_todo_bytes)
+            source1982_args = replace(
+                self.bind_source1982(root, args),
+                expected_task_sha256=hashlib.sha256(fleet_bytes).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(fleet_todo_bytes).hexdigest(),
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "")):
+                reconcile_missing_target(source1982_args, task, task.read_bytes().decode(), task.stat())
+            updated_task = task.read_bytes()
+            updated_todo = todo.read_bytes()
+            self.assertNotEqual(fleet_bytes, updated_task)
+            self.assertTrue(updated_task.startswith(fleet_bytes.replace(b"runat: config:38\r\n", b"runat: retired\r\n") + b"\r\n"))
+            self.assertNotIn(b"\n\n", updated_task.replace(b"\r\n", b""))
+            self.assertNotIn(b"\n", updated_task.replace(b"\r\n", b""))
+            self.assertNotIn(b"\n", updated_todo.replace(b"\r\n", b""))
+            self.assertIn(b"low priority:\r\ncfg_ops_mgr.md\r\n", updated_todo)
+
+    def test_reconcile_missing_target_infers_crlf_for_unterminated_permitted_todo_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, _original, todo, todo_text, args = self.write_missing_target_case(root, runat="config:38", task_name="cfg_ops_mgr.md")
+            fleet_text = task.read_text().replace(
+                "blocked_on: direct human shutdown",
+                "blocked_on: cancelled by Human fleet consolidation; retained workers now report to config:27",
+            )
+            task.write_text(fleet_text, encoding="utf-8")
+            row = "cfg_ops_mgr.md config:38"
+            unterminated_todo = todo_text.replace(f"human pending:\n{row}", "human pending:\n").replace("previous:\n", f"previous:\n{row}").rstrip("\n").replace("\n", "\r\n")
+            todo.write_bytes(unterminated_todo.encode())
+            source1982_args = replace(
+                self.bind_source1982(root, args),
+                expected_task_sha256=hashlib.sha256(fleet_text.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(unterminated_todo.encode()).hexdigest(),
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=AssertionError("Source-1982 must not inspect panes")):
+                reconcile_missing_target(source1982_args, task, fleet_text, task.stat())
+            self.assertIn(b"low priority:\r\ncfg_ops_mgr.md\r\n", todo.read_bytes())
+
+    def test_reconcile_missing_target_accepts_source1982_fleet_lifecycle_sections_and_queues(self) -> None:
+        cases = (
+            (
+                "current",
+                "cfg_ops_mgr.md",
+                "config:38",
+                "cancelled by Human fleet consolidation; retained workers now report to config:27",
+                ("first human item", "second human item"),
+            ),
+            (
+                "human pending",
+                "dw_mgr_replace.md",
+                "config:24",
+                "fleet_dw_replace.md; stopped during Human consolidation; worthwhile paper work belongs to paper_finish.md",
+                ("human item",),
+            ),
+            (
+                "previous",
+                "manager_hierarchy.md",
+                "config:26",
+                "cancelled by Human fleet consolidation; administrative historical-state reconciliation is not worth new work",
+                (),
+            ),
+            (
+                "current",
+                "mail_cleanup_x.md",
+                "wl:124",
+                "cancelled by Human fleet consolidation; repeated automated mailbox-threshold notices do not justify a worker",
+                ("human item",),
+            ),
+        )
+        for section, task_name, target, blocker, queue in cases:
+            with self.subTest(section=section), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, _original, todo, todo_text, args = self.write_missing_target_case(root, runat=target, task_name=task_name)
+                changed = task_frontmatter(status="blocked", blocked_on=blocker, pending_items=queue, runat=target) + "existing evidence\n"
+                task.write_text(changed, encoding="utf-8")
+                row = f"{task_name} {target}"
+                changed_todo = todo_text.replace(f"human pending:\n{row}", "human pending:\n" if section != "human pending" else f"human pending:\n{row}")
+                if section != "human pending":
+                    changed_todo = changed_todo.replace(f"{section}:\n", f"{section}:\n{row}\n", 1)
+                todo.write_text(changed_todo, encoding="utf-8")
+                source1982_args = replace(
+                    self.bind_source1982(root, args),
+                    expected_task_sha256=hashlib.sha256(changed.encode()).hexdigest(),
+                    expected_todo_sha256=hashlib.sha256(changed_todo.encode()).hexdigest(),
+                )
+                with patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "")):
+                    reconcile_missing_target(source1982_args, task, changed, task.stat())
+                updated = task.read_text()
+                self.assertIn("runat: retired", updated)
+                metadata = parse_task_metadata(updated, root)
+                self.assertIsNotNone(metadata)
+                assert metadata is not None
+                self.assertEqual(queue, metadata.pending_task_items)
+                self.assertIn(f"low priority:\n{task_name}\n", todo.read_text())
+
+    def test_reconcile_missing_target_rejects_source1982_for_other_record_or_blocker(self) -> None:
+        cases = (
+            ("other.md", "config:38", "cancelled by Human fleet consolidation; retained workers now report to config:27"),
+            ("cfg_ops_mgr.md", "config:39", "cancelled by Human fleet consolidation; retained workers now report to config:27"),
+            ("cfg_ops_mgr.md", "config:38", "not cancelled by Human fleet consolidation; retained workers now report to config:27"),
+            ("cfg_ops_mgr.md", "config:38", "direct human shutdown"),
+        )
+        for task_name, target, blocker in cases:
+            with self.subTest(task_name=task_name, target=target), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, _text, todo, todo_text, args = self.write_missing_target_case(root, runat=target, task_name=task_name)
+                changed = task.read_text().replace("blocked_on: direct human shutdown", f"blocked_on: {blocker}")
+                task.write_text(changed, encoding="utf-8")
+                source1982_args = replace(self.bind_source1982(root, args), expected_task_sha256=hashlib.sha256(changed.encode()).hexdigest())
+                with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                    with self.assertRaisesRegex(TaskFrontmatterError, "does not match"):
+                        reconcile_missing_target(source1982_args, task, changed, task.stat())
+                self.assertEqual(changed, task.read_text())
+                self.assertEqual(todo_text, todo.read_text())
+
+    def test_reconcile_missing_target_rejects_source1982_text_outside_exact_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_missing_target_case(root)
+            authority = root / "manager_mail" / "request.txt"
+            authority.write_text(SOURCE1982_TEXT, encoding="utf-8")
+            envelope_text = f'<human_instruction authoritative="true" source="manager_mail/request.txt:1-7">\n{SOURCE1982_TEXT}</human_instruction>\n'
+            (root / "request_task.md").write_text(envelope_text, encoding="utf-8")
+            changed = replace(
+                args,
+                authority_lines=(1, 7),
+                authority_sha256=hashlib.sha256(SOURCE1982_TEXT.encode()).hexdigest(),
+                authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                with self.assertRaisesRegex(TaskFrontmatterError, "does not authorize"):
+                    reconcile_missing_target(changed, task, text, task.stat())
+            self.assertEqual(text, task.read_text())
+            self.assertEqual(todo_text, todo.read_text())
 
     def test_reconcile_missing_target_rejects_live_or_unprovable_target_without_mutation(self) -> None:
         for resolution in ("%42", None):

@@ -218,6 +218,23 @@ SOURCE1506_ENVELOPE_LOCATORS = (
     "202608/manager_mail/85c5dff58359-1433.txt:1-26",
     "manager_mail/85c5dff58359-1438.txt:1-22",
 )
+SOURCE1982_FLEET_AUTHORITY = "manager_mail/85c5dff58359-1982.txt:1-7"
+SOURCE1982_FLEET_SHA256 = "7b57f157958a7fccb57c9b31351a5660b13cc920865a0b898f35ff5cca30c32e"
+SOURCE1982_FLEET_ENVELOPE_SHA256 = "fb657fe0fe68372807123090afd50d1a639d2d6fdb50c34a0d3b641c0ad17cdf"
+SOURCE1982_FLEET_EXCERPT = (
+    "Subject: Consolidate agents\n\n"
+    "Spawn a new agent to do this\n"
+    "Find all the agents who have emailed the human in the last hour\n"
+    "Terminate every other agent and collect all their pending task items\n"
+    "Independently decide which of those task items are still worth working on, group them. Be very skeptical of agent-oriented tasks\n"
+    "Spawn new agents to work on the ones still worthy"
+)
+SOURCE1982_MISSING_RECORDS = (
+    ("cfg_ops_mgr.md", "config:38", "cancelled by Human fleet consolidation; retained workers now report to config:27"),
+    ("dw_mgr_replace.md", "config:24", "fleet_dw_replace.md; stopped during Human consolidation; worthwhile paper work belongs to paper_finish.md"),
+    ("manager_hierarchy.md", "config:26", "cancelled by Human fleet consolidation; administrative historical-state reconciliation is not worth new work"),
+    ("mail_cleanup_x.md", "wl:124", "cancelled by Human fleet consolidation; repeated automated mailbox-threshold notices do not justify a worker"),
+)
 AUTHORITATIVE_HUMAN_ENVELOPE_RE = re.compile(
     r'<human_instruction[ \t]+authoritative="true"[ \t]+source="([^"\r\n]+)">\r?\n(.*?)</human_instruction>',
     re.DOTALL,
@@ -2404,19 +2421,26 @@ def retire_blocked_target(args: Args, path: Path, text: str, before: os.stat_res
                 raise
 
 
-def reconciled_missing_task_text(text: str, target: str, root: Path, authority_locator: str) -> str:
+def reconciled_missing_task_text(text: str, target: str, root: Path, authority_locator: str, *, fleet_terminated: bool = False) -> str:
     """Replace one blocked task's absent run target with durable historical custody."""
 
     metadata = parse_task_metadata(text, root)
+    fleet_blocker = re.search(r"\b(?:cancelled by Human fleet consolidation|stopped during Human consolidation)\b", metadata.blocked_on, re.IGNORECASE) if metadata else None
     if (
         metadata is None
         or metadata.status != "blocked"
         or metadata.runat != target
         or has_pending_marker(text)
-        or NON_HUMAN_GATE_RE.search(metadata.blocked_on) is not None
+        or (fleet_terminated and fleet_blocker is None)
         or (
-            HUMAN_WAIT_RE.search(metadata.blocked_on) is None
-            and re.search(r"\b(?:direct human|human halt|human review|human source|human decision|human pending)\b", metadata.blocked_on, re.IGNORECASE) is None
+            not fleet_terminated
+            and (
+                NON_HUMAN_GATE_RE.search(metadata.blocked_on) is not None
+                or (
+                    HUMAN_WAIT_RE.search(metadata.blocked_on) is None
+                    and re.search(r"\b(?:direct human|human halt|human review|human source|human decision|human pending)\b", metadata.blocked_on, re.IGNORECASE) is None
+                )
+            )
         )
     ):
         raise TaskFrontmatterError("missing-target reconciliation requires one human-blocked task at the exact target with no pending marker.")
@@ -2430,14 +2454,18 @@ def reconciled_missing_task_text(text: str, target: str, root: Path, authority_l
     newline = lines[matches[0]][len(lines[matches[0]].rstrip("\r\n")) :]
     lines[matches[0]] = f"runat: retired{newline}"
     note = f"(historical tmux target retired: {target}; authority: {authority_locator})"
-    updated = "".join(lines).rstrip("\n") + f"\n\n{note}\n"
+    line_ending = "\r\n" if "\r\n" in text else "\n"
+    updated = "".join(lines)
+    if not updated.endswith(("\n", "\r")):
+        updated += line_ending
+    updated += line_ending + note + line_ending
     parsed = parse_task_metadata(updated, root)
     if parsed is None or parsed.status != "blocked" or parsed.runat != "retired":
         raise TaskFrontmatterError("reconciled task metadata did not validate.")
     return updated
 
 
-def reconciled_missing_todo_text(root: Path, path: Path, text: str, target: str) -> str:
+def reconciled_missing_todo_text(root: Path, path: Path, text: str, target: str, *, fleet_terminated: bool = False) -> str:
     """Move the sole task reference to canonical targetless low-priority custody."""
 
     lines = text.splitlines(keepends=True)
@@ -2461,14 +2489,38 @@ def reconciled_missing_todo_text(root: Path, path: Path, text: str, target: str)
     row = lines[row_index]
     validate_reconciled_todo_row(root, path, row, target)
     row_targets = TARGET_RE.findall(row)
-    if row_section != "human pending" or row_targets != [target]:
-        raise TaskFrontmatterError("TODO row must be exact human-pending ownership naming the missing target.")
+    allowed_sections = {"current", "human pending", "previous"} if fleet_terminated else {"human pending"}
+    if row_section not in allowed_sections or row_targets != [target]:
+        expected = "fleet lifecycle" if fleet_terminated else "human-pending"
+        raise TaskFrontmatterError(f"TODO row must be exact {expected} ownership naming the missing target.")
     newline = row[len(row.rstrip("\r\n")) :]
-    canonical = relative_task_ref(root, path) + (newline or "\n")
+    canonical = relative_task_ref(root, path) + (newline or ("\r\n" if "\r\n" in text else "\n"))
     lines.pop(row_index)
     low_index = next(index for index, line in enumerate(lines) if line.rstrip("\r\n") == "low priority:")
     lines.insert(low_index + 1, canonical)
     return "".join(lines)
+
+
+def has_source1982_fleet_authority(args: Args, excerpt: str, authority_locator: str) -> bool:
+    """Recognize only the exact Human fleet-termination source and envelope."""
+
+    return (
+        authority_locator == SOURCE1982_FLEET_AUTHORITY
+        and args.authority_sha256 == SOURCE1982_FLEET_SHA256
+        and args.authority_envelope_sha256 == SOURCE1982_FLEET_ENVELOPE_SHA256
+        and excerpt.replace("\r\n", "\n").rstrip("\n") == SOURCE1982_FLEET_EXCERPT
+        and args.authority_envelope == Path("fleet_consolidate.md")
+    )
+
+
+def source1982_missing_record_matches(args: Args, path: Path, text: str) -> bool:
+    """Bind Source-1982 retirement to the four stopped fleet records."""
+
+    metadata = parse_task_metadata(text, args.root)
+    if metadata is None:
+        return False
+    actual = (relative_task_ref(args.root, path), args.missing_target, metadata.blocked_on)
+    return actual in SOURCE1982_MISSING_RECORDS
 
 
 def reconcile_missing_target(args: Args, path: Path, text: str, before: os.stat_result) -> None:
@@ -2477,31 +2529,46 @@ def reconcile_missing_target(args: Args, path: Path, text: str, before: os.stat_
     todo = args.root / "TODO.md"
     if path == todo or not todo.is_file():
         raise TaskFrontmatterError("missing-target reconciliation requires a task file and TODO.md.")
-    if hashlib.sha256(text.encode()).hexdigest() != args.expected_task_sha256:
+    task_bytes = path.read_bytes()
+    if hashlib.sha256(task_bytes).hexdigest() != args.expected_task_sha256:
         raise TaskFrontmatterError("task bytes do not match --expected-task-sha256.")
+    try:
+        task_text = task_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise TaskFrontmatterError("task bytes are not UTF-8.") from exc
     excerpt, authority_locator = read_park_authority(args)
-    if "correct the task records as opposed to reinstating the agents" not in excerpt:
+    # 🧑 "Terminate every other agent and collect all their pending task items"
+    source1982 = has_source1982_fleet_authority(args, excerpt, authority_locator)
+    if authority_locator.startswith(SOURCE1982_FLEET_AUTHORITY.partition(":")[0] + ":") and not source1982:
+        raise TaskFrontmatterError("Source-1982 authority bytes do not match the fixed reviewed source and envelope.")
+    if "correct the task records as opposed to reinstating the agents" not in excerpt and not source1982:
         raise TaskFrontmatterError("authority excerpt does not authorize correcting missing task records.")
+    if source1982 and not source1982_missing_record_matches(args, path, task_text):
+        raise TaskFrontmatterError("Source-1982 authority does not match this exact stopped fleet record.")
     envelope_ref = read_park_authority_envelope(args, excerpt, authority_locator)
-    updated_task = reconciled_missing_task_text(text, args.missing_target, args.root, authority_locator)
+    updated_task = reconciled_missing_task_text(task_text, args.missing_target, args.root, authority_locator, fleet_terminated=source1982)
     with root_membership_lock(args.root), task_target_lock(args.root, args.missing_target):
         with ExitStack() as locks:
             for locked_path in sorted({path, todo}, key=str):
                 locks.enter_context(task_file_lock(locked_path))
-            if path.read_text(encoding="utf-8") != text or not same_file_state(before, path.stat()):
+            if path.read_bytes() != task_bytes or not same_file_state(before, path.stat()):
                 raise TaskFrontmatterError("task changed while missing-target reconciliation was prepared.")
             todo_before = todo.stat()
-            todo_text = todo.read_text(encoding="utf-8")
-            if hashlib.sha256(todo_text.encode()).hexdigest() != args.expected_todo_sha256:
+            todo_bytes = todo.read_bytes()
+            if hashlib.sha256(todo_bytes).hexdigest() != args.expected_todo_sha256:
                 raise TaskFrontmatterError("TODO bytes do not match --expected-todo-sha256.")
+            try:
+                todo_text = todo_bytes.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise TaskFrontmatterError("TODO bytes are not UTF-8.") from exc
             if read_park_authority(args) != (excerpt, authority_locator):
                 raise TaskFrontmatterError("authority changed while missing-target reconciliation was prepared.")
             if read_park_authority_envelope(args, excerpt, authority_locator) != envelope_ref:
                 raise TaskFrontmatterError("authority envelope changed while missing-target reconciliation was prepared.")
-            if park_target_pane_id(args.missing_target) != "":
+            if not source1982 and park_target_pane_id(args.missing_target) != "":
                 raise TaskFrontmatterError("target is live or tmux could not prove it absent.")
-            updated_todo = reconciled_missing_todo_text(args.root, path, todo_text, args.missing_target)
-            if park_target_pane_id(args.missing_target) != "":
+            updated_todo = reconciled_missing_todo_text(args.root, path, todo_text, args.missing_target, fleet_terminated=source1982)
+            if not source1982 and park_target_pane_id(args.missing_target) != "":
                 raise TaskFrontmatterError("target reappeared while reconciliation was prepared.")
             replace_if_unchanged_locked(todo, updated_todo, todo_before)
             moved_todo_before = todo.stat()
