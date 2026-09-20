@@ -61,6 +61,7 @@ from omo_manager.omo_completion_email import source1970_eval_queue_items
 from omo_manager.omo_completion_email import source1970_eval_recovery_request
 from omo_manager.omo_completion_email import source1970_eval_resolution_items
 from omo_manager.omo_completion_email import source1994_plot_recovery_request
+from omo_manager.omo_completion_email import source2003_pangram_recovery_request
 from omo_manager.omo_completion_email import watcher_pangram_recovery_request
 from omo_manager.omo_completion_email import WATCHER_PANGRAM_EVIDENCE
 from omo_manager.omo_completion_email import WATCHER_PANGRAM_ITEMS
@@ -72,6 +73,8 @@ from omo_manager.omo_completion_email import SOURCE1994_COMPLETED_ITEMS
 from omo_manager.omo_completion_email import SOURCE1994_EVIDENCE
 from omo_manager.omo_completion_email import SOURCE1994_ITEMS
 from omo_manager.omo_completion_email import SOURCE1994_PATH
+from omo_manager.omo_completion_email import SOURCE2003_AFTER_QUEUE_SHA256
+from omo_manager.omo_completion_email import SOURCE2003_ITEMS
 
 
 @dataclass(frozen=True)
@@ -212,6 +215,10 @@ def parse_args(argv: list[str]) -> Args:
         help="Record six Source-1994 items and resolve only the five covered by the existing result, without sending email.",
     )
     _ = sub.add_parser(
+        "recover-source2003-pangram",
+        help="Record the three acknowledged Source-2003 Pangram items without sending email.",
+    )
+    _ = sub.add_parser(
         "recover-watcher-pangram-reviewed-sent",
         help="Apply the one reviewed-Sent Pangram watcher cleanup without sending email.",
     )
@@ -290,6 +297,8 @@ def parse_args(argv: list[str]) -> Args:
         return Args(parsed.command, source1970_eval_queue_items(), evidence=source1970_eval_evidence())
     if parsed.command == "recover-source1994-plot":
         return Args(parsed.command, SOURCE1994_ITEMS, evidence=SOURCE1994_EVIDENCE)
+    if parsed.command == "recover-source2003-pangram":
+        return Args(parsed.command, SOURCE2003_ITEMS)
     if parsed.command == "recover-watcher-pangram-reviewed-sent":
         return Args(parsed.command, WATCHER_PANGRAM_ITEMS, evidence=WATCHER_PANGRAM_EVIDENCE)
     if parsed.command == "recover-mail-compress-reviewed-sent":
@@ -475,6 +484,7 @@ def sent_recovery_request(args: Args) -> OrdinaryPendingRecoveryRequest:
         "recover-source1990-pangram",
         "recover-source1970-eval",
         "recover-source1994-plot",
+        "recover-source2003-pangram",
         "recover-watcher-pangram-reviewed-sent",
         "recover-mail-compress-reviewed-sent",
     }:
@@ -483,6 +493,8 @@ def sent_recovery_request(args: Args) -> OrdinaryPendingRecoveryRequest:
         return source1970_eval_recovery_request()
     if args.command == "recover-source1994-plot":
         return source1994_plot_recovery_request()
+    if args.command == "recover-source2003-pangram":
+        return source2003_pangram_recovery_request()
     if args.command == "recover-watcher-pangram-reviewed-sent":
         return watcher_pangram_recovery_request()
     if args.command == "recover-mail-compress-reviewed-sent":
@@ -526,11 +538,13 @@ def recover_sent_pending_transition(args: Args, root: Path, path: Path) -> int:
         "recover-source1990-pangram",
         "recover-source1970-eval",
         "recover-source1994-plot",
+        "recover-source2003-pangram",
         "recover-watcher-pangram-reviewed-sent",
         "recover-mail-compress-reviewed-sent",
     }:
         raise BlockingError("only authenticated incident recovery adapters are supported")
-    outcome = "pending item removed after verification"
+    source2003_add = args.command == "recover-source2003-pangram"
+    outcome = "pending item created" if source2003_add else "pending item removed after verification"
     request = sent_recovery_request(args)
     if args.command == "recover-source1970-eval":
         resolution_items = source1970_eval_resolution_items()
@@ -560,7 +574,9 @@ def recover_sent_pending_transition(args: Args, root: Path, path: Path) -> int:
             if transition is None:
                 raise BlockingError("Sent recovery task bytes changed without an exact prepared transition")
             commit_ordinary_pending_transition(transition, current_task_sha256)
-            if args.command == "recover-source1994-plot":
+            if source2003_add:
+                print("replayed committed Source-2003 recovery: recorded 3 Human items; no email sent")
+            elif args.command == "recover-source1994-plot":
                 print("replayed committed Source-1994 recovery: recorded 6, reconciled 5, 1 remains; no email sent")
             else:
                 print(f"replayed committed {args.command} for {len(args.items)} pending item(s); no email sent")
@@ -574,9 +590,11 @@ def recover_sent_pending_transition(args: Args, root: Path, path: Path) -> int:
             "recover-watcher-pangram-reviewed-sent",
             "recover-mail-compress-reviewed-sent",
         }
-        if args.command not in subset_recoveries and metadata.pending_task_items != args.items:
+        if not source2003_add and args.command not in subset_recoveries and metadata.pending_task_items != args.items:
             raise BlockingError("Sent recovery removal must cover the complete ordered live queue")
-        if args.command == "recover-source1994-plot":
+        if source2003_add:
+            updated, count = add_pending_items(text, args.items)
+        elif args.command == "recover-source1994-plot":
             updated, added_count = add_pending_items(text, args.items)
             if added_count != len(SOURCE1994_ITEMS):
                 raise BlockingError("Source-1994 recovery must record all six exact items once")
@@ -585,11 +603,18 @@ def recover_sent_pending_transition(args: Args, root: Path, path: Path) -> int:
             updated, count = remove_pending_items(updated, resolution_items)
         else:
             updated, count = remove_pending_items(text, args.items)
-        updated = append_comment(updated, pending_remove_evidence_comment(count, args.evidence))
+        if not source2003_add:
+            updated = append_comment(updated, pending_remove_evidence_comment(count, args.evidence))
         updated_metadata = parse_task_metadata(updated, root)
         if updated_metadata is None:
             raise TaskFrontmatterError("updated pending queue metadata is invalid")
         after_queue_sha256 = pending_queue_sha256(updated_metadata.pending_task_items)
+        if source2003_add and (
+            count != len(SOURCE2003_ITEMS)
+            or updated_metadata.pending_task_items != SOURCE2003_ITEMS
+            or after_queue_sha256 != SOURCE2003_AFTER_QUEUE_SHA256
+        ):
+            raise BlockingError("Source-2003 recovery must record all three exact items once")
         if args.command == "recover-source1994-plot" and (
             count != len(SOURCE1994_COMPLETED_ITEMS)
             or updated_metadata.pending_task_items != (SOURCE1994_ITEMS[-1],)
@@ -621,7 +646,9 @@ def recover_sent_pending_transition(args: Args, root: Path, path: Path) -> int:
         fsync_task_parent(path)
         committed_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
         commit_ordinary_pending_transition(transition, committed_sha256)
-        if args.command == "recover-source1994-plot":
+        if source2003_add:
+            print("recorded 3 Source-2003 Human pending items; no email sent")
+        elif args.command == "recover-source1994-plot":
             print("recorded 6 Source-1994 pending items, reconciled 5 completed items, and left 1 awaiting Human approval; no email sent")
         else:
             print(f"reconciled {args.command} for {count} pending item(s); no email sent")
@@ -661,6 +688,7 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
             "recover-source1990-pangram",
             "recover-source1970-eval",
             "recover-source1994-plot",
+            "recover-source2003-pangram",
             "recover-watcher-pangram-reviewed-sent",
             "recover-mail-compress-reviewed-sent",
         }:

@@ -7,7 +7,7 @@ Public no-send recovery commands are incident-specific. They accept only their r
 - exact bindings
   - expected task bytes and ordered queue
   - full ordered Human item set and purpose digest
-  - one verified Sent message: RFC Message-ID, decoded subject digest, and the exact canonical pending-notice body digest
+  - one verified Sent message: RFC Message-ID, decoded subject digest, and the exact incident-bound body digest
   - unused completion claim, authorization bytes, target, task bytes, and semantic key
   - exact Git commit/blob/diff proof when manager ownership changed
 - durable behavior
@@ -38,6 +38,12 @@ Public no-send recovery commands are incident-specific. They accept only their r
   - it binds the exact authority file, owner task bytes, empty ordered queue, blocked lifecycle, authenticated owner/manager, acknowledgement and reviewed-result Sent messages, result commit on `main`, and sole failed add claim
   - it atomically records all six exact Human items, durably preserves their text, reconciles only the five completed figure changes, and leaves the review-before-paper-integration item open
   - it preserves the earlier Source-1977 reconciliation and every unrelated claim; any task, queue, source, claim, commit, or Sent-message drift fails before task mutation
+- Source-2003 Pangram add adapter
+  - `recover-source2003-pangram` takes no incident parameters and never invokes the sender
+  - it binds the exact queue-empty `src1964_pangram.md` bytes, blocked lifecycle, `dw:15` owner, `dw:60` manager, compressed-source pointer, and owner-private authenticated report replay
+  - it authenticates the one existing acknowledgement by Message-ID and exact subject/body digests, plus the three distinct unused item-specific add claims and authorizations
+  - it atomically records the three exact items with Human provenance, preserves every unrelated task byte and claim, and supports only its exact prepared/committed replay
+  - task, queue, source replay, acknowledgement, or claim drift fails before task mutation
 - watcher Pangram reviewed-Sent adapter
   - `recover-watcher-pangram-reviewed-sent` takes no incident parameters and never invokes the sender
   - it binds only the current `watcher_repair.md` bytes, `config:35` owner, `config:39` manager, complete ordered queue, and its exact three-item subset

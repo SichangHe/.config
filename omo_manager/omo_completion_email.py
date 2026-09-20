@@ -270,6 +270,66 @@ SOURCE1994_SOURCE1977_COMPLETION_LINE = (
     "/hdd1/sichanghe/DeGenTWeb_slow/data/classify/full_corpus_svm_size_boxplots_source1977_reviewed_20260919; "
     "Human completion email Message-ID <178985052856.2662722.8783220920664080578@gmail.com>.)"
 )
+# 🧑 Human: "records exactly those three Human-authored items once, preserves provenance ... binds exact current bytes/ordered queue/owner/source/Sent/claims, rejects drift, and sends no email."
+SOURCE2003_ROOT = "/ssd1/sichangheagent/work_logs"
+SOURCE2003_TASK = "src1964_pangram.md"
+SOURCE2003_TASK_SHA256 = "494a4fd5514061362867b08c56a6a33daf72e0a61ad6f217eddd7ec1563f4d0e"
+SOURCE2003_PRIOR_TASK_SHA256 = "a53550b3125e1191cfbb8cecf1fbc415b86b24cb16624b907ea4f50d0c49876a"
+SOURCE2003_PRIOR_TASK_SIZE_BYTES = 4005
+SOURCE2003_QUEUE_SHA256 = "7dcf350513e984adce5263d4f8da8546439050ce5e01ec3487bb061444885730"
+SOURCE2003_AFTER_QUEUE_SHA256 = "3e3a8dfeaa735d934924215ff73e5f4bf1de402b31f0f5a658253e16c085ae6a"
+SOURCE2003_OWNER = "dw:15"
+SOURCE2003_MANAGER = "dw:60"
+SOURCE2003_STATUS = "blocked"
+SOURCE2003_BLOCKED_ON = "watcher_repair.md"
+SOURCE2003_SOURCE_POINTER = "(record and delegate manager_mail/85c5dff58359-2003.txt)"
+SOURCE2003_ITEM_TEXTS = (
+    "Human Source-2003: Explain the exact body-swap website-generation pipeline, quantify how detailed and long the source-page summary was, and assess whether summary content changed what detector metrics the experiment measures.",
+    "Human Source-2003: Determine the strongest defensible paper argument that Pangram could perform better without rescoring every page, comparing use of the existing scored dataset, a smaller dataset, and the Binoculars-score and known-positive evidence.",
+    "Human Source-2003: If more Pangram testing is needed, specify a statistically defensible experiment using a few hundred samples and at most about 1,000, including sampling, controls, settings, metrics, and uncertainty.",
+)
+SOURCE2003_ITEMS = tuple(f"🧑 {item}" for item in SOURCE2003_ITEM_TEXTS)
+SOURCE2003_ITEMS_SHA256 = "d88892efbb0a97ed5d28dc0c6c556b997b079510dcc5c39b6135699b2f0ca4ed"
+SOURCE2003_PURPOSE_SHA256 = "545b3608da63abfc82523ed7f7e2a75aef2a77f71ab16d64878df300f61637d8"
+SOURCE2003_PLAN_KEY = "f3bde3651c35db4975ce7c13b6d89daf08cdccfc6d7e7c6e817fb5d9e867da0b"
+SOURCE2003_NOTICE_KEY = "72fdb5ce0675d5714dba617b650861e25212ffea23509d092567069523adc430"
+SOURCE2003_CANONICAL_BODY_SHA256 = "2be1d6753d43b68cea6255c798e53c03db500c7996656c186569b60fa57d0704"
+SOURCE2003_ACK_MESSAGE_ID = "<178987548847.1940621.13225615650843671377@gmail.com>"
+SOURCE2003_ACK_SUBJECT_SHA256 = "b2439c1be93a90abff001abd6a6c39bfaddb49354dfd1722f48301ee549f1aa8"
+SOURCE2003_ACK_BODY_SHA256 = "03d0348b99216242ed3de387276c80b92ee167de21abe56f60128d50a72e4e14"
+SOURCE2003_REPORT_REPLAY_ID = "1bec2f5a79d7e6b70bdf2032dd24fc03d071a70f7ebbb80156744c5650bcadf8"
+SOURCE2003_REPORT_COMMITMENT_ID = "43b7d8aadb78b73a7a6a5a87d666365f8300a7446d8dd01a38db1af7d42c9be8"
+SOURCE2003_REPORT_COMMITMENT_PATH = Path(
+    "/home/sichangheagent/.local/state/omo-manager/report-receipts/1bec2f5a79d7e6b70bdf2032dd24fc03d071a70f7ebbb80156744c5650bcadf8.commitment"
+)
+SOURCE2003_REPORT_COMMITMENT_SHA256 = "dcdf87b5d2de54be25bd17a721f569e7e7251511bf4091145d93d86c3156b345"
+SOURCE2003_REPORT_DRAFT_PATH = Path("/tmp/omo-report-drafts-30033/src1964_pangram.iw7287rx.md")
+SOURCE2003_REPORT_DRAFT_SHA256 = "413d7796a84175651fe648643ea7c992ec17008c9a4a0626590aa26ae3d0e43d"
+SOURCE2003_REPORT_DRAFT_SIZE_BYTES = 1445
+SOURCE2003_REPORT_MANAGER_TASK = "dw_paper_mgr2.md"
+SOURCE2003_FAILED_CLAIMS = (
+    (
+        "de13da9f7a31c7cca2934bca83428ff43cf5e09b108d3aa5ddba269c4cb45d38",
+        SOURCE2003_PRIOR_TASK_SHA256,
+        SOURCE2003_MANAGER,
+        "38cb3acb189b20351757f0a34c6b4a4d788c7ebdfa7740efe159a17a24073c2e",
+        "4615b30b68176670b22d7913078418e5b6edea81192318fffef120ab031ef829",
+    ),
+    (
+        "03a4cfb05eac77d803a3d9f4260389df5a7760c3e845ba01b86868085fc6754a",
+        SOURCE2003_PRIOR_TASK_SHA256,
+        SOURCE2003_MANAGER,
+        "3a5d9dcb16d93ae0dcac2a76271492fe41d0816b348ac9e4f11ce62b0628082d",
+        "1fb6022420555f26686b2d4f978930781454a9be3aaf2d46722c185f38c35b3e",
+    ),
+    (
+        "1fa0d3b1dac2bf9ad6013bcdf80a1880e1f20990ea648a1d2d2aa750066c6f0e",
+        SOURCE2003_PRIOR_TASK_SHA256,
+        SOURCE2003_MANAGER,
+        "ef2d72af03c96cd4418f348f5c67c9818f9ebbba75cc0234829388b4c8e58dcc",
+        "01182075251f3c1c2429cab289fef9b7c5e459f1b361402e5df6173fa9673824",
+    ),
+)
 # 🧑 Human: "do not send another Human email"
 WATCHER_PANGRAM_ROOT = "/ssd1/sichangheagent/work_logs"
 WATCHER_PANGRAM_TASK = "watcher_repair.md"
@@ -574,6 +634,27 @@ def source1994_plot_recovery_request() -> OrdinaryPendingRecoveryRequest:
     )
 
 
+def source2003_pangram_recovery_request() -> OrdinaryPendingRecoveryRequest:
+    """Return the immutable request for the sole Source-2003 pending-add recovery."""
+
+    return OrdinaryPendingRecoveryRequest(
+        "source2003-pangram-record-add",
+        SOURCE2003_TASK_SHA256,
+        SOURCE2003_QUEUE_SHA256,
+        SOURCE2003_PURPOSE_SHA256,
+        SOURCE2003_PURPOSE_SHA256,
+        *SOURCE2003_FAILED_CLAIMS[0],
+        SOURCE2003_ACK_MESSAGE_ID,
+        SOURCE2003_ACK_SUBJECT_SHA256,
+        SOURCE2003_ACK_BODY_SHA256,
+        extra_claim_key=SOURCE2003_FAILED_CLAIMS[1][0],
+        extra_task_sha256=SOURCE2003_FAILED_CLAIMS[1][1],
+        extra_manager_target=SOURCE2003_FAILED_CLAIMS[1][2],
+        extra_semantic_key=SOURCE2003_FAILED_CLAIMS[1][3],
+        extra_authorization_sha256=SOURCE2003_FAILED_CLAIMS[1][4],
+    )
+
+
 def watcher_pangram_recovery_request() -> OrdinaryPendingRecoveryRequest:
     """Return the one reviewed-Sent, no-claim watcher reconciliation request."""
 
@@ -618,6 +699,16 @@ def mail_compress_recovery_request() -> OrdinaryPendingRecoveryRequest:
 def recovery_incident_values(request: OrdinaryPendingRecoveryRequest) -> tuple[str, ...]:
     """Bind incident-only evidence without changing earlier transition records."""
 
+    if request.mode == "source2003-pangram-record-add":
+        return (
+            SOURCE2003_ITEMS_SHA256,
+            SOURCE2003_AFTER_QUEUE_SHA256,
+            SOURCE2003_REPORT_REPLAY_ID,
+            SOURCE2003_REPORT_COMMITMENT_ID,
+            SOURCE2003_REPORT_COMMITMENT_SHA256,
+            SOURCE2003_REPORT_DRAFT_SHA256,
+            *SOURCE2003_FAILED_CLAIMS[2],
+        )
     if request.mode == "source1994-plot-record-remove":
         return (
             SOURCE1994_SHA256,
@@ -803,6 +894,7 @@ def validate_recovery_request(request: OrdinaryPendingRecoveryRequest) -> None:
         "source1990-pangram-remove",
         "source1970-eval-remove",
         "source1994-plot-record-remove",
+        "source2003-pangram-record-add",
         "watcher-pangram-reviewed-sent-remove",
         "mail-compress-reviewed-sent-remove",
     }:
@@ -1280,6 +1372,151 @@ def validate_source1994_plot_authority(
         raise OSError("Source-1994 result commit identity changed")
 
 
+def validate_source2003_report_source(root: Path, task: Path) -> None:
+    """Authenticate the private owner report that preserved the compressed Source-2003 request."""
+
+    try:
+        require_private_directory(SOURCE2003_REPORT_COMMITMENT_PATH.parent, "Source-2003 report receipt directory")
+        require_private_directory(SOURCE2003_REPORT_DRAFT_PATH.parent, "Source-2003 report draft directory")
+        commitment_payload = owned_private_file(SOURCE2003_REPORT_COMMITMENT_PATH, "Source-2003 report commitment", 64_000)
+        draft_payload = owned_private_file(SOURCE2003_REPORT_DRAFT_PATH, "Source-2003 report draft", 8_000)
+        commitment = json.loads(commitment_payload)
+        draft_text = draft_payload.decode("utf-8")
+    except FileNotFoundError as exc:
+        raise OSError("Source-2003 authenticated report replay is missing") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise OSError("Source-2003 authenticated report replay is malformed") from exc
+    if not isinstance(commitment, dict):
+        raise OSError("Source-2003 authenticated report replay is malformed")
+    unsigned = dict(commitment)
+    commitment_id = unsigned.pop("commitment_id", None)
+    canonical = (json.dumps(commitment, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    preflight = commitment.get("preflight")
+    transfer = commitment.get("transfer")
+    if not isinstance(preflight, dict) or not isinstance(transfer, dict):
+        raise OSError("Source-2003 authenticated report replay is malformed")
+    allocation = preflight.get("allocation")
+    routing_sources = preflight.get("routing_sources")
+    authority = transfer.get("authority")
+    queue_item = transfer.get("queue_item")
+    routing = transfer.get("routing")
+    if (
+        not isinstance(allocation, dict)
+        or not isinstance(routing_sources, list)
+        or not isinstance(authority, dict)
+        or not isinstance(queue_item, dict)
+        or not isinstance(routing, dict)
+    ):
+        raise OSError("Source-2003 authenticated report replay is malformed")
+    source_task = str(task.resolve())
+    manager_task = str((root / SOURCE2003_REPORT_MANAGER_TASK).resolve())
+    matching_sources = [source for source in routing_sources if isinstance(source, dict) and source.get("path") == source_task]
+    expected_item_lines = tuple(f"{index}. `{item}`" for index, item in enumerate(SOURCE2003_ITEM_TEXTS, 1))
+    report_item_lines = tuple(line for line in draft_text.splitlines() if re.fullmatch(r"[1-3]\. `Human Source-2003: .+`", line))
+    if (
+        set(commitment) != {"allocation", "commitment", "commitment_id", "preflight", "replay_id", "schema", "transfer"}
+        or commitment.get("schema") != "omo-report-transaction-commitment/v2"
+        or commitment.get("replay_id") != SOURCE2003_REPORT_REPLAY_ID
+        or commitment_id != SOURCE2003_REPORT_COMMITMENT_ID
+        or commitment_id
+        != hashlib.sha256(json.dumps(unsigned, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        or canonical != commitment_payload
+        or hashlib.sha256(commitment_payload).hexdigest() != SOURCE2003_REPORT_COMMITMENT_SHA256
+        or allocation.get("file") != str(SOURCE2003_REPORT_DRAFT_PATH)
+        or allocation.get("file_sha256") != SOURCE2003_REPORT_DRAFT_SHA256
+        or allocation.get("file_size_bytes") != SOURCE2003_REPORT_DRAFT_SIZE_BYTES
+        or len(matching_sources) != 1
+        or matching_sources[0]
+        != {
+            "exists": True,
+            "path": source_task,
+            "sha256": SOURCE2003_PRIOR_TASK_SHA256,
+            "size_bytes": SOURCE2003_PRIOR_TASK_SIZE_BYTES,
+        }
+        or authority != {"kind": "agent-originated", "producer_target": SOURCE2003_OWNER, "source_task": source_task}
+        or transfer.get("commitment_path") != str(SOURCE2003_REPORT_COMMITMENT_PATH)
+        or transfer.get("receiver") != manager_task
+        or transfer.get("schema") != "omo-report-transfer-receipt/v1"
+        or queue_item.get("input_sha256") != SOURCE2003_REPORT_DRAFT_SHA256
+        or queue_item.get("manager") != manager_task
+        or queue_item.get("producer") != source_task
+        or queue_item.get("replay_id") != SOURCE2003_REPORT_REPLAY_ID
+        or routing.get("manager") != manager_task
+        or routing.get("producer_target") != SOURCE2003_OWNER
+        or routing.get("requested_manager_target") != SOURCE2003_MANAGER
+        or routing.get("resolved_manager_target") != SOURCE2003_MANAGER
+        or routing.get("route_kind") != "active-manager-task"
+        or routing.get("task") != source_task
+        or len(draft_payload) != SOURCE2003_REPORT_DRAFT_SIZE_BYTES
+        or hashlib.sha256(draft_payload).hexdigest() != SOURCE2003_REPORT_DRAFT_SHA256
+        or report_item_lines != expected_item_lines
+        or draft_text.count(SOURCE2003_ACK_MESSAGE_ID) != 1
+        or draft_text.count("recent thread lookup exceeded 30s") != 1
+        or draft_text.count("`omo_pending.py list` remains empty") != 1
+        or draft_text.count("do not send another Human email or weaken Human provenance") != 1
+    ):
+        raise OSError("Source-2003 authenticated report replay does not bind this recovery")
+
+
+def validate_source2003_pangram_authority(
+    root: Path,
+    plan: CompletionEmail,
+    items: tuple[str, ...],
+    evidence: str,
+    request: OrdinaryPendingRecoveryRequest,
+    current_text: str,
+) -> None:
+    """Authenticate the exact three-item Source-2003 pending-add incident."""
+
+    try:
+        metadata = parse_task_metadata(current_text, root)
+        relative = plan.task.resolve().relative_to(root.resolve()).as_posix()
+    except (TaskFrontmatterError, ValueError) as exc:
+        raise OSError("Source-2003 Pangram task is malformed") from exc
+    expected_plan = _build_completion_email(
+        root,
+        plan.task,
+        current_text,
+        "pending item created",
+        items=SOURCE2003_ITEMS,
+        semantic_key=SOURCE2003_PURPOSE_SHA256,
+        sent_recovery=True,
+    )
+    if (
+        metadata is None
+        or str(root.resolve()) != SOURCE2003_ROOT
+        or relative != SOURCE2003_TASK
+        or metadata.version != "v1.0.0"
+        or metadata.status != SOURCE2003_STATUS
+        or metadata.blocked_on != SOURCE2003_BLOCKED_ON
+        or metadata.runat != SOURCE2003_OWNER
+        or metadata.managerat != SOURCE2003_MANAGER
+        or metadata.is_manager
+        or metadata.pending_task_items
+        or digest_fields("pending-queue-v1", *metadata.pending_task_items) != SOURCE2003_QUEUE_SHA256
+        or current_text.splitlines().count(SOURCE2003_SOURCE_POINTER) != 1
+        or hashlib.sha256(current_text.encode()).hexdigest() != SOURCE2003_TASK_SHA256
+        or human_authored_pending_items(items) != SOURCE2003_ITEMS
+        or items != SOURCE2003_ITEMS
+        or len(set(items)) != len(items)
+        or hashlib.sha256("\0".join(items).encode()).hexdigest() != SOURCE2003_ITEMS_SHA256
+        or evidence
+        or request != source2003_pangram_recovery_request()
+        or stale_claim_bindings(request) != SOURCE2003_FAILED_CLAIMS
+        or ordinary_pending_purpose(plan.outcome, items, evidence) != SOURCE2003_PURPOSE_SHA256
+        or plan != expected_plan
+        or plan.target != SOURCE2003_OWNER
+        or plan.manager_target != SOURCE2003_MANAGER
+        or plan.task_sha256 != SOURCE2003_TASK_SHA256
+        or plan.key != SOURCE2003_PLAN_KEY
+        or plan.notice_key != SOURCE2003_NOTICE_KEY
+        or hashlib.sha256(plan.body.encode()).hexdigest() != SOURCE2003_CANONICAL_BODY_SHA256
+        or plan.send_allowed
+    ):
+        raise OSError("Source-2003 authority does not bind this exact Pangram recovery")
+    validate_source2003_report_source(root, plan.task)
+
+
 def claims_rows(state: Path) -> tuple[Path, list[list[str]], str]:
     ledger = state / "completion-email-claims.tsv"
     previous = owned_private_file(ledger, "completion claims ledger", 8_000_000).decode()
@@ -1396,6 +1633,8 @@ def stale_claim_bindings(request: OrdinaryPendingRecoveryRequest) -> tuple[tuple
                 request.extra_authorization_sha256,
             )
         )
+    if request.mode == "source2003-pangram-record-add":
+        bindings.extend(SOURCE2003_FAILED_CLAIMS[2:])
     if request.mode == "mail-compress-reviewed-sent-remove":
         bindings.extend(MAIL_COMPRESS_FAILED_CLAIMS[2:])
     return tuple(bindings)
@@ -1539,6 +1778,114 @@ def validate_source1970_eval_state(
     )
     if matching_plan_rows or any(path.exists() for path in current_paths):
         raise OSError("Source-1970 recovery conflicts with existing completion state")
+
+
+def validate_source2003_pangram_state(
+    state: Path,
+    plan: CompletionEmail,
+    request: OrdinaryPendingRecoveryRequest,
+    transition_key: str,
+    rows: list[list[str]],
+) -> None:
+    """Authenticate all three unused item-specific add claims without touching unrelated claims."""
+
+    authorization_dir = state / "completion-email-authorizations"
+    retired_dir = state / "completion-email-retired-authorizations"
+    relative = plan.task.relative_to(plan.root).as_posix()
+    if stale_claim_bindings(request) != SOURCE2003_FAILED_CLAIMS:
+        raise OSError("Source-2003 failed claim bindings changed")
+    for item, binding in zip(SOURCE2003_ITEMS, SOURCE2003_FAILED_CLAIMS, strict=True):
+        claim_key, task_sha256, manager_target, semantic_key, authorization_sha256 = binding
+        old = authorization_dir / claim_key
+        retired = retired_dir / claim_key
+        live = old.exists()
+        if live == retired.exists():
+            raise OSError("Source-2003 unused authorization state is ambiguous")
+        payload = owned_private_file(old if live else retired, "Source-2003 unused authorization", 4096).decode()
+        authorization = authorization_values(payload)
+        body = pending_item_notice_body("pending item created", (item,))
+        notice_key = completion_notice_key(
+            plan.root,
+            relative,
+            SOURCE2003_OWNER,
+            manager_target,
+            "pending item created",
+            (item,),
+            "",
+            "",
+            body,
+            task_sha256,
+            None,
+            semantic_key,
+        )
+        identity = "\0".join(
+            (
+                str(plan.root),
+                relative,
+                SOURCE2003_OWNER,
+                manager_target,
+                task_sha256,
+                "pending item created",
+                item,
+                "",
+                "",
+                body,
+            )
+        )
+        expected_authorization = {
+            "version": "1",
+            "target": SOURCE2003_OWNER,
+            "root": str(plan.root),
+            "task": relative,
+            "task_sha256": task_sha256,
+            "notice_key": notice_key,
+            "semantic_key": semantic_key,
+            "subject_sha256": hashlib.sha256(b"").hexdigest(),
+            "body_sha256": hashlib.sha256(body.encode()).hexdigest(),
+        }
+        expected = [claim_key, SOURCE2003_OWNER, SOURCE2003_TASK, manager_target, task_sha256, notice_key, semantic_key]
+        tombstone = claim_tombstone(transition_key, claim_key, SOURCE2003_TASK, manager_target, task_sha256)
+        selected = [row for row in rows if row and row[0] == claim_key]
+        if (
+            task_sha256 != SOURCE2003_PRIOR_TASK_SHA256
+            or manager_target != SOURCE2003_MANAGER
+            or hashlib.sha256(identity.encode()).hexdigest() != claim_key
+            or hashlib.sha256(payload.encode()).hexdigest() != authorization_sha256
+            or authorization != expected_authorization
+            or selected not in ([expected], [tombstone])
+            or any(path.exists() for path in forbidden_prior_claim_state(state, claim_key, notice_key))
+        ):
+            raise OSError("Source-2003 unused claim evidence changed")
+        expected_live_rows = [expected] if selected == [expected] else []
+        if (
+            [row for row in rows if len(row) >= 6 and row[5] == notice_key] != expected_live_rows
+            or [row for row in rows if len(row) == 7 and row[6] == semantic_key] != expected_live_rows
+        ):
+            raise OSError("Source-2003 unused claim is not the sole exact purpose claim")
+    matching_plan_rows = [
+        row
+        for row in rows
+        if row
+        and (
+            row[0] == plan.key
+            or len(row) >= 6
+            and row[5] == plan.notice_key
+            or len(row) == 7
+            and row[6] == plan.notice_semantic_key
+        )
+    ]
+    current_paths = (
+        authorization_dir / plan.key,
+        state / "completion-email-authorization-used" / plan.key,
+        state / "completion-email-delivered" / plan.key,
+        state / "completion-email-reconciled" / plan.key,
+        state / "completion-email-requests" / plan.key,
+        state / "completion-email-reconciliations" / plan.key,
+        state / "completion-notice-delivered" / plan.notice_key,
+        state / "ordinary-completion-by-notice" / plan.notice_key,
+    )
+    if matching_plan_rows or any(path.exists() for path in current_paths):
+        raise OSError("Source-2003 recovery conflicts with existing completion state")
 
 
 def validate_mail_compress_state(
@@ -1700,7 +2047,9 @@ def prepare_ordinary_pending_transition(
     purpose = ordinary_pending_purpose(plan.outcome, items, evidence)
     if purpose != request.purpose_sha256:
         raise OSError("ordinary pending recovery purpose digest does not match")
-    if request.mode == "adopt-add" and (plan.outcome != "pending item created" or evidence):
+    if request.mode in {"adopt-add", "source2003-pangram-record-add"} and (
+        plan.outcome != "pending item created" or evidence
+    ):
         raise OSError("claim adoption is supported only for the exact no-evidence add purpose")
     if request.mode in {
         "supersede-remove",
@@ -1719,6 +2068,8 @@ def prepare_ordinary_pending_transition(
         validate_source1970_eval_authority(plan.root, plan, items, evidence, request, current_text)
     elif request.mode == "source1994-plot-record-remove":
         validate_source1994_plot_authority(plan.root, plan, items, evidence, request, current_text)
+    elif request.mode == "source2003-pangram-record-add":
+        validate_source2003_pangram_authority(plan.root, plan, items, evidence, request, current_text)
     elif request.mode == "mail-compress-reviewed-sent-remove":
         validate_mail_compress_authority(plan.root, plan, items, evidence, request, current_text)
     else:
@@ -1739,6 +2090,7 @@ def prepare_ordinary_pending_transition(
         "source1990-pangram-remove",
         "source1970-eval-remove",
         "source1994-plot-record-remove",
+        "source2003-pangram-record-add",
         "watcher-pangram-reviewed-sent-remove",
         "mail-compress-reviewed-sent-remove",
     } and request.sent_body_sha256 != hashlib.sha256(plan.body.encode()).hexdigest():
@@ -1786,6 +2138,8 @@ def prepare_ordinary_pending_transition(
         relative = plan.task.relative_to(plan.root).as_posix()
         if request.mode == "source1970-eval-remove":
             validate_source1970_eval_state(state, plan, request, transition_key, rows)
+        elif request.mode == "source2003-pangram-record-add":
+            validate_source2003_pangram_state(state, plan, request, transition_key, rows)
         elif request.mode == "mail-compress-reviewed-sent-remove":
             validate_mail_compress_state(state, plan, request, rows)
         retirements: list[tuple[Path, Path, list[str], list[str], dict[str, str], bool]] = []
