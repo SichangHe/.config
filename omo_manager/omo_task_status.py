@@ -75,6 +75,7 @@ except ImportError:
     _validate_human_close_authorization = None
 from omo_manager.omo_agent_status import parse_task_metadata
 from omo_manager.omo_agent_status import parse_task_lines
+from omo_manager.omo_agent_status import parse_task_text
 from omo_manager.omo_codex_status import exact_pane_id
 from omo_manager.omo_task_lock import task_target_lock
 from omo_manager.omo_task_lock import task_file_lock
@@ -253,6 +254,7 @@ SOURCE1998_TASK_SHA256 = "73f6a26b8d2a441f5fc97481713b5db87dc3e31ed6b762e266efdf
 SOURCE1998_TODO_SHA256 = "cdb2544e0fb53d7e93055bf5107922e385fb77b377e43128c5f501aceab42cfc"
 SOURCE1998_TASK_AFTER_SHA256 = "dd2c12389f993b3d63b3bfae20d698bebe0ac0b00ba663752a0b7c0adf272468"
 SOURCE1998_TODO_AFTER_SHA256 = "14326f1a72e445ec3ae4a89694e9a15a5c1b65cbd1c5a80b8071f1fc83b09946"
+SOURCE1998_RETIRE_TASK_AFTER_SHA256 = "97d678ca67574058ca7a736b2b35cdde91009ae23dfd73a15a90ff4a0f19270a"
 SOURCE1998_HUMAN_BODY = (
     "Use Codex session records etc. to understand what’s going on and how we prevent this\n"
     "Be very smart about it and do this with the minimum cost, e.g. avoid reading large chunks of agent history and letting cheap subagent grep them if needed"
@@ -277,6 +279,15 @@ SOURCE1998_TRANSCRIPT = Path(
 )
 SOURCE1998_TRANSCRIPT_SHA256 = "a234d436733d21e2063e7d3e2f421018c998f8663ee30a9cbd526140dda80f89"
 SOURCE1998_TRANSACTION = ".omo-source1998-reconcile.json"
+SOURCE1998_RETIRE_TRANSACTION = ".omo-source1998-retire.json"
+SOURCE1998_RETIREMENT_NOTE = (
+    "(terminal lifecycle: reviewed Source-1998 done record retired as historical; target config:45 retained as provenance; "
+    "pane %3556 PID 4192552 start_ticks 128730636 cwd /home/sichangheagent/.config was not signalled; "
+    "session 01a0bbfe-ac16-7c01-a46b-e3a60decacad, transcript SHA-256 "
+    "a234d436733d21e2063e7d3e2f421018c998f8663ee30a9cbd526140dda80f89, completion key "
+    "1febfdf1f5688e80e251eec8924b3279132710b51ab273c795c9f8100eff3789, Human authority "
+    "manager_mail/85c5dff58359-1998.txt SHA-256 12e5ad1aaefb6eae7f1e265f2d41c6da1c6b21bdf8a36427dc7efa643d5a433d.)"
+)
 AUTHORITATIVE_HUMAN_ENVELOPE_RE = re.compile(
     r'<human_instruction[ \t]+authoritative="true"[ \t]+source="([^"\r\n]+)">\r?\n(.*?)</human_instruction>',
     re.DOTALL,
@@ -373,6 +384,7 @@ class Args:
     completion_key: str = ""
     reconcile_dependency_blocked_current: bool = False
     reconcile_source1998_done: bool = False
+    retire_source1998_done: bool = False
     dependency_sha256: str = ""
     dangerously_ignore_checks: bool = False
 
@@ -407,6 +419,7 @@ class ParsedArgs(argparse.Namespace):
     reconcile_blocked_index: bool = False
     reconcile_dependency_blocked_current: bool = False
     reconcile_source1998_done: bool = False
+    retire_source1998_done: bool = False
     closure_repository: Path | None = None
     dirty_path_handoff: Path | None = None
     restore_terminal_target: bool = False
@@ -539,6 +552,12 @@ shutdown.""",
         action="store_true",
         help="Finish the exact authenticated Source-1998 exited-shell record without sending mail or mutating its pane.",
     )
+    _ = parser.add_argument(
+        "--retire-source-1998-done",
+        dest="retire_source1998_done",
+        action="store_true",
+        help="Retire the exact authenticated Source-1998 done record without relaunching or stopping its retained shell.",
+    )
     _ = parser.add_argument("--session-id", default="", help="Session id captured by the prior close, if available.")
     _ = parser.add_argument("--replacement-task", type=Path, help="Active replacement task file; required with --finish-replaced-done.")
     _ = parser.add_argument("--replacement-custody-audit", type=Path, help="Accepted Source-1938 audit proving the exact dw:32/dw:33 custody history; only with --finish-replaced-done.")
@@ -589,7 +608,7 @@ shutdown.""",
         help="For normal done closure, bypass only Codex status and session checks while retaining target, ownership, and bookkeeping guards.",
     )
     _ = parser.add_argument("--expected-task-sha256", default="", help="Exact SHA-256 of unchanged task bytes required with --park-unlinked or --reattest-park-unlinked.")
-    _ = parser.add_argument("--expected-todo-sha256", default="", help="Exact SHA-256 of unchanged TODO bytes required with --park-unlinked or --reattest-park-unlinked.")
+    _ = parser.add_argument("--expected-todo-sha256", default="", help="Exact SHA-256 of unchanged TODO bytes required by the selected custody, park, or Source-1998 retirement operation.")
     _ = parser.add_argument("--expected-receipt-sha256", default="", help="Exact SHA-256 of the complete v1 or v2 receipt required with --reattest-park-unlinked.")
     _ = parser.add_argument("--expected-pane-id", default="", help="Exact numeric tmux pane id required by a live bound-pane mode.")
     _ = parser.add_argument("--expected-pane-pid", type=int, default=0, help="Exact live pane process id required with --close-done-live-no-mail.")
@@ -618,7 +637,7 @@ shutdown.""",
     if any(consumed_receipt) and (not all(consumed_receipt) or not (parsed.close_done_live_no_mail or parsed.describe_done_live_no_mail)):
         parser.error("manager-consumed report evidence requires both receipt arguments with a done-live no-mail operation.")
     session_transcript = (parsed.session_transcript, parsed.session_transcript_sha256.strip())
-    if any(session_transcript) and (not all(session_transcript) or not (parsed.recover_exited_shell_done or parsed.reconcile_source1998_done)):
+    if any(session_transcript) and (not all(session_transcript) or not (parsed.recover_exited_shell_done or parsed.reconcile_source1998_done or parsed.retire_source1998_done)):
         parser.error("session transcript evidence requires both arguments with an exited-shell recovery mode.")
     if parsed.session_transcript is not None and (
         not parsed.session_transcript.is_absolute()
@@ -634,7 +653,7 @@ shutdown.""",
         parser.error("human-close authorization requires both source and digest.")
     if parsed.closure_repository is not None and (
         parsed.status != "done"
-        or any((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index))
+        or any((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.retire_source1998_done))
     ):
         parser.error("--closure-repository is only valid with a normal done transition.")
     if parsed.closure_repository is not None and not parsed.closure_repository.is_absolute():
@@ -658,6 +677,7 @@ shutdown.""",
         parsed.reconcile_blocked_index,
         parsed.reconcile_dependency_blocked_current,
         parsed.reconcile_source1998_done,
+        parsed.retire_source1998_done,
         parsed.restore_terminal_target,
         parsed.close_shared_target,
         parsed.cancel_shared_target,
@@ -700,6 +720,7 @@ shutdown.""",
                 parsed.reconcile_blocked_index,
                 parsed.reconcile_dependency_blocked_current,
                 parsed.reconcile_source1998_done,
+                parsed.retire_source1998_done,
                 parsed.restore_terminal_target,
                 parsed.close_shared_target,
                 parsed.close_retired_done,
@@ -969,6 +990,7 @@ shutdown.""",
         or parsed.close_active_task_tree_no_mail
         or parsed.close_done_live_no_mail
         or parsed.reconcile_source1998_done
+        or parsed.retire_source1998_done
     ):
         parser.error("park-unlinked task, TODO, receipt, pane, and authority assertions require a park operation.")
     if parsed.retire_blocked_target:
@@ -1659,6 +1681,82 @@ shutdown.""",
             expected_todo_sha256=parsed.expected_todo_sha256.strip(),
             reconcile_source1998_done=True,
         )
+    if parsed.retire_source1998_done:
+        unrelated = (
+            parsed.status,
+            parsed.blocked_on,
+            parsed.finish_closed_done,
+            parsed.finish_replaced_done,
+            parsed.recover_exited_shell_done,
+            parsed.replacement_task,
+            parsed.replacement_custody_audit,
+            parsed.stale_target,
+            parsed.replacement_target,
+            parsed.stale_sha256,
+            parsed.replacement_sha256,
+            parsed.replacement_status,
+            parsed.protected_target,
+            parsed.stopped_evidence,
+            parsed.replacement_pane_evidence,
+            parsed.audit_output,
+            parsed.closure_repository,
+            parsed.dirty_path_handoff,
+            parsed.historical_target,
+            parsed.task_sha256,
+            parsed.historical_commit,
+            parsed.shared_target,
+            parsed.protected_shared_task,
+            parsed.protected_shared_sha256,
+            parsed.active_target,
+            parsed.manager_target,
+            parsed.source_sha256,
+            parsed.human_close_authorization_source,
+            parsed.human_close_authorization_sha256,
+            parsed.expected_receipt_sha256,
+            parsed.expected_pane_id,
+            parsed.expected_pane_pid,
+            parsed.expected_pane_start_ticks,
+            parsed.expected_session_id,
+            parsed.manager_consumed_report_receipt,
+            parsed.manager_consumed_report_receipt_sha256,
+            parsed.authority_file,
+            parsed.authority_lines,
+            parsed.authority_sha256,
+            parsed.no_mail_intent,
+            parsed.authority_envelope,
+            parsed.authority_envelope_sha256,
+            parsed.missing_target,
+            parsed.dangerously_ignore_checks,
+        )
+        if (
+            any(unrelated)
+            or parsed.completion_key.strip() != SOURCE1998_COMPLETION_KEY
+            or parsed.root.resolve() != SOURCE1998_ROOT
+            or parsed.terminal_evidence.strip() != SOURCE1998_CLOSE_FAILURE
+            or parsed.session_id.strip() != SOURCE1998_SESSION_ID
+            or parsed.pane_id.strip() != SOURCE1998_PANE_ID
+            or parsed.session_transcript is None
+            or parsed.session_transcript.resolve(strict=False) != SOURCE1998_TRANSCRIPT
+            or parsed.session_transcript_sha256.strip() != SOURCE1998_TRANSCRIPT_SHA256
+            or parsed.expected_task_sha256.strip() != SOURCE1998_TASK_AFTER_SHA256
+            or SHA256_RE.fullmatch(parsed.expected_todo_sha256.strip()) is None
+        ):
+            parser.error("Source-1998 retirement requires the fixed completion, retained-shell, transcript, task, and explicit current TODO digest bindings.")
+        return Args(
+            parsed.root.resolve(),
+            parsed.task_file,
+            "done",
+            "",
+            session_id=SOURCE1998_SESSION_ID,
+            pane_id=SOURCE1998_PANE_ID,
+            terminal_evidence=SOURCE1998_CLOSE_FAILURE,
+            session_transcript=SOURCE1998_TRANSCRIPT,
+            session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256,
+            completion_key=SOURCE1998_COMPLETION_KEY,
+            expected_task_sha256=parsed.expected_task_sha256.strip(),
+            expected_todo_sha256=parsed.expected_todo_sha256.strip(),
+            retire_source1998_done=True,
+        )
     if parsed.recover_exited_shell_done:
         if parsed.status not in {None, "", "done"}:
             parser.error("--recover-exited-shell-done only supports status `done`.")
@@ -2125,7 +2223,7 @@ def replace_if_unchanged_locked_published(path: Path, text: str, before: os.stat
             os.fchmod(handle.fileno(), before.st_mode & 0o7777)
             published_fd = os.dup(handle.fileno())
             after = path.stat()
-            if not same_file_state(before, after):
+            if not same_file_generation(before, after):
                 raise TaskFrontmatterError("task file changed while status update was being prepared; retry after rereading it.")
             os.replace(tmp_path, path)
             tmp_path = None
@@ -2152,7 +2250,7 @@ def replace_bytes_if_unchanged(path: Path, payload: bytes, before: os.stat_resul
                 os.fsync(handle.fileno())
                 temporary = Path(handle.name)
             temporary.chmod(before.st_mode & 0o7777)
-            if not same_file_state(before, path.stat()):
+            if not same_file_generation(before, path.stat()):
                 raise TaskFrontmatterError("task file changed while target restoration was being prepared; retry after rereading it.")
             os.replace(temporary, path)
             temporary = None
@@ -2161,11 +2259,11 @@ def replace_bytes_if_unchanged(path: Path, payload: bytes, before: os.stat_resul
                 temporary.unlink(missing_ok=True)
 
 
-def current_target_task_paths(root: Path, target: str) -> tuple[Path, ...]:
+def current_target_task_paths(root: Path, target: str, todo_text: str | None = None) -> tuple[Path, ...]:
     """Return TODO `current` task paths that claim `target` in metadata or TODO text."""
 
     matches: set[Path] = set()
-    for task in parse_task_lines(root / "TODO.md"):
+    for task in parse_task_text(todo_text) if todo_text is not None else parse_task_lines(root / "TODO.md"):
         if task.section != "todo:current":
             continue
         candidate = (root / task.task_file).resolve(strict=False)
@@ -3012,7 +3110,7 @@ def validate_source1506_replacement(root: Path) -> tuple[Path, str, os.stat_resu
         or stat.S_ISLNK(before.st_mode)
         or before.st_uid != os.getuid()
         or stat.S_IMODE(before.st_mode) & 0o022
-        or not same_file_state(before, after)
+        or not same_file_generation(before, after)
         or metadata is None
         or metadata.version == V2_VERSION
         or metadata.status != "done"
@@ -3286,7 +3384,7 @@ def read_park_authority(args: Args) -> tuple[str, str]:
         or before.st_uid != os.getuid()
         or stat.S_IMODE(before.st_mode) & 0o077
         or len(payload) > MAX_AUTHORITY_BYTES
-        or not same_file_state(before, after)
+        or not same_file_generation(before, after)
         or not same_file_state(after, current)
         or any(stat.S_ISLNK(state.st_mode) or not same_file_state(state, latest) for (_path, state), (_latest_path, latest) in zip(directory_states, current_directories))
         or hashlib.sha256(payload).hexdigest() != args.authority_sha256
@@ -3773,7 +3871,7 @@ def reattest_park_unlinked(args: Args, path: Path, text: str, before: os.stat_re
             todo_before = todo.stat()
             todo_text = todo.read_text(encoding="utf-8")
             if (
-                not same_file_state(before, current_before)
+                not same_file_generation(before, current_before)
                 or current_text != text
                 or parse_task_metadata(current_text, args.root) != metadata
                 or hashlib.sha256(current_text.encode()).hexdigest() != args.expected_task_sha256
@@ -5524,7 +5622,7 @@ def reconcile_done_index(root: Path, path: Path, text: str, before: os.stat_resu
             current_text = path.read_text(encoding="utf-8")
             current_metadata = parse_task_metadata(current_text, root)
             if (
-                not same_file_state(before, current_before)
+                not same_file_generation(before, current_before)
                 or current_text != text
                 or current_metadata is None
                 or current_metadata.status != "done"
@@ -6020,9 +6118,9 @@ def private_evidence_bytes(path: Path, expected_sha256: str, field: str) -> byte
         after = os.fstat(fd)
     finally:
         os.close(fd)
-    identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+    identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
     if (
-        identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
         or not stat.S_ISREG(before.st_mode)
         or before.st_uid != os.getuid()
         or before.st_nlink != 1
@@ -7629,7 +7727,7 @@ def interrupted_delivery_command_matches(item: dict[str, object], args: Args, pa
     return root == args.root and task == path and interrupted_done_script_matches(lines[3], args, path, key)
 
 
-def interrupted_done_session_payload(args: Args, path: Path) -> bytes:
+def _interrupted_done_session_evidence(args: Args, path: Path) -> tuple[bytes, os.stat_result]:
     """Read one immutable Codex transcript beneath the configured session root."""
 
     transcript = args.session_transcript
@@ -7661,10 +7759,10 @@ def interrupted_done_session_payload(args: Args, path: Path) -> bytes:
         bound = transcript.lstat()
     except OSError as exc:
         raise TaskFrontmatterError(f"interrupted completion transcript identity is unavailable: {exc}") from exc
-    identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+    identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
     if (
-        identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-        or (bound.st_dev, bound.st_ino) != (before.st_dev, before.st_ino)
+        identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        or not same_file_generation(before, bound)
         or not stat.S_ISREG(before.st_mode)
         or before.st_uid != os.getuid()
         or before.st_mode & 0o022
@@ -7674,7 +7772,13 @@ def interrupted_done_session_payload(args: Args, path: Path) -> bytes:
         or hashlib.sha256(payload).hexdigest() != args.session_transcript_sha256
     ):
         raise TaskFrontmatterError("interrupted completion transcript changed or is not exact owner-controlled evidence.")
-    return payload
+    return payload, before
+
+
+def interrupted_done_session_payload(args: Args, path: Path) -> bytes:
+    """Read one immutable Codex transcript without exposing its generation."""
+
+    return _interrupted_done_session_evidence(args, path)[0]
 
 
 def validate_interrupted_done_session(args: Args, path: Path, payload: bytes) -> None:
@@ -7768,7 +7872,7 @@ def source1998_authority_snapshot(root: Path) -> tuple[bytes, os.stat_result]:
         not stat.S_ISREG(before.st_mode)
         or before.st_uid != os.getuid()
         or stat.S_IMODE(before.st_mode) & 0o077
-        or not same_file_state(before, after)
+        or not same_file_generation(before, after)
         or hashlib.sha256(payload).hexdigest() != SOURCE1998_AUTHORITY_SHA256
         or payload != SOURCE1998_AUTHORITY_BYTES
     ):
@@ -7815,11 +7919,11 @@ def validate_source1998_envelope(text: str) -> None:
         raise TaskFrontmatterError("Source-1998 reconciliation requires the sole canonical Human envelope.")
 
 
-def source1998_todo_target_claims(root: Path, target: str) -> tuple[Path, ...]:
+def source1998_todo_target_claims(root: Path, target: str, todo_text: str | None = None) -> tuple[Path, ...]:
     """Return every active TODO row that explicitly claims the fixed target."""
 
     claims: list[Path] = []
-    for task in parse_task_lines(root / "TODO.md"):
+    for task in parse_task_text(todo_text) if todo_text is not None else parse_task_lines(root / "TODO.md"):
         if task.section not in {"todo:current", "todo:human pending", "todo:low priority"} or not task.target or not same_tmux_target(task.target, target):
             continue
         candidate = (root / task.task_file).resolve(strict=False)
@@ -7828,10 +7932,23 @@ def source1998_todo_target_claims(root: Path, target: str) -> tuple[Path, ...]:
     return tuple(claims)
 
 
-def validate_source1998_transcript(args: Args, path: Path) -> None:
+def source1998_all_todo_target_claims(root: Path, target: str, todo_text: str | None = None) -> tuple[Path, ...]:
+    """Return every TODO row, including historical `previous`, that claims the fixed target."""
+
+    claims: list[Path] = []
+    for task in parse_task_text(todo_text) if todo_text is not None else parse_task_lines(root / "TODO.md"):
+        if task.section not in {"todo:current", "todo:human pending", "todo:low priority", "todo:previous"} or not task.target or not same_tmux_target(task.target, target):
+            continue
+        candidate = (root / task.task_file).resolve(strict=False)
+        if candidate != root and root in candidate.parents:
+            claims.append(candidate)
+    return tuple(claims)
+
+
+def validate_source1998_transcript(args: Args, path: Path) -> os.stat_result:
     """Require the one delivered completion and the final killed retry in one session."""
 
-    payload = interrupted_done_session_payload(args, path)
+    payload, generation = _interrupted_done_session_evidence(args, path)
     validate_interrupted_done_session(args, path, payload)
     try:
         records = [json.loads(line) for line in payload.decode().splitlines()]
@@ -7855,6 +7972,7 @@ def validate_source1998_transcript(args: Args, path: Path) -> None:
             deliveries.append(item)
     if len(deliveries) != 1:
         raise TaskFrontmatterError("Source-1998 transcript does not bind exactly one reviewed completion delivery.")
+    return generation
 
 
 def source1998_transaction_record(task_before: bytes, task_after: bytes, todo_before: bytes, todo_after: bytes) -> dict[str, str]:
@@ -7929,7 +8047,7 @@ def source1998_read_transaction(path: Path) -> tuple[dict[str, str], tuple[bytes
         return None
     except OSError as exc:
         raise TaskFrontmatterError(f"Source-1998 durable transition record is unavailable: {exc}") from exc
-    if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or stat.S_IMODE(before.st_mode) & 0o077 or not same_file_state(before, after):
+    if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or stat.S_IMODE(before.st_mode) & 0o077 or not same_file_generation(before, after):
         raise TaskFrontmatterError("Source-1998 durable transition record is not a stable owner-private file.")
     try:
         record = json.loads(payload)
@@ -7954,28 +8072,482 @@ def source1998_remove_transaction(path: Path) -> None:
         os.close(directory_fd)
 
 
-def source1998_apply_transaction(path: Path, todo: Path, marker: Path, payload: tuple[bytes, bytes, bytes, bytes]) -> None:
+def source1998_apply_transaction(
+    path: Path,
+    todo: Path,
+    marker: Path,
+    payload: tuple[bytes, bytes, bytes, bytes],
+    *,
+    task_generation: os.stat_result | None = None,
+    todo_generation: os.stat_result | None = None,
+) -> None:
     """Apply or replay the prepared Source-1998 transition without ambiguous partial state."""
 
     task_before, task_after, todo_before, todo_after = payload
     if hashlib.sha256(task_after).hexdigest() != SOURCE1998_TASK_AFTER_SHA256 or hashlib.sha256(todo_after).hexdigest() != SOURCE1998_TODO_AFTER_SHA256:
         raise TaskFrontmatterError("Source-1998 durable transition postimages are not the reviewed exact result.")
-    current_task = path.read_bytes()
-    current_todo = todo.read_bytes()
+    current_task, current_task_state = source1998_stable_file_snapshot(path)
+    current_todo, current_todo_state = source1998_stable_file_snapshot(todo)
+    if (
+        (task_generation is not None and not same_file_generation(task_generation, current_task_state))
+        or (todo_generation is not None and not same_file_generation(todo_generation, current_todo_state))
+    ):
+        raise TaskFrontmatterError("Source-1998 reconciliation task or TODO changed after final evidence; retry.")
+    task_write_state = task_generation or current_task_state
+    todo_write_state = todo_generation or current_todo_state
     task_state = "before" if current_task == task_before else "after" if current_task == task_after else "other"
     todo_state = "before" if current_todo == todo_before else "after" if current_todo == todo_after else "other"
     if "other" in {task_state, todo_state}:
         raise TaskFrontmatterError("Source-1998 task or TODO bytes do not match the prepared transition.")
+    if task_state == "after" and todo_state == "before":
+        raise TaskFrontmatterError("Source-1998 reconciliation has an impossible task-after/TODO-before partial state.")
     if task_state == "after" and todo_state == "after":
         source1998_remove_transaction(marker)
         return
     if todo_state == "before":
-        replace_if_unchanged_locked(todo, todo_after.decode("utf-8"), todo.stat())
+        replace_if_unchanged_locked(todo, todo_after.decode("utf-8"), todo_write_state)
     if task_state == "before":
-        replace_if_unchanged_locked(path, task_after.decode("utf-8"), path.stat())
+        replace_if_unchanged_locked(path, task_after.decode("utf-8"), task_write_state)
     if path.read_bytes() != task_after or todo.read_bytes() != todo_after:
         raise TaskFrontmatterError("Source-1998 durable transition did not reach its exact committed state.")
     source1998_remove_transaction(marker)
+
+
+def source1998_retire_task_text(text: str, root: Path) -> str:
+    """Build the only permitted historical postimage for the reviewed task."""
+
+    metadata = parse_task_metadata(text, root)
+    if (
+        metadata is None
+        or metadata.status != "done"
+        or metadata.runat != SOURCE1998_TARGET
+        or metadata.managerat != SOURCE1998_MANAGER
+        or metadata.tool != "codex"
+        or metadata.session_id != SOURCE1998_SESSION_ID
+        or metadata.is_manager
+        or metadata.pending_task_items
+    ):
+        raise TaskFrontmatterError("Source-1998 retirement requires the exact queue-empty done task and retained target.")
+    parts = frontmatter_parts(text)
+    if parts is None:
+        raise TaskFrontmatterError("Source-1998 retirement task has no frontmatter.")
+    lines = text.splitlines(keepends=True)
+    closing = next((idx for idx, line in enumerate(lines[1:], start=1) if line.strip() == "---"), None)
+    if closing is None:
+        raise TaskFrontmatterError("Source-1998 retirement task frontmatter has no closing marker.")
+    replaced = 0
+    for idx in range(1, closing):
+        key, sep, value = lines[idx].partition(":")
+        if sep and key.strip() == "runat":
+            if value.strip() != SOURCE1998_TARGET:
+                raise TaskFrontmatterError("Source-1998 retirement task target drifted.")
+            newline = lines[idx][len(lines[idx].rstrip("\r\n")) :]
+            lines[idx] = f"runat: retired{newline}"
+            replaced += 1
+    if replaced != 1:
+        raise TaskFrontmatterError("Source-1998 retirement requires exactly one frontmatter runat field.")
+    updated = "".join(lines)
+    newline = "\r\n" if "\r\n" in updated else "\n"
+    if not updated.endswith(("\n", "\r")):
+        updated += newline
+    updated += SOURCE1998_RETIREMENT_NOTE + newline
+    retired = parse_manager_child_metadata(updated, root)
+    if retired is None or retired.status != "done" or retired.runat != "retired":
+        raise TaskFrontmatterError("Source-1998 retirement task postimage did not validate.")
+    return updated
+
+
+def source1998_retire_todo_text(root: Path, path: Path, text: str) -> str:
+    """Remove only the retained target from the exact previous TODO row."""
+
+    if source1998_all_todo_target_claims(root, SOURCE1998_TARGET, text) != (path.resolve(strict=False),):
+        raise TaskFrontmatterError("Source-1998 retirement requires the sole TODO claim for config:45 to be its exact previous row.")
+    lines = text.splitlines(keepends=True)
+    section = ""
+    rows: list[tuple[int, str]] = []
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.endswith(":"):
+            section = stripped[:-1].casefold()
+            continue
+        if path in todo_row_task_paths(root, line):
+            rows.append((idx, section))
+    if len(rows) != 1 or rows[0][1] != "previous":
+        raise TaskFrontmatterError("Source-1998 retirement requires one previous TODO row for the exact task.")
+    idx, _ = rows[0]
+    line = lines[idx]
+    if line.rstrip("\r\n") != f"{SOURCE1998_TASK} {SOURCE1998_TARGET}":
+        raise TaskFrontmatterError("Source-1998 retirement requires the exact previous target claim.")
+    newline = line[len(line.rstrip("\r\n")) :]
+    lines[idx] = f"{SOURCE1998_TASK}{newline}"
+    return "".join(lines)
+
+
+def source1998_retire_transaction_record(task_before: bytes, task_after: bytes, todo_before: bytes, todo_after: bytes) -> dict[str, str]:
+    """Build a durable exact retirement transition record."""
+
+    return {
+        "schema": "omo-source1998-retire/v1",
+        "task": SOURCE1998_TASK,
+        "todo": "TODO.md",
+        "target": SOURCE1998_TARGET,
+        "task_before": base64.b64encode(task_before).decode("ascii"),
+        "task_after": base64.b64encode(task_after).decode("ascii"),
+        "todo_before": base64.b64encode(todo_before).decode("ascii"),
+        "todo_after": base64.b64encode(todo_after).decode("ascii"),
+    }
+
+
+def source1998_retire_transaction_payload(record: dict[str, str]) -> tuple[bytes, bytes, bytes, bytes]:
+    """Decode one structurally valid retirement record."""
+
+    expected = {"schema", "task", "todo", "target", "task_before", "task_after", "todo_before", "todo_after"}
+    if set(record) != expected or any(not isinstance(value, str) for value in record.values()):
+        raise TaskFrontmatterError("Source-1998 retirement record is malformed.")
+    if record["schema"] != "omo-source1998-retire/v1" or record["task"] != SOURCE1998_TASK or record["todo"] != "TODO.md" or record["target"] != SOURCE1998_TARGET:
+        raise TaskFrontmatterError("Source-1998 retirement record is not the fixed operation.")
+    try:
+        decoded = tuple(base64.b64decode(record[key], validate=True) for key in ("task_before", "task_after", "todo_before", "todo_after"))
+    except (ValueError, binascii.Error) as exc:
+        raise TaskFrontmatterError("Source-1998 retirement record has invalid file bytes.") from exc
+    if any(not value for value in decoded):
+        raise TaskFrontmatterError("Source-1998 retirement record has empty file bytes.")
+    return decoded  # type: ignore[return-value]
+
+
+def source1998_read_retire_transaction(path: Path) -> tuple[dict[str, str], tuple[bytes, bytes, bytes, bytes]] | None:
+    """Read one owner-private prepared retirement record."""
+
+    try:
+        before = path.lstat()
+        payload = path.read_bytes()
+        after = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise TaskFrontmatterError(f"Source-1998 retirement record is unavailable: {exc}") from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or stat.S_IMODE(before.st_mode) & 0o077 or not same_file_generation(before, after):
+        raise TaskFrontmatterError("Source-1998 retirement record is not a stable owner-private file.")
+    try:
+        record = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TaskFrontmatterError("Source-1998 retirement record is not valid JSON.") from exc
+    if not isinstance(record, dict) or any(not isinstance(key, str) or not isinstance(value, str) for key, value in record.items()):
+        raise TaskFrontmatterError("Source-1998 retirement record has invalid fields.")
+    typed = dict(record)
+    return typed, source1998_retire_transaction_payload(typed)
+
+
+def source1998_stable_file_snapshot(path: Path) -> tuple[bytes, os.stat_result]:
+    """Read exact bytes with a stable generation for a guarded Source-1998 write."""
+
+    before = path.stat()
+    payload = path.read_bytes()
+    after = path.stat()
+    if not same_file_generation(before, after):
+        raise TaskFrontmatterError(f"Source-1998 file `{path.name}` changed during the evidence read; retry.")
+    return payload, before
+
+
+def source1998_apply_retire_transaction(
+    root: Path,
+    path: Path,
+    todo: Path,
+    marker: Path,
+    payload: tuple[bytes, bytes, bytes, bytes],
+    *,
+    task_generation: os.stat_result | None = None,
+    todo_generation: os.stat_result | None = None,
+) -> None:
+    """Apply or replay retirement only when the marker postimages are recomputed exactly."""
+
+    task_before, task_after, todo_before, todo_after = payload
+    try:
+        expected_task_after = source1998_retire_task_text(task_before.decode("utf-8"), root).encode("utf-8")
+        expected_todo_after = source1998_retire_todo_text(root, path, todo_before.decode("utf-8")).encode("utf-8")
+    except (UnicodeDecodeError, TaskFrontmatterError) as exc:
+        raise TaskFrontmatterError("Source-1998 retirement marker preimages are not the exact reviewed state.") from exc
+    if (
+        task_after != expected_task_after
+        or todo_after != expected_todo_after
+        or hashlib.sha256(task_after).hexdigest() != SOURCE1998_RETIRE_TASK_AFTER_SHA256
+    ):
+        raise TaskFrontmatterError("Source-1998 retirement marker task postimage is not the exact reviewed result.")
+    current_task, current_task_state = source1998_stable_file_snapshot(path)
+    current_todo, current_todo_state = source1998_stable_file_snapshot(todo)
+    if (
+        (task_generation is not None and not same_file_generation(task_generation, current_task_state))
+        or (todo_generation is not None and not same_file_generation(todo_generation, current_todo_state))
+    ):
+        raise TaskFrontmatterError("Source-1998 retirement task or TODO changed after final evidence; retry.")
+    task_write_state = task_generation or current_task_state
+    todo_write_state = todo_generation or current_todo_state
+    task_state = "before" if current_task == task_before else "after" if current_task == task_after else "other"
+    todo_state = "before" if current_todo == todo_before else "after" if current_todo == todo_after else "other"
+    if "other" in {task_state, todo_state}:
+        raise TaskFrontmatterError("Source-1998 retirement task or TODO bytes do not match the prepared transition.")
+    if task_state == "after" and todo_state == "before":
+        raise TaskFrontmatterError("Source-1998 retirement has an impossible task-after/TODO-before partial state.")
+    if todo_state == "before":
+        replace_if_unchanged_locked(todo, todo_after.decode("utf-8"), todo_write_state)
+    if task_state == "before":
+        replace_if_unchanged_locked(path, task_after.decode("utf-8"), task_write_state)
+    if path.read_bytes() != task_after or todo.read_bytes() != todo_after:
+        raise TaskFrontmatterError("Source-1998 retirement did not reach its exact committed state.")
+    source1998_remove_transaction(marker)
+
+
+def source1998_retire_final_evidence_pass(
+    args: Args,
+    path: Path,
+    todo: Path,
+    expected_task_before: bytes,
+    expected_task_after: bytes,
+    expected_todo_before: bytes,
+    expected_todo_after: bytes,
+    *,
+    expected_task_state: os.stat_result | None = None,
+    expected_todo_state: os.stat_result | None = None,
+    expected_authority: tuple[bytes, os.stat_result] | None = None,
+    expected_pane: tuple[str, int, str, str, str, int] | None = None,
+    expected_transcript: os.stat_result | None = None,
+    allow_partial: bool = False,
+) -> tuple[os.stat_result, os.stat_result]:
+    """Perform the complete fail-closed evidence pass immediately before retirement."""
+
+    current_task, current_task_state = source1998_stable_file_snapshot(path)
+    current_todo, current_todo_state = source1998_stable_file_snapshot(todo)
+    current_todo_text = current_todo.decode("utf-8")
+    owners = authoritative_active_target_task_paths(args.root, SOURCE1998_TARGET)
+    current_claims = current_target_task_paths(args.root, SOURCE1998_TARGET, current_todo_text)
+    todo_claims = source1998_todo_target_claims(args.root, SOURCE1998_TARGET, current_todo_text)
+    all_todo_claims = source1998_all_todo_target_claims(args.root, SOURCE1998_TARGET, current_todo_text)
+    source_path = path.resolve(strict=False)
+    expected_todo_claims = (source_path,) if current_todo == expected_todo_before else ()
+    if owners or current_claims or todo_claims or all_todo_claims != expected_todo_claims:
+        refs = ", ".join(relative_task_ref(args.root, owner) for owner in (*owners, *current_claims, *todo_claims, *all_todo_claims)) or "none"
+        raise TaskFrontmatterError(f"Source-1998 retained target is still claimed by an active or current record: {refs}.")
+    pane_state = source1998_pane_snapshot()
+    authority_payload, authority_state = source1998_authority_snapshot(args.root)
+    transcript_generation = validate_source1998_transcript(args, path)
+    if (
+        (expected_pane is not None and pane_state != expected_pane)
+        or (expected_authority is not None and (authority_payload != expected_authority[0] or not same_file_generation(authority_state, expected_authority[1])))
+        or (expected_transcript is not None and not same_file_generation(transcript_generation, expected_transcript))
+    ):
+        raise TaskFrontmatterError("Source-1998 authority, transcript, or retained pane changed before the final evidence pass; retry.")
+    task_states = {expected_task_before, expected_task_after} if allow_partial else {expected_task_before}
+    todo_states = {expected_todo_before, expected_todo_after} if allow_partial else {expected_todo_before}
+    if (
+        current_task not in task_states
+        or current_todo not in todo_states
+        or (expected_task_state is not None and not same_file_generation(expected_task_state, current_task_state))
+        or (expected_todo_state is not None and not same_file_generation(expected_todo_state, current_todo_state))
+    ):
+        raise TaskFrontmatterError("Source-1998 retirement task or TODO bytes changed before the final evidence pass; retry.")
+    if (
+        hashlib.sha256(expected_task_before).hexdigest() != SOURCE1998_TASK_AFTER_SHA256
+        or hashlib.sha256(expected_task_after).hexdigest() != SOURCE1998_RETIRE_TASK_AFTER_SHA256
+        or hashlib.sha256(expected_todo_before).hexdigest() != args.expected_todo_sha256
+    ):
+        raise TaskFrontmatterError("Source-1998 retirement task or TODO preimages are not the bound reviewed result.")
+    try:
+        recomputed_task_after = source1998_retire_task_text(expected_task_before.decode("utf-8"), args.root).encode("utf-8")
+        recomputed_todo_after = source1998_retire_todo_text(args.root, path, expected_todo_before.decode("utf-8")).encode("utf-8")
+    except (UnicodeDecodeError, TaskFrontmatterError) as exc:
+        raise TaskFrontmatterError("Source-1998 retirement evidence preimages are not the exact reviewed state.") from exc
+    if expected_task_after != recomputed_task_after or expected_todo_after != recomputed_todo_after:
+        raise TaskFrontmatterError("Source-1998 retirement evidence postimages are not the exact derived result.")
+    return current_task_state, current_todo_state
+
+
+def retire_source1998_done(args: Args, path: Path, text: str, before: os.stat_result) -> str:
+    """Retire the exact reviewed done record without touching its retained shell."""
+
+    todo = args.root / "TODO.md"
+    marker = args.root / SOURCE1998_RETIRE_TRANSACTION
+    if (
+        args.root.resolve() != SOURCE1998_ROOT
+        or relative_task_ref(args.root, path) != SOURCE1998_TASK
+        or args.completion_key != SOURCE1998_COMPLETION_KEY
+        or args.session_id != SOURCE1998_SESSION_ID
+        or args.pane_id != SOURCE1998_PANE_ID
+        or args.terminal_evidence != SOURCE1998_CLOSE_FAILURE
+        or args.session_transcript != SOURCE1998_TRANSCRIPT
+        or args.session_transcript_sha256 != SOURCE1998_TRANSCRIPT_SHA256
+        or not todo.is_file()
+    ):
+        raise TaskFrontmatterError("Source-1998 retirement arguments do not bind the fixed task, retained shell, and transcript.")
+    with root_membership_lock(args.root), task_target_lock(args.root, SOURCE1998_TARGET):
+        with ExitStack() as locks:
+            for locked_path in sorted({path, todo, marker}, key=str):
+                locks.enter_context(task_file_lock(locked_path))
+            authority_payload, authority_state = source1998_authority_snapshot(args.root)
+            pane_state = source1998_pane_snapshot()
+            transcript_generation = validate_source1998_transcript(args, path)
+            transaction = source1998_read_retire_transaction(marker)
+            if transaction is not None:
+                record, payload = transaction
+                task_before, task_after, todo_before, todo_after = payload
+                if args.expected_task_sha256 != SOURCE1998_TASK_AFTER_SHA256 or hashlib.sha256(task_before).hexdigest() != SOURCE1998_TASK_AFTER_SHA256 or hashlib.sha256(todo_before).hexdigest() != args.expected_todo_sha256:
+                    raise TaskFrontmatterError("Source-1998 retirement record does not bind the supplied post-reconciliation digests.")
+                owners = authoritative_active_target_task_paths(args.root, SOURCE1998_TARGET)
+                current_claims = current_target_task_paths(args.root, SOURCE1998_TARGET)
+                if owners or current_claims:
+                    refs = ", ".join(relative_task_ref(args.root, owner) for owner in (*owners, *current_claims)) or "none"
+                    raise TaskFrontmatterError(f"Source-1998 retained target is still claimed by an active or current record: {refs}.")
+                task_generation, todo_generation = source1998_retire_final_evidence_pass(
+                    args,
+                    path,
+                    todo,
+                    task_before,
+                    task_after,
+                    todo_before,
+                    todo_after,
+                    expected_authority=(authority_payload, authority_state),
+                    expected_pane=pane_state,
+                    expected_transcript=transcript_generation,
+                    allow_partial=True,
+                )
+                source1998_apply_retire_transaction(
+                    args.root,
+                    path,
+                    todo,
+                    marker,
+                    payload,
+                    task_generation=task_generation,
+                    todo_generation=todo_generation,
+                )
+                return "retired"
+            current_before = path.stat()
+            current_bytes = path.read_bytes()
+            todo_before = todo.stat()
+            todo_bytes = todo.read_bytes()
+            if (
+                not same_file_generation(before, current_before)
+                or current_bytes != text.encode("utf-8")
+                or args.expected_task_sha256 != SOURCE1998_TASK_AFTER_SHA256
+                or hashlib.sha256(current_bytes).hexdigest() != SOURCE1998_TASK_AFTER_SHA256
+                or hashlib.sha256(todo_bytes).hexdigest() != args.expected_todo_sha256
+            ):
+                raise TaskFrontmatterError("Source-1998 retirement requires the exact current task and TODO bytes; retry after rereading both files.")
+            metadata = parse_task_metadata(current_bytes.decode("utf-8"), args.root)
+            if (
+                metadata is None
+                or metadata.status != "done"
+                or metadata.runat != SOURCE1998_TARGET
+                or metadata.managerat != SOURCE1998_MANAGER
+                or metadata.tool != "codex"
+                or metadata.session_id != SOURCE1998_SESSION_ID
+                or metadata.is_manager
+                or metadata.pending_task_items
+            ):
+                raise TaskFrontmatterError("Source-1998 retirement requires the exact queue-empty done task.")
+            validate_source1998_envelope(current_bytes.decode("utf-8"))
+            owners = authoritative_active_target_task_paths(args.root, SOURCE1998_TARGET)
+            current_claims = current_target_task_paths(args.root, SOURCE1998_TARGET)
+            if owners or current_claims:
+                refs = ", ".join(relative_task_ref(args.root, owner) for owner in (*owners, *current_claims)) or "none"
+                raise TaskFrontmatterError(f"Source-1998 retained target is still claimed by an active or current record: {refs}.")
+            updated_task = source1998_retire_task_text(current_bytes.decode("utf-8"), args.root)
+            updated_todo = source1998_retire_todo_text(args.root, path, todo_bytes.decode("utf-8"))
+            if hashlib.sha256(updated_task.encode("utf-8")).hexdigest() != SOURCE1998_RETIRE_TASK_AFTER_SHA256:
+                raise TaskFrontmatterError("Source-1998 retirement postimages are not the fixed reviewed result.")
+            record = source1998_retire_transaction_record(current_bytes, updated_task.encode("utf-8"), todo_bytes, updated_todo.encode("utf-8"))
+            task_generation, todo_generation = source1998_retire_final_evidence_pass(
+                args,
+                path,
+                todo,
+                current_bytes,
+                updated_task.encode("utf-8"),
+                todo_bytes,
+                updated_todo.encode("utf-8"),
+                expected_task_state=current_before,
+                expected_todo_state=todo_before,
+                expected_authority=(authority_payload, authority_state),
+                expected_pane=pane_state,
+                expected_transcript=transcript_generation,
+            )
+            source1998_write_transaction(marker, record)
+            source1998_apply_retire_transaction(
+                args.root,
+                path,
+                todo,
+                marker,
+                source1998_retire_transaction_payload(record),
+                task_generation=task_generation,
+                todo_generation=todo_generation,
+            )
+    return "retired"
+
+
+def source1998_reconcile_final_evidence_pass(
+    args: Args,
+    path: Path,
+    todo: Path,
+    payload: tuple[bytes, bytes, bytes, bytes],
+    *,
+    expected_task_state: os.stat_result | None = None,
+    expected_todo_state: os.stat_result | None = None,
+    expected_authority: tuple[bytes, os.stat_result] | None = None,
+    expected_transcript: os.stat_result | None = None,
+) -> tuple[os.stat_result, os.stat_result]:
+    """Revalidate every Source-1998 reconciliation replay input before writes."""
+
+    task_before, task_after, todo_before, todo_after = payload
+    current_task, task_generation = source1998_stable_file_snapshot(path)
+    current_todo, todo_generation = source1998_stable_file_snapshot(todo)
+    task_state = "before" if current_task == task_before else "after" if current_task == task_after else "other"
+    todo_state = "before" if current_todo == todo_before else "after" if current_todo == todo_after else "other"
+    if "other" in {task_state, todo_state} or (task_state == "after" and todo_state == "before"):
+        raise TaskFrontmatterError("Source-1998 reconciliation replay bytes are not an allowed stable transition state.")
+    try:
+        expected_task_after = update_frontmatter_status(task_before.decode("utf-8"), "done", "", args.root).encode("utf-8")
+        expected_todo_after = reconcile_todo_text(args.root, path, todo_before.decode("utf-8"), SOURCE1998_TARGET, "previous", ("current", "human pending")).encode("utf-8")
+        metadata = parse_task_metadata(task_before.decode("utf-8"), args.root)
+    except (UnicodeDecodeError, TaskFrontmatterError) as exc:
+        raise TaskFrontmatterError("Source-1998 reconciliation replay preimages are not the exact reviewed state.") from exc
+    if (
+        task_after != expected_task_after
+        or todo_after != expected_todo_after
+        or hashlib.sha256(task_before).hexdigest() != SOURCE1998_TASK_SHA256
+        or hashlib.sha256(task_after).hexdigest() != SOURCE1998_TASK_AFTER_SHA256
+        or hashlib.sha256(todo_before).hexdigest() != SOURCE1998_TODO_SHA256
+        or hashlib.sha256(todo_after).hexdigest() != SOURCE1998_TODO_AFTER_SHA256
+        or metadata is None
+        or metadata.version == V2_VERSION
+        or metadata.status != "blocked"
+        or metadata.blocked_on != SOURCE1998_BLOCKER
+        or metadata.runat != SOURCE1998_TARGET
+        or metadata.managerat != SOURCE1998_MANAGER
+        or metadata.tool != "codex"
+        or metadata.session_id != SOURCE1998_SESSION_ID
+        or metadata.is_manager
+        or metadata.pending_task_items
+        or has_pending_marker(task_before.decode("utf-8"))
+    ):
+        raise TaskFrontmatterError("Source-1998 reconciliation replay bytes are not the exact reviewed transition.")
+    validate_source1998_envelope(task_before.decode("utf-8"))
+    source_path = path.resolve(strict=False)
+    owners = authoritative_active_target_task_paths(args.root, SOURCE1998_TARGET)
+    todo_claims = source1998_todo_target_claims(args.root, SOURCE1998_TARGET, current_todo.decode("utf-8"))
+    all_todo_claims = source1998_all_todo_target_claims(args.root, SOURCE1998_TARGET, current_todo.decode("utf-8"))
+    expected_owners = (source_path,) if task_state == "before" else ()
+    expected_claims = (source_path,) if todo_state == "before" else ()
+    if owners != expected_owners or todo_claims != expected_claims or all_todo_claims != (source_path,):
+        refs = ", ".join(relative_task_ref(args.root, owner) for owner in (*owners, *todo_claims, *all_todo_claims)) or "none"
+        raise TaskFrontmatterError(f"Source-1998 reconciliation replay ownership or TODO claim drifted: {refs}.")
+    authority_payload, authority_state = source1998_authority_snapshot(args.root)
+    source1998_pane_snapshot()
+    transcript_generation = validate_source1998_transcript(args, path)
+    if (
+        (expected_task_state is not None and not same_file_generation(task_generation, expected_task_state))
+        or (expected_todo_state is not None and not same_file_generation(todo_generation, expected_todo_state))
+        or (expected_authority is not None and (authority_payload != expected_authority[0] or not same_file_generation(authority_state, expected_authority[1])))
+        or (expected_transcript is not None and not same_file_generation(transcript_generation, expected_transcript))
+    ):
+        raise TaskFrontmatterError("Source-1998 task, TODO, authority, or transcript changed between evidence passes; retry.")
+    return task_generation, todo_generation
 
 
 def reconcile_source1998_done(args: Args, path: Path, text: str, before: os.stat_result) -> str:
@@ -8010,7 +8582,22 @@ def reconcile_source1998_done(args: Args, path: Path, text: str, before: os.stat
                     or hashlib.sha256(todo_before).hexdigest() != SOURCE1998_TODO_SHA256
                 ):
                     raise TaskFrontmatterError("Source-1998 durable transition does not bind the supplied pre-transition digests.")
-                source1998_apply_transaction(path, todo, marker, payload)
+                transcript_generation = validate_source1998_transcript(args, path)
+                task_generation, todo_generation = source1998_reconcile_final_evidence_pass(
+                    args,
+                    path,
+                    todo,
+                    payload,
+                    expected_transcript=transcript_generation,
+                )
+                source1998_apply_transaction(
+                    path,
+                    todo,
+                    marker,
+                    payload,
+                    task_generation=task_generation,
+                    todo_generation=todo_generation,
+                )
                 return SOURCE1998_TARGET
             current_before = path.stat()
             current_bytes = path.read_bytes()
@@ -8019,7 +8606,7 @@ def reconcile_source1998_done(args: Args, path: Path, text: str, before: os.stat
             current_text = current_bytes.decode("utf-8")
             todo_text = todo_bytes.decode("utf-8")
             if (
-                not same_file_state(before, current_before)
+                not same_file_generation(before, current_before)
                 or current_text != text
                 or args.expected_task_sha256 != SOURCE1998_TASK_SHA256
                 or args.expected_todo_sha256 != SOURCE1998_TODO_SHA256
@@ -8049,25 +8636,42 @@ def reconcile_source1998_done(args: Args, path: Path, text: str, before: os.stat
             owners = authoritative_active_target_task_paths(args.root, SOURCE1998_TARGET)
             source_path = path.resolve(strict=False)
             additional_owners = tuple(owner for owner in owners if owner != source_path)
-            todo_claims = source1998_todo_target_claims(args.root, SOURCE1998_TARGET)
-            if additional_owners or todo_claims != (source_path,):
-                refs = ", ".join(relative_task_ref(args.root, owner) for owner in (*additional_owners, *todo_claims)) or "none"
+            todo_claims = source1998_todo_target_claims(args.root, SOURCE1998_TARGET, todo_text)
+            all_todo_claims = source1998_all_todo_target_claims(args.root, SOURCE1998_TARGET, todo_text)
+            if additional_owners or todo_claims != (source_path,) or all_todo_claims != (source_path,):
+                refs = ", ".join(relative_task_ref(args.root, owner) for owner in (*additional_owners, *todo_claims, *all_todo_claims)) or "none"
                 raise TaskFrontmatterError(f"Source-1998 target has an unrelated active owner or TODO claim: {refs}.")
             authority_payload, authority_state = source1998_authority_snapshot(args.root)
             pane_state = source1998_pane_snapshot()
-            validate_source1998_transcript(args, path)
+            transcript_generation = validate_source1998_transcript(args, path)
             updated_todo = reconcile_todo_text(args.root, path, todo_text, SOURCE1998_TARGET, "previous", ("current", "human pending"))
             updated_task = update_frontmatter_status(current_text, "done", "", args.root)
             latest_authority, latest_authority_state = source1998_authority_snapshot(args.root)
             latest_pane_state = source1998_pane_snapshot()
-            if latest_authority != authority_payload or not same_file_state(authority_state, latest_authority_state) or latest_pane_state != pane_state:
+            if latest_authority != authority_payload or not same_file_generation(authority_state, latest_authority_state) or latest_pane_state != pane_state:
                 raise TaskFrontmatterError("Source-1998 authority or retained pane changed before reconciliation; retry.")
-            validate_source1998_transcript(args, path)
             if updated_todo == todo_text:
                 raise TaskFrontmatterError("Source-1998 reconciliation requires the sole current TODO row to move to previous.")
             record = source1998_transaction_record(current_bytes, updated_task.encode("utf-8"), todo_bytes, updated_todo.encode("utf-8"))
+            task_generation, todo_generation = source1998_reconcile_final_evidence_pass(
+                args,
+                path,
+                todo,
+                source1998_transaction_payload(record),
+                expected_task_state=current_before,
+                expected_todo_state=todo_before,
+                expected_authority=(authority_payload, authority_state),
+                expected_transcript=transcript_generation,
+            )
             source1998_write_transaction(marker, record)
-            source1998_apply_transaction(path, todo, marker, source1998_transaction_payload(record))
+            source1998_apply_transaction(
+                path,
+                todo,
+                marker,
+                source1998_transaction_payload(record),
+                task_generation=task_generation,
+                todo_generation=todo_generation,
+            )
     return SOURCE1998_TARGET
 
 
@@ -8298,6 +8902,7 @@ def automatic_done_email_eligible(args: Args, initial_status: str | None) -> boo
             args.close_done_live_no_mail,
             args.describe_done_live_no_mail,
             args.reconcile_source1998_done,
+            args.retire_source1998_done,
         )
     )
     return args.status == "done" and not special_done and initial_status is not None and initial_status != "done"
@@ -8321,11 +8926,12 @@ def run(args: Args) -> int:
     closed_done_live_no_mail = False
     described_done_live_no_mail = False
     source1998_reconciled = False
+    source1998_retired = False
     try:
         path = task_path(args.root, args.task_file)
         before = path.stat()
         text = path.read_text(encoding="utf-8")
-        initial_metadata = parse_manager_child_metadata(text, args.root) if args.restore_terminal_target or args.close_retired_done else parse_task_metadata(text, args.root)
+        initial_metadata = parse_manager_child_metadata(text, args.root) if args.restore_terminal_target or args.close_retired_done or args.retire_source1998_done else parse_task_metadata(text, args.root)
         if initial_metadata is not None and initial_metadata.version == V2_VERSION and not v2_enabled(args.root):
             raise BlockingError("v2 task writes are disabled until reviewed migration enablement")
         if initial_metadata is not None and initial_metadata.version != V2_VERSION and v2_enabled(args.root):
@@ -8362,6 +8968,9 @@ def run(args: Args) -> int:
         elif args.reconcile_source1998_done:
             target = reconcile_source1998_done(args, path, text, before)
             source1998_reconciled = True
+        elif args.retire_source1998_done:
+            target = retire_source1998_done(args, path, text, before)
+            source1998_retired = True
         elif args.reconcile_blocked_index:
             reconcile_previous_blocked_index(args, path, text, before)
         elif args.retire_blocked_target:
@@ -8470,7 +9079,7 @@ def run(args: Args) -> int:
                 before = path.stat()
                 updated = update_frontmatter_status(path.read_text(encoding="utf-8"), args.status, args.blocked_on, args.root)
                 replace_if_unchanged(path, updated, before)
-        final_metadata = parse_task_metadata(path.read_text(encoding="utf-8"), args.root)
+        final_metadata = parse_manager_child_metadata(path.read_text(encoding="utf-8"), args.root) if args.retire_source1998_done else parse_task_metadata(path.read_text(encoding="utf-8"), args.root)
         if final_metadata is not None and final_metadata.version == V2_VERSION:
             _ = blocking_request(args.root, {"operation": "reconcile"})
     except (OSError, TaskFrontmatterError, BlockingError) as exc:
@@ -8494,6 +9103,8 @@ def run(args: Args) -> int:
             print(f"Finalized retired task metadata with historical target {target}; no pane was signalled.")
         elif source1998_reconciled:
             print(f"Finalized the authenticated Source-1998 task metadata for {target}; retained shell pane and sent no email.")
+        elif source1998_retired:
+            print("Retired the authenticated Source-1998 task as historical metadata; retained shell pane was not signalled and no email was sent.")
         elif target and not shared_target_closure:
             print(done_close_message(target, session_id))
         if not closed_done_live_no_mail:

@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import unittest
 import yaml
+import zlib
 from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import nullcontext
@@ -81,6 +82,11 @@ from omo_manager.omo_task_status import SOURCE1845_PREPARED_AUDIT_SHA256
 from omo_manager.omo_task_status import SOURCE1998_COMPLETION_KEY
 from omo_manager.omo_task_status import SOURCE1998_AUTHORITY_BYTES
 from omo_manager.omo_task_status import SOURCE1998_CLOSE_FAILURE
+from omo_manager.omo_task_status import SOURCE1998_BLOCKER
+from omo_manager.omo_task_status import SOURCE1998_AUTHORITY
+from omo_manager.omo_task_status import SOURCE1998_TASK
+from omo_manager.omo_task_status import SOURCE1998_TARGET
+from omo_manager.omo_task_status import SOURCE1998_MANAGER
 from omo_manager.omo_task_status import SOURCE1998_PANE_ID
 from omo_manager.omo_task_status import SOURCE1998_PANE_CWD
 from omo_manager.omo_task_status import SOURCE1998_PANE_COMMAND
@@ -90,7 +96,19 @@ from omo_manager.omo_task_status import SOURCE1998_SESSION_ID
 from omo_manager.omo_task_status import SOURCE1998_HUMAN_ENVELOPE
 from omo_manager.omo_task_status import SOURCE1998_TASK_SHA256
 from omo_manager.omo_task_status import SOURCE1998_TODO_SHA256
+from omo_manager.omo_task_status import SOURCE1998_TASK_AFTER_SHA256
+from omo_manager.omo_task_status import SOURCE1998_RETIRE_TASK_AFTER_SHA256
+from omo_manager.omo_task_status import SOURCE1998_RETIREMENT_NOTE
+from omo_manager.omo_task_status import source1998_retire_task_text
+from omo_manager.omo_task_status import source1998_retire_todo_text
+from omo_manager.omo_task_status import source1998_apply_retire_transaction
+from omo_manager.omo_task_status import source1998_apply_transaction
+from omo_manager.omo_task_status import source1998_retire_transaction_record
+from omo_manager.omo_task_status import source1998_transaction_record
+from omo_manager.omo_task_status import source1998_stable_file_snapshot
+from omo_manager.omo_task_status import source1998_write_transaction
 from omo_manager.omo_task_status import source1998_todo_target_claims
+from omo_manager.omo_task_status import interrupted_done_session_payload
 from omo_manager.omo_task_status import SOURCE1998_TRANSCRIPT
 from omo_manager.omo_task_status import SOURCE1998_TRANSCRIPT_SHA256
 from omo_manager.omo_task_status import Args as StatusArgs
@@ -136,6 +154,35 @@ SOURCE1982_BYTES = (
     b"Spawn new agents to work on the ones still worthy"
 )
 SOURCE1982_TEXT = SOURCE1982_BYTES.decode().replace("\r\n", "\n")
+
+# Immutable checked-in post-reconciliation bytes. These deliberately do not
+# read the mutable work-log root; the assertions below protect production
+# Source-1998 bindings from tests that patch every digest.
+SOURCE1998_RETIRED_TASK_FIXTURE = zlib.decompress(
+    base64.b64decode(
+        "eNrNVsuO20YQvPMrGnuygSVX1Fvy7iKJfUgORoIEOQRBII/IljhYcoaeGUorn/wbAZKf85ekekjtynauAXKiRDb7UVVdwzRNkwM7r61Z0yHPRtko8UGFzq+ptIYT1xkV1lRYs9P79XSWBGtr+V/yY9Ioo/bsLgLGi0T7zXB/TTtVe05aNqU2+01Q/mGjAzdI/vsfiWcvdTe6XNMoV6PtdsepKvJ5uihGeaqm823KEzUflVyoQpVJimZvh9ybkmveq4AEtHO2ubt66uDqPvnxaOj7DqH0i+1cwWm+Wi3X9OnjX9/bI5W6pCNT55m8tZYQd6JgH9h4XEp1yuhXPHstM9LQJTkurCs9cSgyRFFnSuAWlEGuSoVPH//0tLcYkxAsdytUQpXW8YFNoFBpn9F3TID7RL5RLpDa2i6QDjG+tDGGjjpU+MXUaKObrgG0PlwTZ/uM1MGid8dK8KRauT1TUXXmwZPdEXBBIeQIFiUkZ80hSGRRsWrJd9s+ZO+4lRIN6R0Z5pLL7NPHv5MkJd00XGoVuD4RN0rXsZUeS23iH35URbgEFnelJUFFFQ/GHmsu94JtzejVt9Z4vdW1DicUiFPpDwwW1N5gNF3ECdeRD7VHb6CVn3CPvJzRv0ZoZwKuDQdVqqCuKQgKgUt65/bvruPYQLeuyRdOt8G/woTAnGqLFncdHlzipNljLnTegO1aZBz4MaBP6eZz2ICxASo768go50CvhgZE3GdMb2J3dLTu4RnZV8KssYEKgITBFJVd+tCfl9gYI+GHeq+75QJeneKUEeGfRhAKJ2WXe1H5FY5SYHVqDC8Nm0HlXTm8//QV7zKKyjvrRE5HCt2/Kzox9ZiWNGD8IOoDk9lWW8wk4VOD7buGr7GG62MIKmCIPfZnYPmo9xByShOa9s+oFYFN4DoRgpG9Q/PbHSeD3i7xQa3Qqv0adGJI3/ycAoA03R10AAMsWivBGtI32lfnVsFqxCkjzZAQEs36KhHqTO+a2UEqWH9IEN0jkyoGecG5WAGSNb2mIoSzysr6hM9OFtLsw77jjTbkwDGhaT06oBe+lK6aes4Zu9JvINOREce+rjYIRXradQFYBAOVmiLpYkIekx6XjIoc6+NqofdQqKBi8CuiQ8qva/SGp3WtNPRYCFQB42eN3RbWyR2GEcf+oVGLtvtK7KN3fTpMl8lyU8oze4ARzSO60hnVKOvdNuLDUNxRm96HTdduFzQs4xQ+4vFypLbm6/t+j65rQSKjTY+uK6IcKkuVHhHwDvw3RXu8xUMRCzm7uqcQ+zoZjkrZuVuN1tOZqvoPll4DOtJOoXt/zeunfxvTfv25isk75MX6FXvdFRUgxWD8vvzl+ToXdO3zxYtcqW3gAoV0h/e0G2+WK6W89FsMp2vsnw5n+ZZvpjmi3w6Wy3zPF/M8vF0tPhmL1RkhW3uX4n4oMZBvV8nwzvjxTIbj8f5bJzl09F8tFqMVvPFYjyZLebTyeQi29kvpNvSqV14yjKf5bNRlq8WeAdZprPZcjkbjabT+Xg8yZez8UWW7GXyIprBIJyo9/jxgaMt0CBFTpu+2ZfJbxAajJc7JnDJsKKeiX5lEa8j/3iG9FhzWYbXdTRNMeZNJ2k2UYxNiR05Pm2aSOLZgox1OJmo1jsuTkUt3OgQgnf9jKyRDt+32kxmqGUqPiBT0J675I4q8+b6BifZ+hU1Sev4wZGt1FmsNBuK1KXlTrzE4/0jH7uvSSeZ1L0yVQEJeo/ACMC8mX0uZucJ1PwW4YJV1y37FIcuLborePSXGjAOEtenFWIJZI8GF/JmLU2fDfJ1/R2IKsAsHIAXdrDUckxxUWHAuvngf+FI+R8Iun6C06ve1u7RLb/xJH0QG44JweWikgw1rJt0WZvK1uGq/Mg+a21Dw/MLYZ6JdwU2MmexR6hZ97xgcHOdcJd2qc9H4WQ6j+kKB61"
+        .replace("d+tCfl9", "dW+tCfl9")
+        .replace("3OgQ", "3tOgQ")
+    )
+)
+SOURCE1998_RETIRED_TODO_FIXTURE = zlib.decompress(
+    base64.b64decode(
+        "eNqNVsmO4zYQvfMrhL5mOqPVttzXAPmBADkSFEVbTEukhovVztenSIq05O4Z5GIYVVSt71WVsiPT5+zCRybIxLLfMjPZj0wzrbkUmZcNTLE31MtMSJNdpJqIyYi4m4GL6xt6oVYpJsxLtkj1rrORv7OMZAqUWWcvF6a+ZbM1mSEatAs3QzYz0Tu1YtqORmfgyMj5DU3yxiAUwfXA+vUDI7OXWbEbl1a/vCE2zeYOPgTTGVHSij5jhA4QI3Emv0GMi4s3Y6NmCK2xndFE+IipnMCU1rhoT/XvU59RKS78eq5r1C94jQZPV1U6Zb+cD4VTzGRmaifOEb1cMaGG35hTbGxVLRJs0VgzdeOUOc3cnXMUjITknPAP9icTf/3NOrwobpid4Q2lEMQsN6/AWYEuI2MGghdajrwnxhtdxnNRNih4dZ+NJHiLcRzRQgyFWjgl4bsYG5fWRAS5ghrCXV01LdLSKsqKU33EPprO8rH3n9JXM0DBr8PrP3a8v5Z5eTj78vgnrkD8I9ipXSohLqO4fCpQeURosOA8wuCMkFa0aJsWz6M0wUblStZhX8r1eyhjEV4eauiJuCoyxRo1iN3IiDXgjVPOBL3HlE5r5R2E2IJHKeevy1+hhXUuRkyskUJOd99uOQl+dRD6/p0cWc46UhUHltd11Zxo0xTHQ1lXLbm0/RF1RYnhLVPEAHnwCOhYw6gPaJRLNkM5wN094nFkRNgZu7qh2I6Bw/eKDi4D36ar2rTXA0/OsSgIuacOhRtZpMsZGfnOBLYaDAPm29MW8xE7dQ5xSL3FTl1CNP1wJ9oMZNOU1NeqgZAosFXdt59VqWUxdQ/99Zvjl98UoRRWKGAwzg91u9XmK/g9PZ8hnrvyxBquIIEgq8rJV9IEbewChDKOpNsF4uBToQleAxaxkb3EI7GCJv754TBxTYO1VXxy0l5SvZMengiJHSy3zDs8sfLTgzpSsM1P+F8ppzh+AjxijokIEzOD7PUqP0JU5S4iQKWU71jShysnAColuWZzEufBcF09cTFJn3kH7caPYZJwEt/vwysOvjVcAFeJ7XnEVVGidRg48g3YQWI7MhoEC8pAFawIf1gf+X1MrZNgYme18T3qlFxgGGP2ARkptvHo6xrxkz78ajLEVq89g9bG8hZ5UjppqrFTFSkpD/FLmI+PnOKHm29aJ+TiBgNHJnj6lzBXYLx1G5iXyMPDKCI0VXw2W0NNglFRpQn9w3LY0LEi8eXh2U5iy25ILWnrVGiDywswSi521l/XrkwbpT14SMEes8IkQARTMK96GNos1sgzKfHgiGEya7CXEoFVzdzgW99unDRrWLDqJ7b6+RwV7JHbtOIwvOfCsGuY27/8xI7ujFCzdWBQNsKgPqUQjkfMtbbMBQlNTCbX7fK6bheYz69uTrszC4zPnV/9yvjZJCjcY1uw1Gk5hXC1pRQOGam2lr3qNamAhcRtrjDeMXsmVf288KRPKoT0vyJmQBksF8Hifq7S3ofb7UGph8e4rWa4ZOg9ttujqnYW6cihFVReBTdyNQrdJaPpAB9DyN7L1y6PI6OuwpCsTxCvKU9h5jzI5pU/LEuNYXs9nI+ywzOfmTsunc5LwlWmyTSPjsgdAZIDTh1vI3+aWEc4iY6eo9wfz9vl8xWelglrQWY9ACm40Pw6JFo0pb8lilNVPq2wpkhAA2ezkr37efTMPanTLaGkCadIqM0VbscNxZrKe0n2mv30hM3MV0rAyOD9Nc7OJt9lrNiPn6XozA9kvPRSsP1VCwcR1DWWU0OYNiZftwmY+9xhezgOhtavTn7mObTT5QP3p7ztGupO1/z0vV+Ksi02B1tw0zgofQCwJ6Le/cm+HdtwXDgl61dWPWnLODOdrufkugVZi0Z+YfQOWeFulBSsb0FaFYkeMKCd5XKrzX3ybt12RHuQbud9fXz+eOv5tB/lt0S6cq+wSVHsFSYqivZxN5iA1/VuiD37ZWNy5A+sGGreFiWZN04/a2XSfvWtSHGd/AiF1cInx3A4seh7GCBqAre7bNQmG7+EQft5u/4HeU5iMA=="
+    )
+)
+SOURCE1998_RETIRED_TODO_DIGEST = hashlib.sha256(SOURCE1998_RETIRED_TODO_FIXTURE).hexdigest()
+
+
+class CtimeDriftState:
+    def __init__(self, state: os.stat_result) -> None:
+        self.st_mode = state.st_mode
+        self.st_dev = state.st_dev
+        self.st_ino = state.st_ino
+        self.st_size = state.st_size
+        self.st_uid = state.st_uid
+        self.st_nlink = state.st_nlink
+        self.st_mtime_ns = state.st_mtime_ns
+        self.st_ctime_ns = state.st_ctime_ns + 1
 
 
 def task_frontmatter(
@@ -9319,8 +9366,20 @@ manager note
             path = root / "token_usage_1998.md"
             authority = root / "manager_mail" / "85c5dff58359-1998.txt"
             authority.parent.mkdir()
-            task = Path("/ssd1/sichangheagent/work_logs/token_usage_1998.md").read_bytes()
-            todo = Path("/ssd1/sichangheagent/work_logs/TODO.md").read_bytes()
+            task = (
+                task_frontmatter(
+                    status="blocked",
+                    blocked_on=SOURCE1998_BLOCKER,
+                    runat=SOURCE1998_TARGET,
+                    managerat=SOURCE1998_MANAGER,
+                    session_id=SOURCE1998_SESSION_ID,
+                )
+                + SOURCE1998_HUMAN_ENVELOPE
+                + "\n"
+            ).encode("utf-8")
+            task_after = update_frontmatter_status(task.decode("utf-8"), "done", "", root).encode("utf-8")
+            todo = b"current:\ntoken_usage_1998.md config:45\n\nhuman pending:\n\nlow priority:\n\nprevious:\n"
+            todo_after = b"current:\n\nhuman pending:\n\nlow priority:\n\nprevious:\ntoken_usage_1998.md config:45\n"
             path.write_bytes(task)
             (root / "TODO.md").write_bytes(todo)
             authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
@@ -9336,8 +9395,8 @@ manager note
                 session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256,
                 completion_key=SOURCE1998_COMPLETION_KEY,
                 terminal_evidence=SOURCE1998_CLOSE_FAILURE,
-                expected_task_sha256=SOURCE1998_TASK_SHA256,
-                expected_todo_sha256=SOURCE1998_TODO_SHA256,
+                expected_task_sha256=hashlib.sha256(task).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo).hexdigest(),
             )
             pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
             real_replace = replace_if_unchanged_locked
@@ -9353,20 +9412,33 @@ manager note
                 patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane),
                 patch("omo_manager.omo_task_status.validate_source1998_transcript"),
             )
-            with evidence[0], evidence[1], evidence[2], evidence[3], patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=fail_task_write), redirect_stderr(io.StringIO()):
+            with evidence[0], evidence[1], evidence[2], evidence[3], patch("omo_manager.omo_task_status.SOURCE1998_TASK_SHA256", hashlib.sha256(task).hexdigest()), patch("omo_manager.omo_task_status.SOURCE1998_TASK_AFTER_SHA256", hashlib.sha256(task_after).hexdigest()), patch("omo_manager.omo_task_status.SOURCE1998_TODO_SHA256", hashlib.sha256(todo).hexdigest()), patch("omo_manager.omo_task_status.SOURCE1998_TODO_AFTER_SHA256", hashlib.sha256(todo_after).hexdigest()), patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=fail_task_write), redirect_stderr(io.StringIO()):
                 self.assertEqual(2, run(args))
             self.assertTrue((root / ".omo-source1998-reconcile.json").is_file())
             self.assertIn("status: blocked\n", path.read_text(encoding="utf-8"))
             self.assertIn("previous:\ntoken_usage_1998.md config:45\n", (root / "TODO.md").read_text(encoding="utf-8"))
             marker = root / ".omo-source1998-reconcile.json"
             prepared_marker = marker.read_bytes()
+            real_apply = source1998_apply_transaction
+            original_todo_mode = (root / "TODO.md").stat().st_mode & 0o7777
+
+            def drift_metadata_before_apply(*apply_args: object, **apply_kwargs: object) -> None:
+                target_todo = root / "TODO.md"
+                target_todo.chmod(0o600 if original_todo_mode != 0o600 else 0o644)
+                apply_kwargs["todo_generation"] = CtimeDriftState(apply_kwargs["todo_generation"])
+                return real_apply(*apply_args, **apply_kwargs)
+
+            with evidence[0], evidence[1], evidence[2], evidence[3], patch("omo_manager.omo_task_status.SOURCE1998_TASK_SHA256", hashlib.sha256(task).hexdigest()), patch("omo_manager.omo_task_status.SOURCE1998_TASK_AFTER_SHA256", hashlib.sha256(task_after).hexdigest()), patch("omo_manager.omo_task_status.SOURCE1998_TODO_SHA256", hashlib.sha256(todo).hexdigest()), patch("omo_manager.omo_task_status.SOURCE1998_TODO_AFTER_SHA256", hashlib.sha256(todo_after).hexdigest()), patch("omo_manager.omo_task_status.source1998_apply_transaction", side_effect=drift_metadata_before_apply), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertTrue(marker.is_file())
+            (root / "TODO.md").chmod(0o644)
             tampered = json.loads(prepared_marker)
             tampered["task_after"] = tampered["task_before"]
             marker.write_text(json.dumps(tampered, sort_keys=True, separators=(",", ":")), encoding="utf-8")
-            with evidence[0], evidence[1], evidence[2], evidence[3], redirect_stderr(io.StringIO()):
+            with evidence[0], evidence[1], evidence[2], evidence[3], patch("omo_manager.omo_task_status.SOURCE1998_TASK_SHA256", hashlib.sha256(task).hexdigest()), patch("omo_manager.omo_task_status.SOURCE1998_TASK_AFTER_SHA256", hashlib.sha256(task_after).hexdigest()), patch("omo_manager.omo_task_status.SOURCE1998_TODO_SHA256", hashlib.sha256(todo).hexdigest()), patch("omo_manager.omo_task_status.SOURCE1998_TODO_AFTER_SHA256", hashlib.sha256(todo_after).hexdigest()), redirect_stderr(io.StringIO()):
                 self.assertEqual(2, run(args))
             marker.write_bytes(prepared_marker)
-            with evidence[0], evidence[1], evidence[2], evidence[3], redirect_stderr(io.StringIO()):
+            with evidence[0], evidence[1], evidence[2], evidence[3], patch("omo_manager.omo_task_status.SOURCE1998_TASK_SHA256", hashlib.sha256(task).hexdigest()), patch("omo_manager.omo_task_status.SOURCE1998_TASK_AFTER_SHA256", hashlib.sha256(task_after).hexdigest()), patch("omo_manager.omo_task_status.SOURCE1998_TODO_SHA256", hashlib.sha256(todo).hexdigest()), patch("omo_manager.omo_task_status.SOURCE1998_TODO_AFTER_SHA256", hashlib.sha256(todo_after).hexdigest()), redirect_stderr(io.StringIO()):
                 self.assertEqual(0, run(args))
             finished = path.read_text(encoding="utf-8")
             updated_todo = (root / "TODO.md").read_text(encoding="utf-8")
@@ -9384,6 +9456,281 @@ manager note
         for closing in ("</human_instruction >", "</human_instruction\t>"):
             with self.assertRaisesRegex(TaskFrontmatterError, "sole canonical Human envelope"):
                 validate_source1998_envelope(SOURCE1998_HUMAN_ENVELOPE.replace("</human_instruction>", closing))
+
+    def test_source1998_reconciliation_rejects_todo_ctime_drift_after_final_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / SOURCE1998_TASK
+            authority = root / SOURCE1998_AUTHORITY
+            authority.parent.mkdir()
+            task = (
+                task_frontmatter(
+                    status="blocked",
+                    blocked_on=SOURCE1998_BLOCKER,
+                    runat=SOURCE1998_TARGET,
+                    managerat=SOURCE1998_MANAGER,
+                    session_id=SOURCE1998_SESSION_ID,
+                )
+                + SOURCE1998_HUMAN_ENVELOPE
+                + "\n"
+            ).encode()
+            task_after = update_frontmatter_status(task.decode(), "done", "", root).encode()
+            todo = b"current:\ntoken_usage_1998.md config:45\n\nhuman pending:\n\nlow priority:\n\nprevious:\n"
+            todo_after = b"current:\n\nhuman pending:\n\nlow priority:\n\nprevious:\ntoken_usage_1998.md config:45\n"
+            path.write_bytes(task)
+            (root / "TODO.md").write_bytes(todo)
+            authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+            args = StatusArgs(
+                root,
+                Path(SOURCE1998_TASK),
+                "done",
+                "",
+                session_id=SOURCE1998_SESSION_ID,
+                reconcile_source1998_done=True,
+                pane_id=SOURCE1998_PANE_ID,
+                session_transcript=SOURCE1998_TRANSCRIPT,
+                session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256,
+                completion_key=SOURCE1998_COMPLETION_KEY,
+                terminal_evidence=SOURCE1998_CLOSE_FAILURE,
+                expected_task_sha256=hashlib.sha256(task).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo).hexdigest(),
+            )
+            pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+            real_apply = source1998_apply_transaction
+
+            def drift_before_apply(*apply_args: object, **apply_kwargs: object) -> None:
+                target_todo = root / "TODO.md"
+                target_todo.chmod(0o600 if (target_todo.stat().st_mode & 0o7777) != 0o600 else 0o644)
+                apply_kwargs["todo_generation"] = CtimeDriftState(apply_kwargs["todo_generation"])
+                return real_apply(*apply_args, **apply_kwargs)
+
+            evidence = (
+                patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root),
+                patch("omo_manager.omo_task_status.source1998_authority_snapshot", return_value=(SOURCE1998_AUTHORITY_BYTES, authority.stat())),
+                patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane),
+                patch("omo_manager.omo_task_status.validate_source1998_transcript"),
+            )
+            with (
+                evidence[0],
+                evidence[1],
+                evidence[2],
+                evidence[3],
+                patch("omo_manager.omo_task_status.SOURCE1998_TASK_SHA256", hashlib.sha256(task).hexdigest()),
+                patch("omo_manager.omo_task_status.SOURCE1998_TASK_AFTER_SHA256", hashlib.sha256(task_after).hexdigest()),
+                patch("omo_manager.omo_task_status.SOURCE1998_TODO_SHA256", hashlib.sha256(todo).hexdigest()),
+                patch("omo_manager.omo_task_status.SOURCE1998_TODO_AFTER_SHA256", hashlib.sha256(todo_after).hexdigest()),
+                patch("omo_manager.omo_task_status.source1998_apply_transaction", side_effect=drift_before_apply),
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(2, run(args))
+            self.assertEqual(task, path.read_bytes())
+            self.assertEqual(todo, (root / "TODO.md").read_bytes())
+            self.assertTrue((root / ".omo-source1998-reconcile.json").is_file())
+            (root / "TODO.md").chmod(0o644)
+            with evidence[0], evidence[1], evidence[2], evidence[3], patch("omo_manager.omo_task_status.SOURCE1998_TASK_SHA256", hashlib.sha256(task).hexdigest()), patch("omo_manager.omo_task_status.SOURCE1998_TASK_AFTER_SHA256", hashlib.sha256(task_after).hexdigest()), patch("omo_manager.omo_task_status.SOURCE1998_TODO_SHA256", hashlib.sha256(todo).hexdigest()), patch("omo_manager.omo_task_status.SOURCE1998_TODO_AFTER_SHA256", hashlib.sha256(todo_after).hexdigest()), redirect_stderr(io.StringIO()):
+                self.assertEqual(0, run(args))
+            self.assertFalse((root / ".omo-source1998-reconcile.json").exists())
+
+    def test_source1998_transcript_rejects_chmod_ctime_drift_during_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sessions = root / "sessions"
+            sessions.mkdir()
+            session_id = "session-1998"
+            transcript = sessions / f"rollout-test-{session_id}.jsonl"
+            payload = b"{}\n"
+            transcript.write_bytes(payload)
+            transcript.chmod(0o600)
+            args = StatusArgs(
+                root,
+                Path(SOURCE1998_TASK),
+                "done",
+                "",
+                session_id=session_id,
+                session_transcript=transcript,
+                session_transcript_sha256=hashlib.sha256(payload).hexdigest(),
+            )
+            real_fstat = os.fstat
+            calls = 0
+
+            def fstat_with_chmod(fd: int) -> os.stat_result:
+                nonlocal calls
+                calls += 1
+                state = real_fstat(fd)
+                if calls == 1:
+                    transcript.chmod(0o400)
+                return state if calls == 1 else CtimeDriftState(state)
+
+            with (
+                patch.dict(os.environ, {"CODEX_HOME": str(root)}),
+                patch("omo_manager.omo_task_status.os.fstat", side_effect=fstat_with_chmod),
+                self.assertRaisesRegex(TaskFrontmatterError, "changed or is not exact owner-controlled evidence"),
+            ):
+                interrupted_done_session_payload(args, path=root / SOURCE1998_TASK)
+
+    def test_source1998_reconciliation_fresh_and_replay_reject_transcript_ctime_drift(self) -> None:
+        for replay in (False, True):
+            with self.subTest(replay=replay), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / SOURCE1998_TASK
+                authority = root / SOURCE1998_AUTHORITY
+                authority.parent.mkdir()
+                task = (
+                    task_frontmatter(
+                        status="blocked",
+                        blocked_on=SOURCE1998_BLOCKER,
+                        runat=SOURCE1998_TARGET,
+                        managerat=SOURCE1998_MANAGER,
+                        session_id=SOURCE1998_SESSION_ID,
+                    )
+                    + SOURCE1998_HUMAN_ENVELOPE
+                    + "\n"
+                ).encode()
+                task_after = update_frontmatter_status(task.decode(), "done", "", root).encode()
+                todo = b"current:\ntoken_usage_1998.md config:45\n\nhuman pending:\n\nlow priority:\n\nprevious:\n"
+                todo_after = b"current:\n\nhuman pending:\n\nlow priority:\n\nprevious:\ntoken_usage_1998.md config:45\n"
+                path.write_bytes(task)
+                (root / "TODO.md").write_bytes(todo)
+                authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+                marker = root / ".omo-source1998-reconcile.json"
+                if replay:
+                    source1998_write_transaction(marker, source1998_transaction_record(task, task_after, todo, todo_after))
+                args = StatusArgs(
+                    root,
+                    Path(SOURCE1998_TASK),
+                    "done",
+                    "",
+                    session_id=SOURCE1998_SESSION_ID,
+                    reconcile_source1998_done=True,
+                    pane_id=SOURCE1998_PANE_ID,
+                    session_transcript=SOURCE1998_TRANSCRIPT,
+                    session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256,
+                    completion_key=SOURCE1998_COMPLETION_KEY,
+                    terminal_evidence=SOURCE1998_CLOSE_FAILURE,
+                    expected_task_sha256=hashlib.sha256(task).hexdigest(),
+                    expected_todo_sha256=hashlib.sha256(todo).hexdigest(),
+                )
+                pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+                transcript_state = authority.stat()
+                transcript_states = iter((transcript_state, CtimeDriftState(transcript_state)))
+                with (
+                    patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root),
+                    patch("omo_manager.omo_task_status.SOURCE1998_TASK_SHA256", hashlib.sha256(task).hexdigest()),
+                    patch("omo_manager.omo_task_status.SOURCE1998_TASK_AFTER_SHA256", hashlib.sha256(task_after).hexdigest()),
+                    patch("omo_manager.omo_task_status.SOURCE1998_TODO_SHA256", hashlib.sha256(todo).hexdigest()),
+                    patch("omo_manager.omo_task_status.SOURCE1998_TODO_AFTER_SHA256", hashlib.sha256(todo_after).hexdigest()),
+                    patch("omo_manager.omo_task_status.source1998_authority_snapshot", return_value=(SOURCE1998_AUTHORITY_BYTES, authority.stat())),
+                    patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane),
+                    patch("omo_manager.omo_task_status.validate_source1998_transcript", side_effect=lambda *_: next(transcript_states)),
+                    redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(2, run(args))
+                self.assertEqual(task, path.read_bytes())
+                self.assertEqual(todo, (root / "TODO.md").read_bytes())
+                self.assertEqual(replay, marker.is_file())
+
+    def test_source1998_reconciliation_fresh_rejects_task_ctime_drift_before_locked_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / SOURCE1998_TASK
+            authority = root / SOURCE1998_AUTHORITY
+            authority.parent.mkdir()
+            task = (
+                task_frontmatter(status="blocked", blocked_on=SOURCE1998_BLOCKER, runat=SOURCE1998_TARGET, managerat=SOURCE1998_MANAGER, session_id=SOURCE1998_SESSION_ID)
+                + SOURCE1998_HUMAN_ENVELOPE
+                + "\n"
+            ).encode()
+            todo = b"current:\ntoken_usage_1998.md config:45\n\nhuman pending:\n\nlow priority:\n\nprevious:\n"
+            path.write_bytes(task)
+            (root / "TODO.md").write_bytes(todo)
+            authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+            args = StatusArgs(root, Path(SOURCE1998_TASK), "done", "", session_id=SOURCE1998_SESSION_ID, reconcile_source1998_done=True, pane_id=SOURCE1998_PANE_ID, session_transcript=SOURCE1998_TRANSCRIPT, session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256, completion_key=SOURCE1998_COMPLETION_KEY, terminal_evidence=SOURCE1998_CLOSE_FAILURE, expected_task_sha256=hashlib.sha256(task).hexdigest(), expected_todo_sha256=hashlib.sha256(todo).hexdigest())
+            pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+            real_stat = Path.stat
+            path_stat_calls = 0
+
+            @contextmanager
+            def drift_on_root_lock(_root: Path):
+                path.chmod(0o600 if (real_stat(path).st_mode & 0o7777) != 0o600 else 0o644)
+                yield
+
+            def drift_stat(candidate: Path, *stat_args: object, **stat_kwargs: object) -> os.stat_result | CtimeDriftState:
+                nonlocal path_stat_calls
+                state = real_stat(candidate, *stat_args, **stat_kwargs)
+                if candidate == path:
+                    path_stat_calls += 1
+                    if path_stat_calls == 2:
+                        return CtimeDriftState(state)
+                return state
+
+            with (
+                patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root),
+                patch("omo_manager.omo_task_status.source1998_authority_snapshot", return_value=(SOURCE1998_AUTHORITY_BYTES, authority.stat())),
+                patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane),
+                patch("omo_manager.omo_task_status.validate_source1998_transcript", return_value=authority.stat()),
+                patch("omo_manager.omo_task_status.root_membership_lock", side_effect=drift_on_root_lock),
+                patch.object(Path, "stat", side_effect=drift_stat),
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(2, run(args))
+            self.assertEqual(task, path.read_bytes())
+            self.assertEqual(todo, (root / "TODO.md").read_bytes())
+            self.assertFalse((root / ".omo-source1998-reconcile.json").exists())
+
+    def test_source1998_reconciliation_fresh_final_pass_rejects_task_todo_authority_ctime_drift(self) -> None:
+        for drift_kind in ("task", "todo", "authority"):
+            with self.subTest(drift_kind=drift_kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / SOURCE1998_TASK
+                todo = root / "TODO.md"
+                authority = root / SOURCE1998_AUTHORITY
+                authority.parent.mkdir()
+                task = (task_frontmatter(status="blocked", blocked_on=SOURCE1998_BLOCKER, runat=SOURCE1998_TARGET, managerat=SOURCE1998_MANAGER, session_id=SOURCE1998_SESSION_ID) + SOURCE1998_HUMAN_ENVELOPE + "\n").encode()
+                task_after = update_frontmatter_status(task.decode(), "done", "", root).encode()
+                todo_before = b"current:\ntoken_usage_1998.md config:45\n\nhuman pending:\n\nlow priority:\n\nprevious:\n"
+                todo_after = b"current:\n\nhuman pending:\n\nlow priority:\n\nprevious:\ntoken_usage_1998.md config:45\n"
+                path.write_bytes(task)
+                todo.write_bytes(todo_before)
+                authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+                args = StatusArgs(root, Path(SOURCE1998_TASK), "done", "", session_id=SOURCE1998_SESSION_ID, reconcile_source1998_done=True, pane_id=SOURCE1998_PANE_ID, session_transcript=SOURCE1998_TRANSCRIPT, session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256, completion_key=SOURCE1998_COMPLETION_KEY, terminal_evidence=SOURCE1998_CLOSE_FAILURE, expected_task_sha256=hashlib.sha256(task).hexdigest(), expected_todo_sha256=hashlib.sha256(todo_before).hexdigest())
+                pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+                initial_authority = authority.stat()
+                authority_calls = 0
+                real_stable = source1998_stable_file_snapshot
+
+                def drift_authority(*_args: object) -> tuple[bytes, os.stat_result | CtimeDriftState]:
+                    nonlocal authority_calls
+                    authority_calls += 1
+                    if drift_kind == "authority" and authority_calls == 3:
+                        return SOURCE1998_AUTHORITY_BYTES, CtimeDriftState(initial_authority)
+                    return SOURCE1998_AUTHORITY_BYTES, initial_authority
+
+                def drift_stable(candidate: Path) -> tuple[bytes, os.stat_result | CtimeDriftState]:
+                    payload, state = real_stable(candidate)
+                    if drift_kind == "task" and candidate == path:
+                        path.chmod(0o600 if (candidate.stat().st_mode & 0o7777) != 0o600 else 0o644)
+                        return payload, CtimeDriftState(state)
+                    if drift_kind == "todo" and candidate == todo:
+                        todo.chmod(0o600 if (todo.stat().st_mode & 0o7777) != 0o600 else 0o644)
+                        return payload, CtimeDriftState(state)
+                    return payload, state
+
+                with (
+                    patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root),
+                    patch("omo_manager.omo_task_status.SOURCE1998_TASK_SHA256", hashlib.sha256(task).hexdigest()),
+                    patch("omo_manager.omo_task_status.SOURCE1998_TASK_AFTER_SHA256", hashlib.sha256(task_after).hexdigest()),
+                    patch("omo_manager.omo_task_status.SOURCE1998_TODO_SHA256", hashlib.sha256(todo_before).hexdigest()),
+                    patch("omo_manager.omo_task_status.SOURCE1998_TODO_AFTER_SHA256", hashlib.sha256(todo_after).hexdigest()),
+                    patch("omo_manager.omo_task_status.source1998_authority_snapshot", side_effect=drift_authority),
+                    patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane),
+                    patch("omo_manager.omo_task_status.validate_source1998_transcript", return_value=initial_authority),
+                    patch("omo_manager.omo_task_status.source1998_stable_file_snapshot", side_effect=drift_stable),
+                    redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(2, run(args))
+                self.assertEqual(task, path.read_bytes())
+                self.assertEqual(todo_before, todo.read_bytes())
+                self.assertFalse((root / ".omo-source1998-reconcile.json").exists())
 
     def test_source1998_reconciliation_rejects_authoritative_collision_outside_current(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -9423,6 +9770,748 @@ manager note
             other.write_text(task_frontmatter(status="running", runat="config:99") + "mismatched owner\n", encoding="utf-8")
             (root / "TODO.md").write_text("current:\n\nhuman pending:\nother.md config:45\n\nlow priority:\n\nprevious:\n", encoding="utf-8")
             self.assertEqual((other.resolve(),), source1998_todo_target_claims(root, "config:45"))
+
+    def test_source1998_retirement_is_exact_and_targetless(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / SOURCE1998_TASK
+            todo = root / "TODO.md"
+            authority = root / SOURCE1998_AUTHORITY
+            authority.parent.mkdir()
+            task = task_frontmatter(
+                status="done",
+                runat=SOURCE1998_TARGET,
+                managerat=SOURCE1998_MANAGER,
+                session_id=SOURCE1998_SESSION_ID,
+            ) + SOURCE1998_HUMAN_ENVELOPE + "\n"
+            todo_text = "current:\n\nhuman pending:\n\nlow priority:\n\nprevious:\ntoken_usage_1998.md config:45\n"
+            retire_task_after = source1998_retire_task_text(task, root).encode("utf-8")
+            path.write_text(task, encoding="utf-8")
+            todo.write_text(todo_text, encoding="utf-8")
+            authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+            args = StatusArgs(
+                root=root,
+                task_file=Path(SOURCE1998_TASK),
+                status="done",
+                blocked_on="",
+                session_id=SOURCE1998_SESSION_ID,
+                retire_source1998_done=True,
+                pane_id=SOURCE1998_PANE_ID,
+                session_transcript=SOURCE1998_TRANSCRIPT,
+                session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256,
+                completion_key=SOURCE1998_COMPLETION_KEY,
+                terminal_evidence=SOURCE1998_CLOSE_FAILURE,
+                expected_task_sha256=hashlib.sha256(task.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+            )
+            pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+            with (
+                patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root),
+                patch("omo_manager.omo_task_status.SOURCE1998_TASK_AFTER_SHA256", hashlib.sha256(task.encode()).hexdigest()),
+                patch("omo_manager.omo_task_status.SOURCE1998_RETIRE_TASK_AFTER_SHA256", hashlib.sha256(retire_task_after).hexdigest()),
+                patch("omo_manager.omo_task_status.source1998_authority_snapshot", return_value=(SOURCE1998_AUTHORITY_BYTES, authority.stat())),
+                patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane),
+                patch("omo_manager.omo_task_status.validate_source1998_transcript"),
+            ):
+                self.assertEqual(0, run(args))
+            retired = path.read_text(encoding="utf-8")
+            self.assertIn("runat: retired\n", retired)
+            self.assertIn(SOURCE1998_RETIREMENT_NOTE, retired)
+            self.assertEqual("token_usage_1998.md", [line for line in todo.read_text(encoding="utf-8").splitlines() if line.startswith("token_usage_1998.md")][0])
+            self.assertFalse((root / ".omo-source1998-retire.json").exists())
+
+    def test_source1998_retirement_rejects_todo_drift_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / SOURCE1998_TASK
+            todo = root / "TODO.md"
+            authority = root / SOURCE1998_AUTHORITY
+            authority.parent.mkdir()
+            task = task_frontmatter(status="done", runat=SOURCE1998_TARGET, managerat=SOURCE1998_MANAGER, session_id=SOURCE1998_SESSION_ID) + SOURCE1998_HUMAN_ENVELOPE + "\n"
+            todo_text = "current:\n\nprevious:\ntoken_usage_1998.md config:99\n"
+            path.write_text(task, encoding="utf-8")
+            todo.write_text(todo_text, encoding="utf-8")
+            authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+            args = StatusArgs(
+                root,
+                Path(SOURCE1998_TASK),
+                "done",
+                "",
+                session_id=SOURCE1998_SESSION_ID,
+                retire_source1998_done=True,
+                pane_id=SOURCE1998_PANE_ID,
+                session_transcript=SOURCE1998_TRANSCRIPT,
+                session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256,
+                completion_key=SOURCE1998_COMPLETION_KEY,
+                terminal_evidence=SOURCE1998_CLOSE_FAILURE,
+                expected_task_sha256=hashlib.sha256(task.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+            )
+            with patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertEqual(task, path.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_source1998_retirement_replay_rechecks_new_active_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / SOURCE1998_TASK
+            todo = root / "TODO.md"
+            authority = root / SOURCE1998_AUTHORITY
+            authority.parent.mkdir()
+            task = task_frontmatter(status="done", runat=SOURCE1998_TARGET, managerat=SOURCE1998_MANAGER, session_id=SOURCE1998_SESSION_ID) + SOURCE1998_HUMAN_ENVELOPE + "\n"
+            todo_text = "current:\n\nhuman pending:\n\nlow priority:\n\nprevious:\ntoken_usage_1998.md config:45\n"
+            retire_task_after = source1998_retire_task_text(task, root).encode("utf-8")
+            path.write_text(task, encoding="utf-8")
+            todo.write_text(todo_text, encoding="utf-8")
+            authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+            args = StatusArgs(
+                root,
+                Path(SOURCE1998_TASK),
+                "done",
+                "",
+                session_id=SOURCE1998_SESSION_ID,
+                retire_source1998_done=True,
+                pane_id=SOURCE1998_PANE_ID,
+                session_transcript=SOURCE1998_TRANSCRIPT,
+                session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256,
+                completion_key=SOURCE1998_COMPLETION_KEY,
+                terminal_evidence=SOURCE1998_CLOSE_FAILURE,
+                expected_task_sha256=hashlib.sha256(task.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+            )
+            pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+            real_replace = replace_if_unchanged_locked
+
+            def fail_task_write(target: Path, replacement: str, state: os.stat_result) -> os.stat_result:
+                if target == path:
+                    raise RuntimeError("simulated kill between Source-1998 retirement publishes")
+                return real_replace(target, replacement, state)
+
+            evidence = (
+                patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root),
+                patch("omo_manager.omo_task_status.SOURCE1998_TASK_AFTER_SHA256", hashlib.sha256(task.encode()).hexdigest()),
+                patch("omo_manager.omo_task_status.SOURCE1998_RETIRE_TASK_AFTER_SHA256", hashlib.sha256(retire_task_after).hexdigest()),
+                patch("omo_manager.omo_task_status.source1998_authority_snapshot", return_value=(SOURCE1998_AUTHORITY_BYTES, authority.stat())),
+                patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane),
+                patch("omo_manager.omo_task_status.validate_source1998_transcript"),
+            )
+            with evidence[0], evidence[1], evidence[2], evidence[3], evidence[4], evidence[5], patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=fail_task_write), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            interrupted_task = path.read_bytes()
+            interrupted_todo = todo.read_bytes()
+            marker = root / ".omo-source1998-retire.json"
+            self.assertTrue(marker.is_file())
+            (root / "other.md").write_text(task_frontmatter(status="running", runat=SOURCE1998_TARGET, managerat=SOURCE1998_MANAGER) + "new owner\n", encoding="utf-8")
+            with evidence[0], evidence[1], evidence[2], evidence[3], evidence[4], evidence[5], redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertEqual(interrupted_task, path.read_bytes())
+            self.assertEqual(interrupted_todo, todo.read_bytes())
+            self.assertTrue(marker.is_file())
+
+    def test_source1998_retirement_replay_rechecks_new_current_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / SOURCE1998_TASK
+            todo = root / "TODO.md"
+            authority = root / SOURCE1998_AUTHORITY
+            authority.parent.mkdir()
+            task = task_frontmatter(status="done", runat=SOURCE1998_TARGET, managerat=SOURCE1998_MANAGER, session_id=SOURCE1998_SESSION_ID) + SOURCE1998_HUMAN_ENVELOPE + "\n"
+            todo_text = "current:\n\nhuman pending:\n\nlow priority:\n\nprevious:\ntoken_usage_1998.md config:45\n"
+            retire_task_after = source1998_retire_task_text(task, root).encode("utf-8")
+            path.write_text(task, encoding="utf-8")
+            todo.write_text(todo_text, encoding="utf-8")
+            authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+            args = StatusArgs(root, Path(SOURCE1998_TASK), "done", "", session_id=SOURCE1998_SESSION_ID, retire_source1998_done=True, pane_id=SOURCE1998_PANE_ID, session_transcript=SOURCE1998_TRANSCRIPT, session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256, completion_key=SOURCE1998_COMPLETION_KEY, terminal_evidence=SOURCE1998_CLOSE_FAILURE, expected_task_sha256=hashlib.sha256(task.encode()).hexdigest(), expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest())
+            pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+            real_replace = replace_if_unchanged_locked
+
+            def fail_task_write(target: Path, replacement: str, state: os.stat_result) -> os.stat_result:
+                if target == path:
+                    raise RuntimeError("simulated kill between Source-1998 retirement publishes")
+                return real_replace(target, replacement, state)
+
+            evidence = (patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root), patch("omo_manager.omo_task_status.SOURCE1998_TASK_AFTER_SHA256", hashlib.sha256(task.encode()).hexdigest()), patch("omo_manager.omo_task_status.SOURCE1998_RETIRE_TASK_AFTER_SHA256", hashlib.sha256(retire_task_after).hexdigest()), patch("omo_manager.omo_task_status.source1998_authority_snapshot", return_value=(SOURCE1998_AUTHORITY_BYTES, authority.stat())), patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane), patch("omo_manager.omo_task_status.validate_source1998_transcript"))
+            with evidence[0], evidence[1], evidence[2], evidence[3], evidence[4], evidence[5], patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=fail_task_write), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            interrupted_task = path.read_bytes()
+            todo.write_text("current:\nother.md config:45\n\nhuman pending:\n\nlow priority:\n\nprevious:\ntoken_usage_1998.md\n", encoding="utf-8")
+            interrupted_todo = todo.read_bytes()
+            marker = root / ".omo-source1998-retire.json"
+            with evidence[0], evidence[1], evidence[2], evidence[3], evidence[4], evidence[5], redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertEqual(interrupted_task, path.read_bytes())
+            self.assertEqual(interrupted_todo, todo.read_bytes())
+            self.assertTrue(marker.is_file())
+
+    def test_source1998_retirement_replay_final_pass_rejects_non_current_todo_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / SOURCE1998_TASK
+            todo = root / "TODO.md"
+            authority = root / SOURCE1998_AUTHORITY
+            authority.parent.mkdir()
+            path.write_bytes(SOURCE1998_RETIRED_TASK_FIXTURE)
+            todo.write_bytes(SOURCE1998_RETIRED_TODO_FIXTURE)
+            authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+            args = StatusArgs(root, Path(SOURCE1998_TASK), "done", "", session_id=SOURCE1998_SESSION_ID, retire_source1998_done=True, pane_id=SOURCE1998_PANE_ID, session_transcript=SOURCE1998_TRANSCRIPT, session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256, completion_key=SOURCE1998_COMPLETION_KEY, terminal_evidence=SOURCE1998_CLOSE_FAILURE, expected_task_sha256=SOURCE1998_TASK_AFTER_SHA256, expected_todo_sha256=hashlib.sha256(todo.read_bytes()).hexdigest())
+            pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+            real_replace = replace_if_unchanged_locked
+
+            def fail_task_write(target: Path, replacement: str, state: os.stat_result) -> os.stat_result:
+                if target == path:
+                    raise RuntimeError("simulated kill between Source-1998 retirement publishes")
+                return real_replace(target, replacement, state)
+
+            evidence = (
+                patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root),
+                patch("omo_manager.omo_task_status.source1998_authority_snapshot", return_value=(SOURCE1998_AUTHORITY_BYTES, authority.stat())),
+                patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane),
+                patch("omo_manager.omo_task_status.validate_source1998_transcript"),
+            )
+            with evidence[0], evidence[1], evidence[2], evidence[3], patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=fail_task_write), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            interrupted_task = path.read_bytes()
+            todo.write_text("current:\n\nhuman pending:\nother.md config:45\n\nlow priority:\n\nprevious:\ntoken_usage_1998.md\n", encoding="utf-8")
+            interrupted_todo = todo.read_bytes()
+            marker = root / ".omo-source1998-retire.json"
+            with evidence[0], evidence[1], evidence[2], evidence[3], redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertEqual(interrupted_task, path.read_bytes())
+            self.assertEqual(interrupted_todo, todo.read_bytes())
+            self.assertTrue(marker.is_file())
+
+    def test_source1998_retirement_replay_final_pass_rejects_owner_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / SOURCE1998_TASK
+            todo = root / "TODO.md"
+            authority = root / SOURCE1998_AUTHORITY
+            authority.parent.mkdir()
+            path.write_bytes(SOURCE1998_RETIRED_TASK_FIXTURE)
+            todo.write_bytes(SOURCE1998_RETIRED_TODO_FIXTURE)
+            authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+            args = StatusArgs(root, Path(SOURCE1998_TASK), "done", "", session_id=SOURCE1998_SESSION_ID, retire_source1998_done=True, pane_id=SOURCE1998_PANE_ID, session_transcript=SOURCE1998_TRANSCRIPT, session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256, completion_key=SOURCE1998_COMPLETION_KEY, terminal_evidence=SOURCE1998_CLOSE_FAILURE, expected_task_sha256=SOURCE1998_TASK_AFTER_SHA256, expected_todo_sha256=SOURCE1998_RETIRED_TODO_DIGEST)
+            pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+            real_replace = replace_if_unchanged_locked
+
+            def fail_task_write(target: Path, replacement: str, state: os.stat_result) -> os.stat_result:
+                if target == path:
+                    raise RuntimeError("simulated kill between Source-1998 retirement publishes")
+                return real_replace(target, replacement, state)
+
+            owner_calls = [0]
+            other = root / "other.md"
+
+            def owners(_root: Path, _target: str) -> tuple[Path, ...]:
+                owner_calls[0] += 1
+                if owner_calls[0] == 4:
+                    other.write_text(task_frontmatter(status="running", runat=SOURCE1998_TARGET, managerat=SOURCE1998_MANAGER) + "late owner\n", encoding="utf-8")
+                    return (other,)
+                return ()
+
+            evidence = (
+                patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root),
+                patch("omo_manager.omo_task_status.source1998_authority_snapshot", return_value=(SOURCE1998_AUTHORITY_BYTES, authority.stat())),
+                patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane),
+                patch("omo_manager.omo_task_status.validate_source1998_transcript"),
+                patch("omo_manager.omo_task_status.authoritative_active_target_task_paths", side_effect=owners),
+            )
+            with evidence[0], evidence[1], evidence[2], evidence[3], evidence[4], patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=fail_task_write), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            interrupted_task = path.read_bytes()
+            interrupted_todo = todo.read_bytes()
+            marker = root / ".omo-source1998-retire.json"
+            self.assertTrue(marker.is_file())
+            with evidence[0], evidence[1], evidence[2], evidence[3], evidence[4], redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertEqual(interrupted_task, path.read_bytes())
+            self.assertEqual(interrupted_todo, todo.read_bytes())
+            self.assertTrue(marker.is_file())
+
+    def test_source1998_retirement_replay_rechecks_pane_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / SOURCE1998_TASK
+            todo = root / "TODO.md"
+            authority = root / SOURCE1998_AUTHORITY
+            authority.parent.mkdir()
+            task = task_frontmatter(status="done", runat=SOURCE1998_TARGET, managerat=SOURCE1998_MANAGER, session_id=SOURCE1998_SESSION_ID) + SOURCE1998_HUMAN_ENVELOPE + "\n"
+            todo_text = "current:\n\nhuman pending:\n\nlow priority:\n\nprevious:\ntoken_usage_1998.md config:45\n"
+            path.write_text(task, encoding="utf-8")
+            todo.write_text(todo_text, encoding="utf-8")
+            authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+            args = StatusArgs(root, Path(SOURCE1998_TASK), "done", "", session_id=SOURCE1998_SESSION_ID, retire_source1998_done=True, pane_id=SOURCE1998_PANE_ID, session_transcript=SOURCE1998_TRANSCRIPT, session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256, completion_key=SOURCE1998_COMPLETION_KEY, terminal_evidence=SOURCE1998_CLOSE_FAILURE, expected_task_sha256=hashlib.sha256(task.encode()).hexdigest(), expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest())
+            pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+            changed_pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, "bash", SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+            retire_task_after = source1998_retire_task_text(task, root).encode("utf-8")
+            real_replace = replace_if_unchanged_locked
+
+            def fail_task_write(target: Path, replacement: str, state: os.stat_result) -> os.stat_result:
+                if target == path:
+                    raise RuntimeError("simulated kill between Source-1998 retirement publishes")
+                return real_replace(target, replacement, state)
+
+            pane_observations = iter((pane, pane, pane, changed_pane))
+            evidence = (patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root), patch("omo_manager.omo_task_status.SOURCE1998_TASK_AFTER_SHA256", hashlib.sha256(task.encode()).hexdigest()), patch("omo_manager.omo_task_status.SOURCE1998_RETIRE_TASK_AFTER_SHA256", hashlib.sha256(retire_task_after).hexdigest()), patch("omo_manager.omo_task_status.source1998_authority_snapshot", return_value=(SOURCE1998_AUTHORITY_BYTES, authority.stat())), patch("omo_manager.omo_task_status.source1998_pane_snapshot", side_effect=lambda: next(pane_observations)), patch("omo_manager.omo_task_status.validate_source1998_transcript"))
+            with evidence[0], evidence[1], evidence[2], evidence[3], evidence[4], evidence[5], patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=fail_task_write), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            interrupted_task = path.read_bytes()
+            interrupted_todo = todo.read_bytes()
+            marker = root / ".omo-source1998-retire.json"
+            with evidence[0], evidence[1], evidence[2], evidence[3], evidence[4], evidence[5], redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertEqual(interrupted_task, path.read_bytes())
+            self.assertEqual(interrupted_todo, todo.read_bytes())
+            self.assertTrue(marker.is_file())
+
+    def test_source1998_retirement_replay_rechecks_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / SOURCE1998_TASK
+            todo = root / "TODO.md"
+            authority = root / SOURCE1998_AUTHORITY
+            authority.parent.mkdir()
+            path.write_bytes(SOURCE1998_RETIRED_TASK_FIXTURE)
+            todo.write_bytes(SOURCE1998_RETIRED_TODO_FIXTURE)
+            authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+            args = StatusArgs(root, Path(SOURCE1998_TASK), "done", "", session_id=SOURCE1998_SESSION_ID, retire_source1998_done=True, pane_id=SOURCE1998_PANE_ID, session_transcript=SOURCE1998_TRANSCRIPT, session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256, completion_key=SOURCE1998_COMPLETION_KEY, terminal_evidence=SOURCE1998_CLOSE_FAILURE, expected_task_sha256=SOURCE1998_TASK_AFTER_SHA256, expected_todo_sha256=SOURCE1998_RETIRED_TODO_DIGEST)
+            pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+            real_replace = replace_if_unchanged_locked
+
+            def fail_task_write(target: Path, replacement: str, state: os.stat_result) -> os.stat_result:
+                if target == path:
+                    raise RuntimeError("simulated kill between Source-1998 retirement publishes")
+                return real_replace(target, replacement, state)
+
+            authority_states = iter(((SOURCE1998_AUTHORITY_BYTES, authority.stat()), (SOURCE1998_AUTHORITY_BYTES, authority.stat()), (SOURCE1998_AUTHORITY_BYTES, authority.stat()), (b"changed", authority.stat())))
+            authority_snapshot = patch("omo_manager.omo_task_status.source1998_authority_snapshot", side_effect=lambda *_: next(authority_states))
+            evidence = (patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root), patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane), patch("omo_manager.omo_task_status.validate_source1998_transcript"), authority_snapshot)
+            with evidence[0], evidence[1], evidence[2], evidence[3], patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=fail_task_write), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            interrupted_task = path.read_bytes()
+            interrupted_todo = todo.read_bytes()
+            marker = root / ".omo-source1998-retire.json"
+            self.assertTrue(marker.is_file())
+            with evidence[0], evidence[1], evidence[2], evidence[3], redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertEqual(interrupted_task, path.read_bytes())
+            self.assertEqual(interrupted_todo, todo.read_bytes())
+            self.assertTrue(marker.is_file())
+
+    def test_source1998_retirement_replay_rechecks_transcript(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / SOURCE1998_TASK
+            todo = root / "TODO.md"
+            authority = root / SOURCE1998_AUTHORITY
+            authority.parent.mkdir()
+            path.write_bytes(SOURCE1998_RETIRED_TASK_FIXTURE)
+            todo.write_bytes(SOURCE1998_RETIRED_TODO_FIXTURE)
+            authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+            args = StatusArgs(root, Path(SOURCE1998_TASK), "done", "", session_id=SOURCE1998_SESSION_ID, retire_source1998_done=True, pane_id=SOURCE1998_PANE_ID, session_transcript=SOURCE1998_TRANSCRIPT, session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256, completion_key=SOURCE1998_COMPLETION_KEY, terminal_evidence=SOURCE1998_CLOSE_FAILURE, expected_task_sha256=SOURCE1998_TASK_AFTER_SHA256, expected_todo_sha256=SOURCE1998_RETIRED_TODO_DIGEST)
+            pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+            real_replace = replace_if_unchanged_locked
+
+            def fail_task_write(target: Path, replacement: str, state: os.stat_result) -> os.stat_result:
+                if target == path:
+                    raise RuntimeError("simulated kill between Source-1998 retirement publishes")
+                return real_replace(target, replacement, state)
+
+            transcript_calls = [0]
+
+            def drift_transcript(*_args: object) -> None:
+                transcript_calls[0] += 1
+                if transcript_calls[0] == 4:
+                    raise TaskFrontmatterError("changed transcript")
+
+            evidence = (patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root), patch("omo_manager.omo_task_status.source1998_authority_snapshot", return_value=(SOURCE1998_AUTHORITY_BYTES, authority.stat())), patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane), patch("omo_manager.omo_task_status.validate_source1998_transcript", side_effect=drift_transcript))
+            with evidence[0], evidence[1], evidence[2], evidence[3], patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=fail_task_write), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            interrupted_task = path.read_bytes()
+            interrupted_todo = todo.read_bytes()
+            marker = root / ".omo-source1998-retire.json"
+            self.assertTrue(marker.is_file())
+            with evidence[0], evidence[1], evidence[2], evidence[3], redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertEqual(interrupted_task, path.read_bytes())
+            self.assertEqual(interrupted_todo, todo.read_bytes())
+            self.assertTrue(marker.is_file())
+
+    def test_source1998_retirement_replay_completes_todo_after_task_before_partial_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / SOURCE1998_TASK
+            todo = root / "TODO.md"
+            authority = root / SOURCE1998_AUTHORITY
+            authority.parent.mkdir()
+            path.write_bytes(SOURCE1998_RETIRED_TASK_FIXTURE)
+            todo.write_bytes(SOURCE1998_RETIRED_TODO_FIXTURE)
+            authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+            args = StatusArgs(root, Path(SOURCE1998_TASK), "done", "", session_id=SOURCE1998_SESSION_ID, retire_source1998_done=True, pane_id=SOURCE1998_PANE_ID, session_transcript=SOURCE1998_TRANSCRIPT, session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256, completion_key=SOURCE1998_COMPLETION_KEY, terminal_evidence=SOURCE1998_CLOSE_FAILURE, expected_task_sha256=SOURCE1998_TASK_AFTER_SHA256, expected_todo_sha256=SOURCE1998_RETIRED_TODO_DIGEST)
+            pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+            real_replace = replace_if_unchanged_locked
+
+            def fail_task_write(target: Path, replacement: str, state: os.stat_result) -> os.stat_result:
+                if target == path:
+                    raise RuntimeError("simulated kill between Source-1998 retirement publishes")
+                return real_replace(target, replacement, state)
+
+            evidence = (patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root), patch("omo_manager.omo_task_status.source1998_authority_snapshot", return_value=(SOURCE1998_AUTHORITY_BYTES, authority.stat())), patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane), patch("omo_manager.omo_task_status.validate_source1998_transcript"))
+            with evidence[0], evidence[1], evidence[2], evidence[3], patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=fail_task_write), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            marker = root / ".omo-source1998-retire.json"
+            self.assertTrue(marker.is_file())
+            with evidence[0], evidence[1], evidence[2], evidence[3], redirect_stderr(io.StringIO()):
+                self.assertEqual(0, run(args))
+            self.assertIn(b"runat: retired\n", path.read_bytes())
+            self.assertIn(b"previous:\ntoken_usage_1998.md\n", todo.read_bytes())
+            self.assertFalse(marker.exists())
+
+    def test_source1998_retirement_replay_rejects_inverse_partial_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / SOURCE1998_TASK
+            todo = root / "TODO.md"
+            marker = root / ".omo-source1998-retire.json"
+            task_before = SOURCE1998_RETIRED_TASK_FIXTURE
+            todo_before = SOURCE1998_RETIRED_TODO_FIXTURE
+            task_after = source1998_retire_task_text(task_before.decode("utf-8"), root).encode("utf-8")
+            todo_after = source1998_retire_todo_text(root, path, todo_before.decode("utf-8")).encode("utf-8")
+            path.write_bytes(task_after)
+            todo.write_bytes(todo_before)
+            marker.write_bytes(b"prepared")
+            with self.assertRaisesRegex(TaskFrontmatterError, "impossible task-after/TODO-before"):
+                source1998_apply_retire_transaction(root, path, todo, marker, (task_before, task_after, todo_before, todo_after))
+            self.assertEqual(task_after, path.read_bytes())
+            self.assertEqual(todo_before, todo.read_bytes())
+            self.assertEqual(b"prepared", marker.read_bytes())
+
+    def test_source1998_retirement_parser_binds_post_reconciliation_digests(self) -> None:
+        valid = [
+            "--retire-source-1998-done",
+            "--completion-key",
+            SOURCE1998_COMPLETION_KEY,
+            "--session-id",
+            SOURCE1998_SESSION_ID,
+            "--pane-id",
+            SOURCE1998_PANE_ID,
+            "--terminal-evidence",
+            SOURCE1998_CLOSE_FAILURE,
+            "--session-transcript",
+            str(SOURCE1998_TRANSCRIPT),
+            "--session-transcript-sha256",
+            SOURCE1998_TRANSCRIPT_SHA256,
+            "--expected-task-sha256",
+            SOURCE1998_TASK_AFTER_SHA256,
+            "--expected-todo-sha256",
+            SOURCE1998_RETIRED_TODO_DIGEST,
+            SOURCE1998_TASK,
+        ]
+        args = parse_args(valid)
+        self.assertTrue(args.retire_source1998_done)
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args(["--root", "/tmp/source1998-clone", *valid])
+        bad = valid.copy()
+        bad[bad.index(SOURCE1998_RETIRED_TODO_DIGEST)] = "g" * 64
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args(bad)
+
+    def test_source1998_retirement_constants_match_checked_in_postimages(self) -> None:
+        self.assertEqual(SOURCE1998_TASK_AFTER_SHA256, hashlib.sha256(SOURCE1998_RETIRED_TASK_FIXTURE).hexdigest())
+        self.assertEqual(SOURCE1998_RETIRED_TODO_DIGEST, hashlib.sha256(SOURCE1998_RETIRED_TODO_FIXTURE).hexdigest())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = SOURCE1998_RETIRED_TASK_FIXTURE.decode("utf-8")
+            todo = SOURCE1998_RETIRED_TODO_FIXTURE.decode("utf-8")
+            retired = source1998_retire_task_text(task, root)
+            targetless = source1998_retire_todo_text(root, root / SOURCE1998_TASK, todo)
+            self.assertEqual(SOURCE1998_RETIRE_TASK_AFTER_SHA256, hashlib.sha256(retired.encode()).hexdigest())
+            self.assertNotEqual(todo, targetless)
+            self.assertIn(SOURCE1998_RETIREMENT_NOTE, retired)
+            self.assertIn("runat: retired\n", retired)
+            self.assertIn("previous:\ntoken_usage_1998.md\n", targetless)
+            self.assertNotIn("token_usage_1998.md config:45", targetless)
+            path = root / SOURCE1998_TASK
+            todo_path = root / "TODO.md"
+            authority = root / SOURCE1998_AUTHORITY
+            authority.parent.mkdir()
+            path.write_bytes(SOURCE1998_RETIRED_TASK_FIXTURE)
+            todo_path.write_bytes(SOURCE1998_RETIRED_TODO_FIXTURE)
+            authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+            args = StatusArgs(root, Path(SOURCE1998_TASK), "done", "", session_id=SOURCE1998_SESSION_ID, retire_source1998_done=True, pane_id=SOURCE1998_PANE_ID, session_transcript=SOURCE1998_TRANSCRIPT, session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256, completion_key=SOURCE1998_COMPLETION_KEY, terminal_evidence=SOURCE1998_CLOSE_FAILURE, expected_task_sha256=SOURCE1998_TASK_AFTER_SHA256, expected_todo_sha256=SOURCE1998_RETIRED_TODO_DIGEST)
+            pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+            with patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root), patch("omo_manager.omo_task_status.source1998_authority_snapshot", return_value=(SOURCE1998_AUTHORITY_BYTES, authority.stat())), patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane), patch("omo_manager.omo_task_status.validate_source1998_transcript"), redirect_stderr(io.StringIO()):
+                self.assertEqual(0, run(args))
+            self.assertIn(b"runat: retired\n", path.read_bytes())
+            self.assertFalse((root / ".omo-source1998-retire.json").exists())
+
+    def test_source1998_retirement_fresh_path_rechecks_owner_before_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / SOURCE1998_TASK
+            todo = root / "TODO.md"
+            authority = root / SOURCE1998_AUTHORITY
+            authority.parent.mkdir()
+            path.write_bytes(SOURCE1998_RETIRED_TASK_FIXTURE)
+            todo.write_bytes(SOURCE1998_RETIRED_TODO_FIXTURE)
+            authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+            args = StatusArgs(root, Path(SOURCE1998_TASK), "done", "", session_id=SOURCE1998_SESSION_ID, retire_source1998_done=True, pane_id=SOURCE1998_PANE_ID, session_transcript=SOURCE1998_TRANSCRIPT, session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256, completion_key=SOURCE1998_COMPLETION_KEY, terminal_evidence=SOURCE1998_CLOSE_FAILURE, expected_task_sha256=SOURCE1998_TASK_AFTER_SHA256, expected_todo_sha256=SOURCE1998_RETIRED_TODO_DIGEST)
+            pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+            other = root / "other.md"
+            owner_snapshots = iter(((), (other,)))
+            current_snapshots = iter(((), ()))
+            with (
+                patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root),
+                patch("omo_manager.omo_task_status.source1998_authority_snapshot", return_value=(SOURCE1998_AUTHORITY_BYTES, authority.stat())),
+                patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane),
+                patch("omo_manager.omo_task_status.validate_source1998_transcript"),
+                patch("omo_manager.omo_task_status.authoritative_active_target_task_paths", side_effect=lambda *_: next(owner_snapshots)),
+                patch("omo_manager.omo_task_status.current_target_task_paths", side_effect=lambda *_: next(current_snapshots)),
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(2, run(args))
+            self.assertEqual(SOURCE1998_RETIRED_TASK_FIXTURE, path.read_bytes())
+            self.assertEqual(SOURCE1998_RETIRED_TODO_FIXTURE, todo.read_bytes())
+            self.assertFalse((root / ".omo-source1998-retire.json").exists())
+
+    def test_source1998_retirement_fresh_final_pass_rejects_authority_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / SOURCE1998_TASK
+            todo = root / "TODO.md"
+            authority = root / SOURCE1998_AUTHORITY
+            authority.parent.mkdir()
+            path.write_bytes(SOURCE1998_RETIRED_TASK_FIXTURE)
+            todo.write_bytes(SOURCE1998_RETIRED_TODO_FIXTURE)
+            authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+            args = StatusArgs(
+                root,
+                Path(SOURCE1998_TASK),
+                "done",
+                "",
+                session_id=SOURCE1998_SESSION_ID,
+                retire_source1998_done=True,
+                pane_id=SOURCE1998_PANE_ID,
+                session_transcript=SOURCE1998_TRANSCRIPT,
+                session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256,
+                completion_key=SOURCE1998_COMPLETION_KEY,
+                terminal_evidence=SOURCE1998_CLOSE_FAILURE,
+                expected_task_sha256=SOURCE1998_TASK_AFTER_SHA256,
+                expected_todo_sha256=SOURCE1998_RETIRED_TODO_DIGEST,
+            )
+            pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+            initial_authority_state = authority.stat()
+            authority.chmod(0o400)
+            drift_authority_state = CtimeDriftState(authority.stat())
+            authority.chmod(0o644)
+            authority_states = iter(((SOURCE1998_AUTHORITY_BYTES, initial_authority_state), (SOURCE1998_AUTHORITY_BYTES, drift_authority_state)))
+            with (
+                patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root),
+                patch("omo_manager.omo_task_status.source1998_authority_snapshot", side_effect=lambda *_: next(authority_states)),
+                patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane),
+                patch("omo_manager.omo_task_status.validate_source1998_transcript"),
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(2, run(args))
+            self.assertEqual(SOURCE1998_RETIRED_TASK_FIXTURE, path.read_bytes())
+            self.assertEqual(SOURCE1998_RETIRED_TODO_FIXTURE, todo.read_bytes())
+            self.assertFalse((root / ".omo-source1998-retire.json").exists())
+
+    def test_source1998_retirement_fresh_rejects_task_ctime_drift_before_locked_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / SOURCE1998_TASK
+            todo = root / "TODO.md"
+            authority = root / SOURCE1998_AUTHORITY
+            authority.parent.mkdir()
+            path.write_bytes(SOURCE1998_RETIRED_TASK_FIXTURE)
+            todo.write_bytes(SOURCE1998_RETIRED_TODO_FIXTURE)
+            authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+            args = StatusArgs(root, Path(SOURCE1998_TASK), "done", "", session_id=SOURCE1998_SESSION_ID, retire_source1998_done=True, pane_id=SOURCE1998_PANE_ID, session_transcript=SOURCE1998_TRANSCRIPT, session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256, completion_key=SOURCE1998_COMPLETION_KEY, terminal_evidence=SOURCE1998_CLOSE_FAILURE, expected_task_sha256=SOURCE1998_TASK_AFTER_SHA256, expected_todo_sha256=SOURCE1998_RETIRED_TODO_DIGEST)
+            pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+            real_stat = Path.stat
+            path_stat_calls = 0
+
+            @contextmanager
+            def drift_on_root_lock(_root: Path):
+                path.chmod(0o600 if (real_stat(path).st_mode & 0o7777) != 0o600 else 0o644)
+                yield
+
+            def drift_stat(candidate: Path, *stat_args: object, **stat_kwargs: object) -> os.stat_result | CtimeDriftState:
+                nonlocal path_stat_calls
+                state = real_stat(candidate, *stat_args, **stat_kwargs)
+                if candidate == path:
+                    path_stat_calls += 1
+                    if path_stat_calls == 2:
+                        return CtimeDriftState(state)
+                return state
+
+            with (
+                patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root),
+                patch("omo_manager.omo_task_status.source1998_authority_snapshot", return_value=(SOURCE1998_AUTHORITY_BYTES, authority.stat())),
+                patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane),
+                patch("omo_manager.omo_task_status.validate_source1998_transcript", return_value=authority.stat()),
+                patch("omo_manager.omo_task_status.root_membership_lock", side_effect=drift_on_root_lock),
+                patch.object(Path, "stat", side_effect=drift_stat),
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(2, run(args))
+            self.assertEqual(SOURCE1998_RETIRED_TASK_FIXTURE, path.read_bytes())
+            self.assertEqual(SOURCE1998_RETIRED_TODO_FIXTURE, todo.read_bytes())
+            self.assertFalse((root / ".omo-source1998-retire.json").exists())
+
+    def test_source1998_retirement_fresh_final_pass_rejects_non_current_todo_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / SOURCE1998_TASK
+            todo = root / "TODO.md"
+            authority = root / SOURCE1998_AUTHORITY
+            authority.parent.mkdir()
+            path.write_bytes(SOURCE1998_RETIRED_TASK_FIXTURE)
+            todo.write_text("current:\n\nhuman pending:\n\nlow priority:\n\nprevious:\nother.md config:45\n", encoding="utf-8")
+            authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+            args = StatusArgs(root, Path(SOURCE1998_TASK), "done", "", session_id=SOURCE1998_SESSION_ID, retire_source1998_done=True, pane_id=SOURCE1998_PANE_ID, session_transcript=SOURCE1998_TRANSCRIPT, session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256, completion_key=SOURCE1998_COMPLETION_KEY, terminal_evidence=SOURCE1998_CLOSE_FAILURE, expected_task_sha256=SOURCE1998_TASK_AFTER_SHA256, expected_todo_sha256=hashlib.sha256(todo.read_bytes()).hexdigest())
+            pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+            with (
+                patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root),
+                patch("omo_manager.omo_task_status.source1998_authority_snapshot", return_value=(SOURCE1998_AUTHORITY_BYTES, authority.stat())),
+                patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane),
+                patch("omo_manager.omo_task_status.validate_source1998_transcript"),
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(2, run(args))
+            self.assertEqual(SOURCE1998_RETIRED_TASK_FIXTURE, path.read_bytes())
+            self.assertIn(b"previous:\nother.md config:45", todo.read_bytes())
+            self.assertFalse((root / ".omo-source1998-retire.json").exists())
+
+    def test_source1998_retirement_fresh_final_pass_rejects_each_live_todo_section(self) -> None:
+        for section in ("current", "human pending", "low priority"):
+            with self.subTest(section=section), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / SOURCE1998_TASK
+                todo = root / "TODO.md"
+                authority = root / SOURCE1998_AUTHORITY
+                authority.parent.mkdir()
+                rows = {name: ("other.md config:45\n" if name == section else "") for name in ("current", "human pending", "low priority")}
+                todo_text = "".join(f"{name}:\n{rows[name]}\n" for name in ("current", "human pending", "low priority")) + "previous:\ntoken_usage_1998.md config:45\n"
+                path.write_bytes(SOURCE1998_RETIRED_TASK_FIXTURE)
+                todo.write_text(todo_text, encoding="utf-8")
+                authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+                args = StatusArgs(root, Path(SOURCE1998_TASK), "done", "", session_id=SOURCE1998_SESSION_ID, retire_source1998_done=True, pane_id=SOURCE1998_PANE_ID, session_transcript=SOURCE1998_TRANSCRIPT, session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256, completion_key=SOURCE1998_COMPLETION_KEY, terminal_evidence=SOURCE1998_CLOSE_FAILURE, expected_task_sha256=SOURCE1998_TASK_AFTER_SHA256, expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest())
+                pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+                with (
+                    patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root),
+                    patch("omo_manager.omo_task_status.source1998_authority_snapshot", return_value=(SOURCE1998_AUTHORITY_BYTES, authority.stat())),
+                    patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane),
+                    patch("omo_manager.omo_task_status.validate_source1998_transcript"),
+                    redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(2, run(args))
+                self.assertEqual(SOURCE1998_RETIRED_TASK_FIXTURE, path.read_bytes())
+                self.assertEqual(todo_text.encode(), todo.read_bytes())
+                self.assertFalse((root / ".omo-source1998-retire.json").exists())
+
+    def test_source1998_retirement_rejects_todo_drift_after_final_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / SOURCE1998_TASK
+            todo = root / "TODO.md"
+            authority = root / SOURCE1998_AUTHORITY
+            authority.parent.mkdir()
+            path.write_bytes(SOURCE1998_RETIRED_TASK_FIXTURE)
+            todo.write_bytes(SOURCE1998_RETIRED_TODO_FIXTURE)
+            authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+            args = StatusArgs(root, Path(SOURCE1998_TASK), "done", "", session_id=SOURCE1998_SESSION_ID, retire_source1998_done=True, pane_id=SOURCE1998_PANE_ID, session_transcript=SOURCE1998_TRANSCRIPT, session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256, completion_key=SOURCE1998_COMPLETION_KEY, terminal_evidence=SOURCE1998_CLOSE_FAILURE, expected_task_sha256=SOURCE1998_TASK_AFTER_SHA256, expected_todo_sha256=SOURCE1998_RETIRED_TODO_DIGEST)
+            pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+            real_apply = source1998_apply_retire_transaction
+            original_todo = todo.read_bytes()
+            drifted_todo = original_todo + b"\nconcurrent drift\n"
+
+            def drift_before_apply(*apply_args: object, **apply_kwargs: object) -> None:
+                todo.write_bytes(drifted_todo)
+                return real_apply(*apply_args, **apply_kwargs)
+
+            with (
+                patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root),
+                patch("omo_manager.omo_task_status.source1998_authority_snapshot", return_value=(SOURCE1998_AUTHORITY_BYTES, authority.stat())),
+                patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane),
+                patch("omo_manager.omo_task_status.validate_source1998_transcript"),
+                patch("omo_manager.omo_task_status.source1998_apply_retire_transaction", side_effect=drift_before_apply),
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(2, run(args))
+            self.assertEqual(SOURCE1998_RETIRED_TASK_FIXTURE, path.read_bytes())
+            self.assertEqual(drifted_todo, todo.read_bytes())
+            self.assertTrue((root / ".omo-source1998-retire.json").exists())
+
+    def test_source1998_retirement_rejects_todo_metadata_drift_after_final_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / SOURCE1998_TASK
+            todo = root / "TODO.md"
+            authority = root / SOURCE1998_AUTHORITY
+            authority.parent.mkdir()
+            path.write_bytes(SOURCE1998_RETIRED_TASK_FIXTURE)
+            todo.write_bytes(SOURCE1998_RETIRED_TODO_FIXTURE)
+            authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+            args = StatusArgs(root, Path(SOURCE1998_TASK), "done", "", session_id=SOURCE1998_SESSION_ID, retire_source1998_done=True, pane_id=SOURCE1998_PANE_ID, session_transcript=SOURCE1998_TRANSCRIPT, session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256, completion_key=SOURCE1998_COMPLETION_KEY, terminal_evidence=SOURCE1998_CLOSE_FAILURE, expected_task_sha256=SOURCE1998_TASK_AFTER_SHA256, expected_todo_sha256=SOURCE1998_RETIRED_TODO_DIGEST)
+            pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+            real_apply = source1998_apply_retire_transaction
+            original_mode = todo.stat().st_mode & 0o7777
+
+            def drift_before_apply(*apply_args: object, **apply_kwargs: object) -> None:
+                todo.chmod(0o600 if original_mode != 0o600 else 0o644)
+                return real_apply(*apply_args, **apply_kwargs)
+
+            with (
+                patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root),
+                patch("omo_manager.omo_task_status.source1998_authority_snapshot", return_value=(SOURCE1998_AUTHORITY_BYTES, authority.stat())),
+                patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane),
+                patch("omo_manager.omo_task_status.validate_source1998_transcript"),
+                patch("omo_manager.omo_task_status.source1998_apply_retire_transaction", side_effect=drift_before_apply),
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(2, run(args))
+            self.assertEqual(SOURCE1998_RETIRED_TASK_FIXTURE, path.read_bytes())
+            self.assertEqual(SOURCE1998_RETIRED_TODO_FIXTURE, todo.read_bytes())
+            self.assertEqual(0o600 if original_mode != 0o600 else 0o644, todo.stat().st_mode & 0o7777)
+            self.assertTrue((root / ".omo-source1998-retire.json").exists())
+
+    def test_source1998_retirement_replay_final_pass_rejects_each_todo_section(self) -> None:
+        for section in ("current", "human pending", "low priority", "previous"):
+            with self.subTest(section=section), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / SOURCE1998_TASK
+                todo = root / "TODO.md"
+                authority = root / SOURCE1998_AUTHORITY
+                marker = root / ".omo-source1998-retire.json"
+                authority.parent.mkdir()
+                rows = {name: ("other.md config:45\n" if name == section else "") for name in ("current", "human pending", "low priority", "previous")}
+                if section != "previous":
+                    rows["previous"] = "token_usage_1998.md config:45\n"
+                todo_text = "".join(f"{name}:\n{rows[name]}\n" for name in ("current", "human pending", "low priority", "previous"))
+                task_before = SOURCE1998_RETIRED_TASK_FIXTURE
+                todo_before = todo_text.encode()
+                task_after = source1998_retire_task_text(task_before.decode(), root).encode()
+                todo_after = todo_text.encode() if section == "previous" else todo_text.replace("token_usage_1998.md config:45\n", "token_usage_1998.md\n").encode()
+                path.write_bytes(task_before)
+                todo.write_bytes(todo_before)
+                authority.write_bytes(SOURCE1998_AUTHORITY_BYTES)
+                source1998_write_transaction(marker, source1998_retire_transaction_record(task_before, task_after, todo_before, todo_after))
+                args = StatusArgs(root, Path(SOURCE1998_TASK), "done", "", session_id=SOURCE1998_SESSION_ID, retire_source1998_done=True, pane_id=SOURCE1998_PANE_ID, session_transcript=SOURCE1998_TRANSCRIPT, session_transcript_sha256=SOURCE1998_TRANSCRIPT_SHA256, completion_key=SOURCE1998_COMPLETION_KEY, terminal_evidence=SOURCE1998_CLOSE_FAILURE, expected_task_sha256=SOURCE1998_TASK_AFTER_SHA256, expected_todo_sha256=hashlib.sha256(todo_before).hexdigest())
+                pane = (SOURCE1998_PANE_ID, SOURCE1998_PANE_PID, SOURCE1998_PANE_COMMAND, SOURCE1998_PANE_CWD, "config:45.0", SOURCE1998_PANE_START_TICKS)
+                with (
+                    patch("omo_manager.omo_task_status.SOURCE1998_ROOT", root),
+                    patch("omo_manager.omo_task_status.source1998_authority_snapshot", return_value=(SOURCE1998_AUTHORITY_BYTES, authority.stat())),
+                    patch("omo_manager.omo_task_status.source1998_pane_snapshot", return_value=pane),
+                    patch("omo_manager.omo_task_status.validate_source1998_transcript"),
+                    redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(2, run(args))
+                self.assertEqual(task_before, path.read_bytes())
+                self.assertEqual(todo_before, todo.read_bytes())
+                self.assertTrue(marker.is_file())
 
     def test_cli_finish_closed_done_failure_stays_blocked_retryable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
