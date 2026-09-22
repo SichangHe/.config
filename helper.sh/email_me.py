@@ -174,7 +174,7 @@ def parse_args(argv: list[str]) -> CliArgs:
     )
     _ = parser.add_argument(
         "--tmux-target",
-        help="Normally omit: the helper infers producer identity from the exact current pane, then the launch environment. Override only to preserve a different verified producer identity; never pass a task owner or delivery target.",
+        help="Normally omit: the helper infers producer identity from an authenticated OmniGent runtime, then the exact current pane and launch environment. Override only to preserve a different verified producer identity; never pass a task owner or delivery target.",
     )
     _ = parser.add_argument(
         "--sender-tmux-target",
@@ -776,6 +776,10 @@ def env_manager_tmux_target() -> str | None:
 
 
 def inferred_tmux_target(manager_human: bool) -> str | None:
+    # 🧑 "the tag of these emails are off"
+    omnigent_target = omnigent_inferred_target()
+    if omnigent_target is not None:
+        return omnigent_target
     agent_target = env_tmux_target()
     has_pane_id = bool(os.environ.get("TMUX_PANE", "").strip())
     current_target = current_tmux_window() if has_pane_id else None
@@ -789,7 +793,7 @@ def inferred_tmux_target(manager_human: bool) -> str | None:
         return fallback_target
     if has_pane_id:
         return None
-    return current_tmux_window() or omnigent_inferred_target()
+    return current_tmux_window()
 
 
 def omnigent_inferred_target() -> str | None:
@@ -802,10 +806,14 @@ def omnigent_inferred_target() -> str | None:
     except ImportError:
         return None
     try:
-        target = authenticate_current_omnigent().target
-    except (NotOmniGentEnvironment, OmniGentIdentityError, OSError):
+        target = getattr(authenticate_current_omnigent(), "target", None)
+    except NotOmniGentEnvironment:
         return None
-    return canonical_email_tmux_target(target) if valid_tmux_target(target) else None
+    except (OmniGentIdentityError, OSError) as exc:
+        raise ValueError("OmniGent producer identity could not be authenticated") from exc
+    if not isinstance(target, str) or OMNIGENT_TARGET_RE.fullmatch(target) is None:
+        raise ValueError("OmniGent producer identity could not be authenticated")
+    return target
 
 
 def agent_session_id() -> str:

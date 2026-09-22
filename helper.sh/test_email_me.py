@@ -634,6 +634,124 @@ class EmailMeTests(unittest.TestCase):
                 "omnigent://session-1", email_me.inferred_tmux_target(False)
             )
 
+    def test_inferred_target_prefers_authenticated_omnigent_over_inherited_tmux(self) -> None:
+        identity = SimpleNamespace(target="omnigent://session-1")
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "TMUX": "/tmp/tmux-session",
+                    "TMUX_PANE": "%42",
+                    "OMO_AGENT_TMUX_TARGET": "main:0",
+                },
+            ),
+            patch(
+                "omo_omnigent_identity.authenticate_current_omnigent",
+                return_value=identity,
+            ),
+            patch.object(email_me, "current_tmux_window") as current_tmux,
+        ):
+            self.assertEqual(
+                "omnigent://session-1", email_me.inferred_tmux_target(False)
+            )
+        current_tmux.assert_not_called()
+
+    def test_inferred_target_rejects_broken_omnigent_identity_before_tmux_fallback(self) -> None:
+        identity_error = __import__("omo_omnigent_identity").OmniGentIdentityError
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "TMUX_PANE": "",
+                    "OMO_AGENT_TMUX_TARGET": "main:0",
+                },
+            ),
+            patch(
+                "omo_omnigent_identity.authenticate_current_omnigent",
+                side_effect=identity_error("broken identity"),
+            ),
+            self.assertRaisesRegex(ValueError, "could not be authenticated"),
+        ):
+            email_me.inferred_tmux_target(False)
+
+    def test_inferred_target_rejects_invalid_omnigent_target_before_inherited_fallback(self) -> None:
+        identity = SimpleNamespace(target="")
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "TMUX_PANE": "",
+                    "OMO_AGENT_TMUX_TARGET": "main:0",
+                },
+            ),
+            patch(
+                "omo_omnigent_identity.authenticate_current_omnigent",
+                return_value=identity,
+            ),
+            self.assertRaisesRegex(ValueError, "could not be authenticated"),
+        ):
+            email_me.inferred_tmux_target(False)
+
+    def test_inferred_target_rejects_tmux_shaped_omnigent_target_before_inherited_fallback(self) -> None:
+        identity = SimpleNamespace(target="main:7")
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "TMUX_PANE": "",
+                    "OMO_AGENT_TMUX_TARGET": "main:0",
+                },
+            ),
+            patch(
+                "omo_omnigent_identity.authenticate_current_omnigent",
+                return_value=identity,
+            ),
+            self.assertRaisesRegex(ValueError, "could not be authenticated"),
+        ):
+            email_me.inferred_tmux_target(False)
+
+    def test_manager_human_fake_send_uses_authenticated_omnigent_subject_tag(self) -> None:
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        identity = SimpleNamespace(target="omnigent://session-1")
+        with tempfile.TemporaryDirectory() as tmp:
+            sent = Path(tmp) / "sent.txt"
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "EMAIL_ME_FAKE_SEND_LOG": str(sent),
+                        "TMUX_PANE": "%42",
+                        "OMO_AGENT_TMUX_TARGET": "main:0",
+                    },
+                ),
+                patch.object(sys, "stdin", StringIO("figure update\n")),
+                patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch(
+                    "omo_omnigent_identity.authenticate_current_omnigent",
+                    return_value=identity,
+                ),
+            ):
+                self.assertEqual(
+                    0,
+                    email_me.main(
+                        [
+                            "--manager-human",
+                            "--non-completion",
+                            "--subject",
+                            "Figure update",
+                        ]
+                    ),
+                )
+            self.assertTrue(
+                sent.read_text(encoding="utf-8").startswith(
+                    "[omnigent://session-1] Figure update\n"
+                )
+            )
+
     def test_help_says_tmux_target_should_normally_be_omitted(self) -> None:
         with (
             patch("sys.stdout", new_callable=StringIO) as stdout,
@@ -643,7 +761,10 @@ class EmailMeTests(unittest.TestCase):
         self.assertEqual(0, raised.exception.code)
         help_text = " ".join(stdout.getvalue().split())
         self.assertIn("Normally omit: the helper infers producer identity", help_text)
-        self.assertIn("from the exact current pane, then the launch environment", help_text)
+        self.assertIn(
+            "from an authenticated OmniGent runtime, then the exact current pane and launch environment",
+            help_text,
+        )
         self.assertIn("never pass a task owner or delivery target.", help_text)
 
     def test_help_restricts_no_pwd_footer_to_explicit_instruction(self) -> None:
