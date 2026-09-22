@@ -47,8 +47,10 @@ from omo_email_config import (  # noqa: E402
 )
 from omo_email_subject import (  # noqa: E402
     MailRouteProfile,
+    OMNIGENT_TARGET_RE,
     SubjectInputError,
     canonical_tmux_target,
+    current_agent_session_id as env_agent_session_id,
     fresh_manager_subject,
     manager_digest_authorization_path,
     manager_digest_authorization_payload,
@@ -65,10 +67,17 @@ from omo_guest_images import GuestImageError, ValidatedImage, reply_attachments 
 PWD_FOOTER_RE = re.compile(r"(?:^|\n)(?:>\s*)?PWD: [^\n]+\n?\Z")
 UNQUOTED_PWD_FOOTER_RE = re.compile(r"(?:^|\n)PWD: [^\n]+\n?\Z")
 TMUX_WINDOW_RE = re.compile(r"[^:\n]+:\d+(?:\.\d+)?\Z")
-AGENT_SESSION_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z", re.IGNORECASE)
-TMUX_SUBJECT_TAG_RE = re.compile(r"^\s*(?:\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\]|[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?:\s+|$)")
-BRACKETED_TMUX_TAG_RE = re.compile(r"\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\]")
-MANAGER_HUMAN_SUBJECT_RE = re.compile(r"^(?:Re:\s*)?\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\](?:\s+|$)", re.IGNORECASE)
+AGENT_SESSION_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z", re.IGNORECASE
+)
+PRODUCER_TARGET = r"(?:[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?|omnigent://[A-Za-z0-9._-]+)"
+TMUX_SUBJECT_TAG_RE = re.compile(
+    rf"^\s*(?:\[{PRODUCER_TARGET}\]|{PRODUCER_TARGET})(?:\s+|$)"
+)
+BRACKETED_TMUX_TAG_RE = re.compile(rf"\[{PRODUCER_TARGET}\]")
+MANAGER_HUMAN_SUBJECT_RE = re.compile(
+    rf"^(?:Re:\s*)?\[{PRODUCER_TARGET}\](?:\s+|$)", re.IGNORECASE
+)
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)(?:\s+#+\s*)?$")
@@ -77,6 +86,21 @@ ORDERED_LIST_RE = re.compile(r"^\s{0,3}\d+[.)]\s+(.+)$")
 BLOCKQUOTE_RE = re.compile(r"^\s{0,3}>\s?(.*)$")
 FENCE_RE = re.compile(r"^\s{0,3}(```|~~~)")
 HR_RE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
+SOURCE2048_RECOVERY_KEY = (
+    "803ba79e684265b9d33fc98159bc0c94366cd93206916a36c5ae5825771dda2e"
+)
+SOURCE2048_RECOVERY_OWNER = "DeGenTWeb_writeup:0"
+SOURCE2048_RECOVERY_THREAD_TARGET = "dw:15"
+SOURCE2048_RECOVERY_TASK = "paper_finish.md"
+SOURCE2048_RECOVERY_SUBJECT_SHA256 = (
+    "d7f322d6687485a7ee16c7fbccb2ac395b87fb39d9e11c0f1959a2702c6f16f0"
+)
+SOURCE2048_RECOVERY_BODY_SHA256 = (
+    "8a49c9552a32908a4f3f36008972f1173877de6e15bfb46bc1ec7292c5f1a453"
+)
+SOURCE2048_RECOVERY_SENT_SUBJECT_SHA256 = (
+    "b2439c1be93a90abff001abd6a6c39bfaddb49354dfd1722f48301ee549f1aa8"
+)
 
 
 @dataclass(frozen=True)
@@ -94,6 +118,8 @@ class CliArgs:
     completion_authorization: str
     digest_authorization: str
     pending_notice_key: str
+    require_human_recipient: bool
+    preserve_source2048_thread: bool
 
 
 class ParsedArgs(argparse.Namespace):
@@ -113,6 +139,8 @@ class ParsedArgs(argparse.Namespace):
     completion_authorization: str = ""
     digest_authorization: str = ""
     pending_notice_key: str = ""
+    require_human_recipient: bool = False
+    preserve_source2048_thread: bool = False
 
 
 def parse_args(argv: list[str]) -> CliArgs:
@@ -126,32 +154,76 @@ def parse_args(argv: list[str]) -> CliArgs:
     )
     _ = parser.add_argument("legacy_args", nargs="*", help=argparse.SUPPRESS)
     _ = parser.add_argument("--subject", help="Email subject/title.")
-    _ = parser.add_argument("--subject-file", type=Path, help="Read the email subject from this one-line file instead of an argument.")
-    _ = parser.add_argument("--message-file", type=Path, help="Read the email body from this file instead of stdin.")
-    _ = parser.add_argument("--dry-run", action="store_true", help="Validate without sending.")
+    _ = parser.add_argument(
+        "--subject-file",
+        type=Path,
+        help="Read the email subject from this one-line file instead of an argument.",
+    )
+    _ = parser.add_argument(
+        "--message-file",
+        type=Path,
+        help="Read the email body from this file instead of stdin.",
+    )
+    _ = parser.add_argument(
+        "--dry-run", action="store_true", help="Validate without sending."
+    )
     _ = parser.add_argument(
         "--no-pwd-footer",
         action="store_true",
         help="Send the body exactly as provided, without appending a PWD footer. Agents must not use this option unless explicitly told to.",
     )
-    _ = parser.add_argument("--tmux-target", help="Normally omit: the helper infers producer identity from the exact current pane, then the launch environment. Override only to preserve a different verified producer identity; never pass a task owner or delivery target.")
-    _ = parser.add_argument("--sender-tmux-target", dest="sender_tmux_target", help="Alias for --tmux-target; use only when forwarding or compressing mail while preserving a different verified producer identity.")
-    _ = parser.add_argument("--supersedes-message-id", action="append", default=[], help="Exact Message-ID from agent-unread that this replacement supersedes; repeat for multiple messages.")
-    _ = parser.add_argument("--manager-human", action="store_true", help=argparse.SUPPRESS)
+    _ = parser.add_argument(
+        "--tmux-target",
+        help="Normally omit: the helper infers producer identity from the exact current pane, then the launch environment. Override only to preserve a different verified producer identity; never pass a task owner or delivery target.",
+    )
+    _ = parser.add_argument(
+        "--sender-tmux-target",
+        dest="sender_tmux_target",
+        help="Alias for --tmux-target; use only when forwarding or compressing mail while preserving a different verified producer identity.",
+    )
+    _ = parser.add_argument(
+        "--supersedes-message-id",
+        action="append",
+        default=[],
+        help="Exact Message-ID from agent-unread that this replacement supersedes; repeat for multiple messages.",
+    )
+    _ = parser.add_argument(
+        "--manager-human", action="store_true", help=argparse.SUPPRESS
+    )
     classification = parser.add_mutually_exclusive_group()
-    _ = classification.add_argument("--non-completion", action="store_true", help=argparse.SUPPRESS)
-    _ = classification.add_argument("--completion-authorization", default="", help=argparse.SUPPRESS)
-    _ = classification.add_argument("--digest-authorization", default="", help=argparse.SUPPRESS)
+    _ = classification.add_argument(
+        "--non-completion", action="store_true", help=argparse.SUPPRESS
+    )
+    _ = classification.add_argument(
+        "--completion-authorization", default="", help=argparse.SUPPRESS
+    )
+    _ = classification.add_argument(
+        "--digest-authorization", default="", help=argparse.SUPPRESS
+    )
     _ = parser.add_argument("--pending-notice-key", default="", help=argparse.SUPPRESS)
+    _ = parser.add_argument(
+        "--preserve-source2048-thread", action="store_true", help=argparse.SUPPRESS
+    )
+    _ = parser.add_argument(
+        "--require-human-recipient",
+        action="store_true",
+        help="Refuse delivery unless separate agent and human mailboxes are configured.",
+    )
     _ = parser.add_argument("--guest-hees", action="store_true", help=argparse.SUPPRESS)
-    _ = parser.add_argument("--guest-image-reference", action="append", default=[], help=argparse.SUPPRESS)
+    _ = parser.add_argument(
+        "--guest-image-reference", action="append", default=[], help=argparse.SUPPRESS
+    )
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.legacy_args:
-        parser.error("pass email subject with --subject or --subject-file; pass email body by standard input or --message-file.")
+        parser.error(
+            "pass email subject with --subject or --subject-file; pass email body by standard input or --message-file."
+        )
     if parsed.subject is not None and parsed.subject_file is not None:
         parser.error("pass email subject with --subject or --subject-file, not both.")
     if parsed.subject is not None and not parsed.subject.strip():
-        parser.error("subject must not be empty; omit --subject to continue the latest verified thread.")
+        parser.error(
+            "subject must not be empty; omit --subject to continue the latest verified thread."
+        )
     if parsed.subject_file is not None:
         try:
             raw_title = parsed.subject_file.read_text(encoding="utf-8")
@@ -180,28 +252,57 @@ def parse_args(argv: list[str]) -> CliArgs:
             parser.error("`title` must not contain control characters.")
     if parsed.manager_human and not content.strip():
         parser.error("email body must not be empty.")
-    if parsed.tmux_target is not None and parsed.sender_tmux_target is not None and parsed.tmux_target != parsed.sender_tmux_target:
+    if (
+        parsed.tmux_target is not None
+        and parsed.sender_tmux_target is not None
+        and parsed.tmux_target != parsed.sender_tmux_target
+    ):
         parser.error("pass --tmux-target or --sender-tmux-target, not both.")
     tmux_target = parsed.tmux_target or parsed.sender_tmux_target
     if tmux_target is not None and not valid_tmux_target(tmux_target):
-        parser.error("--tmux-target must have shape session:window or session:window.pane, for example wl:4.")
-    guest_hees = parsed.guest_hees or (parsed.manager_human and guest_hees_tmux_target(tmux_target))
+        parser.error(
+            "--tmux-target must have shape session:window, session:window.pane, or omnigent://SESSION_ID, for example wl:4."
+        )
+    guest_hees = parsed.guest_hees or (
+        parsed.manager_human and guest_hees_tmux_target(tmux_target)
+    )
     if guest_hees and not parsed.manager_human:
         parser.error("--guest-hees requires --manager-human.")
     if guest_hees and not guest_hees_tmux_target(tmux_target):
         parser.error("--guest-hees requires a --tmux-target in the guest_hees session.")
-    if (parsed.non_completion or parsed.completion_authorization or parsed.digest_authorization) and not parsed.manager_human:
+    if (
+        parsed.non_completion
+        or parsed.completion_authorization
+        or parsed.digest_authorization
+    ) and not parsed.manager_human:
         parser.error("mail classification options require --manager-human.")
-    if parsed.completion_authorization and re.fullmatch(r"[0-9a-f]{64}", parsed.completion_authorization) is None:
+    if (
+        parsed.completion_authorization
+        and re.fullmatch(r"[0-9a-f]{64}", parsed.completion_authorization) is None
+    ):
         parser.error("--completion-authorization must be a lowercase SHA-256 digest.")
-    if parsed.digest_authorization and re.fullmatch(r"[0-9a-f]{64}", parsed.digest_authorization) is None:
+    if parsed.preserve_source2048_thread and not parsed.completion_authorization:
+        parser.error(
+            "--preserve-source2048-thread requires --completion-authorization."
+        )
+    if (
+        parsed.digest_authorization
+        and re.fullmatch(r"[0-9a-f]{64}", parsed.digest_authorization) is None
+    ):
         parser.error("--digest-authorization must be a lowercase SHA-256 digest.")
-    if parsed.pending_notice_key and re.fullmatch(r"[0-9a-f]{64}", parsed.pending_notice_key) is None:
+    if (
+        parsed.pending_notice_key
+        and re.fullmatch(r"[0-9a-f]{64}", parsed.pending_notice_key) is None
+    ):
         parser.error("--pending-notice-key must be a lowercase SHA-256 digest.")
-    if parsed.pending_notice_key and (not parsed.manager_human or not parsed.non_completion):
+    if parsed.pending_notice_key and (
+        not parsed.manager_human or not parsed.non_completion
+    ):
         parser.error("--pending-notice-key requires --manager-human --non-completion.")
     if parsed.pending_notice_key and title is not None:
-        parser.error("--pending-notice-key must reuse the latest verified thread; omit --subject and --subject-file.")
+        parser.error(
+            "--pending-notice-key must reuse the latest verified thread; omit --subject and --subject-file."
+        )
     pending_notice_lines = content.splitlines()
     if parsed.pending_notice_key and not (
         content.endswith("\n")
@@ -209,11 +310,20 @@ def parse_args(argv: list[str]) -> CliArgs:
         and pending_notice_lines
         and pending_notice_lines[0] == "pending item created:"
         and len(pending_notice_lines) > 1
-        and all(line.startswith("- ") and len(line) > 2 for line in pending_notice_lines[1:])
+        and all(
+            line.startswith("- ") and len(line) > 2 for line in pending_notice_lines[1:]
+        )
     ):
-        parser.error("--pending-notice-key requires an exact pending-item creation body.")
-    if any(re.fullmatch(r"<[^<>\s]+>", value) is None for value in parsed.supersedes_message_id):
-        parser.error("--supersedes-message-id must be an exact RFC Message-ID enclosed in angle brackets.")
+        parser.error(
+            "--pending-notice-key requires an exact pending-item creation body."
+        )
+    if any(
+        re.fullmatch(r"<[^<>\s]+>", value) is None
+        for value in parsed.supersedes_message_id
+    ):
+        parser.error(
+            "--supersedes-message-id must be an exact RFC Message-ID enclosed in angle brackets."
+        )
     if len(set(parsed.supersedes_message_id)) != len(parsed.supersedes_message_id):
         parser.error("--supersedes-message-id values must be unique.")
     return CliArgs(
@@ -230,6 +340,8 @@ def parse_args(argv: list[str]) -> CliArgs:
         completion_authorization=parsed.completion_authorization,
         digest_authorization=parsed.digest_authorization,
         pending_notice_key=parsed.pending_notice_key,
+        require_human_recipient=parsed.require_human_recipient,
+        preserve_source2048_thread=parsed.preserve_source2048_thread,
     )
 
 
@@ -254,7 +366,13 @@ def normalize_subject(title: str, tmux_target: str = "") -> str:
         if re.match(r"^\s*re:\s*", base, flags=re.IGNORECASE):
             reply = True
             base = re.sub(r"^\s*re:\s*", "", base, count=1, flags=re.IGNORECASE).strip()
-        base = re.sub(r"^\s*(?:\[a\]|\[omo_manager\]|\[omo_manager_recover\])\s*", "", base, count=1, flags=re.IGNORECASE).strip()
+        base = re.sub(
+            r"^\s*(?:\[a\]|\[omo_manager\]|\[omo_manager_recover\])\s*",
+            "",
+            base,
+            count=1,
+            flags=re.IGNORECASE,
+        ).strip()
         base = clean_subject_tmux_tags(base)
         if base == before:
             break
@@ -263,7 +381,11 @@ def normalize_subject(title: str, tmux_target: str = "") -> str:
     clean_target = tmux_target.strip()
     base = clean_subject_tmux_tags(base)
     bracketed_target = f"[{clean_target}]"
-    if clean_target and valid_tmux_target(clean_target) and not base.startswith(f"{bracketed_target} "):
+    if (
+        clean_target
+        and valid_tmux_target(clean_target)
+        and not base.startswith(f"{bracketed_target} ")
+    ):
         base = f"{bracketed_target} {base}"
     if lowered.startswith("re:"):
         return f"Re: {base}"
@@ -310,7 +432,9 @@ def current_tmux_window() -> str | None:
 
 
 def valid_tmux_target(target: str) -> bool:
-    return bool(TMUX_WINDOW_RE.fullmatch(target))
+    return bool(
+        TMUX_WINDOW_RE.fullmatch(target) or OMNIGENT_TARGET_RE.fullmatch(target)
+    )
 
 
 # 🧑 "The dedicated guest manager and its agents for hees ... send emails back to `46496337@qq.com`"
@@ -319,20 +443,37 @@ def guest_hees_tmux_target(target: str | None) -> bool:
     if target is None:
         return False
     canonical = canonical_email_tmux_target(target)
-    return guest_hees_target(canonical) and canonical.partition(":")[0] == GUEST_HEES_SESSION
+    return (
+        guest_hees_target(canonical)
+        and canonical.partition(":")[0] == GUEST_HEES_SESSION
+    )
 
 
 def substantive_guest_reply(content: str) -> bool:
     """Reject blank and canonical lifecycle-only guest mail."""
-    lines = [line.strip() for line in markdown_links_to_plain(content).splitlines() if line.strip()]
+    lines = [
+        line.strip()
+        for line in markdown_links_to_plain(content).splitlines()
+        if line.strip()
+    ]
     if not lines:
         return False
     labels = ("Task:", "Outcome:", "Items:", "Evidence:", "Completion record:")
-    lifecycle_shape = any(line.startswith("Task:") for line in lines) and any(line.startswith("Outcome:") for line in lines)
-    if lifecycle_shape and all(line.startswith(labels) or line.startswith(('- ', '* ')) for line in lines):
+    lifecycle_shape = any(line.startswith("Task:") for line in lines) and any(
+        line.startswith("Outcome:") for line in lines
+    )
+    if lifecycle_shape and all(
+        line.startswith(labels) or line.startswith(("- ", "* ")) for line in lines
+    ):
         return False
     normalized = " ".join(lines).casefold().rstrip(".! ")
-    return normalized not in {"done", "task done", "completed", "task completed", "pending item removed"}
+    return normalized not in {
+        "done",
+        "task done",
+        "completed",
+        "task completed",
+        "pending item removed",
+    }
 
 
 def verified_guest_reply_headers(reply_headers: dict[str, str]) -> bool:
@@ -349,10 +490,16 @@ def sent_plain_text(message: Message) -> str:
     return ""
 
 
-def sent_message_matches_guest_reply(candidate: Message, expected: EmailMessage, sender: str) -> bool:
+def sent_message_matches_guest_reply(
+    candidate: Message, expected: EmailMessage, sender: str
+) -> bool:
     """Validate exact participants, thread, identity, and substantive Sent content."""
-    recipients = [address for _name, address in getaddresses(candidate.get_all("To", []))]
-    senders = [address for _name, address in getaddresses(candidate.get_all("From", []))]
+    recipients = [
+        address for _name, address in getaddresses(candidate.get_all("To", []))
+    ]
+    senders = [
+        address for _name, address in getaddresses(candidate.get_all("From", []))
+    ]
     headers = {
         "In-Reply-To": str(candidate.get("In-Reply-To", "")),
         "References": str(candidate.get("References", "")),
@@ -399,7 +546,9 @@ def acquire_guest_reply_claim(state_dir: Path, source: str) -> GuestReplyClaim |
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         directory.chmod(0o700)
         if not path.exists():
-            temporary_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            temporary_fd = os.open(
+                temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+            )
             try:
                 offset = 0
                 while offset < len(expected):
@@ -414,14 +563,20 @@ def acquire_guest_reply_claim(state_dir: Path, source: str) -> GuestReplyClaim |
                 os.link(temporary, path)
             except FileExistsError:
                 pass
-            directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            directory_fd = os.open(
+                directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
             try:
                 os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         metadata = os.fstat(fd)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o077
+        ):
             raise OSError("unsafe guest reply claim")
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if os.read(fd, len(expected) + 1) != expected:
@@ -440,13 +595,17 @@ def guest_reply_attempt_path(state_dir: Path, source: str) -> Path:
     return state_dir / "guest-hees-reply-attempts" / f"{digest}.eml"
 
 
-def store_guest_reply_attempt(state_dir: Path, source: str, message: EmailMessage) -> bool:
+def store_guest_reply_attempt(
+    state_dir: Path, source: str, message: EmailMessage
+) -> bool:
     """Persist the exact expected message before SMTP for safe retry reconciliation."""
     path = guest_reply_attempt_path(state_dir, source)
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         path.parent.chmod(0o700)
-        with tempfile.NamedTemporaryFile("wb", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
+        with tempfile.NamedTemporaryFile(
+            "wb", dir=path.parent, prefix=f".{path.name}.", delete=False
+        ) as handle:
             temporary = Path(handle.name)
             temporary.chmod(0o600)
             _ = handle.write(message.as_bytes(policy=policy.default))
@@ -454,7 +613,9 @@ def store_guest_reply_attempt(state_dir: Path, source: str, message: EmailMessag
             os.fsync(handle.fileno())
         try:
             os.replace(temporary, path)
-            directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            directory_fd = os.open(
+                path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
             try:
                 os.fsync(directory_fd)
             finally:
@@ -463,10 +624,17 @@ def store_guest_reply_attempt(state_dir: Path, source: str, message: EmailMessag
             temporary.unlink(missing_ok=True)
     except OSError:
         return False
-    return load_guest_reply_attempt(state_dir, source, str(message["In-Reply-To"]), str(message["From"])) is not None
+    return (
+        load_guest_reply_attempt(
+            state_dir, source, str(message["In-Reply-To"]), str(message["From"])
+        )
+        is not None
+    )
 
 
-def load_guest_reply_attempt(state_dir: Path, source: str, inbound_message_id: str, sender: str) -> EmailMessage | None:
+def load_guest_reply_attempt(
+    state_dir: Path, source: str, inbound_message_id: str, sender: str
+) -> EmailMessage | None:
     """Load only an owner-private exact-thread substantive prior attempt."""
     path = guest_reply_attempt_path(state_dir, source)
     try:
@@ -493,32 +661,60 @@ def load_guest_reply_attempt(state_dir: Path, source: str, inbound_message_id: s
     return candidate
 
 
-def verify_guest_reply_in_sent(settings: AgentMailSettings, expected: EmailMessage) -> GuestSentEvidence | None:
+def verify_guest_reply_in_sent(
+    settings: AgentMailSettings, expected: EmailMessage
+) -> GuestSentEvidence | None:
     """Find one exact immutable copy in Gmail Sent Mail before reporting success."""
     try:
-        timeout_s = max(float(os.environ.get("OMO_GUEST_HEES_SENT_VERIFY_TIMEOUT_S", "20")), 0)
+        timeout_s = max(
+            float(os.environ.get("OMO_GUEST_HEES_SENT_VERIFY_TIMEOUT_S", "20")), 0
+        )
     except ValueError:
         timeout_s = 20
     deadline_s = time.monotonic() + timeout_s
     while True:
         client: imaplib.IMAP4_SSL | None = None
         try:
-            client = imaplib.IMAP4_SSL(GMAIL_IMAP_HOST, timeout=min(max(timeout_s, 1), 30))
+            client = imaplib.IMAP4_SSL(
+                GMAIL_IMAP_HOST, timeout=min(max(timeout_s, 1), 30)
+            )
             client.login(settings.agent_address, settings.app_password)
             typ, _data = client.select('"[Gmail]/Sent Mail"', readonly=True)
             if typ != "OK":
                 raise imaplib.IMAP4.error("cannot select Sent Mail")
-            typ, data = client.uid("search", None, "HEADER", "Message-ID", str(expected["Message-ID"]))
-            uids = b" ".join(item for item in data or [] if isinstance(item, bytes)).split() if typ == "OK" else []
+            typ, data = client.uid(
+                "search", None, "HEADER", "Message-ID", str(expected["Message-ID"])
+            )
+            uids = (
+                b" ".join(
+                    item for item in data or [] if isinstance(item, bytes)
+                ).split()
+                if typ == "OK"
+                else []
+            )
             if len(uids) == 1:
-                typ, fetched = client.uid("fetch", uids[0].decode("ascii"), "(BODY.PEEK[])")
-                payloads = [item[1] for item in fetched or [] if isinstance(item, tuple) and isinstance(item[1], bytes)]
+                typ, fetched = client.uid(
+                    "fetch", uids[0].decode("ascii"), "(BODY.PEEK[])"
+                )
+                payloads = [
+                    item[1]
+                    for item in fetched or []
+                    if isinstance(item, tuple) and isinstance(item[1], bytes)
+                ]
                 if typ == "OK" and len(payloads) == 1:
-                    candidate = BytesParser(policy=policy.default).parsebytes(payloads[0])
-                    if sent_message_matches_guest_reply(candidate, expected, settings.agent_address):
+                    candidate = BytesParser(policy=policy.default).parsebytes(
+                        payloads[0]
+                    )
+                    if sent_message_matches_guest_reply(
+                        candidate, expected, settings.agent_address
+                    ):
                         return GuestSentEvidence(
-                            hashlib.sha256(str(candidate["Subject"]).encode()).hexdigest(),
-                            hashlib.sha256(sent_plain_text(candidate).encode()).hexdigest(),
+                            hashlib.sha256(
+                                str(candidate["Subject"]).encode()
+                            ).hexdigest(),
+                            hashlib.sha256(
+                                sent_plain_text(candidate).encode()
+                            ).hexdigest(),
                         )
         except (OSError, ValueError, imaplib.IMAP4.error):
             pass
@@ -533,18 +729,26 @@ def verify_guest_reply_in_sent(settings: AgentMailSettings, expected: EmailMessa
         time.sleep(min(0.5, max(0, deadline_s - time.monotonic())))
 
 
-def validate_manager_route_identity(explicit_target: str | None, selected_target: str) -> None:
+def validate_manager_route_identity(
+    explicit_target: str | None, selected_target: str
+) -> None:
     if explicit_target is None:
         return
     inferred_target = inferred_tmux_target(True)
     if inferred_target is None:
         return
-    if guest_hees_tmux_target(explicit_target) != guest_hees_tmux_target(inferred_target):
+    if guest_hees_tmux_target(explicit_target) != guest_hees_tmux_target(
+        inferred_target
+    ):
         raise ValueError(
             f"explicit tmux target {canonical_email_tmux_target(explicit_target)} conflicts with verified producer route {canonical_email_tmux_target(inferred_target)}"
         )
-    if guest_hees_tmux_target(selected_target) != guest_hees_tmux_target(inferred_target):
-        raise ValueError("selected email route conflicts with verified producer identity")
+    if guest_hees_tmux_target(selected_target) != guest_hees_tmux_target(
+        inferred_target
+    ):
+        raise ValueError(
+            "selected email route conflicts with verified producer identity"
+        )
 
 
 def canonical_email_tmux_target(target: str) -> str:
@@ -578,21 +782,44 @@ def inferred_tmux_target(manager_human: bool) -> str | None:
     if current_target is not None:
         current_target = canonical_email_tmux_target(current_target)
         return agent_target if agent_target == current_target else current_target
-    fallback_target = agent_target or (env_manager_tmux_target() if manager_human else None)
+    fallback_target = agent_target or (
+        env_manager_tmux_target() if manager_human else None
+    )
     if fallback_target is not None:
         return fallback_target
-    return None if has_pane_id else current_tmux_window()
+    if has_pane_id:
+        return None
+    return current_tmux_window() or omnigent_inferred_target()
+
+
+def omnigent_inferred_target() -> str | None:
+    try:
+        from omo_omnigent_identity import (
+            NotOmniGentEnvironment,
+            OmniGentIdentityError,
+            authenticate_current_omnigent,
+        )
+    except ImportError:
+        return None
+    try:
+        target = authenticate_current_omnigent().target
+    except (NotOmniGentEnvironment, OmniGentIdentityError, OSError):
+        return None
+    return canonical_email_tmux_target(target) if valid_tmux_target(target) else None
 
 
 def agent_session_id() -> str:
-    value = (os.environ.get("CODEX_SESSION_ID", "").strip() or os.environ.get("CODEX_THREAD_ID", "").strip()).lower()
-    return value if AGENT_SESSION_RE.fullmatch(value) else ""
+    return env_agent_session_id()
 
 
-def footer_tmux_target(explicit_tmux_target: str | None = None, manager_human: bool = False) -> str | None:
+def footer_tmux_target(
+    explicit_tmux_target: str | None = None, manager_human: bool = False
+) -> str | None:
     if explicit_tmux_target is not None:
         if not valid_tmux_target(explicit_tmux_target):
-            raise ValueError("tmux target must have shape session:window or session:window.pane.")
+            raise ValueError(
+                "tmux target must have shape session:window, session:window.pane, or omnigent://SESSION_ID."
+            )
         return canonical_email_tmux_target(explicit_tmux_target)
     return inferred_tmux_target(manager_human)
 
@@ -610,11 +837,21 @@ def clean_subject_tmux_tags(subject: str) -> str:
 
 def validate_manager_human_subject(subject: str) -> None:
     stripped = subject.strip()
-    if MANAGER_HUMAN_SUBJECT_RE.match(stripped) is None or len(BRACKETED_TMUX_TAG_RE.findall(stripped)) != 1:
-        raise ValueError("manager-human subject must contain exactly one bracketed tmux tag.")
+    if (
+        MANAGER_HUMAN_SUBJECT_RE.match(stripped) is None
+        or len(BRACKETED_TMUX_TAG_RE.findall(stripped)) != 1
+    ):
+        raise ValueError(
+            "manager-human subject must contain exactly one bracketed tmux or OmniGent tag."
+        )
 
 
-def append_pwd_footer(content: str, cwd: str | Path | None = None, tmux_target: str | None = None, require_unquoted_footer: bool = False) -> str:
+def append_pwd_footer(
+    content: str,
+    cwd: str | Path | None = None,
+    tmux_target: str | None = None,
+    require_unquoted_footer: bool = False,
+) -> str:
     pwd_footer = UNQUOTED_PWD_FOOTER_RE if require_unquoted_footer else PWD_FOOTER_RE
     if pwd_footer.search(content):
         return content
@@ -630,15 +867,19 @@ def short_pwd(cwd: str | Path) -> str:
 
 
 def markdown_links_to_plain(text: str) -> str:
-    return MARKDOWN_LINK_RE.sub(lambda match: f"{match.group(1).strip()}: {match.group(2).strip()}", text)
+    return MARKDOWN_LINK_RE.sub(
+        lambda match: f"{match.group(1).strip()}: {match.group(2).strip()}", text
+    )
 
 
 def render_inline_markdown(text: str) -> str:
     parts: list[str] = []
     last_end = 0
     for match in INLINE_CODE_RE.finditer(text):
-        parts.append(render_inline_text(text[last_end:match.start()]))
-        parts.append(f'<code style="font-family: monospace;">{escape(match.group(1))}</code>')
+        parts.append(render_inline_text(text[last_end : match.start()]))
+        parts.append(
+            f'<code style="font-family: monospace;">{escape(match.group(1))}</code>'
+        )
         last_end = match.end()
     parts.append(render_inline_text(text[last_end:]))
     return "".join(parts)
@@ -648,7 +889,7 @@ def render_inline_text(text: str) -> str:
     parts: list[str] = []
     last_end = 0
     for match in MARKDOWN_LINK_RE.finditer(text):
-        parts.append(render_inline_styles(text[last_end:match.start()]))
+        parts.append(render_inline_styles(text[last_end : match.start()]))
         label = render_inline_styles(match.group(1).strip())
         url = escape(match.group(2).strip(), quote=True)
         parts.append(f'<a href="{url}" style="color: #1155cc;">{label}</a>')
@@ -659,8 +900,16 @@ def render_inline_text(text: str) -> str:
 
 def render_inline_styles(text: str) -> str:
     html = escape(text)
-    html = re.sub(r"\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<![A-Za-z0-9])__(?=\S)(.+?)(?<=\S)__(?![A-Za-z0-9])", lambda match: f"<strong>{match.group(1) or match.group(2)}</strong>", html)
-    return re.sub(r"(?<!\*)\*(?!\*)(?=\S)(.+?)(?<=\S)\*(?!\*)|(?<![A-Za-z0-9])_(?!_)(?=\S)(.+?)(?<=\S)_(?![A-Za-z0-9])", lambda match: f"<em>{match.group(1) or match.group(2)}</em>", html)
+    html = re.sub(
+        r"\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<![A-Za-z0-9])__(?=\S)(.+?)(?<=\S)__(?![A-Za-z0-9])",
+        lambda match: f"<strong>{match.group(1) or match.group(2)}</strong>",
+        html,
+    )
+    return re.sub(
+        r"(?<!\*)\*(?!\*)(?=\S)(.+?)(?<=\S)\*(?!\*)|(?<![A-Za-z0-9])_(?!_)(?=\S)(.+?)(?<=\S)_(?![A-Za-z0-9])",
+        lambda match: f"<em>{match.group(1) or match.group(2)}</em>",
+        html,
+    )
 
 
 def inline_lines_html(text: str) -> str:
@@ -672,10 +921,35 @@ def paragraph_html(lines: list[str]) -> str:
     return f'<p style="margin: 0 0 12px 0;">{inline_lines_html(text)}</p>'
 
 
-def list_html(kind: str, items: list[str]) -> str:
-    tag = "ol" if kind == "ol" else "ul"
-    rendered_items = "\n".join(f'<li style="margin: 0 0 4px 0;">{inline_lines_html(item)}</li>' for item in items)
-    return f'<{tag} style="margin: 0 0 12px 24px; padding: 0;">\n{rendered_items}\n</{tag}>'
+# 🧑 "the email script messes up nested lists by flattening them and needs to be fixed"
+def list_html(items: list[tuple[str, int, str]]) -> str:
+    def render(start: int, indent: int, kind: str) -> tuple[str, int]:
+        tag = "ol" if kind == "ol" else "ul"
+        rendered: list[str] = [f'<{tag} style="margin: 0 0 12px 24px; padding: 0;">']
+        idx = start
+        while idx < len(items):
+            item_kind, item_indent, text = items[idx]
+            if item_indent != indent or item_kind != kind:
+                break
+            idx += 1
+            rendered_item = f'<li style="margin: 0 0 4px 0;">{inline_lines_html(text)}'
+            nested_lists: list[str] = []
+            while idx < len(items) and items[idx][1] > indent:
+                nested, idx = render(idx, items[idx][1], items[idx][0])
+                nested_lists.append(nested)
+            if nested_lists:
+                nested_html = "\n".join(nested_lists)
+                rendered_item = f"{rendered_item}\n{nested_html}"
+            rendered.append(f"{rendered_item}</li>")
+        rendered.append(f"</{tag}>")
+        return "\n".join(rendered), idx
+
+    rendered_lists: list[str] = []
+    idx = 0
+    while idx < len(items):
+        rendered, idx = render(idx, items[idx][1], items[idx][0])
+        rendered_lists.append(rendered)
+    return "\n".join(rendered_lists)
 
 
 def blockquote_html(lines: list[str]) -> str:
@@ -684,25 +958,25 @@ def blockquote_html(lines: list[str]) -> str:
     return f'<blockquote style="margin: 0 0 12px 0; padding-left: 12px; border-left: 4px solid #d0d7de; color: #57606a;">{inner}</blockquote>'
 
 
-def match_list_item(line: str, in_list: bool) -> tuple[str, str] | None:
+def match_list_item(line: str, in_list: bool) -> tuple[str, int, str] | None:
+    indent = len(line) - len(line.lstrip(" \t"))
     if (unordered := UNORDERED_LIST_RE.match(line)) is not None:
-        return ("ul", unordered.group(1))
+        return ("ul", indent, unordered.group(1))
     if (ordered := ORDERED_LIST_RE.match(line)) is not None:
-        return ("ol", ordered.group(1))
+        return ("ol", indent, ordered.group(1))
     if not in_list:
         return None
     if (nested_unordered := re.match(r"^\s+[-*+]\s+(.+)$", line)) is not None:
-        return ("ul", nested_unordered.group(1))
+        return ("ul", indent, nested_unordered.group(1))
     if (nested_ordered := re.match(r"^\s+\d+[.)]\s+(.+)$", line)) is not None:
-        return ("ol", nested_ordered.group(1))
+        return ("ol", indent, nested_ordered.group(1))
     return None
 
 
 def markdown_to_html(text: str) -> str:
     blocks: list[str] = []
     paragraph: list[str] = []
-    list_kind = ""
-    list_items: list[str] = []
+    list_items: list[tuple[str, int, str]] = []
     quote_lines: list[str] = []
     lines = text.splitlines()
     idx = 0
@@ -713,11 +987,9 @@ def markdown_to_html(text: str) -> str:
             paragraph.clear()
 
     def flush_list() -> None:
-        nonlocal list_kind
         if list_items:
-            blocks.append(list_html(list_kind, list_items))
+            blocks.append(list_html(list_items))
             list_items.clear()
-        list_kind = ""
 
     def flush_quote() -> None:
         if quote_lines:
@@ -748,7 +1020,9 @@ def markdown_to_html(text: str) -> str:
             if idx < len(lines):
                 idx += 1
             code = escape("\n".join(code_lines))
-            blocks.append(f'<pre style="margin: 0 0 12px 0; padding: 10px; background: #f6f8fa; white-space: pre-wrap;"><code>{code}</code></pre>')
+            blocks.append(
+                f'<pre style="margin: 0 0 12px 0; padding: 10px; background: #f6f8fa; white-space: pre-wrap;"><code>{code}</code></pre>'
+            )
             continue
         quote = BLOCKQUOTE_RE.match(line)
         if quote is not None:
@@ -761,15 +1035,12 @@ def markdown_to_html(text: str) -> str:
         if list_item is not None:
             flush_paragraph()
             flush_quote()
-            kind, item_text = list_item
-            if list_kind and list_kind != kind:
-                flush_list()
-            list_kind = kind
-            list_items.append(item_text)
+            list_items.append(list_item)
             idx += 1
             continue
         if list_items and (line.startswith(" ") or line.startswith("\t")):
-            list_items[-1] = f"{list_items[-1]}\n{line.strip()}"
+            kind, indent, item_text = list_items[-1]
+            list_items[-1] = (kind, indent, f"{item_text}\n{line.strip()}")
             idx += 1
             continue
         flush_list()
@@ -778,10 +1049,14 @@ def markdown_to_html(text: str) -> str:
         if heading is not None:
             flush_paragraph()
             level = min(len(heading.group(1)), 6)
-            blocks.append(f'<h{level} style="margin: 0 0 12px 0;">{render_inline_markdown(heading.group(2).strip())}</h{level}>')
+            blocks.append(
+                f'<h{level} style="margin: 0 0 12px 0;">{render_inline_markdown(heading.group(2).strip())}</h{level}>'
+            )
         elif HR_RE.match(line):
             flush_paragraph()
-            blocks.append('<hr style="border: 0; border-top: 1px solid #d0d7de; margin: 16px 0;">')
+            blocks.append(
+                '<hr style="border: 0; border-top: 1px solid #d0d7de; margin: 16px 0;">'
+            )
         else:
             paragraph.append(line)
         idx += 1
@@ -790,13 +1065,29 @@ def markdown_to_html(text: str) -> str:
     return f'<!doctype html><html><body style="font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; line-height: 1.45;">{body}</body></html>\n'
 
 
-def build_message(sender_email: str, title: str, content: str, add_pwd_footer: bool = True, prepared_subject: str | None = None, reply_headers: dict[str, str] | None = None, tmux_target: str | None = None, manager_human: bool = False, recipient_email: str | None = None, supersedes_message_ids: tuple[str, ...] = (), agent_session: str = "") -> EmailMessage:
+def build_message(
+    sender_email: str,
+    title: str,
+    content: str,
+    add_pwd_footer: bool = True,
+    prepared_subject: str | None = None,
+    reply_headers: dict[str, str] | None = None,
+    tmux_target: str | None = None,
+    manager_human: bool = False,
+    recipient_email: str | None = None,
+    supersedes_message_ids: tuple[str, ...] = (),
+    agent_session: str = "",
+) -> EmailMessage:
     source_target = footer_tmux_target(tmux_target, manager_human)
     msg = EmailMessage()
-    msg.add_header("Subject", prepared_subject or normalize_subject(title, source_target or ""))
+    msg.add_header(
+        "Subject", prepared_subject or normalize_subject(title, source_target or "")
+    )
     msg.add_header("From", sender_email)
     msg.add_header("To", recipient_email or sender_email)
-    msg.add_header("Message-ID", make_msgid(domain=sender_email.partition("@")[2] or None))
+    msg.add_header(
+        "Message-ID", make_msgid(domain=sender_email.partition("@")[2] or None)
+    )
     if agent_session:
         if AGENT_SESSION_RE.fullmatch(agent_session) is None:
             raise ValueError("agent session identity must be a UUID")
@@ -809,7 +1100,13 @@ def build_message(sender_email: str, title: str, content: str, add_pwd_footer: b
     elif reply_headers_for_subject is not None:
         for name, value in reply_headers_for_subject(title).items():
             msg.add_header(name, value)
-    body = append_pwd_footer(content, tmux_target=source_target, require_unquoted_footer=manager_human) if add_pwd_footer else content
+    body = (
+        append_pwd_footer(
+            content, tmux_target=source_target, require_unquoted_footer=manager_human
+        )
+        if add_pwd_footer
+        else content
+    )
     msg.set_content(markdown_links_to_plain(body))
     msg.add_alternative(markdown_to_html(body), subtype="html")
     return msg
@@ -818,7 +1115,9 @@ def build_message(sender_email: str, title: str, content: str, add_pwd_footer: b
 def attach_guest_images(msg: EmailMessage, images: tuple[ValidatedImage, ...]) -> None:
     for image in images:
         maintype, subtype = image.mime_type.split("/", 1)
-        msg.add_attachment(image.data, maintype=maintype, subtype=subtype, filename=image.filename)
+        msg.add_attachment(
+            image.data, maintype=maintype, subtype=subtype, filename=image.filename
+        )
 
 
 def parse_env_file(file_path: Path) -> dict[str, str]:
@@ -878,7 +1177,13 @@ def parse_env_file(file_path: Path) -> dict[str, str]:
 
 
 def manager_state_dir() -> Path:
-    return Path(os.environ.get("OMO_MANAGER_STATE_DIR", Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omo-manager"))
+    return Path(
+        os.environ.get(
+            "OMO_MANAGER_STATE_DIR",
+            Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
+            / "omo-manager",
+        )
+    )
 
 
 def read_owner_private_file(path: Path, label: str, maximum_bytes: int) -> bytes:
@@ -888,7 +1193,11 @@ def read_owner_private_file(path: Path, label: str, maximum_bytes: int) -> bytes
     fd = os.open(path, flags)
     try:
         before = os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_mode & 0o077:
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_mode & 0o077
+        ):
             raise ValueError(f"{label} must be an owner-private regular file")
         payload = b""
         while chunk := os.read(fd, min(65_536, maximum_bytes + 1 - len(payload))):
@@ -926,31 +1235,44 @@ def validate_non_completion_owner(producer_target: str) -> bool:
     from omo_task_context import infer_pending_task
 
     validate_invoking_owner_target(producer_target, "non-completion Human mail")
-    root = Path(os.environ.get("OMO_WORK_LOGS_ROOT", DEFAULT_ROOT)).expanduser().resolve()
+    root = (
+        Path(os.environ.get("OMO_WORK_LOGS_ROOT", DEFAULT_ROOT)).expanduser().resolve()
+    )
     try:
         task = infer_pending_task(root, producer_target)
         metadata = read_task_metadata(task, root)
     except (OSError, ValueError) as exc:
-        raise ValueError("non-completion Human mail requires an exact active task owner") from exc
+        raise ValueError(
+            "non-completion Human mail requires an exact active task owner"
+        ) from exc
     # 🧑 "Worker agents must directly correspond to the human and only go through the managers when they need help."
     if (
         metadata is None
-        or canonical_email_tmux_target(metadata.runat) != canonical_email_tmux_target(producer_target)
+        or canonical_email_tmux_target(metadata.runat)
+        != canonical_email_tmux_target(producer_target)
         or (not metadata.is_manager and not metadata.managerat)
     ):
-        raise ValueError("non-completion Human mail requires an exact active task owner")
+        raise ValueError(
+            "non-completion Human mail requires an exact active task owner"
+        )
     return metadata.is_manager
 
 
-def validate_non_completion_thread(producer_target: str, reply_headers: dict[str, str]) -> None:
+def validate_non_completion_thread(
+    producer_target: str, reply_headers: dict[str, str]
+) -> None:
     """Require worker lifecycle replies to use the authenticated completion path."""
 
     message_ids = set(re.findall(r"<[^<>\s]+>", reply_headers.get("References", "")))
     message_ids.update(re.findall(r"<[^<>\s]+>", reply_headers.get("In-Reply-To", "")))
     for message_id in message_ids:
-        path, expected = worker_lifecycle_report_guard(manager_state_dir(), producer_target, message_id)
+        path, expected = worker_lifecycle_report_guard(
+            manager_state_dir(), producer_target, message_id
+        )
         try:
-            guarded = read_owner_private_file(path, "worker lifecycle reporting guard", 4096)
+            guarded = read_owner_private_file(
+                path, "worker lifecycle reporting guard", 4096
+            )
         except FileNotFoundError:
             continue
         if guarded != expected:
@@ -961,19 +1283,28 @@ def validate_non_completion_thread(producer_target: str, reply_headers: dict[str
         )
 
 
-def validate_manager_operational_reply(reply_headers: dict[str, str], content: str) -> None:
+def validate_manager_operational_reply(
+    reply_headers: dict[str, str], content: str
+) -> None:
     """Limit manager Human mail to fixed acknowledgments or one question."""
 
     lines = [line.strip() for line in content.splitlines() if line.strip()]
     if not verified_guest_reply_headers(reply_headers):
-        raise ValueError("manager operational mail must reply to one verified Human email thread")
+        raise ValueError(
+            "manager operational mail must reply to one verified Human email thread"
+        )
     if lines in [
         ["Acknowledged: I accepted this request."],
         ["Acknowledged: I recorded your request."],
         ["Acknowledged: I handled your request without adding a pending item."],
     ]:
         return
-    if lines and lines[0] == "pending item created:" and len(lines) > 1 and all(line.startswith("- ") and len(line) > 2 for line in lines[1:]):
+    if (
+        lines
+        and lines[0] == "pending item created:"
+        and len(lines) > 1
+        and all(line.startswith("- ") and len(line) > 2 for line in lines[1:])
+    ):
         return
     if len(lines) == 1 and re.fullmatch(
         r"Question: (?:what|which|who|whose|where|when|why|how|is|are|was|were|do|does|did|can|could|should|would|will|may|must) [^.!;:\r\n]{1,450}\?",
@@ -993,13 +1324,17 @@ def validate_invoking_owner_target(producer_target: str, purpose: str) -> None:
     if not os.environ.get("TMUX_PANE", "").strip():
         raise ValueError(f"{purpose} requires the exact invoking owner pane")
     actual_target = current_tmux_window()
-    if actual_target is None or canonical_email_tmux_target(actual_target) != canonical_email_tmux_target(producer_target):
+    if actual_target is None or canonical_email_tmux_target(
+        actual_target
+    ) != canonical_email_tmux_target(producer_target):
         raise ValueError(f"{purpose} target does not match the invoking pane")
     if not invoking_process_belongs_to_pane(os.environ["TMUX_PANE"]):
         raise ValueError(f"{purpose} requires an authenticated invoking pane process")
 
 
-def validate_completion_owner(producer_target: str, root: Path, relative_task: str) -> None:
+def validate_completion_owner(
+    producer_target: str, root: Path, relative_task: str
+) -> None:
     """Require the live process and active task presenting a completion claim to own it."""
 
     validate_invoking_owner_target(producer_target, "completion Human mail")
@@ -1013,9 +1348,13 @@ def validate_completion_owner(producer_target: str, root: Path, relative_task: s
         authorized_task.relative_to(resolved_root)
         active_task = infer_active_task(resolved_root, producer_target).resolve()
     except (OSError, ValueError) as exc:
-        raise ValueError("completion email authorization has no exact active owner task") from exc
+        raise ValueError(
+            "completion email authorization has no exact active owner task"
+        ) from exc
     if active_task != authorized_task:
-        raise ValueError("completion email authorization belongs to a different active task")
+        raise ValueError(
+            "completion email authorization belongs to a different active task"
+        )
 
 
 def process_ancestor_pids(pid: int) -> set[int]:
@@ -1026,14 +1365,23 @@ def process_ancestor_pids(pid: int) -> set[int]:
     while current > 1 and current not in ancestors:
         ancestors.add(current)
         try:
-            suffix = Path(f"/proc/{current}/stat").read_text(encoding="ascii").rsplit(")", 1)[1].split()
+            suffix = (
+                Path(f"/proc/{current}/stat")
+                .read_text(encoding="ascii")
+                .rsplit(")", 1)[1]
+                .split()
+            )
             current = int(suffix[1])
             continue
         except (OSError, IndexError, ValueError):
             pass
         try:
             result = subprocess.run(
-                ["ps", "-p", str(current), "-o", "ppid="], capture_output=True, text=True, timeout=2, check=False
+                ["ps", "-p", str(current), "-o", "ppid="],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
             )
             current = int(result.stdout.strip()) if result.returncode == 0 else 0
         except (OSError, subprocess.TimeoutExpired, ValueError):
@@ -1055,10 +1403,16 @@ def invoking_process_belongs_to_pane(pane: str) -> bool:
     except (OSError, subprocess.TimeoutExpired):
         return False
     pane_pid = result.stdout.strip()
-    return result.returncode == 0 and pane_pid.isdigit() and int(pane_pid) in process_ancestor_pids(os.getpid())
+    return (
+        result.returncode == 0
+        and pane_pid.isdigit()
+        and int(pane_pid) in process_ancestor_pids(os.getpid())
+    )
 
 
-def validate_completion_authorization(args: CliArgs, producer_target: str) -> dict[str, str]:
+def validate_completion_authorization(
+    args: CliArgs, producer_target: str
+) -> dict[str, str]:
     """Bind completion content to one owner-created durable semantic claim."""
 
     key = args.completion_authorization
@@ -1066,7 +1420,10 @@ def validate_completion_authorization(args: CliArgs, producer_target: str) -> di
         return {}
     state_dir = manager_state_dir()
     authorization_directory = state_dir / "completion-email-authorizations"
-    for directory, label in ((state_dir, "manager state directory"), (authorization_directory, "completion authorization directory")):
+    for directory, label in (
+        (state_dir, "manager state directory"),
+        (authorization_directory, "completion authorization directory"),
+    ):
         try:
             directory_state = directory.lstat()
         except FileNotFoundError as exc:
@@ -1079,10 +1436,14 @@ def validate_completion_authorization(args: CliArgs, producer_target: str) -> di
             raise ValueError(f"{label} is not owner-private")
     authorization = authorization_directory / key
     try:
-        payload = read_owner_private_file(authorization, "completion email authorization", 4096).decode()
+        payload = read_owner_private_file(
+            authorization, "completion email authorization", 4096
+        ).decode()
         values = dict(line.split("=", 1) for line in payload.splitlines())
     except (FileNotFoundError, UnicodeDecodeError, ValueError) as exc:
-        raise ValueError("completion email authorization is missing or malformed") from exc
+        raise ValueError(
+            "completion email authorization is missing or malformed"
+        ) from exc
     expected_fields = {
         "version",
         "target",
@@ -1094,20 +1455,34 @@ def validate_completion_authorization(args: CliArgs, producer_target: str) -> di
         "subject_sha256",
         "body_sha256",
     }
-    if len(payload.splitlines()) != len(values) or set(values) != expected_fields or values["version"] != "1":
+    if (
+        len(payload.splitlines()) != len(values)
+        or set(values) != expected_fields
+        or values["version"] != "1"
+    ):
         raise ValueError("completion email authorization is missing or malformed")
-    if canonical_email_tmux_target(values["target"]) != canonical_email_tmux_target(producer_target):
+    if canonical_email_tmux_target(values["target"]) != canonical_email_tmux_target(
+        producer_target
+    ):
         raise ValueError("completion email authorization belongs to a different owner")
     validate_completion_owner(producer_target, Path(values["root"]), values["task"])
     task = (Path(values["root"]) / values["task"]).resolve()
     if values["task_sha256"] != hashlib.sha256(task.read_bytes()).hexdigest():
         raise ValueError("completion email authorization task bytes changed")
-    if values["subject_sha256"] != hashlib.sha256((args.title or "").encode()).hexdigest() or values[
-        "body_sha256"
-    ] != hashlib.sha256(args.content.encode()).hexdigest():
-        raise ValueError("completion email content does not match its owner authorization")
+    if (
+        values["subject_sha256"]
+        != hashlib.sha256((args.title or "").encode()).hexdigest()
+        or values["body_sha256"] != hashlib.sha256(args.content.encode()).hexdigest()
+    ):
+        raise ValueError(
+            "completion email content does not match its owner authorization"
+        )
     try:
-        claims = read_owner_private_file(state_dir / "completion-email-claims.tsv", "completion claims ledger", 8_000_000).decode()
+        claims = read_owner_private_file(
+            state_dir / "completion-email-claims.tsv",
+            "completion claims ledger",
+            8_000_000,
+        ).decode()
     except (FileNotFoundError, UnicodeDecodeError, ValueError) as exc:
         raise ValueError("completion email authorization has no durable claim") from exc
     matches = [
@@ -1115,7 +1490,8 @@ def validate_completion_authorization(args: CliArgs, producer_target: str) -> di
         for fields in (line.split("\t") for line in claims.splitlines())
         if len(fields) == 7
         and fields[0] == key
-        and canonical_email_tmux_target(fields[1]) == canonical_email_tmux_target(values["target"])
+        and canonical_email_tmux_target(fields[1])
+        == canonical_email_tmux_target(values["target"])
         and fields[2] == Path(values["task"]).name
         and fields[4] == values["task_sha256"]
         and fields[5] == values["notice_key"]
@@ -1126,14 +1502,52 @@ def validate_completion_authorization(args: CliArgs, producer_target: str) -> di
     return values
 
 
+# 🧑 Human: "smallest authenticated same-key recovery preserving the original Human thread and responsible-owner policy"
+def validate_source2048_thread_recovery(
+    args: CliArgs, values: dict[str, str], producer_target: str
+) -> None:
+    expected = {
+        "target": SOURCE2048_RECOVERY_OWNER,
+        "task": SOURCE2048_RECOVERY_TASK,
+        "semantic_key": SOURCE2048_RECOVERY_KEY,
+        "subject_sha256": SOURCE2048_RECOVERY_SUBJECT_SHA256,
+        "body_sha256": SOURCE2048_RECOVERY_BODY_SHA256,
+    }
+    if (
+        not args.preserve_source2048_thread
+        or canonical_tmux_target(producer_target) != SOURCE2048_RECOVERY_OWNER
+        or any(values.get(name) != value for name, value in expected.items())
+    ):
+        raise ValueError(
+            "Source-2048 thread recovery does not match its exact owner authorization"
+        )
+
+
+def is_source2048_thread_recovery(values: dict[str, str]) -> bool:
+    return (
+        values.get("target") == SOURCE2048_RECOVERY_OWNER
+        and values.get("task") == SOURCE2048_RECOVERY_TASK
+        and values.get("semantic_key") == SOURCE2048_RECOVERY_KEY
+        and values.get("subject_sha256") == SOURCE2048_RECOVERY_SUBJECT_SHA256
+        and values.get("body_sha256") == SOURCE2048_RECOVERY_BODY_SHA256
+    )
+
+
 def validate_digest_authorization(args: CliArgs) -> tuple[Path, bytes]:
     """Validate one exact capability created by the queued-digest helper."""
 
-    if args.title is None or re.match(r"^\s*re:\s*", args.title, re.IGNORECASE) or args.supersedes_message_ids:
+    if (
+        args.title is None
+        or re.match(r"^\s*re:\s*", args.title, re.IGNORECASE)
+        or args.supersedes_message_ids
+    ):
         raise ValueError("queued digest authorization requires one fresh subject")
     state_dir = manager_state_dir()
     authorization_dir = state_dir / "manager-digest-authorizations"
-    for directory, label in ((state_dir, "manager state directory"), (authorization_dir, "digest authorization directory")):
+    for directory, label in (
+        (state_dir, "manager state directory"),
+        (authorization_dir, "digest authorization directory"),
+    ):
         try:
             directory_state = directory.lstat()
         except FileNotFoundError as exc:
@@ -1144,7 +1558,9 @@ def validate_digest_authorization(args: CliArgs) -> tuple[Path, bytes]:
             or stat.S_IMODE(directory_state.st_mode) != 0o700
         ):
             raise ValueError(f"{label} is not owner-private")
-    authorization = manager_digest_authorization_path(state_dir, args.digest_authorization)
+    authorization = manager_digest_authorization_path(
+        state_dir, args.digest_authorization
+    )
     expected = manager_digest_authorization_payload(args.title or "", args.content)
     try:
         payload = read_owner_private_file(authorization, "digest authorization", 4096)
@@ -1174,26 +1590,49 @@ def consume_completion_authorization(key: str, values: dict[str, str]) -> None:
     except FileExistsError:
         pass
     used_state = used_directory.lstat()
-    if not stat.S_ISDIR(used_state.st_mode) or used_state.st_uid != os.getuid() or stat.S_IMODE(used_state.st_mode) != 0o700:
+    if (
+        not stat.S_ISDIR(used_state.st_mode)
+        or used_state.st_uid != os.getuid()
+        or stat.S_IMODE(used_state.st_mode) != 0o700
+    ):
         raise ValueError("completion authorization use directory is not owner-private")
     lock_path = state_dir / "completion-email-claims.lock"
     lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     with os.fdopen(lock_fd, "r+", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        claims = read_owner_private_file(state_dir / "completion-email-claims.tsv", "completion claims ledger", 8_000_000)
-        expected = (key, values["target"], Path(values["task"]).name, values["task_sha256"], values["notice_key"], values["semantic_key"])
+        claims = read_owner_private_file(
+            state_dir / "completion-email-claims.tsv",
+            "completion claims ledger",
+            8_000_000,
+        )
+        expected = (
+            key,
+            values["target"],
+            Path(values["task"]).name,
+            values["task_sha256"],
+            values["notice_key"],
+            values["semantic_key"],
+        )
         matching = []
         for line in claims.decode().splitlines():
             fields = line.split("\t")
-            if len(fields) == 7 and (
-                fields[0], fields[1], fields[2], fields[4], fields[5], fields[6]
-            ) == expected:
+            if (
+                len(fields) == 7
+                and (fields[0], fields[1], fields[2], fields[4], fields[5], fields[6])
+                == expected
+            ):
                 matching.append(fields)
         if len(matching) != 1:
-            raise ValueError("completion email authorization has no current durable claim")
+            raise ValueError(
+                "completion email authorization has no current durable claim"
+            )
         used = used_directory / key
         try:
-            fd = os.open(used, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            fd = os.open(
+                used,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
         except FileExistsError as exc:
             raise ValueError("completion email authorization was already used") from exc
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -1209,7 +1648,10 @@ def release_completion_authorization(key: str, values: dict[str, str]) -> None:
     used_directory = manager_state_dir() / "completion-email-authorization-used"
     used = used_directory / key
     expected = f"{values['target']}\t{values['task']}\n"
-    if read_owner_private_file(used, "completion authorization use", 4096).decode() != expected:
+    if (
+        read_owner_private_file(used, "completion authorization use", 4096).decode()
+        != expected
+    ):
         raise ValueError("completion authorization use does not match its capability")
     used.unlink()
     fsync_directory(used_directory)
@@ -1259,9 +1701,21 @@ def update_manager_email_key(
             if release:
                 rows = [row for row in rows if row[1] != digest]
             else:
-                rows.append((now_s, digest, display_subject.replace("\t", " ").replace("\n", " ")))
+                rows.append(
+                    (
+                        now_s,
+                        digest,
+                        display_subject.replace("\t", " ").replace("\n", " "),
+                    )
+                )
             tmp = dedupe_file.with_name(f".{dedupe_file.name}.tmp")
-            tmp.write_text("".join(f"{sent_s}\t{old_digest}\t{old_subject}\n" for sent_s, old_digest, old_subject in rows), encoding="utf-8")
+            tmp.write_text(
+                "".join(
+                    f"{sent_s}\t{old_digest}\t{old_subject}\n"
+                    for sent_s, old_digest, old_subject in rows
+                ),
+                encoding="utf-8",
+            )
             tmp.chmod(0o600)
             tmp.replace(dedupe_file)
     except (OSError, ValueError):
@@ -1269,12 +1723,20 @@ def update_manager_email_key(
     return True
 
 
-def should_send_manager_email_key(dedupe_subject: str, display_subject: str, content: str, state_scope: str = "human") -> bool:
-    return update_manager_email_key(dedupe_subject, display_subject, content, state_scope, release=False)
+def should_send_manager_email_key(
+    dedupe_subject: str, display_subject: str, content: str, state_scope: str = "human"
+) -> bool:
+    return update_manager_email_key(
+        dedupe_subject, display_subject, content, state_scope, release=False
+    )
 
 
-def release_manager_email_key(dedupe_subject: str, display_subject: str, content: str, state_scope: str = "human") -> None:
-    _ = update_manager_email_key(dedupe_subject, display_subject, content, state_scope, release=True)
+def release_manager_email_key(
+    dedupe_subject: str, display_subject: str, content: str, state_scope: str = "human"
+) -> None:
+    _ = update_manager_email_key(
+        dedupe_subject, display_subject, content, state_scope, release=True
+    )
 
 
 def exact_once_email_record(
@@ -1285,12 +1747,20 @@ def exact_once_email_record(
 ) -> tuple[str, bytes]:
     targets = BRACKETED_TMUX_TAG_RE.findall(display_subject)
     if len(targets) != 1:
-        raise ValueError("manager email exact-once subject has no unique producer target")
+        raise ValueError(
+            "manager email exact-once subject has no unique producer target"
+        )
     producer_target = canonical_email_tmux_target(authenticated_producer_target)
     if canonical_email_tmux_target(targets[0][1:-1]) != producer_target:
-        raise ValueError("manager email exact-once subject target does not match its authenticated producer")
+        raise ValueError(
+            "manager email exact-once subject target does not match its authenticated producer"
+        )
     digest = hashlib.sha256(
-        dedupe_subject.encode() + b"\0" + producer_target.encode() + b"\0" + content.encode()
+        dedupe_subject.encode()
+        + b"\0"
+        + producer_target.encode()
+        + b"\0"
+        + content.encode()
     ).hexdigest()
     payload = (
         "schema=omo-manager-human-email-exact-once/v1\n"
@@ -1313,13 +1783,25 @@ def exact_once_email_claim(
     state_dir = manager_state_dir()
     state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     state_info = state_dir.lstat()
-    if not stat.S_ISDIR(state_info.st_mode) or state_info.st_uid != os.getuid() or state_info.st_mode & 0o077:
-        raise ValueError("manager email exact-once state directory is not owner-private")
+    if (
+        not stat.S_ISDIR(state_info.st_mode)
+        or state_info.st_uid != os.getuid()
+        or state_info.st_mode & 0o077
+    ):
+        raise ValueError(
+            "manager email exact-once state directory is not owner-private"
+        )
     claims = state_dir / "human-email-exact-once"
     claims.mkdir(mode=0o700, exist_ok=True)
     claims_info = claims.lstat()
-    if not stat.S_ISDIR(claims_info.st_mode) or claims_info.st_uid != os.getuid() or claims_info.st_mode & 0o077:
-        raise ValueError("manager email exact-once claim directory is not owner-private")
+    if (
+        not stat.S_ISDIR(claims_info.st_mode)
+        or claims_info.st_uid != os.getuid()
+        or claims_info.st_mode & 0o077
+    ):
+        raise ValueError(
+            "manager email exact-once claim directory is not owner-private"
+        )
     digest, payload = exact_once_email_record(
         dedupe_subject, display_subject, content, authenticated_producer_target
     )
@@ -1328,31 +1810,52 @@ def exact_once_email_claim(
     release = claim.with_suffix(".release")
     if os.path.lexists(delivered) or os.path.lexists(release):
         if not os.path.lexists(claim):
-            raise ValueError("manager email exact-once state has an orphan terminal artifact")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            raise ValueError(
+                "manager email exact-once state has an orphan terminal artifact"
+            )
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
         fd = os.open(claim, flags, 0o600)
     except FileExistsError:
-        if read_owner_private_file(claim, "manager email exact-once claim", 4096) != payload:
-            raise ValueError("manager email exact-once claim conflicts with this delivery")
+        if (
+            read_owner_private_file(claim, "manager email exact-once claim", 4096)
+            != payload
+        ):
+            raise ValueError(
+                "manager email exact-once claim conflicts with this delivery"
+            )
         if os.path.lexists(release):
-            raise ValueError("manager email exact-once claim has incomplete release state")
+            raise ValueError(
+                "manager email exact-once claim has incomplete release state"
+            )
         if not os.path.lexists(delivered):
             return "uncertain"
         claim_info = claim.lstat()
         delivered_info = delivered.lstat()
-        if (
-            (claim_info.st_dev, claim_info.st_ino) != (delivered_info.st_dev, delivered_info.st_ino)
-            or read_owner_private_file(delivered, "manager email exact-once delivery", 4096) != payload
-        ):
-            raise ValueError("manager email exact-once delivery conflicts with its claim")
+        if (claim_info.st_dev, claim_info.st_ino) != (
+            delivered_info.st_dev,
+            delivered_info.st_ino,
+        ) or read_owner_private_file(
+            delivered, "manager email exact-once delivery", 4096
+        ) != payload:
+            raise ValueError(
+                "manager email exact-once delivery conflicts with its claim"
+            )
         return "delivered"
     preserve_claim = False
     try:
         if os.path.lexists(delivered) or os.path.lexists(release):
             preserve_claim = True
             os.close(fd)
-            raise ValueError("manager email exact-once state changed during reservation")
+            raise ValueError(
+                "manager email exact-once state changed during reservation"
+            )
         with os.fdopen(fd, "wb") as handle:
             handle.write(payload)
             handle.flush()
@@ -1386,18 +1889,25 @@ def mark_exact_once_email_delivered(
     release = claim.with_suffix(".release")
     if os.path.lexists(release):
         raise ValueError("manager email exact-once claim has incomplete release state")
-    if read_owner_private_file(claim, "manager email exact-once claim", 4096) != payload:
+    if (
+        read_owner_private_file(claim, "manager email exact-once claim", 4096)
+        != payload
+    ):
         raise ValueError("manager email exact-once claim conflicts with this delivery")
     try:
         os.link(claim, delivered, follow_symlinks=False)
     except FileExistsError:
         claim_info = claim.lstat()
         delivered_info = delivered.lstat()
-        if (
-            (claim_info.st_dev, claim_info.st_ino) != (delivered_info.st_dev, delivered_info.st_ino)
-            or read_owner_private_file(delivered, "manager email exact-once delivery", 4096) != payload
-        ):
-            raise ValueError("manager email exact-once delivery conflicts with its claim")
+        if (claim_info.st_dev, claim_info.st_ino) != (
+            delivered_info.st_dev,
+            delivered_info.st_ino,
+        ) or read_owner_private_file(
+            delivered, "manager email exact-once delivery", 4096
+        ) != payload:
+            raise ValueError(
+                "manager email exact-once delivery conflicts with its claim"
+            )
     fsync_directory(claims)
 
 
@@ -1420,14 +1930,19 @@ def release_exact_once_email_claim(
         raise ValueError("manager email exact-once delivery is already committed")
     if os.path.lexists(release):
         raise ValueError("manager email exact-once claim has incomplete release state")
-    if read_owner_private_file(claim, "manager email exact-once claim", 4096) != payload:
+    if (
+        read_owner_private_file(claim, "manager email exact-once claim", 4096)
+        != payload
+    ):
         raise ValueError("manager email exact-once claim conflicts with this delivery")
     os.link(claim, release, follow_symlinks=False)
     try:
         claim.unlink()
         if os.path.lexists(delivered):
             os.link(release, claim, follow_symlinks=False)
-            raise ValueError("manager email exact-once delivery became committed during release")
+            raise ValueError(
+                "manager email exact-once delivery became committed during release"
+            )
         release.unlink()
         fsync_directory(claims)
     except BaseException:
@@ -1457,7 +1972,13 @@ def claim_email_delivery(
         return exact_once_email_claim(
             dedupe_subject, display_subject, content, authenticated_producer_target
         )
-    return "new" if should_send_manager_email_key(dedupe_subject, display_subject, content, state_scope) else "delivered"
+    return (
+        "new"
+        if should_send_manager_email_key(
+            dedupe_subject, display_subject, content, state_scope
+        )
+        else "delivered"
+    )
 
 
 def release_email_delivery(
@@ -1485,7 +2006,9 @@ def log_manager_email(subject: str, state_scope: str = "human") -> None:
         log_file = state_dir / f"{state_scope}-email-sent.tsv"
         safe_subject = subject.replace("\t", " ").replace("\n", " ")
         with log_file.open("a", encoding="utf-8") as handle:
-            handle.write(f"{datetime.now().astimezone().isoformat(timespec='seconds')}\t{safe_subject}\n")
+            handle.write(
+                f"{datetime.now().astimezone().isoformat(timespec='seconds')}\t{safe_subject}\n"
+            )
     except OSError:
         pass
 
@@ -1510,26 +2033,64 @@ def main(argv: list[str]) -> int:
         subject_tmux_target = footer_tmux_target(args.tmux_target, args.manager_human)
         if args.manager_human and subject_tmux_target is not None:
             validate_manager_route_identity(args.tmux_target, subject_tmux_target)
-        if args.manager_human and guest_hees_tmux_target(subject_tmux_target) and not args.guest_hees:
+        if (
+            args.manager_human
+            and guest_hees_tmux_target(subject_tmux_target)
+            and not args.guest_hees
+        ):
             args = dataclass_replace(args, guest_hees=True)
         if args.manager_human and subject_tmux_target is None:
             raise ValueError("manager-human email requires a tmux target.")
-        if args.manager_human and not args.guest_hees and not (
-            args.non_completion or args.completion_authorization or args.digest_authorization
+        if (
+            args.manager_human
+            and not args.guest_hees
+            and not (
+                args.non_completion
+                or args.completion_authorization
+                or args.digest_authorization
+            )
         ):
-            raise ValueError("primary manager-human mail requires --non-completion or an owner authorization")
-        if (args.non_completion or args.digest_authorization) and fake_send_log_path() is None:
+            raise ValueError(
+                "primary manager-human mail requires --non-completion or an owner authorization"
+            )
+        if (
+            args.non_completion or args.digest_authorization
+        ) and fake_send_log_path() is None:
             non_completion_manager = validate_non_completion_owner(subject_tmux_target)
-        if args.digest_authorization and not non_completion_manager and fake_send_log_path() is None:
-            raise ValueError("digest authorization requires an exact active manager owner")
-        if args.pending_notice_key and not non_completion_manager and fake_send_log_path() is None:
-            raise ValueError("pending-item creation notice requires an exact active manager owner")
+        if (
+            args.digest_authorization
+            and not non_completion_manager
+            and fake_send_log_path() is None
+        ):
+            raise ValueError(
+                "digest authorization requires an exact active manager owner"
+            )
+        if (
+            args.pending_notice_key
+            and not non_completion_manager
+            and fake_send_log_path() is None
+        ):
+            raise ValueError(
+                "pending-item creation notice requires an exact active manager owner"
+            )
         if args.guest_image_references and not args.guest_hees:
-            raise ValueError("--guest-image-reference requires a guest_hees producer target.")
+            raise ValueError(
+                "--guest-image-reference requires a guest_hees producer target."
+            )
         try:
-            split_settings = configured_agent_mail() if configured_agent_mail is not None else None
+            split_settings = (
+                configured_agent_mail() if configured_agent_mail is not None else None
+            )
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
+        if args.require_human_recipient and (
+            split_settings is None
+            or split_settings.agent_address.casefold()
+            == split_settings.human_address.casefold()
+        ):
+            raise ValueError(
+                "--require-human-recipient requires separate agent and human mailboxes"
+            )
         if args.manager_human and split_settings is None:
             raise ValueError("manager-human email requires split email configuration")
         if args.guest_hees:
@@ -1538,34 +2099,78 @@ def main(argv: list[str]) -> int:
             split_settings = guest_hees_mail(split_settings)
             if split_settings.human_address != GUEST_HEES_ADDRESS:
                 raise ValueError("guest-hees recipient configuration is not pinned")
-        elif args.manager_human and split_settings is not None and split_settings.human_address.casefold() == GUEST_HEES_ADDRESS.casefold():
-            raise ValueError("primary email route must not use the pinned guest recipient")
+        elif (
+            args.manager_human
+            and split_settings is not None
+            and split_settings.human_address.casefold() == GUEST_HEES_ADDRESS.casefold()
+        ):
+            raise ValueError(
+                "primary email route must not use the pinned guest recipient"
+            )
         route_profile = None
         if args.manager_human:
             if MailRouteProfile is None or split_settings is None:
-                raise ValueError("manager-human route-profile validation is unavailable")
+                raise ValueError(
+                    "manager-human route-profile validation is unavailable"
+                )
             route_profile = MailRouteProfile(
                 agent_address=split_settings.agent_address,
                 counterparty_address=split_settings.human_address,
                 route_kind="guest-hees" if args.guest_hees else "primary",
-                parent_message_ids=open_guest_hees_reply_message_ids(manager_state_dir()) if args.guest_hees else None,
+                parent_message_ids=open_guest_hees_reply_message_ids(
+                    manager_state_dir()
+                )
+                if args.guest_hees
+                else None,
             )
         if args.completion_authorization:
-            completion_authorization = validate_completion_authorization(args, subject_tmux_target)
+            completion_authorization = validate_completion_authorization(
+                args, subject_tmux_target
+            )
+            reserved_source2048 = (
+                completion_authorization.get("semantic_key") == SOURCE2048_RECOVERY_KEY
+            )
+            source2048_recovery = is_source2048_thread_recovery(
+                completion_authorization
+            )
+            if (
+                reserved_source2048 != source2048_recovery
+                or source2048_recovery != args.preserve_source2048_thread
+                or (source2048_recovery and not args.require_human_recipient)
+            ):
+                raise ValueError(
+                    "Source-2048 owner authorization requires preserved-thread recovery and the Human-recipient guard"
+                )
+            if source2048_recovery:
+                validate_source2048_thread_recovery(
+                    args, completion_authorization, subject_tmux_target
+                )
         if args.digest_authorization:
             digest_authorization = validate_digest_authorization(args)
         if args.title is None:
             if subject_tmux_target is None:
-                raise ValueError("email without a subject requires an inferred tmux target.")
+                raise ValueError(
+                    "email without a subject requires an inferred tmux target."
+                )
             if prepare_latest_thread_for_tmux_target is None:
-                raise ValueError("email thread lookup is unavailable; pass --subject or --subject-file.")
-            session_bound_thread = bool(args.completion_authorization or args.pending_notice_key)
-            required_agent_session = agent_session_id() if session_bound_thread else None
+                raise ValueError(
+                    "email thread lookup is unavailable; pass --subject or --subject-file."
+                )
+            session_bound_thread = bool(
+                args.completion_authorization or args.pending_notice_key
+            )
+            required_agent_session = (
+                agent_session_id() if session_bound_thread else None
+            )
             if session_bound_thread and not required_agent_session:
-                raise ValueError("email thread lookup requires the current agent session identity")
+                raise ValueError(
+                    "email thread lookup requires the current agent session identity"
+                )
             if route_profile is None:
                 if required_agent_session is None:
-                    subject, reply_headers = prepare_latest_thread_for_tmux_target(subject_tmux_target)
+                    subject, reply_headers = prepare_latest_thread_for_tmux_target(
+                        subject_tmux_target
+                    )
                 else:
                     subject, reply_headers = prepare_latest_thread_for_tmux_target(
                         subject_tmux_target,
@@ -1579,18 +2184,44 @@ def main(argv: list[str]) -> int:
                 )
             title = subject
         elif args.digest_authorization:
-            subject, reply_headers = fresh_manager_subject(args.title, subject_tmux_target or ""), {}
+            subject, reply_headers = (
+                fresh_manager_subject(args.title, subject_tmux_target or ""),
+                {},
+            )
             title = args.title
         elif prepare_subject_and_headers is not None:
             if route_profile is None:
-                subject, reply_headers = prepare_subject_and_headers(args.title, subject_tmux_target or "")
+                subject, reply_headers = prepare_subject_and_headers(
+                    args.title, subject_tmux_target or ""
+                )
             else:
-                subject, reply_headers = prepare_subject_and_headers(args.title, subject_tmux_target or "", route_profile=route_profile)
+                subject, reply_headers = prepare_subject_and_headers(
+                    args.title,
+                    subject_tmux_target or "",
+                    route_profile=route_profile,
+                    preserve_verified_thread_target=SOURCE2048_RECOVERY_THREAD_TARGET
+                    if args.preserve_source2048_thread
+                    else "",
+                )
             title = args.title
         else:
-            subject, reply_headers = normalize_subject(args.title, subject_tmux_target or ""), {}
+            subject, reply_headers = (
+                normalize_subject(args.title, subject_tmux_target or ""),
+                {},
+            )
             title = args.title
-        if args.manager_human and not (args.title is None and (args.completion_authorization or args.pending_notice_key)):
+        if (
+            args.preserve_source2048_thread
+            and hashlib.sha256(subject.encode()).hexdigest()
+            != SOURCE2048_RECOVERY_SENT_SUBJECT_SHA256
+        ):
+            raise ValueError(
+                "Source-2048 recovery subject does not match the exact preserved thread"
+            )
+        if args.manager_human and not (
+            args.title is None
+            and (args.completion_authorization or args.pending_notice_key)
+        ):
             try:
                 validate_manager_human_subject(subject)
             except ValueError:
@@ -1607,19 +2238,32 @@ def main(argv: list[str]) -> int:
                 validate_manager_operational_reply(reply_headers, args.content)
         if args.guest_hees:
             if not substantive_guest_reply(args.content):
-                raise ValueError("guest-hees reply must contain a substantive guest-facing answer")
-            if not subject.casefold().startswith("re:") or not verified_guest_reply_headers(reply_headers):
-                raise ValueError("guest-hees reply must continue one verified guest email thread")
-            guest_reply_source = open_guest_hees_reply_source(manager_state_dir(), reply_headers["In-Reply-To"])
+                raise ValueError(
+                    "guest-hees reply must contain a substantive guest-facing answer"
+                )
+            if not subject.casefold().startswith(
+                "re:"
+            ) or not verified_guest_reply_headers(reply_headers):
+                raise ValueError(
+                    "guest-hees reply must continue one verified guest email thread"
+                )
+            guest_reply_source = open_guest_hees_reply_source(
+                manager_state_dir(), reply_headers["In-Reply-To"]
+            )
     except (OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
     if args.manager_human and route_profile is not None:
         if split_settings is None or (
-            split_settings.agent_address.casefold() != route_profile.agent_address.casefold()
-            or split_settings.human_address.casefold() != route_profile.counterparty_address.casefold()
+            split_settings.agent_address.casefold()
+            != route_profile.agent_address.casefold()
+            or split_settings.human_address.casefold()
+            != route_profile.counterparty_address.casefold()
         ):
-            print("outbound email settings do not match the verified route profile", file=sys.stderr)
+            print(
+                "outbound email settings do not match the verified route profile",
+                file=sys.stderr,
+            )
             return 2
     guest_images: tuple[ValidatedImage, ...] = ()
     if args.guest_image_references:
@@ -1627,20 +2271,48 @@ def main(argv: list[str]) -> int:
             print("guest image validation is unavailable", file=sys.stderr)
             return 2
         try:
-            guest_images = reply_attachments(args.guest_image_references, recipient=GUEST_HEES_ADDRESS)
+            guest_images = reply_attachments(
+                args.guest_image_references, recipient=GUEST_HEES_ADDRESS
+            )
         except GuestImageError as exc:
             print(str(exc), file=sys.stderr)
             return 2
-    add_pwd_footer = False if split_settings is not None else args.add_pwd_footer or args.manager_human
+    add_pwd_footer = (
+        False
+        if split_settings is not None
+        else args.add_pwd_footer or args.manager_human
+    )
     if args.dry_run:
-        body = append_pwd_footer(args.content, tmux_target=subject_tmux_target, require_unquoted_footer=args.manager_human) if add_pwd_footer else args.content
-        print(f"dry-run: email not sent; subject={subject}; body-bytes={len(body.encode())}")
+        body = (
+            append_pwd_footer(
+                args.content,
+                tmux_target=subject_tmux_target,
+                require_unquoted_footer=args.manager_human,
+            )
+            if add_pwd_footer
+            else args.content
+        )
+        print(
+            f"dry-run: email not sent; subject={subject}; body-bytes={len(body.encode())}"
+        )
         return 0
-    dedupe_subject = args.pending_notice_key or (normalized_subject_key(title) if args.manager_human and normalized_subject_key is not None else subject)
+    dedupe_subject = args.pending_notice_key or (
+        normalized_subject_key(title)
+        if args.manager_human and normalized_subject_key is not None
+        else subject
+    )
     dedupe_content = args.content + "\0" + "\0".join(args.guest_image_references)
     state_scope = "guest-hees" if args.guest_hees else "human"
-    exact_once = args.manager_human and (args.non_completion or bool(args.digest_authorization)) and not args.guest_hees
-    delivery_state_subject = normalize_subject("pending item notice", subject_tmux_target or "") if args.pending_notice_key else subject
+    exact_once = (
+        args.manager_human
+        and (args.non_completion or bool(args.digest_authorization))
+        and not args.guest_hees
+    )
+    delivery_state_subject = (
+        normalize_subject("pending item notice", subject_tmux_target or "")
+        if args.pending_notice_key
+        else subject
+    )
     if fake_log := fake_send_log_path():
         if args.guest_hees:
             print("EMAIL_ME_FAKE_SEND_LOG cannot verify a guest reply", file=sys.stderr)
@@ -1654,7 +2326,9 @@ def main(argv: list[str]) -> int:
                 return 2
         if args.completion_authorization:
             try:
-                consume_completion_authorization(args.completion_authorization, completion_authorization)
+                consume_completion_authorization(
+                    args.completion_authorization, completion_authorization
+                )
             except (OSError, ValueError) as exc:
                 print(str(exc), file=sys.stderr)
                 return 2
@@ -1669,19 +2343,27 @@ def main(argv: list[str]) -> int:
                     exact_once=exact_once,
                 )
             except (OSError, ValueError) as exc:
-                print(f"Human email exact-once state is unavailable: {exc}", file=sys.stderr)
+                print(
+                    f"Human email exact-once state is unavailable: {exc}",
+                    file=sys.stderr,
+                )
                 return 2
             if claim_state == "delivered":
                 print("Skipped duplicate human email")
                 return 0
             if claim_state == "uncertain":
-                print("Human email delivery remains uncertain; refusing replay", file=sys.stderr)
+                print(
+                    "Human email delivery remains uncertain; refusing replay",
+                    file=sys.stderr,
+                )
                 return 1
         try:
             fake_log.write_text(f"{subject}\n{args.content}", encoding="utf-8")
         except OSError:
             if args.completion_authorization:
-                release_completion_authorization(args.completion_authorization, completion_authorization)
+                release_completion_authorization(
+                    args.completion_authorization, completion_authorization
+                )
             else:
                 release_email_delivery(
                     dedupe_subject,
@@ -1695,10 +2377,16 @@ def main(argv: list[str]) -> int:
         if exact_once:
             try:
                 mark_exact_once_email_delivered(
-                    dedupe_subject, delivery_state_subject, dedupe_content, subject_tmux_target or ""
+                    dedupe_subject,
+                    delivery_state_subject,
+                    dedupe_content,
+                    subject_tmux_target or "",
                 )
             except (OSError, ValueError) as exc:
-                print(f"Human email was submitted but its exact-once receipt failed: {exc}", file=sys.stderr)
+                print(
+                    f"Human email was submitted but its exact-once receipt failed: {exc}",
+                    file=sys.stderr,
+                )
                 return 1
         if args.manager_human:
             log_manager_email(subject, state_scope)
@@ -1728,19 +2416,38 @@ def main(argv: list[str]) -> int:
         print("Invalid Gmail address format.", file=sys.stderr)
         return 2
 
-    guest_claim = acquire_guest_reply_claim(manager_state_dir(), guest_reply_source) if args.guest_hees else None
+    guest_claim = (
+        acquire_guest_reply_claim(manager_state_dir(), guest_reply_source)
+        if args.guest_hees
+        else None
+    )
     if args.guest_hees and guest_claim is None:
-        print("Guest reply obligation claim is unavailable; retry after local state recovers", file=sys.stderr)
+        print(
+            "Guest reply obligation claim is unavailable; retry after local state recovers",
+            file=sys.stderr,
+        )
         return 1
     if args.guest_hees:
         prior_attempt = load_guest_reply_attempt(
-            manager_state_dir(), guest_reply_source, reply_headers["In-Reply-To"], sender_email
+            manager_state_dir(),
+            guest_reply_source,
+            reply_headers["In-Reply-To"],
+            sender_email,
         )
-        if guest_reply_attempt_path(manager_state_dir(), guest_reply_source).exists() and prior_attempt is None:
+        if (
+            guest_reply_attempt_path(manager_state_dir(), guest_reply_source).exists()
+            and prior_attempt is None
+        ):
             guest_claim.close()
-            print("Guest reply prior attempt is invalid; refusing SMTP", file=sys.stderr)
+            print(
+                "Guest reply prior attempt is invalid; refusing SMTP", file=sys.stderr
+            )
             return 1
-        prior_evidence = verify_guest_reply_in_sent(split_settings, prior_attempt) if prior_attempt is not None else None
+        prior_evidence = (
+            verify_guest_reply_in_sent(split_settings, prior_attempt)
+            if prior_attempt is not None
+            else None
+        )
         if prior_attempt is not None and prior_evidence is not None:
             try:
                 source = fulfill_guest_hees_reply_obligation(
@@ -1752,7 +2459,10 @@ def main(argv: list[str]) -> int:
                 )
             except OSError as exc:
                 guest_claim.close()
-                print(f"Guest reply evidence could not be recorded: {exc}", file=sys.stderr)
+                print(
+                    f"Guest reply evidence could not be recorded: {exc}",
+                    file=sys.stderr,
+                )
                 return 1
             guest_claim.close()
             print(f"Guest reply verified in Sent Mail for {source}")
@@ -1779,7 +2489,9 @@ def main(argv: list[str]) -> int:
             guest_claim.close()
         print(str(exc), file=sys.stderr)
         return 2
-    if args.guest_hees and not store_guest_reply_attempt(manager_state_dir(), guest_reply_source, msg):
+    if args.guest_hees and not store_guest_reply_attempt(
+        manager_state_dir(), guest_reply_source, msg
+    ):
         guest_claim.close()
         print("Guest reply attempt could not be recorded before SMTP", file=sys.stderr)
         return 1
@@ -1799,7 +2511,9 @@ def main(argv: list[str]) -> int:
             return 2
     if args.completion_authorization:
         try:
-            consume_completion_authorization(args.completion_authorization, completion_authorization)
+            consume_completion_authorization(
+                args.completion_authorization, completion_authorization
+            )
         except (OSError, ValueError) as exc:
             print(str(exc), file=sys.stderr)
             return 2
@@ -1814,13 +2528,18 @@ def main(argv: list[str]) -> int:
                 exact_once=exact_once,
             )
         except (OSError, ValueError) as exc:
-            print(f"Human email exact-once state is unavailable: {exc}", file=sys.stderr)
+            print(
+                f"Human email exact-once state is unavailable: {exc}", file=sys.stderr
+            )
             return 2
         if claim_state == "delivered":
             print("Skipped duplicate human email")
             return 0
         if claim_state == "uncertain":
-            print("Human email delivery remains uncertain; refusing replay", file=sys.stderr)
+            print(
+                "Human email delivery remains uncertain; refusing replay",
+                file=sys.stderr,
+            )
             return 1
         email_claimed = True
     smtp_delivery_attempted = False
@@ -1845,12 +2564,19 @@ def main(argv: list[str]) -> int:
                 exact_once=exact_once,
             )
         elif args.completion_authorization:
-            release_completion_authorization(args.completion_authorization, completion_authorization)
+            release_completion_authorization(
+                args.completion_authorization, completion_authorization
+            )
         if args.guest_hees:
             guest_claim.close()
         if smtp_delivery_attempted:
-            print("Email send failed: authentication error after delivery began", file=sys.stderr)
-            print(f"Delivery-uncertain Message-ID: {msg['Message-ID']}", file=sys.stderr)
+            print(
+                "Email send failed: authentication error after delivery began",
+                file=sys.stderr,
+            )
+            print(
+                f"Delivery-uncertain Message-ID: {msg['Message-ID']}", file=sys.stderr
+            )
         else:
             print(
                 "Authentication failed. Ensure Gmail 2-Step Verification is enabled and use a valid app password.",
@@ -1869,7 +2595,9 @@ def main(argv: list[str]) -> int:
                     exact_once=exact_once,
                 )
             elif args.completion_authorization:
-                release_completion_authorization(args.completion_authorization, completion_authorization)
+                release_completion_authorization(
+                    args.completion_authorization, completion_authorization
+                )
             print(f"Email send failed before delivery: {exc}", file=sys.stderr)
             return 1
         print(f"Email send failed: {exc}", file=sys.stderr)
@@ -1877,10 +2605,17 @@ def main(argv: list[str]) -> int:
         smtp_uncertain = True
 
     if args.guest_hees:
-        sent_evidence = verify_guest_reply_in_sent(split_settings, msg) if split_settings is not None else None
+        sent_evidence = (
+            verify_guest_reply_in_sent(split_settings, msg)
+            if split_settings is not None
+            else None
+        )
         if sent_evidence is None:
             guest_claim.close()
-            print(f"Guest reply delivery is unverified; Message-ID: {msg['Message-ID']}", file=sys.stderr)
+            print(
+                f"Guest reply delivery is unverified; Message-ID: {msg['Message-ID']}",
+                file=sys.stderr,
+            )
             return 1
         try:
             source = fulfill_guest_hees_reply_obligation(
@@ -1902,10 +2637,16 @@ def main(argv: list[str]) -> int:
     if exact_once:
         try:
             mark_exact_once_email_delivered(
-                dedupe_subject, delivery_state_subject, dedupe_content, subject_tmux_target or ""
+                dedupe_subject,
+                delivery_state_subject,
+                dedupe_content,
+                subject_tmux_target or "",
             )
         except (OSError, ValueError) as exc:
-            print(f"Human email was submitted but its exact-once receipt failed: {exc}", file=sys.stderr)
+            print(
+                f"Human email was submitted but its exact-once receipt failed: {exc}",
+                file=sys.stderr,
+            )
             return 1
 
     if args.manager_human:
