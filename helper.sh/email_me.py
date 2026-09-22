@@ -1047,8 +1047,17 @@ def markdown_to_html(text: str) -> str:
             idx += 1
             continue
         if list_items and (line.startswith(" ") or line.startswith("\t")):
-            kind, indent, item_text = list_items[-1]
-            list_items[-1] = (kind, indent, f"{item_text}\n{line.strip()}")
+            continuation_indent = len(line) - len(line.lstrip(" \t"))
+            item_idx = next(
+                (
+                    item_index
+                    for item_index in range(len(list_items) - 1, -1, -1)
+                    if list_items[item_index][1] < continuation_indent
+                ),
+                len(list_items) - 1,
+            )
+            kind, indent, item_text = list_items[item_idx]
+            list_items[item_idx] = (kind, indent, f"{item_text}\n{line.strip()}")
             idx += 1
             continue
         flush_list()

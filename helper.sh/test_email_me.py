@@ -498,6 +498,19 @@ class EmailMeTests(unittest.TestCase):
         self.assertIn("bullet grandchild</li>", content)
         self.assertIn("</ol></li>\n<li", content)
 
+    def test_parent_continuation_after_nested_child_stays_with_parent(self) -> None:
+        msg = email_me.build_message(
+            "me@example.com",
+            "hi",
+            "- release status\n  - verify worker logs\n  release passed\n- next release\n",
+        )
+        html = msg.get_body(preferencelist=("html",))
+        self.assertIsNotNone(html)
+        content = html.get_content()
+        self.assertIn("release status<br> release passed\n<ul", content)
+        self.assertIn("verify worker logs</li>\n</ul></li>", content)
+        self.assertNotIn("verify worker logs<br> release passed", content)
+
     def test_indented_code_block_is_not_misread_as_list(self) -> None:
         msg = email_me.build_message(
             "me@example.com",
