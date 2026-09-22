@@ -2860,6 +2860,7 @@ with exclusive_watcher_root(root):
                 0,
                 Path("/bin/false"),
                 manager_target="wl:1.0",
+                total_cleanup_threshold=29,
             )
             counts = iter(
                 (
@@ -2881,6 +2882,35 @@ with exclusive_watcher_root(root):
                 self.assertTrue(watcher.handle_manager_mail_thresholds(object(), args))
 
             self.assertEqual([(2, "total-cleanup"), (10, "total-cleanup")], calls)
+
+    def test_email_watcher_default_skips_total_cleanup_when_unread_is_below_limit(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = Path(tmp) / "state"
+            state.mkdir()
+            args = watcher.Args(
+                root,
+                "",
+                root / "manager_mail",
+                state,
+                root / "work_manager_today.md",
+                True,
+                "me@example.com",
+                0,
+                Path("/bin/false"),
+                manager_target="wl:1.0",
+            )
+            self.assertEqual(0, args.total_cleanup_threshold)
+            self.assertGreater(args.unread_compression_threshold, 0)
+            with (
+                patch.object(watcher, "manager_mail_counts", return_value=watcher.ManagerMailCounts(80, 10, 86400, 10, True)),
+                patch.object(watcher, "push_manager_mail_threshold_ref") as push,
+            ):
+                self.assertFalse(watcher.handle_manager_mail_thresholds(object(), args))
+            push.assert_not_called()
 
     def test_email_watcher_reviewed_retain_all_suppresses_small_growth_and_rearms_materially(self) -> None:
         from omo_manager import email_idle_watcher as watcher
@@ -2911,6 +2941,7 @@ with exclusive_watcher_root(root):
                 manager_target="wl:1.0",
                 unread_compression_threshold=0,
                 recent_cleanup_threshold=0,
+                total_cleanup_threshold=29,
             )
             watcher.save_active_manager_mail_thresholds(watcher.manager_mail_threshold_state_path(args), {"total-cleanup"})
             watcher.save_manager_mail_threshold_watermarks(watcher.manager_mail_threshold_watermarks_path(args), {"total-cleanup": 81})
@@ -3031,6 +3062,7 @@ with exclusive_watcher_root(root):
                 manager_target="wl:1.0",
                 unread_compression_threshold=0,
                 recent_cleanup_threshold=0,
+                total_cleanup_threshold=29,
             )
             with (
                 patch.object(watcher, "manager_mail_counts", return_value=watcher.ManagerMailCounts(83, 5, 86400, 37, True)),
@@ -3120,6 +3152,7 @@ with exclusive_watcher_root(root):
                 manager_target="wl:1.0",
                 unread_compression_threshold=0,
                 recent_cleanup_threshold=0,
+                total_cleanup_threshold=29,
             )
             watcher.save_active_manager_mail_thresholds(watcher.manager_mail_threshold_state_path(args), {"total-cleanup"})
             watcher.save_manager_mail_threshold_watermarks(watcher.manager_mail_threshold_watermarks_path(args), {"total-cleanup": 73})
@@ -3158,6 +3191,7 @@ with exclusive_watcher_root(root):
                 manager_target="wl:1.0",
                 unread_compression_threshold=0,
                 recent_cleanup_threshold=0,
+                total_cleanup_threshold=29,
             )
             counts = iter(
                 (

@@ -186,7 +186,8 @@ DEFAULT_IDLE_EXIT_AFTER_S = float(os.environ.get("OMO_MANAGER_EMAIL_IDLE_EXIT_AF
 DEFAULT_MANAGER_MAIL_THRESHOLD_INTERVAL_S = float(os.environ.get("OMO_MANAGER_EMAIL_THRESHOLD_INTERVAL_S", "300"))
 DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S", "1"))
 DEFAULT_MANAGER_UNREAD_COMPRESSION_THRESHOLD = int(os.environ.get("OMO_MANAGER_EMAIL_UNREAD_COMPRESSION_THRESHOLD", "16"))
-DEFAULT_MANAGER_TOTAL_CLEANUP_THRESHOLD = int(os.environ.get("OMO_MANAGER_EMAIL_TOTAL_CLEANUP_THRESHOLD", "29"))
+# 🧑 "mail cleanup only gets triggered by unread mails, not total"
+DEFAULT_MANAGER_TOTAL_CLEANUP_THRESHOLD = int(os.environ.get("OMO_MANAGER_EMAIL_TOTAL_CLEANUP_THRESHOLD", "0"))
 DEFAULT_MANAGER_RECENT_CLEANUP_THRESHOLD = int(os.environ.get("OMO_MANAGER_EMAIL_RECENT_CLEANUP_THRESHOLD", "64"))
 DEFAULT_MANAGER_RECENT_CLEANUP_WINDOW_S = float(os.environ.get("OMO_MANAGER_EMAIL_RECENT_CLEANUP_WINDOW_S", str(24 * 60 * 60)))
 REVIEWED_RETAIN_ALL_GROWTH_STEP = max(1, int(os.environ.get("OMO_MANAGER_EMAIL_REVIEWED_RETAIN_ALL_GROWTH_STEP", "8")))
@@ -351,7 +352,7 @@ def parse_args(argv: list[str]) -> Args:
     parser.add_argument("--pull-interval-s", type=float, default=DEFAULT_PULL_INTERVAL_S, help="Unread mailbox scan interval while IDLE is otherwise quiet")
     parser.add_argument("--idle-exit-after-s", type=float, default=DEFAULT_IDLE_EXIT_AFTER_S, help="Exit after this many quiet seconds so the outer supervisor refreshes the process; set <=0 to disable")
     parser.add_argument("--unread-compression-threshold", type=int, default=DEFAULT_MANAGER_UNREAD_COMPRESSION_THRESHOLD, help="Queue manager-sent unread mail compression when unread manager mail exceeds this count; set <=0 to disable")
-    parser.add_argument("--total-cleanup-threshold", type=int, default=DEFAULT_MANAGER_TOTAL_CLEANUP_THRESHOLD, help="Queue manager-mail cleanup when retained Inbox mail exceeds this count; set <=0 to disable")
+    parser.add_argument("--total-cleanup-threshold", type=int, default=DEFAULT_MANAGER_TOTAL_CLEANUP_THRESHOLD, help="Queue manager-mail cleanup when retained Inbox mail exceeds this count; <=0 disables. Default 0 so automatic cleanup is unread-triggered only")
     parser.add_argument("--recent-cleanup-threshold", type=int, default=DEFAULT_MANAGER_RECENT_CLEANUP_THRESHOLD, help="Queue manager-human cleanup when recent manager mail exceeds this count; set <=0 to disable")
     parser.add_argument("--recent-cleanup-window-s", type=float, default=DEFAULT_MANAGER_RECENT_CLEANUP_WINDOW_S, help="Recent manager-human cleanup threshold window")
     parser.add_argument("--live-mailbox-approval-only", action="store_true", help="One-shot scan only for AMH live-mailbox approval replies in the pinned approval thread")
