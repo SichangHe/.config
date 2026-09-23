@@ -24,7 +24,7 @@
   - override with `--prices prices.json`
   - export the bundled editable shape with `--dump-default-prices`
   - default source is `https://platform.openai.com/docs/pricing/`, accessed 2026-07-12
-  - current bundled rows cover `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`
+  - current bundled rows cover `gpt-6-sol`, `gpt-5.6-terra`, and `gpt-6-luna`
   - the historical `gpt-5.5` row is retained so older raw session files still price correctly
   - unit is USD per 1M tokens
   - reasoning output is counted separately but is not priced separately because it is already part of output tokens

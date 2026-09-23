@@ -40,8 +40,8 @@ HANDOFF_TIMEOUT_S = 10.0
 HANDOFF_LOCK_TIMEOUT_S = 10.0
 RESERVATION_NAME = "manager-rotation.handoff.json"
 TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
-CODEX_PACKAGE = "@openai/codex@latest"
-SUPPORTED_CODEX_PACKAGES = {"@openai/codex", CODEX_PACKAGE}
+CODEX_PACKAGE = "@openai/codex@0.155.1"
+SUPPORTED_CODEX_PACKAGES = {"@openai/codex", "@openai/codex@latest", CODEX_PACKAGE}
 
 
 class RotationError(RuntimeError):

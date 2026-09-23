@@ -1494,21 +1494,21 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIn("exit_status: FileNotFoundError: [Errno 2] tmux unavailable", text)
 
     def test_codex_cmd_resumes_quoted_session(self) -> None:
-        self.assertTrue(codex_cmd("abc", tool="codex", agent_instructions_file=AGENT_INSTRUCTIONS).startswith("bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox resume abc "))
-        self.assertTrue(codex_cmd("abc def", tool="codex", agent_instructions_file=AGENT_INSTRUCTIONS).startswith("bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox resume 'abc def' "))
+        self.assertTrue(codex_cmd("abc", tool="codex", agent_instructions_file=AGENT_INSTRUCTIONS).startswith("bunx @openai/codex@0.155.1 --dangerously-bypass-approvals-and-sandbox resume abc "))
+        self.assertTrue(codex_cmd("abc def", tool="codex", agent_instructions_file=AGENT_INSTRUCTIONS).startswith("bunx @openai/codex@0.155.1 --dangerously-bypass-approvals-and-sandbox resume 'abc def' "))
         self.assertTrue(codex_cmd("abc", tool="pcodx", agent_instructions_file=AGENT_INSTRUCTIONS).startswith(f"{PCODX_WRAPPER} resume abc "))
         self.assertIn(str(AGENT_INSTRUCTIONS), codex_cmd("abc", tool="pcodx", agent_instructions_file=AGENT_INSTRUCTIONS))
 
     def test_codex_cmd_can_resume_without_submitting_prompt(self) -> None:
         self.assertEqual(
-            "bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox resume abc",
+            "bunx @openai/codex@0.155.1 --dangerously-bypass-approvals-and-sandbox resume abc",
             codex_cmd("abc", include_prompt=False, tool="codex"),
         )
 
     def test_codex_cmd_resume_binds_requested_workdir_for_codex_only(self) -> None:
         workdir = Path("/tmp/current work")
         self.assertEqual(
-            "bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox --cd '/tmp/current work' resume abc",
+            "bunx @openai/codex@0.155.1 --dangerously-bypass-approvals-and-sandbox --cd '/tmp/current work' resume abc",
             codex_cmd("abc", include_prompt=False, workdir=workdir, tool="codex"),
         )
         self.assertNotIn("--cd", codex_cmd("abc", tool="pcodx", include_prompt=False, workdir=workdir))
@@ -1554,7 +1554,7 @@ class OmoTaskTests(unittest.TestCase):
     def test_codex_cmd_uses_prompt_argument_from_file(self) -> None:
         expected_paths = f"{AGENT_INSTRUCTIONS} /tmp/prompt.md"
         self.assertEqual(
-            f'bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox "$(cat -- {expected_paths})"',
+            f'bunx @openai/codex@0.155.1 --dangerously-bypass-approvals-and-sandbox "$(cat -- {expected_paths})"',
             codex_cmd(prompt_file=Path("/tmp/prompt.md"), tool="codex", agent_instructions_file=AGENT_INSTRUCTIONS),
         )
 
@@ -1563,7 +1563,7 @@ class OmoTaskTests(unittest.TestCase):
 
     def test_codex_cmd_uses_captured_vl_instructions(self) -> None:
         self.assertEqual(
-            f'bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox "$(cat -- {AGENT_INSTRUCTIONS} /tmp/prompt.md)"',
+            f'bunx @openai/codex@0.155.1 --dangerously-bypass-approvals-and-sandbox "$(cat -- {AGENT_INSTRUCTIONS} /tmp/prompt.md)"',
             codex_cmd(prompt_file=Path("/tmp/prompt.md"), vl_agent=True, tool="codex", agent_instructions_file=AGENT_INSTRUCTIONS),
         )
 
@@ -1586,14 +1586,14 @@ class OmoTaskTests(unittest.TestCase):
     def test_codex_cmd_adds_reasoning_effort_and_extra_flags(self) -> None:
         self.assertTrue(
             codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="codex", include_prompt=False).startswith(
-                "bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
+                "bunx @openai/codex@0.155.1 --dangerously-bypass-approvals-and-sandbox --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
             )
         )
 
     def test_codex_cmd_orders_and_quotes_explicit_model_and_effort(self) -> None:
         self.assertTrue(
             codex_cmd(model="model name", reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="codex", include_prompt=False).startswith(
-                "bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox --model 'model name' --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
+                "bunx @openai/codex@0.155.1 --dangerously-bypass-approvals-and-sandbox --model 'model name' --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
             )
         )
         self.assertTrue(
@@ -1670,7 +1670,7 @@ class OmoTaskTests(unittest.TestCase):
     def test_codex_cmd_resume_carries_explicit_model_and_effort(self) -> None:
         self.assertTrue(
             codex_cmd("abc def", reasoning_effort="max", model="gpt-5.6-terra", tool="codex", include_prompt=False).startswith(
-                "bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-terra --config 'model_reasoning_effort=\"max\"' resume 'abc def'",
+                "bunx @openai/codex@0.155.1 --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-terra --config 'model_reasoning_effort=\"max\"' resume 'abc def'",
             )
         )
         self.assertTrue(
@@ -1786,11 +1786,11 @@ class OmoTaskTests(unittest.TestCase):
     def test_bare_gpt_5_6_model_is_rejected(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
             parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--model", "gpt-5.6"])
-        self.assertIn("use gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, or gpt-6-astra", stderr.getvalue())
+        self.assertIn("use gpt-6-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra", stderr.getvalue())
         args = Args(Path("/tmp"), "x.md", "cfg", "2", "codex", None, "", None, False, False, "", "", (), model="gpt-5.6")
-        with self.assertRaisesRegex(ValueError, "use gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, or gpt-6-astra"):
+        with self.assertRaisesRegex(ValueError, "use gpt-6-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra"):
             validate_inputs(args)
-        for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-astra"):
+        for model in ("gpt-6-sol", "gpt-5.6-terra", "gpt-6-luna", "gpt-6-astra"):
             with self.subTest(model=model):
                 parsed = parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--model", model])
                 self.assertEqual(model, parsed.model)
@@ -3315,6 +3315,7 @@ class OmoTaskTests(unittest.TestCase):
     def test_has_live_codex_launch_requires_exact_package_argv(self) -> None:
         pane = ProcessInfo(100, 1, "S", ("zsh",))
         for argv, expected in (
+            (("/usr/bin/bunx", "@openai/codex@0.155.1", "--model", "gpt-6-sol"), True),
             (("/usr/bin/bunx", "@openai/codex@latest", "--model", "gpt-5.6-sol"), True),
             (("/usr/bin/bunx", "@openai/codex", "--model", "gpt-5.6-sol"), True),
             (("/usr/bin/bunx", "unrelated-package"), False),

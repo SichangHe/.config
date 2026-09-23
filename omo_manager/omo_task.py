@@ -54,8 +54,9 @@ except ModuleNotFoundError:
     from omo_task_lock import process_start_ticks, task_file_lock, task_target_lock
 
 PCODX_WRAPPER = HELPER_DIR / "pcodx"
+# 🧑 "Change the agent launching script to use `bunx @openai/codex@0.155.1` instead of `latest`."
 COMMAND_BY_TOOL = {
-    "codex": ("bunx", "@openai/codex@latest", "--dangerously-bypass-approvals-and-sandbox"),
+    "codex": ("bunx", "@openai/codex@0.155.1", "--dangerously-bypass-approvals-and-sandbox"),
     "pcodx": (str(PCODX_WRAPPER),),
     "cursor": ("agent", "--force", "--sandbox", "disabled", "--trust"),
 }
@@ -297,7 +298,7 @@ def model_error(model: str) -> str:
     if model and MODEL_RE.fullmatch(model) is None:
         return "--model must be a nonempty model identifier containing only letters, numbers, `.`, `_`, `:`, `/`, or `-`."
     if model == "gpt-5.6":
-        return "--model gpt-5.6 is not a supported Codex model id; use gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, or gpt-6-astra."
+        return "--model gpt-5.6 is not a supported Codex model id; use gpt-6-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra."
     return ""
 
 
@@ -334,9 +335,9 @@ def parse_args(argv: list[str]) -> Args:
   bookkeeping and out of worker prompts.
 
 Model guidance:
-  For Codex, gpt-5.6-sol medium is the default; use max for hard tasks and ultra only for
-  very hard tasks. Use gpt-5.6-sol low for submanagers, gpt-5.6-terra medium for
-  easier routine tasks, and gpt-5.6-luna xhigh for trivial minimal tasks. Terra
+  For Codex, gpt-6-sol medium is the default; use max for hard tasks and ultra only for
+  very hard tasks. Use gpt-6-sol low for submanagers, gpt-5.6-terra medium for
+  easier routine tasks, and gpt-6-luna xhigh for trivial minimal tasks. Terra
   and Luna are unreliable decision makers. gpt-6-astra is also supported, but it
   is very expensive and reserved for tricky tasks.
   For Cursor Agent, use model cursor-grok-4.6 with reasoning effort xhigh; the

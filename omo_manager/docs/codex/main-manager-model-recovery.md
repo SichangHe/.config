@@ -5,8 +5,8 @@
 It acts only when all of these remain true through the replacement boundary:
 
 - `wl:1.0` is the exact live Codex pane and its process, window, and working directory have not changed
-- its current error is exactly the bare ChatGPT-account rejection for `gpt-5.6-sol`, with no other visible error or real typed input
-- its one descendant Codex launch still says `gpt-5.6-sol` and has one valid reasoning effort
+- its current error is exactly the bare ChatGPT-account rejection for `gpt-6-sol`, with no other visible error or real typed input
+- its one descendant Codex launch still says `gpt-6-sol` and has one valid reasoning effort
 - that launch retains the exact main-manager environment: `OMO_AGENT_TMUX_TARGET`, `OMO_MANAGER_TMUX_TARGET`, `OMO_WORK_LOGS_ROOT`, and a private `OMO_MANAGER_STATE_DIR`
 - the supplied source is an owner-private direct file under `ROOT/manager_mail`, and a separate owner-private envelope is a direct file under `ROOT`; the envelope contains exactly one `<human_instruction authoritative="true" source="manager_mail/FILE:START-END">` block whose body is byte-for-byte the selected source lines
 - those selected human-instruction lines consist only of one exact positive grant for the requested model; plain mail text, routing context, denials, and `<manager_delegation>` are rejected

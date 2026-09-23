@@ -192,7 +192,7 @@ class CodexStartTests(unittest.TestCase):
         protected = ("protected:9",)
         launch_argv = (
             "bunx",
-            "@openai/codex@latest",
+            "@openai/codex@0.155.1",
             "--dangerously-bypass-approvals-and-sandbox",
             "--model",
             "gpt-5.6-terra",
@@ -488,7 +488,7 @@ class CodexStartTests(unittest.TestCase):
         root = Path("/tmp/work logs")
         pane = Pane("cfg:2.0", "%2", "@2", "zsh", root)
         command = launch_command(self.args(root), pane, None, "[marker]")
-        self.assertIn("bunx @openai/codex@latest", command)
+        self.assertIn("bunx @openai/codex@0.155.1", command)
         self.assertIn("OMO_AGENT_TMUX_TARGET=cfg:2.0", command)
         self.assertIn("--model gpt-5.6-terra", command)
         self.assertIn("model_reasoning_effort=", command)
@@ -934,7 +934,7 @@ class CodexStartTests(unittest.TestCase):
     def test_launch_command_rejects_programmatic_bare_gpt_5_6_model(self) -> None:
         root = Path("/tmp/work")
         pane = Pane("cfg:2.0", "%2", "@2", "zsh", root)
-        with self.assertRaisesRegex(StartError, "use gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, or gpt-6-astra"):
+        with self.assertRaisesRegex(StartError, "use gpt-6-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra"):
             launch_command(replace(self.args(root), model="gpt-5.6"), pane, None, "[marker]")
 
     def test_launch_command_supports_gpt_6_astra(self) -> None:
@@ -2429,7 +2429,7 @@ class CodexStartTests(unittest.TestCase):
             rollout_info = rollout.stat()
             launch_argv = (
                 "bunx",
-                "@openai/codex@latest",
+                "@openai/codex@0.155.1",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--model",
                 "gpt-5.6-terra",

@@ -115,8 +115,8 @@ RECOVERY_ISSUANCE_VERSION = "omo-codex-recovery-issuance-v1"
 DELIVERY_EVENT_DIRNAME = RECOVERY_EVENT_DIRNAME
 DELIVERY_EVENT_VERSION = "omo-pending-watch-delivery-event-v1"
 CODEX_LAUNCH_COMMAND = "bunx"
-CODEX_PACKAGE = "@openai/codex@latest"
-SUPPORTED_CODEX_PACKAGES = {"@openai/codex", CODEX_PACKAGE}
+CODEX_PACKAGE = "@openai/codex@0.155.1"
+SUPPORTED_CODEX_PACKAGES = {"@openai/codex", "@openai/codex@latest", CODEX_PACKAGE}
 SUPPORTED_CODEX_PROCESS_COMMANDS = {"bun", "bunx", "codex"}
 PROMPT_DELIVERY_TIMEOUT_S = float(os.environ.get("OMO_CODEX_PROMPT_DELIVERY_TIMEOUT_S", "5"))
 PROMPT_CLEAR_CAPTURES = 6
@@ -524,7 +524,7 @@ def parse_args(argv: list[str]) -> Args:
     if parsed.model and MODEL_RE.fullmatch(parsed.model) is None:
         parser.error("--model contains unsupported characters.")
     if parsed.model == "gpt-5.6":
-        parser.error("--model gpt-5.6 is not a supported Codex model id; use gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, or gpt-6-astra.")
+        parser.error("--model gpt-5.6 is not a supported Codex model id; use gpt-6-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra.")
     if parsed.session_id and UUID_RE.fullmatch(parsed.session_id) is None:
         parser.error("--session-id must be a Codex UUID.")
     modes = (
@@ -1452,7 +1452,7 @@ def launch_command(
     pcodx_env: Mapping[str, str] | None = None,
 ) -> str:
     if args.model == "gpt-5.6":
-        raise StartError("--model gpt-5.6 is not a supported Codex model id; use gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, or gpt-6-astra.")
+        raise StartError("--model gpt-5.6 is not a supported Codex model id; use gpt-6-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra.")
     executable = CODEX_LAUNCH_COMMAND if tool == "codex" else PCODX_LAUNCH_COMMAND
     codex = [executable]
     if tool == "codex":

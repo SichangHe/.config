@@ -47,7 +47,7 @@ class ManagerHelperHelpTests(unittest.TestCase):
         self.assertIn("start Cursor Agent there unless --tool codex or pcodx", launch_help)
         self.assertIn("captures the command and output from getagentsmd", launch_help)
         self.assertIn("common and submanager instruction documents", launch_help)
-        self.assertIn("gpt-5.6-sol medium is the default", launch_help)
+        self.assertIn("gpt-6-sol medium is the default", launch_help)
         self.assertIn("gpt-6-astra is also supported", launch_help)
         self.assertIn("very expensive and reserved for tricky tasks", launch_help)
         self.assertIn("cursor-grok-4.6-xhigh", launch_help)

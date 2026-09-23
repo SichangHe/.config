@@ -23,7 +23,7 @@ FILE_SEARCH_RECOVERY_INTERVAL_S = 0.05
 COMPACTION_WAIT_LINES = 2000
 CODEX_RE = re.compile(r"  gpt-")
 CODEX_FOOTER_RE = re.compile(r"^  gpt-")
-SUPPORTED_CODEX_PACKAGES = {"@openai/codex", "@openai/codex@latest"}
+SUPPORTED_CODEX_PACKAGES = {"@openai/codex", "@openai/codex@latest", "@openai/codex@0.155.1"}
 PROC_ROOT = Path("/proc")
 ERROR_RE = re.compile(r"\b(failed|panic|traceback|exception)\b|\berror\b(?!\s*=\s*\d)", re.IGNORECASE)
 SELECTED_MODEL_CAPACITY_RE = re.compile(

@@ -39,7 +39,7 @@ from omo_manager.omo_manager_rotate import LaunchMetadata, read_processes, selec
 
 
 MAIN_MANAGER_TARGET = "wl:1.0"
-FAILED_MODEL = "gpt-5.6-sol"
+FAILED_MODEL = "gpt-6-sol"
 FATAL_ERROR = f'''■ {{"detail":"The '{FAILED_MODEL}' model is not supported when using Codex with a ChatGPT account."}}'''
 MAX_AUTHORITY_BYTES = 1_000_000
 MAX_CAPTURE_LINES = 240
@@ -164,7 +164,7 @@ def parse_args(argv: list[str]) -> Args:
     if MODEL_RE.fullmatch(parsed.model) is None:
         parser.error("--model contains unsupported characters")
     if parsed.model == "gpt-5.6":
-        parser.error("--model gpt-5.6 is not a supported Codex model id; use gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, or gpt-6-astra.")
+        parser.error("--model gpt-5.6 is not a supported Codex model id; use gpt-6-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra.")
     if parsed.model == FAILED_MODEL:
         parser.error(f"--model must differ from unavailable {FAILED_MODEL}")
     for name in ("startup_timeout_s", "model_probe_timeout_s"):
@@ -421,7 +421,7 @@ def require_fatal_state(pane: Pane) -> None:
         raise RecoveryError("wl:1 is not in the required Codex error state")
     errors = tuple(visible_error_lines(current_block(lines).lines))
     if errors != (FATAL_ERROR,):
-        raise RecoveryError("wl:1 does not have exactly the supported gpt-5.6-sol ChatGPT-account failure")
+        raise RecoveryError("wl:1 does not have exactly the supported gpt-6-sol ChatGPT-account failure")
     if not any(CODEX_FOOTER_RE.match(line) is not None for line in lines):
         raise RecoveryError("wl:1 lacks a live Codex model footer")
     input_text = current_input_text(lines)
@@ -674,7 +674,7 @@ def verify_continuity(args: Args, expected: Binding, authority: Authority, sessi
 
 def recover(args: Args) -> str:
     if args.model == "gpt-5.6":
-        raise RecoveryError("--model gpt-5.6 is not a supported Codex model id; use gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, or gpt-6-astra.")
+        raise RecoveryError("--model gpt-5.6 is not a supported Codex model id; use gpt-6-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra.")
     authority = read_authority(args)
     binding = bind(args)
     probe_model(args.model, binding.launch.reasoning_effort, args.model_probe_timeout_s)

@@ -148,7 +148,7 @@ class MainManagerModelRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             args = replace(self.args(root), model="gpt-5.6")
-            with self.assertRaisesRegex(RecoveryError, "use gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, or gpt-6-astra"):
+            with self.assertRaisesRegex(RecoveryError, "use gpt-6-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra"):
                 recover(args)
 
     def test_parse_args_supports_gpt_6_astra(self) -> None:
@@ -215,7 +215,7 @@ class MainManagerModelRecoveryTests(unittest.TestCase):
             root = Path(tmp)
             self.write_authority(root)
             with self.assertRaisesRegex(RecoveryError, "requested model"):
-                read_authority(replace(self.args(root), model="gpt-5.6-luna"))
+                read_authority(replace(self.args(root), model="gpt-6-luna"))
 
     def test_bind_rejects_any_pane_other_than_the_hard_coded_main_manager(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -238,7 +238,7 @@ class MainManagerModelRecoveryTests(unittest.TestCase):
             probe_model("gpt-5.6-terra", "xhigh", 4.0)
 
         command = calls[0]
-        self.assertEqual(["bunx", "@openai/codex@latest"], command[:2])
+        self.assertEqual(["bunx", "@openai/codex@0.155.1"], command[:2])
         self.assertIn("--ephemeral", command)
         self.assertIn("--ignore-user-config", command)
         self.assertIn("--ignore-rules", command)
@@ -247,7 +247,7 @@ class MainManagerModelRecoveryTests(unittest.TestCase):
 
     def test_resume_command_uses_latest_package(self) -> None:
         command = resume_command(self.binding(Path("/tmp/work logs")), "gpt-5.6-terra", self.SESSION_ID, "[marker]")
-        self.assertIn("exec bunx @openai/codex@latest", command)
+        self.assertIn("exec bunx @openai/codex@0.155.1", command)
 
     def test_reserve_and_finish_handoff_keep_one_private_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -441,11 +441,11 @@ class MainManagerModelRecoveryTests(unittest.TestCase):
     def test_fatal_state_accepts_only_the_known_unadorned_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             pane = self.binding(Path(tmp)).pane
-            exact = ["────", FATAL_ERROR, "  gpt-5.6-sol"]
+            exact = ["────", FATAL_ERROR, "  gpt-6-sol"]
             with patch("omo_manager.omo_main_manager_model_recovery.captured_lines", return_value=exact):
                 require_fatal_state(pane)
 
-            decorated = ["────", FATAL_ERROR.removesuffix("}") + ',"code":"unsupported"}', "  gpt-5.6-sol"]
+            decorated = ["────", FATAL_ERROR.removesuffix("}") + ',"code":"unsupported"}', "  gpt-6-sol"]
             with patch("omo_manager.omo_main_manager_model_recovery.captured_lines", return_value=decorated), self.assertRaises(RecoveryError):
                 require_fatal_state(pane)
 

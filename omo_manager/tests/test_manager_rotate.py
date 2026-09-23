@@ -90,6 +90,7 @@ class ManagerRotateTests(unittest.TestCase):
 
             self.assertIn(f"--replacement-email-file {shlex.quote(str(mail))}", calls[0][-1])
     def test_codex_launch_recognizes_latest_and_legacy_packages(self) -> None:
+        self.assertTrue(is_codex_launch_argv(("bunx", "@openai/codex@0.155.1", "--model", "gpt-5.6-terra")))
         self.assertTrue(is_codex_launch_argv(("bunx", "@openai/codex@latest", "--model", "gpt-5.6-terra")))
         self.assertTrue(is_codex_launch_argv(("bunx", "@openai/codex", "--model", "gpt-5.6-terra")))
         self.assertFalse(is_codex_launch_argv(("bunx", "@openai/codex@next", "--model", "gpt-5.6-terra")))
@@ -260,7 +261,7 @@ class ManagerRotateTests(unittest.TestCase):
             Path("/home/sichangheagent/work_logs"),
             Path("/private/state"),
         )
-        self.assertIn("bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox", command)
+        self.assertIn("bunx @openai/codex@0.155.1 --dangerously-bypass-approvals-and-sandbox", command)
         self.assertIn("--model gpt-5.6-terra", command)
         self.assertIn('model_reasoning_effort="xhigh"', command)
         self.assertIn("OMO_AGENT_TMUX_TARGET=wl:1.0", command)

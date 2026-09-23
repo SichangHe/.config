@@ -293,7 +293,7 @@ def invoke_reviewer(
         result = runner(
             [
                 "bunx",
-                "@openai/codex@latest",
+                "@openai/codex@0.155.1",
                 "exec",
                 "--ephemeral",
                 "--sandbox",
@@ -452,7 +452,7 @@ def main(argv: list[str] | None = None) -> int:
                         encoded = json.dumps(payload, separators=(",", ":")).encode()
                     evidence.write_bytes(encoded)
                     evidence.chmod(0o600)
-                    verdict = invoke_reviewer(evidence, args.output_schema, model="gpt-5.6-luna", effort="low")
+                    verdict = invoke_reviewer(evidence, args.output_schema, model="gpt-6-luna", effort="low")
                     if verdict.verdict in {"problem", "needs_evidence", "inconclusive"}:
                         output_dir: Path | None = None
                         if verdict.verdict == "needs_evidence" and verdict.call_ids:

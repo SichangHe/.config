@@ -34,7 +34,7 @@ DEFAULT_PRICE_TABLE = {
         },
         {
             "provider": "openai",
-            "model": "gpt-5.6-sol",
+            "model": "gpt-6-sol",
             "effective_date": "2026-07-12",
             "input_tokens": "5.00",
             "cached_input_tokens": "0.50",
@@ -52,7 +52,7 @@ DEFAULT_PRICE_TABLE = {
         },
         {
             "provider": "openai",
-            "model": "gpt-5.6-luna",
+            "model": "gpt-6-luna",
             "effective_date": "2026-07-12",
             "input_tokens": "1.00",
             "cached_input_tokens": "0.10",
