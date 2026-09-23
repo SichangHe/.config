@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Read or update the current agent's pending work queue."""
+
 from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 if __package__ in {None, ""}:
@@ -38,6 +40,7 @@ from omo_manager.omo_task_edit import replace_if_unchanged
 from omo_manager.omo_task_status import replace_if_unchanged_locked
 from omo_manager.omo_task_lock import task_target_lock
 from omo_manager.omo_task_lock import task_file_lock
+from omo_manager.omo_task_lock import task_file_lock_at_path
 from omo_manager.omo_task_metadata import PendingTaskItem
 from omo_manager.omo_task_metadata import PENDING_ITEM_PROVENANCE_HELP
 from omo_manager.omo_task_metadata import human_authored_pending_items
@@ -47,14 +50,18 @@ from omo_manager.omo_task_metadata import pending_replacement_with_origin
 from omo_manager.omo_blocking_actor import request as blocking_request
 from omo_manager.omo_completion_email import plan_completion_email
 from omo_manager.omo_completion_email import completion_email_is_delivered
+from omo_manager.omo_completion_email import completion_email_state_dir
+from omo_manager.omo_completion_email import claims_rows
 from omo_manager.omo_completion_email import commit_ordinary_pending_transition
 from omo_manager.omo_completion_email import digest_fields
 from omo_manager.omo_completion_email import load_ordinary_pending_transition
 from omo_manager.omo_completion_email import mail_compress_recovery_request
 from omo_manager.omo_completion_email import OrdinaryPendingRecoveryRequest
 from omo_manager.omo_completion_email import ordinary_pending_purpose
+from omo_manager.omo_completion_email import ordinary_completion_participant_evidence
 from omo_manager.omo_completion_email import plan_sent_recovery_completion
 from omo_manager.omo_completion_email import prepare_ordinary_pending_transition
+from omo_manager.omo_completion_email import reconcile_ordinary_sent_completion
 from omo_manager.omo_completion_email import require_owner_completion
 from omo_manager.omo_completion_email import source1970_eval_evidence
 from omo_manager.omo_completion_email import source1970_eval_queue_items
@@ -113,6 +120,9 @@ class Args:
     extra_manager_target: str = ""
     extra_semantic_key: str = ""
     extra_authorization_sha256: str = ""
+    delivery_transcript: Path | None = None
+    delivery_message_file: Path | None = None
+    delivery_message_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -141,6 +151,556 @@ REMOVAL_NOTICE_RECOVERIES = {
         completion_key="cce588d2db12689862a5981a619d17bc9c27e73c4c7593dd1d3473966c9fa070",
     )
 }
+
+# 🧑 Human: "send no email during configuration work ... bound to exact item text/evidence and successful invocation delivery"
+SOURCE2048_BATCH_PATH_ITEM = (
+    "🧑 Provide a supported owner-local completion path for paper_finish.md to send exactly one final reviewed Human result email and remove exactly the four Source-2048 Human items while retaining the distinct broader review item. "
+    "Current omo_pending.py remove accepts only one --item; separate normal calls risk duplicate completion emails, while --no-email is only for recovery after a separately sent answer. "
+    "Do not advise manual task mutation or an invented key protocol. Implement or identify the smallest fail-closed batch/combined-answer path with one generated lowercase SHA-256 completion key shared across the one transition as documented, focused realistic tests, and independent review. "
+    "Preserve all non-Source-2048 items, send no email during configuration work, and return the exact reviewed owner-local invocation to DeGenTWeb_writeup:0."
+)
+SOURCE2048_BATCH_PATH_EVIDENCE = (
+    "The normal owner-local combined-answer batch path passed focused tests and independent review; its exact invocation was delivered "
+    "to DeGenTWeb_writeup:0 and recorded in that Codex session. No Human email was sent and paper_finish.md was not mutated by configuration work."
+)
+SOURCE2048_PAPER_SESSION = "01a0bb49-92ae-70e2-a0eb-0ea7373862e7"
+SOURCE2048_PAPER_CWD = "/ssd1/sichangheagent/DeGenTWeb_writeup"
+SOURCE2048_CONFIG_TASK = "watch_err_email.md"
+SOURCE2048_DELIVERY_MESSAGE_SHA256 = "ee471f6a3aedffd385dead9215198a2a2a311a148d3dadd3dc89d7ad43a79a2a"
+SOURCE2048_PAPER_TRANSCRIPT = Path("2026/09/19/rollout-2026-09-19T13-09-16-01a0bb49-92ae-70e2-a0eb-0ea7373862e7.jsonl")
+CODEX_SESSIONS_ROOT = Path.home() / ".codex" / "sessions"
+SOURCE2048_DELIVERY_SUPPORT_ITEM = "🧑 Recover the exact failed Source-2048 batch completion delivery for paper_finish.md without duplicate mail or queue mutation outside the supported path. The owner executed the reviewed four-item batch exactly once with completion key 803ba79e684265b9d33fc98159bc0c94366cd93206916a36c5ae5825771dda2e; exit 2 said the verified thread is addressed to dw:15 and DeGenTWeb_writeup:0 may not retag it, then reported uncertain delivery/replay suppressed. No Message-ID was returned and all five queue items remain intact. First establish whether any email was delivered using authoritative sender/Sent evidence. If none was delivered, implement or invoke the smallest authenticated same-key recovery preserving the original Human thread and responsible-owner policy; if delivered, reconcile exact evidence without resending. Do not generate a new key, retag the thread, use ordinary email, send from config scope, remove queue items prematurely, or close the support item as delivered. Obtain independent review and return the exact safe command/evidence to the paper owner."
+SOURCE2048_DELIVERY_EVIDENCE = (
+    "Owner recovery preserved completion key 803ba79e684265b9d33fc98159bc0c94366cd93206916a36c5ae5825771dda2e and the verified dw:15 thread; "
+    "Gmail Sent Mail authenticated Message-ID <179003304739.3930722.4995183145126656828@gmail.com>; the four Source-2048 items were removed and the distinct broader review item remains."
+)
+SOURCE2048_DELIVERY_MESSAGE_ID = "<179003304739.3930722.4995183145126656828@gmail.com>"
+SOURCE2048_SENT_SUBJECT_SHA256 = "b2439c1be93a90abff001abd6a6c39bfaddb49354dfd1722f48301ee549f1aa8"
+SOURCE2048_SENT_BODY_SHA256 = "e87ffd70b14f8e41a613740c2c5d3b475e36c8879b4d5ea769c77a19793ef81a"
+SOURCE2048_BROADER_ITEM = "Guide the remaining paper review two concrete items at a time: await the original scoring/training procedure for saved Web labels and the preferred search-result emphasis, adapt edits to feedback, integrate retained workers final reviewed outputs, and review abstract/introduction last. Preserve eight body pages and CC2014 true negatives. Source: paper-owner delegation and Human Sources 1944, 1948, 1952, 1963."
+
+SOURCE2057_ROOT = "/ssd1/sichangheagent/work_logs"
+SOURCE2057_TASK = "paper_finish.md"
+SOURCE2057_SOURCE = "manager_mail/85c5dff58359-2057.txt"
+SOURCE2057_SOURCE_SHA256 = "45eb652b8b5519190aeafc9f1754b161fdac823226a99e0ddcd316b492ef4a44"
+SOURCE2057_TASK_SHA256 = "8d79b29d973b497fb6966c5c07595481ac1e2bcdd5cd91eecc0346cf05e00c40"
+SOURCE2057_OWNER = "DeGenTWeb_writeup:0"
+SOURCE2057_MANAGER = "wl:1"
+SOURCE2057_AUTHORIZATION = "793e5b4636130347a40928a8ac40990beff9e0737db5fd2f5a3871b3065afd0b"
+SOURCE2057_CLAIM_TASK_SHA256 = "6f77fa058a62528624125812baa02aafdd836be09d196d0ae1f6d8cfd9cf46f1"
+SOURCE2057_CLAIM_NOTICE_KEY = "196ba3b396c2fc92abc78d4ae9bf3945d8b9c4d14c768106559e40ce8f95b573"
+SOURCE2057_CLAIM_SEMANTIC_KEY = "319ffd6d0e5677c23fb28359108853517174c42b6e0720661280819332490132"
+SOURCE2057_MESSAGE_ID = "<179004678830.1685206.18344588834047058574@gmail.com>"
+SOURCE2057_SUBJECT = "Re: [DeGenTWeb_writeup:0] Try Pangram for hard data"
+SOURCE2057_SUBJECT_SHA256 = "2d0f42d96fd91d5b3434512cc18bdee00f37fb52689b66fe519beffa6b1615e7"
+SOURCE2057_BODY_SHA256 = "58f10a618150066461f4602c0cf38840134fc851104278742aab089dd524622b"
+SOURCE2057_ITEM = (
+    "🧑 Source-2057 (manager_mail/85c5dff58359-2057.txt): Is the writeup updated with the figure and wording and pushed? "
+    "Is the writeup fully up-to-date with all the changes I requested?"
+)
+SOURCE2057_PRESERVED_ITEM = SOURCE2048_BROADER_ITEM
+SOURCE2057_EVIDENCE = (
+    "Source-2057 was answered by exact verified Sent Message-ID "
+    "<179004678830.1685206.18344588834047058574@gmail.com>; the figure, caption, and wording are pushed, "
+    "the latest Pangram request is complete, and the broader paper review remains open."
+)
+
+# 🧑 Human: “Fill in the comments in /shagent/work_logs/dw_progress_2026-09-14_20.md by drafting relevant things, then ping me for review.”
+SOURCE2059_ROOT = SOURCE2057_ROOT
+SOURCE2059_TASK = SOURCE2057_TASK
+SOURCE2059_SOURCE = "manager_mail/85c5dff58359-2059.txt"
+SOURCE2059_SOURCE_SHA256 = "37861b7f9e567c78c59a48fa1eb0a9034347e11a8ef066fa58f61d72a4ddecaf"
+SOURCE2059_OWNER = SOURCE2057_OWNER
+SOURCE2059_MANAGER = SOURCE2057_MANAGER
+SOURCE2059_AUTHORIZATION = "1d66346c7ae06e36e996c9c5a1d3e3bd2527405a8198103c2bb253026b5d8e08"
+SOURCE2059_CLAIM_TASK_SHA256 = "7402f7eaa92e38f298f26bdfce3ebd20eb201edd44fc09344f0a43feeb7f11cb"
+SOURCE2059_CLAIM_NOTICE_KEY = "feff21cdc89e754a23edfee8874799701531ea98e968b57456eb4fb6d6915234"
+SOURCE2059_CLAIM_SEMANTIC_KEY = "a96fefc508f41ef1b49fa955434e9ae19e1152800a2cb1f2f79aae93b1391093"
+SOURCE2059_MESSAGE_ID = "<179004890105.2317468.7322670588214599687@gmail.com>"
+SOURCE2059_SUBJECT = SOURCE2057_SUBJECT
+SOURCE2059_SUBJECT_SHA256 = SOURCE2057_SUBJECT_SHA256
+SOURCE2059_BODY_SHA256 = "57f9430b1c390e644ed849a7368ee088adad8723382ec87b46b1799f70bd6117"
+SOURCE2059_ITEM = (
+    "🧑 Source-2059 (manager_mail/85c5dff58359-2059.txt): Fill in the comments in "
+    "/shagent/work_logs/dw_progress_2026-09-14_20.md by drafting relevant things, then ping me for review."
+)
+
+
+def source2059_record_payload(canonical_before_sha256: str, recorded_task_sha256: str) -> dict[str, object]:
+    """Return the exact add/ack reconciliation payload."""
+
+    return {
+        "authorization_sha256": SOURCE2059_AUTHORIZATION,
+        "canonical_before_task_sha256": canonical_before_sha256,
+        "claim_notice_key": SOURCE2059_CLAIM_NOTICE_KEY,
+        "claim_semantic_key": SOURCE2059_CLAIM_SEMANTIC_KEY,
+        "claim_task_sha256": SOURCE2059_CLAIM_TASK_SHA256,
+        "items": [SOURCE2059_ITEM],
+        "message_id": SOURCE2059_MESSAGE_ID,
+        "outcome": "recorded; acceptance already delivered",
+        "recorded_task_sha256": recorded_task_sha256,
+        "sent_body_sha256": SOURCE2059_BODY_SHA256,
+        "sent_subject": SOURCE2059_SUBJECT,
+        "sent_subject_sha256": SOURCE2059_SUBJECT_SHA256,
+        "source": SOURCE2059_SOURCE,
+        "source_sha256": SOURCE2059_SOURCE_SHA256,
+        "version": "v1",
+    }
+
+
+def source2059_record_comment(canonical_before_sha256: str, recorded_task_sha256: str) -> str:
+    """Return the durable exact add/ack reconciliation record."""
+
+    payload = source2059_record_payload(canonical_before_sha256, recorded_task_sha256)
+    return "Source-2059 recovery: " + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def source2059_record_status(text: str) -> bool | None:
+    """Return true for the exact reconstructable record, false for malformed, or none when absent."""
+
+    prefix = "(Source-2059 recovery: "
+    records = [line for line in text.splitlines() if "Source-2059 recovery:" in line]
+    if not records:
+        return None
+    if len(records) != 1 or not records[0].startswith(prefix) or not records[0].endswith(")"):
+        return False
+    try:
+        payload = json.loads(records[0][len(prefix) : -1])
+    except json.JSONDecodeError:
+        return False
+    canonical_before_sha256 = payload.get("canonical_before_task_sha256", "") if isinstance(payload, dict) else ""
+    recorded_task_sha256 = payload.get("recorded_task_sha256", "") if isinstance(payload, dict) else ""
+    if (
+        not isinstance(canonical_before_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", canonical_before_sha256) is None
+        or not isinstance(recorded_task_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", recorded_task_sha256) is None
+        or payload != source2059_record_payload(canonical_before_sha256, recorded_task_sha256)
+    ):
+        return False
+    record_line = records[0]
+    lines = text.splitlines(keepends=True)
+    without_record = "".join(line for line in lines if line.rstrip("\r\n") != record_line)
+    if len(lines) - len(without_record.splitlines(keepends=True)) != 1:
+        return False
+    before_text, removed = remove_pending_items(without_record, (SOURCE2059_ITEM,))
+    reconstructed, added = add_pending_items(before_text, (SOURCE2059_ITEM,))
+    return (
+        removed == 1
+        and added == 1
+        and reconstructed == without_record
+        and hashlib.sha256(before_text.encode()).hexdigest() == canonical_before_sha256
+        and hashlib.sha256(without_record.encode()).hexdigest() == recorded_task_sha256
+    )
+
+
+def recover_source2059(root: Path, path: Path) -> int:
+    """Record the one already-acknowledged Source-2059 item without email."""
+
+    source = root / SOURCE2059_SOURCE
+    if str(root.resolve()) != SOURCE2059_ROOT or path.resolve() != (root / SOURCE2059_TASK).resolve():
+        raise BlockingError("Source-2059 recovery requires its exact owner task")
+    with task_file_lock(path):
+        before = path.stat()
+        text = path.read_text(encoding="utf-8")
+        metadata = read_task_metadata(path, root)
+        record_status = source2059_record_status(text)
+        already_recorded = record_status is True
+        if (
+            metadata is None
+            or metadata.version != "v1.0.0"
+            or metadata.status != "running"
+            or metadata.blocked_on
+            or metadata.runat != SOURCE2059_OWNER
+            or metadata.managerat != SOURCE2059_MANAGER
+            or metadata.is_manager
+            or metadata.session_id != SOURCE2048_PAPER_SESSION
+            or record_status is False
+            or metadata.pending_task_items.count(SOURCE2059_ITEM) != int(already_recorded)
+            or metadata.pending_task_items.count(SOURCE2057_PRESERVED_ITEM) != 1
+            or not source.is_file()
+            or source.is_symlink()
+            or hashlib.sha256(source.read_bytes()).hexdigest() != SOURCE2059_SOURCE_SHA256
+            or text.splitlines().count("(record and delegate manager_mail/85c5dff58359-2059.txt)") != 1
+        ):
+            raise BlockingError("Source-2059 owner task or Human authority changed")
+        state = completion_email_state_dir()
+        with task_file_lock_at_path(state / "completion-email-claims.lock"):
+            _ledger, claims, _payload = claims_rows(state)
+            expected_claim = [
+                SOURCE2059_AUTHORIZATION,
+                SOURCE2059_OWNER,
+                SOURCE2059_TASK,
+                SOURCE2059_MANAGER,
+                SOURCE2059_CLAIM_TASK_SHA256,
+                SOURCE2059_CLAIM_NOTICE_KEY,
+                SOURCE2059_CLAIM_SEMANTIC_KEY,
+            ]
+            if (
+                claims.count(expected_claim) != 1
+                or sum(len(row) == 7 and row[0] == SOURCE2059_AUTHORIZATION for row in claims) != 1
+                or sum(len(row) == 7 and row[4] == SOURCE2059_CLAIM_TASK_SHA256 for row in claims) != 1
+                or sum(len(row) == 7 and row[5] == SOURCE2059_CLAIM_NOTICE_KEY for row in claims) != 1
+                or sum(len(row) == 7 and row[6] == SOURCE2059_CLAIM_SEMANTIC_KEY for row in claims) != 1
+            ):
+                raise BlockingError("Source-2059 completion authorization claim is missing or changed")
+            if already_recorded:
+                print("Source-2059 was already recorded from exact existing acceptance; no email sent")
+                return 0
+            participants = ordinary_completion_participant_evidence(
+                SOURCE2059_MESSAGE_ID,
+                SOURCE2059_SUBJECT_SHA256,
+                SOURCE2059_BODY_SHA256,
+            )
+            if participants is None:
+                raise BlockingError("Source-2059 acceptance lacks exact Sent-Mail evidence")
+            updated, added = add_pending_items(text, (SOURCE2059_ITEM,))
+            if added != 1:
+                raise BlockingError("Source-2059 recovery must record its exact Human item once")
+            canonical_before, removed = remove_pending_items(updated, (SOURCE2059_ITEM,))
+            if removed != 1:
+                raise BlockingError("Source-2059 recovery cannot reconstruct its exact queue transition")
+            updated = append_comment(
+                updated,
+                source2059_record_comment(
+                    hashlib.sha256(canonical_before.encode()).hexdigest(),
+                    hashlib.sha256(updated.encode()).hexdigest(),
+                ),
+            )
+            updated_metadata = parse_task_metadata(updated, root)
+            if (
+                updated_metadata is None
+                or updated_metadata.status != metadata.status
+                or updated_metadata.blocked_on != metadata.blocked_on
+                or updated_metadata.runat != metadata.runat
+                or updated_metadata.managerat != metadata.managerat
+                or updated_metadata.session_id != metadata.session_id
+                or updated_metadata.pending_task_items != (*metadata.pending_task_items, SOURCE2059_ITEM)
+            ):
+                raise BlockingError("Source-2059 recovery changed preserved paper state")
+            replace_if_unchanged_locked(path, updated, before)
+            fsync_task_parent(path)
+    print("recorded Source-2059 from exact existing acceptance; no email sent")
+    return 0
+
+
+# 🧑 Human: “Also add a part to mention our trying out the other site generators ... Focus on our objective of generating many sites each with 15 qualified blogs from LLMs and whether it seems feasible in free trial and how much would it cost per site if not using free trial.”
+SOURCE2062_ROOT = SOURCE2057_ROOT
+SOURCE2062_TASK = SOURCE2057_TASK
+SOURCE2062_SOURCE = "manager_mail/85c5dff58359-2062.txt"
+SOURCE2062_SOURCE_SHA256 = "1309740b7d8a561b833923a59ef0c32b9212da397f91065fc7c65512e1c7426f"
+SOURCE2062_OWNER = SOURCE2057_OWNER
+SOURCE2062_MANAGER = SOURCE2057_MANAGER
+SOURCE2062_AUTHORIZATION = "993afc3401b89e983827407afb7246ec03be81cefdd1277385245f44ecc08c81"
+SOURCE2062_CLAIM_TASK_SHA256 = "3c17e0a8eee7ff781eb447141bd8196195ec928e72f8bca7528a33c0fac03842"
+SOURCE2062_CLAIM_NOTICE_KEY = "6b2fcf65e03c22bbe4e292dcd2cdc8b6a83fda8d973393f8458bcfec327ebab1"
+SOURCE2062_CLAIM_SEMANTIC_KEY = "224d9871a28dc19d430ba93a641ba38e09f9ddde45ec6a72a58a33a1108f7947"
+SOURCE2062_MESSAGE_ID = "<179004942971.2490238.13319295266527919748@gmail.com>"
+SOURCE2062_SUBJECT = SOURCE2057_SUBJECT
+SOURCE2062_SUBJECT_SHA256 = SOURCE2057_SUBJECT_SHA256
+SOURCE2062_BODY_SHA256 = "391985c728fc86e67ea3b288d960df6dfd04d0dcfeca1225a9937ee8b765e679"
+SOURCE2062_ITEM = (
+    "🧑 Source-2062 (manager_mail/85c5dff58359-2062.txt): Add to the September 14–20 memo what we know about Hostinger, "
+    "Framer, 10Web, and Durable, focusing on generating many sites with 15 qualifying LLM-written blogs each, free-trial feasibility, "
+    "and paid cost per site; preserve the supplied observed outcomes and incomplete tests."
+)
+
+
+def source2062_record_payload(canonical_before_sha256: str, recorded_task_sha256: str) -> dict[str, object]:
+    """Return the exact add/ack reconciliation payload."""
+
+    return {
+        "authorization_sha256": SOURCE2062_AUTHORIZATION,
+        "canonical_before_task_sha256": canonical_before_sha256,
+        "claim_notice_key": SOURCE2062_CLAIM_NOTICE_KEY,
+        "claim_semantic_key": SOURCE2062_CLAIM_SEMANTIC_KEY,
+        "claim_task_sha256": SOURCE2062_CLAIM_TASK_SHA256,
+        "items": [SOURCE2062_ITEM],
+        "message_id": SOURCE2062_MESSAGE_ID,
+        "outcome": "recorded; acceptance already delivered",
+        "recorded_task_sha256": recorded_task_sha256,
+        "sent_body_sha256": SOURCE2062_BODY_SHA256,
+        "sent_subject": SOURCE2062_SUBJECT,
+        "sent_subject_sha256": SOURCE2062_SUBJECT_SHA256,
+        "source": SOURCE2062_SOURCE,
+        "source_sha256": SOURCE2062_SOURCE_SHA256,
+        "version": "v1",
+    }
+
+
+def source2062_record_comment(canonical_before_sha256: str, recorded_task_sha256: str) -> str:
+    """Return the durable exact add/ack reconciliation record."""
+
+    payload = source2062_record_payload(canonical_before_sha256, recorded_task_sha256)
+    return "Source-2062 recovery: " + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def source2062_record_status(text: str) -> bool | None:
+    """Return true for the exact reconstructable record, false for malformed, or none when absent."""
+
+    prefix = "(Source-2062 recovery: "
+    records = [line for line in text.splitlines() if "Source-2062 recovery:" in line]
+    if not records:
+        return None
+    if len(records) != 1 or not records[0].startswith(prefix) or not records[0].endswith(")"):
+        return False
+    try:
+        payload = json.loads(records[0][len(prefix) : -1])
+    except json.JSONDecodeError:
+        return False
+    canonical_before_sha256 = payload.get("canonical_before_task_sha256", "") if isinstance(payload, dict) else ""
+    recorded_task_sha256 = payload.get("recorded_task_sha256", "") if isinstance(payload, dict) else ""
+    if (
+        not isinstance(canonical_before_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", canonical_before_sha256) is None
+        or not isinstance(recorded_task_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", recorded_task_sha256) is None
+        or payload != source2062_record_payload(canonical_before_sha256, recorded_task_sha256)
+    ):
+        return False
+    record_line = records[0]
+    lines = text.splitlines(keepends=True)
+    without_record = "".join(line for line in lines if line.rstrip("\r\n") != record_line)
+    if len(lines) - len(without_record.splitlines(keepends=True)) != 1:
+        return False
+    before_text, removed = remove_pending_items(without_record, (SOURCE2062_ITEM,))
+    reconstructed, added = add_pending_items(before_text, (SOURCE2062_ITEM,))
+    return (
+        removed == 1
+        and added == 1
+        and reconstructed == without_record
+        and hashlib.sha256(before_text.encode()).hexdigest() == canonical_before_sha256
+        and hashlib.sha256(without_record.encode()).hexdigest() == recorded_task_sha256
+    )
+
+
+def recover_source2062(root: Path, path: Path) -> int:
+    """Record the one already-acknowledged Source-2062 item without email."""
+
+    source = root / SOURCE2062_SOURCE
+    if str(root.resolve()) != SOURCE2062_ROOT or path.resolve() != (root / SOURCE2062_TASK).resolve():
+        raise BlockingError("Source-2062 recovery requires its exact owner task")
+    with task_file_lock(path):
+        before = path.stat()
+        text = path.read_text(encoding="utf-8")
+        metadata = read_task_metadata(path, root)
+        record_status = source2062_record_status(text)
+        already_recorded = record_status is True
+        prerequisite_text = text
+        if already_recorded:
+            record_line = next(line for line in text.splitlines() if line.startswith("(Source-2062 recovery: "))
+            prerequisite_text = "".join(
+                line for line in text.splitlines(keepends=True) if line.rstrip("\r\n") != record_line
+            )
+            prerequisite_text, removed = remove_pending_items(prerequisite_text, (SOURCE2062_ITEM,))
+            if removed != 1:
+                raise BlockingError("Source-2062 recovery record cannot reconstruct its prerequisite")
+        if (
+            metadata is None
+            or metadata.version != "v1.0.0"
+            or metadata.status != "running"
+            or metadata.blocked_on
+            or metadata.runat != SOURCE2062_OWNER
+            or metadata.managerat != SOURCE2062_MANAGER
+            or metadata.is_manager
+            or metadata.session_id != SOURCE2048_PAPER_SESSION
+            or record_status is False
+            or metadata.pending_task_items.count(SOURCE2062_ITEM) != int(already_recorded)
+            or metadata.pending_task_items.count(SOURCE2057_PRESERVED_ITEM) != 1
+            or metadata.pending_task_items.count(SOURCE2059_ITEM) != 1
+            or source2059_record_status(prerequisite_text) is not True
+            or not source.is_file()
+            or source.is_symlink()
+            or hashlib.sha256(source.read_bytes()).hexdigest() != SOURCE2062_SOURCE_SHA256
+            or text.splitlines().count("(record and delegate manager_mail/85c5dff58359-2062.txt)") != 1
+        ):
+            raise BlockingError("Source-2062 owner task or Human authority changed")
+        state = completion_email_state_dir()
+        with task_file_lock_at_path(state / "completion-email-claims.lock"):
+            _ledger, claims, _payload = claims_rows(state)
+            expected_claim = [
+                SOURCE2062_AUTHORIZATION,
+                SOURCE2062_OWNER,
+                SOURCE2062_TASK,
+                SOURCE2062_MANAGER,
+                SOURCE2062_CLAIM_TASK_SHA256,
+                SOURCE2062_CLAIM_NOTICE_KEY,
+                SOURCE2062_CLAIM_SEMANTIC_KEY,
+            ]
+            if (
+                claims.count(expected_claim) != 1
+                or sum(len(row) == 7 and row[0] == SOURCE2062_AUTHORIZATION for row in claims) != 1
+                or sum(len(row) == 7 and row[4] == SOURCE2062_CLAIM_TASK_SHA256 for row in claims) != 1
+                or sum(len(row) == 7 and row[5] == SOURCE2062_CLAIM_NOTICE_KEY for row in claims) != 1
+                or sum(len(row) == 7 and row[6] == SOURCE2062_CLAIM_SEMANTIC_KEY for row in claims) != 1
+            ):
+                raise BlockingError("Source-2062 completion authorization claim is missing or changed")
+            if already_recorded:
+                print("Source-2062 was already recorded from exact existing acceptance; no email sent")
+                return 0
+            participants = ordinary_completion_participant_evidence(
+                SOURCE2062_MESSAGE_ID,
+                SOURCE2062_SUBJECT_SHA256,
+                SOURCE2062_BODY_SHA256,
+            )
+            if participants is None:
+                raise BlockingError("Source-2062 acceptance lacks exact Sent-Mail evidence")
+            updated, added = add_pending_items(text, (SOURCE2062_ITEM,))
+            if added != 1:
+                raise BlockingError("Source-2062 recovery must record its exact Human item once")
+            canonical_before, removed = remove_pending_items(updated, (SOURCE2062_ITEM,))
+            if removed != 1:
+                raise BlockingError("Source-2062 recovery cannot reconstruct its exact queue transition")
+            updated = append_comment(
+                updated,
+                source2062_record_comment(
+                    hashlib.sha256(canonical_before.encode()).hexdigest(),
+                    hashlib.sha256(updated.encode()).hexdigest(),
+                ),
+            )
+            updated_metadata = parse_task_metadata(updated, root)
+            if (
+                updated_metadata is None
+                or updated_metadata.status != metadata.status
+                or updated_metadata.blocked_on != metadata.blocked_on
+                or updated_metadata.runat != metadata.runat
+                or updated_metadata.managerat != metadata.managerat
+                or updated_metadata.session_id != metadata.session_id
+                or updated_metadata.pending_task_items != (*metadata.pending_task_items, SOURCE2062_ITEM)
+            ):
+                raise BlockingError("Source-2062 recovery changed preserved paper state")
+            replace_if_unchanged_locked(path, updated, before)
+            fsync_task_parent(path)
+    print("recorded Source-2062 from exact existing acceptance; no email sent")
+    return 0
+
+
+def source2057_record_comment() -> str:
+    """Return the durable exact add/answer reconciliation record."""
+
+    payload = {
+        "authorization_sha256": SOURCE2057_AUTHORIZATION,
+        "before_task_sha256": SOURCE2057_TASK_SHA256,
+        "claim_notice_key": SOURCE2057_CLAIM_NOTICE_KEY,
+        "claim_semantic_key": SOURCE2057_CLAIM_SEMANTIC_KEY,
+        "claim_task_sha256": SOURCE2057_CLAIM_TASK_SHA256,
+        "evidence": SOURCE2057_EVIDENCE,
+        "items": [SOURCE2057_ITEM],
+        "message_id": SOURCE2057_MESSAGE_ID,
+        "outcome": "recorded and resolved",
+        "sent_body_sha256": SOURCE2057_BODY_SHA256,
+        "sent_subject": SOURCE2057_SUBJECT,
+        "sent_subject_sha256": SOURCE2057_SUBJECT_SHA256,
+        "source": SOURCE2057_SOURCE,
+        "source_sha256": SOURCE2057_SOURCE_SHA256,
+        "version": "v1",
+    }
+    return "Source-2057 recovery: " + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def recover_source2057(root: Path, path: Path) -> int:
+    """Record and resolve the one already-answered Source-2057 item without email."""
+
+    source = root / SOURCE2057_SOURCE
+    if str(root.resolve()) != SOURCE2057_ROOT or path.resolve() != (root / SOURCE2057_TASK).resolve():
+        raise BlockingError("Source-2057 recovery requires its exact owner task")
+    with task_file_lock(path):
+        before = path.stat()
+        text = path.read_text(encoding="utf-8")
+        metadata = read_task_metadata(path, root)
+        if (
+            metadata is None
+            or metadata.version != "v1.0.0"
+            or metadata.status != "long_running"
+            or metadata.blocked_on != "human"
+            or metadata.runat != SOURCE2057_OWNER
+            or metadata.managerat != SOURCE2057_MANAGER
+            or metadata.is_manager
+            or metadata.pending_task_items != (SOURCE2057_PRESERVED_ITEM,)
+            or hashlib.sha256(text.encode()).hexdigest() != SOURCE2057_TASK_SHA256
+            or not source.is_file()
+            or source.is_symlink()
+            or hashlib.sha256(source.read_bytes()).hexdigest() != SOURCE2057_SOURCE_SHA256
+            or text.splitlines().count("(record and delegate manager_mail/85c5dff58359-2057.txt)") != 1
+        ):
+            raise BlockingError("Source-2057 owner task or Human authority changed")
+        state = completion_email_state_dir()
+        with task_file_lock_at_path(state / "completion-email-claims.lock"):
+            _ledger, claims, _payload = claims_rows(state)
+            expected_claim = [
+                SOURCE2057_AUTHORIZATION,
+                SOURCE2057_OWNER,
+                SOURCE2057_TASK,
+                SOURCE2057_MANAGER,
+                SOURCE2057_CLAIM_TASK_SHA256,
+                SOURCE2057_CLAIM_NOTICE_KEY,
+                SOURCE2057_CLAIM_SEMANTIC_KEY,
+            ]
+            if claims.count(expected_claim) != 1 or sum(row[0] == SOURCE2057_AUTHORIZATION for row in claims) != 1:
+                raise BlockingError("Source-2057 completion authorization claim is missing or changed")
+            participants = ordinary_completion_participant_evidence(
+                SOURCE2057_MESSAGE_ID,
+                SOURCE2057_SUBJECT_SHA256,
+                SOURCE2057_BODY_SHA256,
+            )
+            if participants is None:
+                raise BlockingError("Source-2057 answer lacks exact Sent-Mail evidence")
+            updated, added = add_pending_items(text, (SOURCE2057_ITEM,))
+            if added != 1:
+                raise BlockingError("Source-2057 recovery must record its exact Human item once")
+            updated, removed = remove_pending_items(updated, (SOURCE2057_ITEM,))
+            if removed != 1:
+                raise BlockingError("Source-2057 recovery must resolve its exact Human item once")
+            updated = append_comment(updated, source2057_record_comment())
+            updated_metadata = parse_task_metadata(updated, root)
+            if (
+                updated_metadata is None
+                or updated_metadata.status != "long_running"
+                or updated_metadata.blocked_on != "human"
+                or updated_metadata.pending_task_items != (SOURCE2057_PRESERVED_ITEM,)
+            ):
+                raise BlockingError("Source-2057 recovery changed preserved paper state")
+            replace_if_unchanged_locked(path, updated, before)
+            fsync_task_parent(path)
+    print("recorded and resolved Source-2057 from exact Sent evidence; no email sent")
+    return 0
+
+
+def verify_source2048_invocation_delivery(args: Args) -> None:
+    transcript_arg = args.delivery_transcript
+    message_path = args.delivery_message_file
+    if transcript_arg is None or message_path is None:
+        raise BlockingError("Source-2048 recovery requires its delivery transcript and message file")
+    if not message_path.is_file() or message_path.is_symlink():
+        raise BlockingError("Source-2048 delivery message must be a regular file")
+    message_bytes = message_path.read_bytes()
+    message = message_bytes.decode().rstrip()
+    if args.delivery_message_sha256 != SOURCE2048_DELIVERY_MESSAGE_SHA256 or hashlib.sha256(message.encode()).hexdigest() != SOURCE2048_DELIVERY_MESSAGE_SHA256:
+        raise BlockingError("Source-2048 delivery message digest changed")
+    sessions_root = CODEX_SESSIONS_ROOT.resolve()
+    transcript = transcript_arg.resolve()
+    if not transcript_arg.is_file() or transcript_arg.is_symlink() or transcript_arg != transcript or sessions_root not in transcript.parents:
+        raise BlockingError("Source-2048 delivery transcript must be an exact canonical Codex session path")
+    if transcript != sessions_root / SOURCE2048_PAPER_TRANSCRIPT:
+        raise BlockingError("Source-2048 delivery transcript session does not match")
+    expected_message = f'<agent_message from="config:4">\n{message}\n</agent_message>'
+    session_meta = 0
+    deliveries = 0
+    for line in transcript.read_text(encoding="utf-8").splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise BlockingError("Source-2048 delivery transcript is malformed") from exc
+        payload = record.get("payload", {})
+        if record.get("type") == "session_meta" and payload.get("id") == SOURCE2048_PAPER_SESSION and payload.get("cwd") == SOURCE2048_PAPER_CWD:
+            session_meta += 1
+        if record.get("type") != "response_item" or payload.get("role") != "user":
+            continue
+        content = payload.get("content")
+        if isinstance(content, list) and any(part.get("type") == "input_text" and part.get("text") == expected_message for part in content if isinstance(part, dict)):
+            deliveries += 1
+    if session_meta != 1 or deliveries != 1:
+        raise BlockingError("Source-2048 invocation delivery requires one exact paper session and one exact delivered message")
 
 
 def pending_item_state(item: PendingTaskItem) -> str:
@@ -172,7 +732,7 @@ def parse_args(argv: list[str]) -> Args:
         help="Remove verified completed or cancelled work.",
         description=(
             "Remove verified completed or cancelled work. To answer a human question and remove "
-            "its pending item with one email, pass both --answer-subject-file and "
+            "one or more exact Human-authored pending items with one email, repeat --item and pass both --answer-subject-file and "
             "--answer-message-file; do not send the answer separately with email_me.py. The answer "
             "should keep only information the human still needs now."
         ),
@@ -197,6 +757,16 @@ def parse_args(argv: list[str]) -> Args:
     )
     remove.add_argument("--answer-subject-file", type=Path, help="One-line email subject for the combined human answer.")
     remove.add_argument("--answer-message-file", type=Path, help="Email body for the combined human answer.")
+    reconcile = sub.add_parser(
+        "reconcile-sent-remove",
+        help="Verify an already-sent Human answer, then remove its exact completed pending items without another email.",
+    )
+    reconcile.add_argument("--item", action="append", required=True)
+    reconcile.add_argument("--evidence", required=True)
+    reconcile.add_argument("--completion-key", required=True)
+    reconcile.add_argument("--message-id", required=True)
+    reconcile.add_argument("--sent-subject-sha256", required=True)
+    reconcile.add_argument("--sent-body-sha256", required=True)
     recover = sub.add_parser(
         "recover-removal-notice",
         help="Send one missing Human deletion notice without changing the completed queue.",
@@ -225,6 +795,29 @@ def parse_args(argv: list[str]) -> Args:
     _ = sub.add_parser(
         "recover-mail-compress-reviewed-sent",
         help="Apply the stopped mailbox-compression reviewed-Sent reconciliation without sending email.",
+    )
+    source2048 = sub.add_parser(
+        "recover-source2048-batch-path",
+        help="Remove the delivered Source-2048 configuration-helper item without sending email.",
+    )
+    source2048.add_argument("--delivery-transcript", type=Path, required=True)
+    source2048.add_argument("--delivery-message-file", type=Path, required=True)
+    source2048.add_argument("--delivery-message-sha256", required=True)
+    _ = sub.add_parser(
+        "recover-source2048-batch-delivery",
+        help="Reconcile the authenticated Source-2048 result and exact support item without email.",
+    )
+    _ = sub.add_parser(
+        "recover-source2057",
+        help="Record and resolve the exact already-sent Source-2057 answer without email.",
+    )
+    _ = sub.add_parser(
+        "recover-source2059",
+        help="Record the exact already-acknowledged Source-2059 item without email.",
+    )
+    _ = sub.add_parser(
+        "recover-source2062",
+        help="Record the exact already-acknowledged Source-2062 item without email.",
     )
     for recovery in (source1990,):
         recovery.add_argument("--item", action="append", required=True)
@@ -273,9 +866,13 @@ def parse_args(argv: list[str]) -> Args:
             parser.error("--completion-key must be a lowercase SHA-256 digest.")
         if bool(parsed.answer_subject_file) != bool(parsed.answer_message_file):
             parser.error("remove requires both --answer-subject-file and --answer-message-file when either is used.")
-        if parsed.answer_subject_file:
-            parser.error("pending-item notices cannot be combined with another Human answer.")
         items = normalized_items(tuple(parsed.item or ()))
+        if len(set(items)) != len(items):
+            parser.error("remove requires unique pending items.")
+        if parsed.answer_subject_file and parsed.item_id:
+            parser.error("combined Human answer requires legacy --item removal.")
+        if parsed.answer_subject_file and human_authored_pending_items(items) != items:
+            parser.error("combined Human answer requires only Human-authored pending items.")
         if parsed.no_email and human_authored_pending_items(items):
             parser.error("--no-email cannot remove Human-authored pending items.")
         if items and human_authored_pending_items(items) and not parsed.no_email and not parsed.completion_key:
@@ -293,6 +890,26 @@ def parse_args(argv: list[str]) -> Args:
         )
     if parsed.command == "recover-removal-notice":
         return Args("recover-removal-notice", recovery_id=parsed.recovery_id)
+    if parsed.command == "reconcile-sent-remove":
+        digests = (parsed.completion_key, parsed.sent_subject_sha256, parsed.sent_body_sha256)
+        if any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in digests):
+            parser.error("completion and Sent-Mail digest values must be lowercase SHA-256 digests.")
+        if re.fullmatch(r"<[^<>\s]+>", parsed.message_id) is None:
+            parser.error("--message-id must be an exact RFC Message-ID enclosed in angle brackets.")
+        items = normalized_items(tuple(parsed.item))
+        if len(set(items)) != len(items):
+            parser.error("reconcile-sent-remove requires unique pending items.")
+        if human_authored_pending_items(items) != items:
+            parser.error("reconcile-sent-remove supports only Human-authored pending items.")
+        return Args(
+            parsed.command,
+            items,
+            evidence=normalized_comment_message(parsed.evidence),
+            completion_key=parsed.completion_key,
+            message_id=parsed.message_id,
+            sent_subject_sha256=parsed.sent_subject_sha256,
+            sent_body_sha256=parsed.sent_body_sha256,
+        )
     if parsed.command == "recover-source1970-eval":
         return Args(parsed.command, source1970_eval_queue_items(), evidence=source1970_eval_evidence())
     if parsed.command == "recover-source1994-plot":
@@ -303,6 +920,29 @@ def parse_args(argv: list[str]) -> Args:
         return Args(parsed.command, WATCHER_PANGRAM_ITEMS, evidence=WATCHER_PANGRAM_EVIDENCE)
     if parsed.command == "recover-mail-compress-reviewed-sent":
         return Args(parsed.command, MAIL_COMPRESS_ITEMS, evidence=MAIL_COMPRESS_EVIDENCE)
+    if parsed.command == "recover-source2048-batch-path":
+        if re.fullmatch(r"[0-9a-f]{64}", parsed.delivery_message_sha256) is None:
+            parser.error("--delivery-message-sha256 must be a lowercase SHA-256 digest.")
+        return Args(
+            parsed.command,
+            (SOURCE2048_BATCH_PATH_ITEM,),
+            evidence=SOURCE2048_BATCH_PATH_EVIDENCE,
+            delivery_transcript=parsed.delivery_transcript,
+            delivery_message_file=parsed.delivery_message_file,
+            delivery_message_sha256=parsed.delivery_message_sha256,
+        )
+    if parsed.command == "recover-source2048-batch-delivery":
+        return Args(
+            parsed.command,
+            (SOURCE2048_DELIVERY_SUPPORT_ITEM,),
+            evidence=SOURCE2048_DELIVERY_EVIDENCE,
+        )
+    if parsed.command == "recover-source2057":
+        return Args(parsed.command, (SOURCE2057_ITEM,), evidence=SOURCE2057_EVIDENCE)
+    if parsed.command == "recover-source2059":
+        return Args(parsed.command, (SOURCE2059_ITEM,))
+    if parsed.command == "recover-source2062":
+        return Args(parsed.command, (SOURCE2062_ITEM,))
     if parsed.command == "recover-source1990-pangram":
         hashes = (
             parsed.expected_task_sha256,
@@ -382,9 +1022,7 @@ def human_answer(args: Args) -> tuple[str, str]:
     return subject, body
 
 
-PENDING_ADD_NOTICE_RE = re.compile(
-    r"(?m)^\(pending item creation notice: ([0-9a-f]{64}):([0-9a-f]{64})\)$"
-)
+PENDING_ADD_NOTICE_RE = re.compile(r"(?m)^\(pending item creation notice: ([0-9a-f]{64}):([0-9a-f]{64})\)$")
 
 
 def pending_add_item_digest(items: tuple[str, ...]) -> str:
@@ -463,10 +1101,7 @@ def pending_queue_sha256(items: tuple[str, ...]) -> str:
 def source1994_pending_record_comment(item: str) -> str:
     """Return one durable exact-item record for the failed Source-1994 add operation."""
 
-    return (
-        f"recorded pending item from Human Source-1994 authority {SOURCE1994_PATH} after acknowledgement "
-        f"Message-ID {SOURCE1994_ACK_MESSAGE_ID}: {item}"
-    )
+    return f"recorded pending item from Human Source-1994 authority {SOURCE1994_PATH} after acknowledgement Message-ID {SOURCE1994_ACK_MESSAGE_ID}: {item}"
 
 
 def fsync_task_parent(path: Path) -> None:
@@ -609,16 +1244,10 @@ def recover_sent_pending_transition(args: Args, root: Path, path: Path) -> int:
         if updated_metadata is None:
             raise TaskFrontmatterError("updated pending queue metadata is invalid")
         after_queue_sha256 = pending_queue_sha256(updated_metadata.pending_task_items)
-        if source2003_add and (
-            count != len(SOURCE2003_ITEMS)
-            or updated_metadata.pending_task_items != SOURCE2003_ITEMS
-            or after_queue_sha256 != SOURCE2003_AFTER_QUEUE_SHA256
-        ):
+        if source2003_add and (count != len(SOURCE2003_ITEMS) or updated_metadata.pending_task_items != SOURCE2003_ITEMS or after_queue_sha256 != SOURCE2003_AFTER_QUEUE_SHA256):
             raise BlockingError("Source-2003 recovery must record all three exact items once")
         if args.command == "recover-source1994-plot" and (
-            count != len(SOURCE1994_COMPLETED_ITEMS)
-            or updated_metadata.pending_task_items != (SOURCE1994_ITEMS[-1],)
-            or after_queue_sha256 != SOURCE1994_AFTER_QUEUE_SHA256
+            count != len(SOURCE1994_COMPLETED_ITEMS) or updated_metadata.pending_task_items != (SOURCE1994_ITEMS[-1],) or after_queue_sha256 != SOURCE1994_AFTER_QUEUE_SHA256
         ):
             raise BlockingError("Source-1994 recovery did not preserve its exact one-item review queue")
         after_task_sha256 = hashlib.sha256(updated.encode()).hexdigest()
@@ -663,7 +1292,10 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
     if args.no_email and human_authored_pending_items(args.items):
         raise ValueError("--no-email cannot remove Human-authored pending items")
     if args.answer_subject_file or args.answer_message_file:
-        raise ValueError("pending-item notices cannot be combined with another Human answer")
+        if args.item_id:
+            raise ValueError("combined Human answer requires legacy --item removal")
+        if human_authored_pending_items(args.items) != args.items:
+            raise ValueError("combined Human answer requires only Human-authored pending items")
     path = current_pending_task(root)
     metadata = read_task_metadata(path, root)
     if metadata is None:
@@ -684,6 +1316,12 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
                 for item in current.pending_task_items:
                     print(item)
             return 0
+        if args.command == "recover-source2057":
+            return recover_source2057(root, path)
+        if args.command == "recover-source2059":
+            return recover_source2059(root, path)
+        if args.command == "recover-source2062":
+            return recover_source2062(root, path)
         if args.command in {
             "recover-source1990-pangram",
             "recover-source1970-eval",
@@ -694,6 +1332,26 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
         }:
             return recover_sent_pending_transition(args, root, path)
         answer_subject, answer_body = human_answer(args)
+        if args.command == "reconcile-sent-remove":
+            if current.version != "v1.0.0":
+                raise BlockingError("already-sent pending removal currently requires a legacy queue")
+            _updated, count = remove_pending_items(text, args.items)
+            if count != len(args.items):
+                raise BlockingError("already-sent pending removal requires every item exactly once")
+            # 🧑 Human: "Do not resend the Human answer."
+            reconcile_ordinary_sent_completion(
+                root,
+                path,
+                "pending item removed after verification",
+                args.message_id,
+                args.sent_subject_sha256,
+                args.sent_body_sha256,
+                items=args.items,
+                evidence=args.evidence,
+                semantic_key=args.completion_key,
+                pending_item_owner=True,
+            )
+            args = replace(args, command="remove")
         if args.command == "recover-removal-notice":
             recovery = REMOVAL_NOTICE_RECOVERIES.get(args.recovery_id)
             if recovery is None:
@@ -737,6 +1395,45 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
                 raise BlockingError("responsible-owner deletion notice requested; retry recovery after owner delivery")
             print(f"recovered deletion notice for {len(recovery.items)} completed pending item(s)")
             return 0
+        if args.command == "recover-source2048-batch-path":
+            if current.version != "v1.0.0" or path.resolve() != (root / SOURCE2048_CONFIG_TASK).resolve():
+                raise BlockingError("Source-2048 batch-path recovery requires its exact legacy configuration task")
+            if args.items != (SOURCE2048_BATCH_PATH_ITEM,) or args.evidence != SOURCE2048_BATCH_PATH_EVIDENCE:
+                raise BlockingError("Source-2048 batch-path recovery bindings changed")
+            updated, count = remove_pending_items(text, args.items)
+            if count != 1:
+                raise BlockingError("Source-2048 batch-path recovery requires its exact pending item once")
+            verify_source2048_invocation_delivery(args)
+            updated = append_comment(updated, pending_remove_evidence_comment(1, args.evidence))
+            replace_if_unchanged(path, updated, before)
+            print("reconciled the delivered Source-2048 batch path; no email sent")
+            return 0
+        if args.command == "recover-source2048-batch-delivery":
+            if current.version != "v1.0.0" or path.resolve() != (root / SOURCE2048_CONFIG_TASK).resolve():
+                raise BlockingError("Source-2048 delivery recovery requires its exact legacy configuration task")
+            if args.items != (SOURCE2048_DELIVERY_SUPPORT_ITEM,) or args.evidence != SOURCE2048_DELIVERY_EVIDENCE:
+                raise BlockingError("Source-2048 delivery recovery bindings changed")
+            paper = root / "paper_finish.md"
+            if (
+                ordinary_completion_participant_evidence(
+                    SOURCE2048_DELIVERY_MESSAGE_ID,
+                    SOURCE2048_SENT_SUBJECT_SHA256,
+                    SOURCE2048_SENT_BODY_SHA256,
+                )
+                is None
+            ):
+                raise BlockingError("Source-2048 exact Sent-Mail evidence is missing")
+            updated, count = remove_pending_items(text, args.items)
+            if count != 1:
+                raise BlockingError("Source-2048 delivery recovery requires its exact support item once")
+            updated = append_comment(updated, pending_remove_evidence_comment(1, args.evidence))
+            with task_file_lock(paper):
+                paper_metadata = read_task_metadata(paper, root)
+                if paper_metadata is None or paper_metadata.pending_task_items != (SOURCE2048_BROADER_ITEM,):
+                    raise BlockingError("Source-2048 paper queue does not retain exactly the broader review item")
+                replace_if_unchanged(path, updated, before)
+            print("reconciled the authenticated Source-2048 delivery support item; no email sent")
+            return 0
         if current.version == "v1.0.0" and v2_enabled(root):
             raise BlockingError("v1 pending writes are disabled after v2 enablement")
         if current.version == "v2.0.0":
@@ -751,11 +1448,7 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
                     raise BlockingError("pending item text is repeated in this request")
                 missing_items = tuple(item for item in args.items if item not in existing)
                 requested_notice_items = human_authored_pending_items(args.items)
-                semantic_key, delivered = (
-                    delivered_pending_add_notice(root, path, text, requested_notice_items)
-                    if requested_notice_items
-                    else ("", False)
-                )
+                semantic_key, delivered = delivered_pending_add_notice(root, path, text, requested_notice_items) if requested_notice_items else ("", False)
                 notice_items = requested_notice_items
                 if not delivered:
                     if not missing_items:
@@ -860,11 +1553,7 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
             existing = set(current.pending_task_items)
             added_items = tuple(item for item in args.items if item not in existing)
             requested_notice_items = human_authored_pending_items(args.items)
-            semantic_key, delivered = (
-                delivered_pending_add_notice(root, path, text, requested_notice_items)
-                if requested_notice_items
-                else ("", False)
-            )
+            semantic_key, delivered = delivered_pending_add_notice(root, path, text, requested_notice_items) if requested_notice_items else ("", False)
             if not added_items:
                 if delivered:
                     updated = append_comment(text, pending_add_notice_comment(requested_notice_items, semantic_key))
@@ -894,6 +1583,8 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
             print("replaced pending item" if changed else "pending item unchanged")
             return 0
         updated, count = remove_pending_items(text, args.items)
+        if answer_subject and count != len(args.items):
+            raise BlockingError("combined Human answer requires every pending item exactly once")
         updated = append_comment(updated, pending_remove_evidence_comment(count, args.evidence))
         if args.no_email:
             replace_if_unchanged(path, updated, before)

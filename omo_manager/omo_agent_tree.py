@@ -184,6 +184,8 @@ def parser() -> argparse.ArgumentParser:
               The default statuses are running and long_running. --status is
               repeatable. --all-statuses selects running, long_running, blocked,
               and done. `runat: retired` is always excluded.
+              A blocked record is included as a structural ancestor when
+              a selected descendant still records that target as its manager.
 
               The command scans Markdown task records under the root and validates
               registered external records through their receipt-bound source
@@ -353,6 +355,8 @@ def frontmatter_only(path: Path, *, indexed: bool) -> str | None:
         if indexed:
             raise TreeError(f"indexed task has no task frontmatter: {path}")
         return None
+    if not indexed and {"task", "tmux_target"}.issubset(keys) and not TASK_KEYS.issubset(keys):
+        return None
     return "---\n" + "\n".join(lines) + "\n---\n"
 
 
@@ -398,10 +402,29 @@ def registered_legacy_purpose(path: Path, task_ref: str) -> str | None:
     return matches[0].purpose
 
 
+def legacy_labeled_purpose(path: Path) -> str | None:
+    next_bullet = False
+    try:
+        with path.open(encoding="utf-8") as source:
+            for line in source:
+                stripped = line.strip()
+                for prefix in ("End goal:", "Historical closure:"):
+                    if stripped.startswith(prefix) and stripped.removeprefix(prefix).strip():
+                        return stripped.removeprefix(prefix).strip()
+                if next_bullet and stripped.startswith("- "):
+                    return stripped.removeprefix("- ").strip()
+                next_bullet = stripped in {"Request summary:", "Task:"}
+    except (OSError, UnicodeError) as exc:
+        raise TreeError(f"cannot read task purpose: {path}") from exc
+    return None
+
+
 def recorded_purpose(path: Path, task_ref: str = "") -> str:
     purpose = assignment_paragraph(path, "manager_delegation") or assignment_paragraph(path, "human_instruction")
     if purpose is None:
         purpose = registered_legacy_purpose(path, task_ref)
+    if purpose is None:
+        purpose = legacy_labeled_purpose(path)
     if purpose is None:
         raise TreeError(f"selected task has no assignment paragraph explaining its purpose: {path}")
     return purpose
@@ -469,7 +492,7 @@ def selected_frontmatter(source: str, statuses: tuple[str, ...]) -> bool:
     return declared[0] in statuses
 
 
-def local_records(root: Path, statuses: tuple[str, ...]) -> list[TaskRecord]:
+def local_records(root: Path, statuses: tuple[str, ...], targets: set[str] | None = None) -> list[TaskRecord]:
     indexed = root_index(root)
     records: list[TaskRecord] = []
     paths = set(root.rglob("*.md"))
@@ -491,6 +514,10 @@ def local_records(root: Path, statuses: tuple[str, ...]) -> list[TaskRecord]:
             raise TreeError(f"task record must not be a symlink: {relative}")
         if not required and not selected_frontmatter(source, statuses):
             continue
+        if targets is not None:
+            runats = [line.partition(":")[2].strip() for line in source.splitlines()[1:-1] if line.startswith("runat:")]
+            if len(runats) != 1 or canonical_target(runats[0]) not in targets:
+                continue
         try:
             metadata = parse_task_metadata(source, root)
         except TaskFrontmatterError as exc:
@@ -504,7 +531,7 @@ def local_records(root: Path, statuses: tuple[str, ...]) -> list[TaskRecord]:
     return records
 
 
-def external_records(root: Path, statuses: tuple[str, ...]) -> list[TaskRecord]:
+def external_records(root: Path, statuses: tuple[str, ...], targets: set[str] | None = None) -> list[TaskRecord]:
     if "blocked" not in statuses:
         return []
     registry = default_registry_dir()
@@ -527,6 +554,8 @@ def external_records(root: Path, statuses: tuple[str, ...]) -> list[TaskRecord]:
         if metadata is None:
             raise TreeError(f"registered external task has no task frontmatter: {receipt.task}")
         if metadata.status not in statuses or metadata.runat == "retired":
+            continue
+        if targets is not None and canonical_target(metadata.runat) not in targets:
             continue
         membership = f"{receipt.todo_section}: {receipt.todo_line}"
         records.append(task_record(receipt.task, recorded_purpose(Path(receipt.task)), metadata, membership, external=True))
@@ -690,6 +719,22 @@ def run(args: Args) -> str:
     configured = configuration(args)
     records = local_records(configured.root, args.statuses)
     records.extend(external_records(configured.root, args.statuses))
+    included_targets = {record.runat for record in records}
+    pending_parents = {record.managerat for record in records if record.managerat != configured.main_manager}
+    while pending_parents:
+        unresolved = pending_parents - included_targets
+        if not unresolved:
+            break
+        parent_records: list[TaskRecord] = []
+        remaining = unresolved
+        candidates = local_records(configured.root, ("blocked",), remaining)
+        candidates.extend(external_records(configured.root, ("blocked",), remaining))
+        parent_records.extend(candidates)
+        if not parent_records:
+            break
+        records.extend(parent_records)
+        included_targets.update(record.runat for record in parent_records)
+        pending_parents.update(record.managerat for record in parent_records if record.managerat != configured.main_manager)
     agents = hierarchy(records, configured.main_manager)
     root = selected_root(args, agents, configured.main_manager)
     if not args.json:

@@ -153,6 +153,32 @@ def is_monthly_archive_path(root: Path, path: Path) -> bool:
     return bool(relative.parts) and ARCHIVE_MONTH_RE.fullmatch(relative.parts[0]) is not None
 
 
+def canonical_retired_todo_row(todo_text: str, relative: str) -> bool:
+    """Require one raw, targetless `previous:` row with canonical headers."""
+
+    section: str | None = None
+    previous_headers = 0
+    references: list[tuple[str | None, str]] = []
+    task_pattern = re.compile(rf"^{re.escape(relative)}(?:\s|$)")
+    known_headers = {"current:": "current", "human pending:": "human pending", "low priority:": "low priority", "previous:": "previous"}
+    header_pattern = re.compile(r"^\s*[A-Za-z][A-Za-z0-9 _-]*:+\s*$")
+    for line in todo_text.splitlines():
+        if line in known_headers:
+            section = known_headers[line]
+            if section == "previous":
+                previous_headers += 1
+        elif re.fullmatch(r"\s*(?:current|previous|human pending|low priority)\s*(?:: *|)", line, re.IGNORECASE) or header_pattern.fullmatch(line):
+            return False
+        if task_pattern.fullmatch(line.strip()):
+            references.append((section, line))
+    return previous_headers == 1 and references == [("previous", relative)]
+
+
+def raw_todo_reference(todo_text: str, relative: str) -> bool:
+    pattern = re.compile(rf"(?<![A-Za-z0-9_.-]){re.escape(relative)}(?=$|[\s\]\[(){{}},;:])")
+    return any(pattern.search(line) is not None for line in todo_text.splitlines())
+
+
 def audit(root: Path, *, include_terminal: bool = False, terminal_dispositions: TerminalDispositionMap | None = None) -> tuple[Finding, ...]:
     root = root.resolve(strict=True)
     todo_path = root / "TODO.md"
@@ -162,7 +188,6 @@ def audit(root: Path, *, include_terminal: bool = False, terminal_dispositions: 
     except (UnicodeError, TaskFrontmatterError) as exc:
         raise TaskFrontmatterError(f"cannot read root TODO file: {exc}") from exc
     todo_rows: dict[Path, list[tuple[str, str]]] = defaultdict(list)
-    todo_row_lines: dict[Path, list[str]] = defaultdict(list)
     local_todo_rows = {(row.task_file, row.section, row.line, row.target) for row in local_rows}
     todo_path_findings: list[Finding] = []
     for row in parse_task_lines(todo_path):
@@ -186,7 +211,6 @@ def audit(root: Path, *, include_terminal: bool = False, terminal_dispositions: 
                 )
             )
         todo_rows[candidate].append((row.section, row.target))
-        todo_row_lines[candidate].append(row.line)
 
     paths = task_files(root)
     task_snapshots: dict[Path, FileSnapshot] = {}
@@ -223,11 +247,11 @@ def audit(root: Path, *, include_terminal: bool = False, terminal_dispositions: 
     for path, metadata in metadata_by_path.items():
         relative = path.relative_to(root).as_posix()
         rows = todo_rows.get(path, [])
-        row_lines = todo_row_lines.get(path, [])
         archived = not rows and (path in archived_paths or is_monthly_archive_path(root, path))
         retired_terminal = metadata.status == "done" and metadata.runat == RETIRED_RUNAT
-        retired_terminal_valid = rows == [("todo:previous", "")] and row_lines == [relative]
-        if retired_terminal and not retired_terminal_valid:
+        retired_terminal_valid = canonical_retired_todo_row(todo_snapshot[-1].decode("utf-8"), relative)
+        raw_reference = raw_todo_reference(todo_snapshot[-1].decode("utf-8"), relative)
+        if retired_terminal and (rows or raw_reference) and not retired_terminal_valid:
             findings.append(
                 Finding(
                     "retired_todo_invalid",

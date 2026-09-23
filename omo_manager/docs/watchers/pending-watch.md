@@ -9,15 +9,21 @@
 
 - file-change path
   - Linux uses recursive inotify watches on the work-log root
+  - setup rejects every explicitly inherited, locally configured, or final selected root that is missing, not a directory, or has a symlink as its lexical final component, including after removing trailing slashes and terminal `/.` components; symlinked ancestors are permitted and the selected real directory is identity-checked, while directory-symlink entries beneath it are skipped instead of followed
   - `.git`, `.venv`, and `__pycache__` dirs are ignored
   - Markdown file events enqueue only changed files for marker parsing
   - `manager_mail/*.txt` events force a full Markdown scan so email attachment retries wake promptly
   - directory create, move, watch removal, unmount, or queue overflow forces a full Markdown scan
   - a filesystem notification resets the mtime-poll backstop even when no Markdown file changed
-  - platforms without inotify use the older mtime scan fallback
+  - platforms without inotify use the older mtime scan fallback only for direct invocations without `--ready-file`; manager setup always requires authenticated inotify readiness and fails closed when it is unavailable
 
 - safety scans
   - startup scans all Markdown files
+  - setup accepts the watcher only after authenticating an active process for the exact watcher script beneath its owned supervisor, exact `--root ROOT`, and token-specific `--ready-file FILE`, then verifying that the owner-private record names that process and the unchanged pre-teardown root identity; the watcher publishes that record only after completing watch-tree setup and the initial file inventory
+  - setup-launched supervisors are session-leading child subreapers; controlled teardown waits until all descendants, including children that create new sessions, are reaped, and a failed teardown retains its recovery pidfile
+  - each stable supervisor pidfile records the launch root's device and inode; setup requires that identity before cross-run teardown and reauthenticates the new guardian after writing the pidfile and before deleting its launch record; the pending guardian stops rather than restarting onto a changed root identity
+  - normal teardown permits different ancestor-symlink spellings only when they resolve to the same persisted root identity; ignoring root resolution is limited to cleanup of the exact just-launched pending guardian after readiness failure
+  - an unauthenticated launch report retains the just-launched process and launch record, while an authenticated pidfile supervisor for a different or unresolved root retains its process and pidfile; both cases abort setup without starting a replacement
   - periodic full scans remain controlled by `--full-scan-interval-s`
   - full scans refresh the fallback mtime snapshot
   - while inotify is active, `--poll-backstop-interval-s` runs an mtime scan after 30 seconds without a filesystem notification, full scan, or previous backstop poll
@@ -99,6 +105,8 @@
   - keeps the exact absent `data_gen_mgr.md` stopped record quiet only while independent target resolution confirms absence and its sole human-pending row, complete task bytes, queue, target, manager, role, and Human termination blocker remain unchanged; any uncertain resolution, runtime, or identity drift remains reportable
   - remembers each accepted dependency tree and authoritative human-blocked snapshot in process-local state; a human snapshot binds exact TODO custody, task bytes, lifecycle, target, owner, blocker, queued goals, and normalized ready-pane report evidence, so any change alerts once; dependency changes, missing or inactive nodes, malformed/cyclic/ambiguous ownership, target reuse, and report-bearing nodes also alert
   - detects manager pane problems when `OMO_MANAGER_TMUX_TARGET` is set
+  - directly emails the Human for each tmux or OmniGent `error` row after dedicated capacity recovery removes recoverable capacity errors; a visibility-only scan that also contains malformed task metadata emails its error rows without running recovery or other pane actions; severe main-manager failures use the same email, while normal owner and recovery-manager routing still proceeds
+  - watcher error email runs `email_me.py` with the watcher root, manager target, and exact problem output; delivery requires separate agent and human mailboxes, failed delivery retries after 10 minutes, and each unchanged delivered error uses the normal problem-repeat throttle
   - detects completed task files whose agents still appear open
   - detects `untracked_agent` panes when a non-`h*` tmux session contains a running, ready, errored, or stuck Codex pane that no task file owns
   - agent-problem prompts start with a direct helper instruction and do not need human acknowledgement
@@ -148,7 +156,7 @@
   - an exact selected-model-capacity warning is recovered by submitting literal `resume` in the same pane, including human-owned `h*` panes under this capacity-recovery exception; only a verified submission that leaves the exact warning consumes one of three attempts
   - executor, pre-paste, paste, submit, and verification failures preserve the three-attempt budget, schedule another same-pane `resume`, and alert the owner not to launch a replacement pane
   - exact-capacity `error` and `untracked_agent` rows are withheld from generic manager prompts while dedicated recovery runs; after three persistent verified submissions, the owner or main-manager peer receives same-pane recovery instructions
-  - non-blocked panes classified as `stuck_input` are submitted with Enter when the Codex status helper says the visible input is safe
+  - non-blocked panes classified as `stuck_input` are submitted with Enter when the Codex status helper says the visible input is safe; this includes a nonempty composer under an active `Working (... • esc to interrupt)` line with the `tab to queue message` footer, but excludes background-terminal waits and compaction
   - first and second successful Enter attempts are remembered and suppressed; the third still-stuck report is sent to the owning manager
   - remembered Enter attempts are cleared when that target is no longer reported as stuck
   - for non-human panes only, a newly completed Codex turn (a changed prompt-through-`Worked for` fingerprint) resets the three-attempt Enter counter; partial output, spinners, and unchanged turns do not reset it

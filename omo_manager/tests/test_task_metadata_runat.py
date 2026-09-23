@@ -11,7 +11,8 @@ from omo_manager.omo_tmux_send import CodexSendOptions, main as tmux_send_main, 
 from omo_manager.omo_task_status import main as task_status_main
 
 
-def task(version: str, runat: str) -> str:
+def task(version: str, runat: str, tool: str = "codex", session_id: str = "") -> str:
+    session_line = f"session_id: {session_id}\n" if session_id else ""
     v2_fields = (
         """task_id: task_019f0000-0000-7000-8000-000000000001
 resolved_task_items: []
@@ -23,8 +24,8 @@ resolved_task_items: []
 version: {version}
 status: running
 runat: {runat}
-tool: codex
-managerat: manager:1
+tool: {tool}
+{session_line}managerat: manager:1
 is_manager: false
 {v2_fields}pending_task_items: []
 ---
@@ -45,6 +46,28 @@ class TaskMetadataRunatTests(unittest.TestCase):
         assert metadata is not None
         self.assertEqual("done", metadata.status)
         self.assertEqual("retired", metadata.runat)
+
+    def test_blocked_retired_codex_keeps_session_evidence(self) -> None:
+        session_id = "019f0000-0000-7000-8000-000000000123"
+        source = task("v1.0.0", "retired", session_id=session_id).replace(
+            "status: running", "status: blocked\nblocked_on: archived dependency"
+        )
+        metadata = parse_task_metadata(source)
+        assert metadata is not None
+        self.assertEqual(session_id, metadata.session_id)
+
+    def test_done_retired_codex_keeps_session_evidence(self) -> None:
+        session_id = "019f0000-0000-7000-8000-000000000123"
+        source = task("v1.0.0", "retired", session_id=session_id).replace("status: running", "status: done")
+        metadata = parse_task_metadata(source)
+        assert metadata is not None
+        self.assertEqual(session_id, metadata.session_id)
+
+    def test_retired_non_codex_rejects_session_id(self) -> None:
+        session_id = "019f0000-0000-7000-8000-000000000123"
+        source = task("v1.0.0", "retired", tool="cursor", session_id=session_id).replace("status: running", "status: done")
+        with self.assertRaisesRegex(TaskFrontmatterError, "Codex tmux or retired target"):
+            _ = parse_task_metadata(source)
 
     def test_tmux_targets_keep_precedence_and_canonicalization(self) -> None:
         for target, canonical in (("wl:2", "wl:2"), ("wl:2.0", "wl:2"), ("omnigent:123", "omnigent:123")):
@@ -77,6 +100,33 @@ class TaskMetadataRunatTests(unittest.TestCase):
         text = task("v1.0.0", "omnigent://session-123").replace("tool: codex", "tool: omnigent")
         with self.assertRaisesRegex(TaskFrontmatterError, "actual `tool` harness"):
             _ = parse_task_metadata(text)
+        antigravity = parse_task_metadata(task("v1.0.0", "omnigent://session-123").replace("tool: codex", "tool: antigravity"))
+        assert antigravity is not None
+        self.assertEqual("antigravity", antigravity.tool)
+        with self.assertRaisesRegex(TaskFrontmatterError, "requires an OmniGent"):
+            _ = parse_task_metadata(task("v1.0.0", "wl:2").replace("tool: codex", "tool: antigravity"))
+        retired = parse_task_metadata(
+            task("v1.0.0", "retired").replace("status: running", "status: done").replace("tool: codex", "tool: antigravity")
+        )
+        assert retired is not None
+        self.assertEqual("antigravity", retired.tool)
+        self.assertEqual("retired", retired.runat)
+
+    def test_omnigent_session_id_matches_runat_for_every_supported_tool(self) -> None:
+        for version in ("v1.0.0", "v2.0.0"):
+            for tool in ("antigravity", "codex", "cursor"):
+                with self.subTest(version=version, tool=tool):
+                    metadata = parse_task_metadata(task(version, "omnigent://api-session.123", tool, "api-session.123"))
+                    assert metadata is not None
+                    self.assertEqual("api-session.123", metadata.session_id)
+
+    def test_omnigent_session_id_rejects_runat_mismatch(self) -> None:
+        with self.assertRaisesRegex(TaskFrontmatterError, "must equal"):
+            _ = parse_task_metadata(task("v1.0.0", "omnigent://api-session", "cursor", "different-session"))
+
+    def test_tmux_non_codex_session_id_remains_invalid(self) -> None:
+        with self.assertRaisesRegex(TaskFrontmatterError, "Codex tmux or retired target, or an OmniGent target"):
+            _ = parse_task_metadata(task("v1.0.0", "wl:2", "cursor", "api-session"))
 
     @patch("omo_manager.omo_agent_status.omnigent_session_snapshot")
     def test_agent_status_inspects_omnigent_without_tmux(self, snapshot) -> None:

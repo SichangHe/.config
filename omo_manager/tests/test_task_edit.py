@@ -11,6 +11,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+import omo_manager.omo_task_edit as task_edit
 from omo_manager.omo_agent_status import parse_task_metadata
 from omo_manager.omo_task_edit import REMOVE_REMINDER
 from omo_manager.omo_task_edit import SOURCE1503_SHA256
@@ -556,6 +557,262 @@ class TaskEditTests(unittest.TestCase):
         self.assertEqual("frontmatter-normalize", args.command)
         self.assertEqual(12, args.line)
 
+    def test_closed_status_normalize_preserves_queue_body_and_runtime_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            original = task_frontmatter(pending_items=("keep Human work",)).replace("status: running", "status: closed") + "body\n"
+            task.write_text(original, encoding="utf-8")
+            digest = hashlib.sha256(original.encode()).hexdigest()
+
+            self.assertEqual(
+                0,
+                run(
+                    Args(
+                        root,
+                        Path("task.md"),
+                        "closed-status-normalize",
+                        expected_task_sha256=digest,
+                        blocked_on="waiting for Human decision",
+                    )
+                ),
+            )
+
+            updated = task.read_text(encoding="utf-8")
+            self.assertEqual(original.replace("status: closed", "status: blocked\nblocked_on: waiting for Human decision"), updated)
+            metadata = parse_task_metadata(updated, root)
+            assert metadata is not None
+            self.assertEqual(("keep Human work",), metadata.pending_task_items)
+            self.assertEqual("wl:2", metadata.runat)
+            self.assertEqual("body\n", updated.rsplit("---\n", 1)[1])
+
+    def test_closed_status_normalize_rejects_digest_drift_without_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            original = task_frontmatter(pending_items=("keep Human work",)).replace("status: running", "status: closed")
+            task.write_text(original, encoding="utf-8")
+
+            self.assertEqual(
+                2,
+                run(
+                    Args(
+                        root,
+                        Path("task.md"),
+                        "closed-status-normalize",
+                        expected_task_sha256="0" * 64,
+                        blocked_on="waiting for Human decision",
+                    )
+                ),
+            )
+            self.assertEqual(original, task.read_text(encoding="utf-8"))
+
+    def test_closed_status_normalize_accepts_evidence_bound_done(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            session_id = "019f0000-0000-7000-8000-000000000123"
+            original = (
+                task_frontmatter()
+                .replace("status: running", "status: closed")
+                .replace("managerat: wl:1", f"session_id: {session_id}\nmanagerat: wl:1")
+                + f"(human closed `{session_id}` as done)\n"
+            )
+            task.write_text(original, encoding="utf-8")
+
+            self.assertEqual(
+                0,
+                run(
+                    Args(
+                        root,
+                        Path("task.md"),
+                        "closed-status-normalize",
+                        expected_task_sha256=hashlib.sha256(original.encode()).hexdigest(),
+                    )
+                ),
+            )
+            self.assertEqual(original.replace("status: closed", "status: done"), task.read_text(encoding="utf-8"))
+
+    def test_closed_status_normalize_parser_rejects_empty_blocker(self) -> None:
+        with self.assertRaises(SystemExit):
+            parse_args(["closed-status-normalize", "task.md", "--expected-task-sha256", "a" * 64, "--blocked-on", ""])
+
+    def test_report_todo_remove_preserves_report_and_removes_only_index_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = root / "report.md"
+            todo = root / "TODO.md"
+            report_text = "# report\n\n(authored by agents unless marked 🧑)\n\nHuman-action content\n"
+            todo_text = "current:\nworker.md wl:2\n\nhuman pending:\nreport.md\nother.md wl:3\n"
+            report.write_text(report_text, encoding="utf-8")
+            todo.write_text(todo_text, encoding="utf-8")
+
+            self.assertEqual(
+                0,
+                run(
+                    Args(
+                        root,
+                        Path("report.md"),
+                        "report-todo-remove",
+                        expected_task_sha256=hashlib.sha256(report_text.encode()).hexdigest(),
+                        expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                    )
+                ),
+            )
+            self.assertEqual(report_text, report.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text.replace("report.md\n", ""), todo.read_text(encoding="utf-8"))
+
+    def test_non_codex_session_normalize_preserves_uuid_in_body_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            session_id = "019f0000-0000-7000-8000-000000000123"
+            original = (
+                task_frontmatter(status="long_running", pending_items=("keep work",))
+                .replace("tool: codex", "tool: cursor")
+                .replace("managerat: wl:1", f"session_id: {session_id}\nmanagerat: wl:1")
+                + "body\n"
+            )
+            task.write_text(original, encoding="utf-8")
+
+            self.assertEqual(
+                0,
+                run(
+                    Args(
+                        root,
+                        Path("task.md"),
+                        "non-codex-session-normalize",
+                        expected_task_sha256=hashlib.sha256(original.encode()).hexdigest(),
+                    )
+                ),
+            )
+            updated = task.read_text(encoding="utf-8")
+            metadata = parse_task_metadata(updated, root)
+            assert metadata is not None
+            self.assertEqual("", metadata.session_id)
+            self.assertEqual(("keep work",), metadata.pending_task_items)
+            self.assertIn(f"historical Codex session_id preserved after tool migration: `{session_id}`", updated)
+
+    def test_non_codex_session_normalize_rejects_omnigent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            session_id = "019f0000-0000-7000-8000-000000000123"
+            original = (
+                task_frontmatter(status="long_running")
+                .replace("runat: wl:2", f"runat: omnigent://{session_id}")
+                .replace("tool: codex", "tool: cursor")
+                .replace("managerat: wl:1", f"session_id: {session_id}\nmanagerat: wl:1")
+            )
+            task.write_text(original, encoding="utf-8")
+            self.assertEqual(
+                2,
+                run(Args(root, Path("task.md"), "non-codex-session-normalize", expected_task_sha256=hashlib.sha256(original.encode()).hexdigest())),
+            )
+            self.assertEqual(original, task.read_text(encoding="utf-8"))
+
+    def test_closed_status_done_rejects_empty_session_evidence_and_v2(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, original in (
+                ("empty.md", task_frontmatter().replace("status: running", "status: closed") + "(human closed `` as done)\n"),
+                (
+                    "v2.md",
+                    task_frontmatter()
+                    .replace("version: v1.0.0", "version: v2.0.0")
+                    .replace("status: running", "status: closed")
+                    .replace("pending_task_items: []", "task_id: task_019f0000-0000-7000-8000-000000000001\nresolved_task_items: []\npending_task_items: []"),
+                ),
+            ):
+                with self.subTest(name=name):
+                    task = root / name
+                    task.write_text(original, encoding="utf-8")
+                    self.assertEqual(
+                        2,
+                        run(Args(root, Path(name), "closed-status-normalize", expected_task_sha256=hashlib.sha256(original.encode()).hexdigest())),
+                    )
+                    self.assertEqual(original, task.read_text(encoding="utf-8"))
+
+    def test_report_todo_remove_rejects_todo_as_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            todo = root / "TODO.md"
+            text = "human pending:\nTODO.md\n"
+            todo.write_text(text, encoding="utf-8")
+            digest = hashlib.sha256(text.encode()).hexdigest()
+            self.assertEqual(
+                2,
+                run(Args(root, Path("TODO.md"), "report-todo-remove", expected_task_sha256=digest, expected_todo_sha256=digest)),
+            )
+
+    def test_report_todo_remove_accepts_generic_yaml_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = root / "report.md"
+            todo = root / "TODO.md"
+            report_text = "---\ntitle: historical review\n---\nHuman-action content\n"
+            todo_text = "human pending:\nreport.md\n"
+            report.write_text(report_text, encoding="utf-8")
+            todo.write_text(todo_text, encoding="utf-8")
+            self.assertEqual(
+                0,
+                run(
+                    Args(
+                        root,
+                        Path("report.md"),
+                        "report-todo-remove",
+                        expected_task_sha256=hashlib.sha256(report_text.encode()).hexdigest(),
+                        expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                    )
+                ),
+            )
+            self.assertEqual(report_text, report.read_text(encoding="utf-8"))
+
+    def test_report_todo_remove_rejects_quoted_task_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = root / "report.md"
+            todo = root / "TODO.md"
+            report_text = '---\n"version": v1.0.0\n"status": running\n"runat": wl:2\n"tool": codex\n"managerat": wl:1\n"is_manager": false\n"pending_task_items": []\n---\n'
+            todo_text = "human pending:\nreport.md\n"
+            report.write_text(report_text, encoding="utf-8")
+            todo.write_text(todo_text, encoding="utf-8")
+            self.assertEqual(
+                2,
+                run(
+                    Args(
+                        root,
+                        Path("report.md"),
+                        "report-todo-remove",
+                        expected_task_sha256=hashlib.sha256(report_text.encode()).hexdigest(),
+                        expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                    )
+                ),
+            )
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_closed_status_normalize_preserves_crlf_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            original = task_frontmatter(pending_items=("keep work",)).replace("status: running", "status: closed").replace("\n", "\r\n").encode()
+            task.write_bytes(original)
+            self.assertEqual(
+                0,
+                run(
+                    Args(
+                        root,
+                        Path("task.md"),
+                        "closed-status-normalize",
+                        expected_task_sha256=hashlib.sha256(original).hexdigest(),
+                        blocked_on="waiting",
+                    )
+                ),
+            )
+            updated = task.read_bytes()
+            self.assertNotIn(b"\n", updated.replace(b"\r\n", b""))
+            self.assertIn(b"status: blocked\r\nblocked_on: waiting\r\n", updated)
+
     def test_summary_prints_frontmatter_overview_without_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -611,7 +868,7 @@ class TaskEditTests(unittest.TestCase):
                 stdout.getvalue(),
             )
 
-    def test_non_summary_command_rejects_historical_done_retired_task(self) -> None:
+    def test_pending_list_accepts_historical_done_retired_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task = root / "terminal.md"
@@ -619,13 +876,13 @@ class TaskEditTests(unittest.TestCase):
                 task_frontmatter(status="done").replace("runat: wl:2", "runat: retired"),
                 encoding="utf-8",
             )
-            stderr = io.StringIO()
+            stdout = io.StringIO()
 
-            with redirect_stderr(stderr):
+            with redirect_stdout(stdout):
                 exit_code = run(Args(root, Path("terminal.md"), "pending-list"))
 
-            self.assertEqual(2, exit_code)
-            self.assertIn("`runat: retired` is only valid when `status` is `blocked`", stderr.getvalue())
+            self.assertEqual(0, exit_code)
+            self.assertEqual("", stdout.getvalue())
 
     def test_summary_rejects_done_retired_task_with_pending_work(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -856,6 +1113,190 @@ class TaskEditTests(unittest.TestCase):
             self.assertEqual(("🧑 answer request",), require.call_args.kwargs["items"])
             self.assertEqual(("🧑 answer request",), plan.call_args.kwargs["items"])
             send.assert_called_once_with(None)
+
+    def source2050_fixture(self, root: Path, *, duplicate: bool = False) -> tuple[Path, str, dict[str, str]]:
+        items = ("unrelated before", *task_edit.SOURCE2050_ITEMS, "unrelated after")
+        if duplicate:
+            items = (*items, task_edit.SOURCE2050_ITEMS[0])
+        watcher_text = task_frontmatter(pending_items=items).replace("runat: wl:2", "runat: config:35").replace("managerat: wl:1", "managerat: config:39")
+        watcher_text += "\n".join(task_edit.SOURCE2050_BODY_EVIDENCE) + "\n"
+        watcher = root / task_edit.SOURCE2050_TASK
+        watcher.write_text(watcher_text, encoding="utf-8")
+        pangram_text = task_frontmatter(status="done").replace("runat: wl:2", "runat: dw:15").replace("managerat: wl:1", "managerat: dw:60")
+        pangram = root / task_edit.SOURCE2050_PANGRAM_TASK
+        pangram.write_text(pangram_text, encoding="utf-8")
+        todo = root / "TODO.md"
+        todo.write_text("previous:\nsrc1964_pangram.md dw:15\n", encoding="utf-8")
+        constants = {
+            "SOURCE2050_ROOT": str(root.resolve()),
+            "SOURCE2050_TASK_SHA256": hashlib.sha256(watcher_text.encode()).hexdigest(),
+            "SOURCE2050_QUEUE_SHA256": task_edit.digest_fields("pending-queue-v1", *items),
+            "SOURCE2050_PANGRAM_SHA256": hashlib.sha256(pangram_text.encode()).hexdigest(),
+            "SOURCE2050_TODO_SHA256": hashlib.sha256(todo.read_bytes()).hexdigest(),
+        }
+        return watcher, watcher_text, constants
+
+    def test_source2050_cleanup_removes_only_two_exact_items_without_email(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            watcher, _text, constants = self.source2050_fixture(root)
+            args = parse_args(["--root", str(root), "recover-source2050-pangram-cleanup"])
+            self.assertEqual(task_edit.SOURCE2050_TASK, args.task_file)
+            self.assertEqual(task_edit.SOURCE2050_ITEMS, args.items)
+            with patch.multiple(task_edit, **constants), patch("omo_manager.omo_task_edit.send_completion_email") as email:
+                self.assertEqual(0, run(args))
+            email.assert_not_called()
+            metadata = parse_task_metadata(watcher.read_text(encoding="utf-8"), root)
+            assert metadata is not None
+            self.assertEqual(("unrelated before", "unrelated after"), metadata.pending_task_items)
+            self.assertIn(task_edit.SOURCE2050_EVIDENCE, watcher.read_text(encoding="utf-8"))
+
+    def test_source2050_cleanup_rejects_task_drift_or_duplicate_before_mutation(self) -> None:
+        for mode in ("task-drift", "duplicate"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                watcher, original, constants = self.source2050_fixture(root, duplicate=mode == "duplicate")
+                if mode == "task-drift":
+                    watcher.write_text(original + "drift\n", encoding="utf-8")
+                    original += "drift\n"
+                args = Args(root, task_edit.SOURCE2050_TASK, "recover-source2050-pangram-cleanup", items=task_edit.SOURCE2050_ITEMS, evidence=task_edit.SOURCE2050_EVIDENCE)
+                with patch.multiple(task_edit, **constants), redirect_stderr(io.StringIO()):
+                    self.assertEqual(2, run(args))
+                self.assertEqual(original, watcher.read_text(encoding="utf-8"))
+
+    def test_source2050_cleanup_rejects_race_after_digest_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            watcher, original, constants = self.source2050_fixture(root)
+            args = Args(root, task_edit.SOURCE2050_TASK, "recover-source2050-pangram-cleanup", items=task_edit.SOURCE2050_ITEMS, evidence=task_edit.SOURCE2050_EVIDENCE)
+            replace = task_edit.replace_if_unchanged_locked
+
+            def race(path: Path, updated: str, before: object) -> None:
+                path.write_text(original + "outside-lock drift\n", encoding="utf-8")
+                replace(path, updated, before)  # type: ignore[arg-type]
+
+            with patch.multiple(task_edit, **constants), patch("omo_manager.omo_task_edit.replace_if_unchanged_locked", side_effect=race), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertEqual(original + "outside-lock drift\n", watcher.read_text(encoding="utf-8"))
+
+    def test_source2050_cleanup_rejects_completion_evidence_race(self) -> None:
+        for filename in (task_edit.SOURCE2050_PANGRAM_TASK, Path("TODO.md")):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                watcher, original, constants = self.source2050_fixture(root)
+                evidence_path = root / filename
+                evidence_original = evidence_path.read_text(encoding="utf-8")
+                args = Args(root, task_edit.SOURCE2050_TASK, "recover-source2050-pangram-cleanup", items=task_edit.SOURCE2050_ITEMS, evidence=task_edit.SOURCE2050_EVIDENCE)
+                remove = task_edit.remove_pending_items
+
+                def race(text: str, items: tuple[str, ...]) -> tuple[str, int]:
+                    evidence_path.write_text(evidence_original + "outside-lock drift\n", encoding="utf-8")
+                    return remove(text, items)
+
+                with patch.multiple(task_edit, **constants), patch("omo_manager.omo_task_edit.remove_pending_items", side_effect=race), redirect_stderr(io.StringIO()):
+                    self.assertEqual(2, run(args))
+                self.assertEqual(original, watcher.read_text(encoding="utf-8"))
+
+    def test_source2050_cleanup_rolls_back_evidence_race_at_watcher_commit(self) -> None:
+        for filename in (task_edit.SOURCE2050_PANGRAM_TASK, Path("TODO.md")):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                watcher, original, constants = self.source2050_fixture(root)
+                evidence_path = root / filename
+                evidence_original = evidence_path.read_text(encoding="utf-8")
+                args = Args(root, task_edit.SOURCE2050_TASK, "recover-source2050-pangram-cleanup", items=task_edit.SOURCE2050_ITEMS, evidence=task_edit.SOURCE2050_EVIDENCE)
+                replace = task_edit.replace_if_unchanged_locked
+                n_calls = 0
+
+                def race(path: Path, updated: str, before: object) -> None:
+                    nonlocal n_calls
+                    n_calls += 1
+                    if n_calls == 1:
+                        replace(path, updated, before)  # type: ignore[arg-type]
+                        evidence_path.write_text(evidence_original + "outside-lock drift\n", encoding="utf-8")
+                        return
+                    replace(path, updated, before)  # type: ignore[arg-type]
+
+                with patch.multiple(task_edit, **constants), patch("omo_manager.omo_task_edit.replace_if_unchanged_locked", side_effect=race), redirect_stderr(io.StringIO()):
+                    self.assertEqual(2, run(args))
+                self.assertEqual(2, n_calls)
+                self.assertEqual(original, watcher.read_text(encoding="utf-8"))
+
+    def test_source2050_cleanup_preserves_watcher_write_while_retrying_rollback(self) -> None:
+        for filename in (task_edit.SOURCE2050_PANGRAM_TASK, Path("TODO.md")):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                watcher, original, constants = self.source2050_fixture(root)
+                evidence_path = root / filename
+                evidence_original = evidence_path.read_text(encoding="utf-8")
+                args = Args(root, task_edit.SOURCE2050_TASK, "recover-source2050-pangram-cleanup", items=task_edit.SOURCE2050_ITEMS, evidence=task_edit.SOURCE2050_EVIDENCE)
+                replace = task_edit.replace_if_unchanged_locked
+                n_calls = 0
+
+                def race(path: Path, updated: str, before: object) -> None:
+                    nonlocal n_calls
+                    n_calls += 1
+                    if n_calls == 1:
+                        replace(path, updated, before)  # type: ignore[arg-type]
+                        evidence_path.write_text(evidence_original + "outside-lock evidence drift\n", encoding="utf-8")
+                        path.write_text(path.read_text(encoding="utf-8") + "concurrent watcher write\n", encoding="utf-8")
+                        return
+                    elif n_calls == 2:
+                        path.write_text(path.read_text(encoding="utf-8") + "second concurrent watcher write\n", encoding="utf-8")
+                    replace(path, updated, before)  # type: ignore[arg-type]
+
+                with patch.multiple(task_edit, **constants), patch("omo_manager.omo_task_edit.replace_if_unchanged_locked", side_effect=race), redirect_stderr(io.StringIO()):
+                    self.assertEqual(2, run(args))
+                self.assertEqual(3, n_calls)
+                self.assertEqual(original + "concurrent watcher write\nsecond concurrent watcher write\n", watcher.read_text(encoding="utf-8"))
+
+    def test_source2050_cleanup_retains_guard_after_bounded_rollback_conflicts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            watcher, _original, constants = self.source2050_fixture(root)
+            evidence_path = root / task_edit.SOURCE2050_PANGRAM_TASK
+            evidence_original = evidence_path.read_text(encoding="utf-8")
+            args = Args(root, task_edit.SOURCE2050_TASK, "recover-source2050-pangram-cleanup", items=task_edit.SOURCE2050_ITEMS, evidence=task_edit.SOURCE2050_EVIDENCE)
+            replace = task_edit.replace_if_unchanged_locked
+            n_calls = 0
+
+            def race(path: Path, updated: str, before: object) -> None:
+                nonlocal n_calls
+                n_calls += 1
+                if n_calls == 1:
+                    replace(path, updated, before)  # type: ignore[arg-type]
+                    evidence_path.write_text(evidence_original + "outside-lock evidence drift\n", encoding="utf-8")
+                    return
+                path.write_text(path.read_text(encoding="utf-8") + f"conflict {n_calls}\n", encoding="utf-8")
+                replace(path, updated, before)  # type: ignore[arg-type]
+
+            with patch.multiple(task_edit, **constants), patch("omo_manager.omo_task_edit.replace_if_unchanged_locked", side_effect=race), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertEqual(1 + task_edit.SOURCE2050_ROLLBACK_ATTEMPTS, n_calls)
+            metadata = parse_task_metadata(watcher.read_text(encoding="utf-8"), root)
+            assert metadata is not None
+            self.assertEqual(("unrelated before", "unrelated after", task_edit.SOURCE2050_GUARD), metadata.pending_task_items)
+
+    def test_source2050_cleanup_retains_guard_when_final_publish_conflicts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            watcher, _original, constants = self.source2050_fixture(root)
+            args = Args(root, task_edit.SOURCE2050_TASK, "recover-source2050-pangram-cleanup", items=task_edit.SOURCE2050_ITEMS, evidence=task_edit.SOURCE2050_EVIDENCE)
+            replace = task_edit.replace_if_unchanged_locked
+            n_calls = 0
+
+            def race(path: Path, updated: str, before: object) -> None:
+                nonlocal n_calls
+                n_calls += 1
+                if n_calls == 2:
+                    path.write_text(path.read_text(encoding="utf-8") + "concurrent watcher write\n", encoding="utf-8")
+                replace(path, updated, before)  # type: ignore[arg-type]
+
+            with patch.multiple(task_edit, **constants), patch("omo_manager.omo_task_edit.replace_if_unchanged_locked", side_effect=race), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            metadata = parse_task_metadata(watcher.read_text(encoding="utf-8"), root)
+            assert metadata is not None
+            self.assertEqual(("unrelated before", "unrelated after", task_edit.SOURCE2050_GUARD), metadata.pending_task_items)
 
     def test_manager_pending_remove_owner_callback_then_retry_mutates_once(self) -> None:
         from omo_manager.omo_completion_email import build_completion_email

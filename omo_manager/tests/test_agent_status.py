@@ -849,7 +849,7 @@ resolved_task_items: []
             self.assertIn("blocked_idle: task=role.md", text)
             self.assertNotIn("stuck_input", text)
 
-    def test_problems_only_stays_quiet_for_queued_input_footer_during_work(self) -> None:
+    def test_problems_only_unsticks_queued_input_during_work(self) -> None:
         pane = [
             '• Working (19m 47s • esc to interrupt)',
             '',
@@ -866,10 +866,15 @@ resolved_task_items: []
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
             _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
-            with patch("omo_manager.omo_codex_status.exact_tail", return_value=(True, pane)), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
-                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            unstick.assert_not_called()
-            self.assertEqual("", out.getvalue())
+            with patch("omo_manager.omo_codex_status.exact_tail", return_value=(True, pane)), patch(
+                "omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter"
+            ) as unstick, redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            unstick.assert_called_once()
+            text = out.getvalue()
+            self.assertIn("stuck_input: task=active.md", text)
+            self.assertIn("unstick=sent_enter", text)
+            self.assertIn("unstuck: target=cfg:1.0 task=active.md action=sent_enter", text)
 
     def test_problems_only_reports_selected_model_capacity_warning_as_error(self) -> None:
         pane = ['────', '⚠ Selected model is at capacity. Please try a different model.', '› Use /skills to list available skills', '  gpt-5.5']

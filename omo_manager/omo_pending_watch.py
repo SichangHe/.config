@@ -94,6 +94,7 @@ from omo_manager.omo_ready_report import latest_visible_turn
 from omo_manager.omo_ready_report import recent_visible_turns
 from omo_manager.omo_ready_report import turn_invoked_report_helper
 from omo_manager.omo_omnigent import manager_status as omnigent_manager_status
+from omo_manager.omo_omnigent import session_ready_report as omnigent_session_ready_report
 from omo_manager.omo_omnigent import session_snapshot as omnigent_session_snapshot
 from omo_manager.omo_tmux_send import CodexSendOptions
 from omo_manager.omo_tmux_send import DEFAULT_TMUX_ENTER_COUNT
@@ -103,12 +104,14 @@ from omo_manager.omo_tmux_send import require_sendable_codex_target
 from omo_manager.omo_tmux_send import send_capacity_resume as verified_send_capacity_resume
 from omo_manager.omo_tmux_send import send_system_to_codex as verified_send_to_codex
 from omo_manager.omo_tmux_send import wrap_agent_message
+from omo_manager.omo_tmux_input_lock import tmux_input_lock
 from omo_manager.omo_task_lock import watcher_report_authority_is_live
-from omo_manager.omo_task_lock import watcher_report_manager_temporary
 from omo_manager.omo_task_lock import watcher_report_state_maintenance_temporary
 from omo_manager.omo_task_lock import watcher_report_state_temporary
 from omo_manager.omo_task_metadata import TaskBlocker
+from omo_manager.omo_task_metadata import TaskFrontmatterError
 from omo_manager.omo_task_metadata import TaskMetadata
+from omo_manager.omo_task_metadata import parse_task_metadata
 from omo_manager.omo_task_metadata import runat_kind
 
 
@@ -129,6 +132,47 @@ def task_file_lock(path: Path) -> Iterator[None]:
             yield
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def require_root_identity(root: Path | None, expected_identity: tuple[int, int] | None) -> None:
+    """Reject root-backed work after the configured directory has changed."""
+
+    if root is None or expected_identity is None:
+        return
+    current = root.lstat()
+    if stat.S_ISLNK(current.st_mode) or not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != expected_identity:
+        raise RuntimeError("configured pending-watcher root changed")
+
+
+@contextmanager
+def cleanup_descriptor_temp(parent_fd: int, name: str) -> Iterator[None]:
+    """Remove a descriptor-relative replacement temporary on every failed path."""
+
+    try:
+        yield
+    finally:
+        try:
+            os.unlink(name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+
+
+def cleanup_stale_consumed_temps(parent_fd: int, leaf_name: str) -> None:
+    """Reclaim crashed consumed-marker replacements while holding the task lock."""
+
+    pattern = re.compile(rf"\.{re.escape(leaf_name)}\.omo-watch-[0-9]+-[0-9a-f]+\.tmp\Z")
+    for name in os.listdir(parent_fd):
+        if pattern.fullmatch(name) is None:
+            continue
+        try:
+            entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if not stat.S_ISREG(entry.st_mode) or entry.st_uid != os.getuid() or stat.S_IMODE(entry.st_mode) & 0o077:
+                continue
+            os.unlink(name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            continue
 
 
 class WatcherAlreadyRunning(RuntimeError):
@@ -159,6 +203,7 @@ def exclusive_watcher_root(root: Path) -> Iterator[None]:
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 DEFAULT_MANAGER_TARGET = os.environ.get("OMO_MANAGER_TMUX_TARGET", "")
 DEFAULT_STATE = default_state_dir() / "pending-watch-consumed-reports.tsv"
+DEFAULT_HUMAN_EMAIL_HELPER = Path(__file__).resolve().parents[1] / "helper.sh" / "email_me.py"
 DEFAULT_DIGEST_IDLE_AFTER_S = float(os.environ.get("OMO_MANAGER_DIGEST_IDLE_AFTER_S", "3600"))
 DEFAULT_AGENT_PROBLEM_INTERVAL_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_INTERVAL_S", "30"))
 DEFAULT_AGENT_PROBLEM_REPEAT_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_REPEAT_S", "1800"))
@@ -286,7 +331,8 @@ IN_IGNORED = 0x00008000
 IN_ISDIR = 0x40000000
 IN_NONBLOCK = getattr(os, "O_NONBLOCK", 0o0004000)
 IN_CLOEXEC = getattr(os, "O_CLOEXEC", 0o2000000)
-WATCH_MASK = IN_MODIFY | IN_ATTRIB | IN_CLOSE_WRITE | IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF | IN_UNMOUNT
+IN_DONT_FOLLOW = 0x02000000
+WATCH_MASK = IN_MODIFY | IN_ATTRIB | IN_CLOSE_WRITE | IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF | IN_UNMOUNT | IN_DONT_FOLLOW
 
 
 def positive_float_env(name: str, default: float) -> float:
@@ -321,6 +367,8 @@ class Marker:
     file_lines: int
     blocked_reason: str
     file_pending_count: int = 1
+    task_metadata: TaskMetadata | None = None
+    root_identity: tuple[int, int] | None = None
 
     @property
     def ref(self) -> str:
@@ -364,6 +412,9 @@ class Args:
     reminder_choice: Callable[[Sequence[str]], str] = random.choice
     classify_done_ready: str = ""
     classify_blocked_ready: str = ""
+    ready_file: Path | None = None
+    root_identity: tuple[int, int] | None = None
+    expected_root_identity: tuple[int, int] | None = None
 
 
 @dataclass
@@ -374,11 +425,32 @@ class BlockingActorController:
     allow_existing: bool = False
     actor: BlockingActor | None = None
 
-    def ensure(self) -> None:
+    def ensure(self, expected_identity: tuple[int, int] | None = None) -> None:
+        if expected_identity is not None:
+            try:
+                root_stat = self.root.lstat()
+            except OSError as exc:
+                raise RuntimeError("configured pending-watcher root changed before blocking actor startup") from exc
+            if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode) or (root_stat.st_dev, root_stat.st_ino) != expected_identity:
+                raise RuntimeError("configured pending-watcher root changed before blocking actor startup")
         if self.actor is not None or not v2_enabled(self.root):
             return
+        if expected_identity is not None:
+            try:
+                root_stat = self.root.lstat()
+            except OSError as exc:
+                raise RuntimeError("configured pending-watcher root changed before blocking actor startup") from exc
+            if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode) or (root_stat.st_dev, root_stat.st_ino) != expected_identity:
+                raise RuntimeError("configured pending-watcher root changed before blocking actor startup")
         actor = BlockingActor(self.root)
         try:
+            if expected_identity is not None:
+                try:
+                    root_stat = self.root.lstat()
+                except OSError as exc:
+                    raise RuntimeError("configured pending-watcher root changed before blocking actor startup") from exc
+                if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode) or (root_stat.st_dev, root_stat.st_ino) != expected_identity:
+                    raise RuntimeError("configured pending-watcher root changed before blocking actor startup")
             actor.start()
         except BlockingError as exc:
             if self.allow_existing and "already running" in str(exc):
@@ -498,7 +570,13 @@ class DeliveryResult:
     error: str = ""
 
 
-def record_terminal_delivery_failure(root: Path | None, target: str, delivery_id: str, error: str) -> Path | None:
+def record_terminal_delivery_failure(
+    root: Path | None,
+    target: str,
+    delivery_id: str,
+    error: str,
+    root_identity: tuple[int, int] | None = None,
+) -> Path | None:
     """Persist one watcher-owned failed-delivery event after fresh pane capture."""
 
     if root is None or RECOVERY_DELIVERY_ID_RE.fullmatch(delivery_id) is None or is_human_tmux_target(target):
@@ -538,18 +616,31 @@ def record_terminal_delivery_failure(root: Path | None, target: str, delivery_id
         return None
     if current_identity() != before:
         return None
+    if root_identity is not None:
+        try:
+            current_root = root.lstat()
+        except OSError:
+            return None
+        if stat.S_ISLNK(current_root.st_mode) or not stat.S_ISDIR(current_root.st_mode) or (current_root.st_dev, current_root.st_ino) != root_identity:
+            return None
     resolved_root = root.resolve()
     try:
         root_stat = resolved_root.stat()
-    except OSError:
+    except (OSError, RuntimeError):
         return None
-    if not stat.S_ISDIR(root_stat.st_mode):
+    if not stat.S_ISDIR(root_stat.st_mode) or (root_identity is not None and (root_stat.st_dev, root_stat.st_ino) != root_identity):
         return None
     event_dir = resolved_root / RECOVERY_EVENT_DIRNAME
     try:
+        if root_identity is not None:
+            current_root = root.lstat()
+            if stat.S_ISLNK(current_root.st_mode) or (current_root.st_dev, current_root.st_ino) != root_identity:
+                return None
         # Create only the final dedicated directory, then open it with
         # O_NOFOLLOW.  A pre-existing symlink (or non-private directory) is
         # refused; never chmod a path that could resolve outside --root.
+        if root_identity is not None:
+            require_root_identity(root, root_identity)
         try:
             os.mkdir(event_dir, 0o700)
         except FileExistsError:
@@ -566,12 +657,15 @@ def record_terminal_delivery_failure(root: Path | None, target: str, delivery_id
         ):
             os.close(directory_fd)
             return None
-    except OSError:
+    except (OSError, RuntimeError):
         return None
     event_path = event_dir / f"{delivery_id}.event"
     event_name = event_path.name
     used_name = f"{delivery_id}.used"
     try:
+        if root_identity is not None:
+            require_root_identity(root, root_identity)
+
         def entry_exists(name: str) -> bool:
             try:
                 os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
@@ -662,11 +756,18 @@ def record_terminal_delivery_failure(root: Path | None, target: str, delivery_id
         os.close(directory_fd)
 
 
-def terminal_delivery_failure(root: Path | None, target: str, delivery_id: str, exc: Exception, status: int = 1) -> DeliveryResult:
+def terminal_delivery_failure(
+    root: Path | None,
+    target: str,
+    delivery_id: str,
+    exc: Exception,
+    status: int = 1,
+    root_identity: tuple[int, int] | None = None,
+) -> DeliveryResult:
     """Return one failed result and expose only durably recorded recovery evidence."""
 
     definite = definitely_rejected_before_paste(exc)
-    event = record_terminal_delivery_failure(root, target, delivery_id, str(exc)) if definite else None
+    event = record_terminal_delivery_failure(root, target, delivery_id, str(exc), root_identity) if definite else None
     suffix = (
         f"; recovery event recorded at `{event}`"
         if event is not None
@@ -685,6 +786,8 @@ class PendingGuard:
     pending_digest: str
     pending_text: str
     guest_owner: GuestHeesOwner | None = None
+    root_identity: tuple[int, int] | None = None
+    task_metadata: TaskMetadata | None = None
 
 
 @dataclass(frozen=True)
@@ -692,6 +795,7 @@ class AgentProblemGuard:
     command: tuple[str, ...]
     problem_lines: tuple[str, ...]
     root: Path | None = None
+    root_identity: tuple[int, int] | None = None
     report_state: Path | None = None
     dependency_task_file: str = ""
     dependency_snapshot: str = ""
@@ -756,6 +860,8 @@ DELIVERY_SUCCESS_EVENTS: SimpleQueue[DeliverySuccessEvent] = SimpleQueue()
 PENDING_SENDS: set[Future[None]] = set()
 PENDING_SEND_HANDLERS: dict[Future[None], Callable[[Future[None]], None]] = {}
 PENDING_SENDS_LOCK = Lock()
+TARGET_SEND_LOCKS: dict[str, Lock] = {}
+TARGET_SEND_LOCKS_LOCK = Lock()
 CONSUMED_REPORT_CACHE_LOCK = Lock()
 
 
@@ -862,7 +968,30 @@ def send_executor() -> ThreadPoolExecutor:
     return _send_executor
 
 
+def target_send_lock(target: str) -> Lock:
+    key = canonical_target(target)
+    with TARGET_SEND_LOCKS_LOCK:
+        lock = TARGET_SEND_LOCKS.get(key)
+        if lock is None:
+            lock = Lock()
+            TARGET_SEND_LOCKS[key] = lock
+        return lock
+
+
 def agent_problem_evidence_current(guard: AgentProblemGuard) -> bool:
+    if guard.root is not None and guard.root_identity is not None:
+        try:
+            root_stat = guard.root.lstat()
+        except OSError:
+            return False
+        if (
+            stat.S_ISLNK(root_stat.st_mode)
+            or not stat.S_ISDIR(root_stat.st_mode)
+            or (root_stat.st_dev, root_stat.st_ino) != guard.root_identity
+        ):
+            return False
+    if guard.root is not None and not authoritative_problem_lines_current(guard.root, guard.problem_lines):
+        return False
     if guard.root is not None and guard.dependency_snapshots:
         current_snapshots = blocked_report_snapshot_state(guard.root, guard.report_state or DEFAULT_STATE)
         return all(
@@ -878,7 +1007,7 @@ def agent_problem_evidence_current(guard: AgentProblemGuard) -> bool:
             task_path = resolve_task_path(guard.root, guard.dependency_task_file)
             state = scan_task_state(task_path, guard.root) if task_path is not None else None
             current = state is not None and blocked_status_dependency_snapshot(guard.root, task, state) == guard.dependency_snapshot
-        return current and (not guard.ready_target or inspect_codex(CodexStatusArgs(guard.ready_target, 80)).status == "ready")
+        return current and (not guard.ready_target or runat_is_ready(guard.ready_target))
     try:
         result = subprocess.run(guard.command, capture_output=True, text=True, timeout=DEFAULT_AGENT_PROBLEM_TIMEOUT_S, check=False)
     except (OSError, subprocess.SubprocessError):
@@ -891,10 +1020,23 @@ def agent_problem_evidence_current(guard: AgentProblemGuard) -> bool:
         return False
     current = Counter(current_lines)
     problem_is_current = bool(expected) and not expected - current
-    return problem_is_current and (not guard.ready_target or inspect_codex(CodexStatusArgs(guard.ready_target, 80)).status == "ready")
+    return problem_is_current and (not guard.ready_target or runat_is_ready(guard.ready_target))
+
+
+def authoritative_problem_lines_current(root: Path, problem_lines: Sequence[str]) -> bool:
+    """Reapply authoritative persistent-role suppression before an async paste."""
+
+    ready_lines = [line for line in problem_lines if line.startswith("ready:")]
+    if not ready_lines:
+        return True
+    output = "\n".join([f"agent-problems: ready={len(problem_lines)}", *problem_lines])
+    filtered_lines = set(filter_blocked_long_running_ready_output(root, output).splitlines()[1:])
+    return all(line in filtered_lines for line in ready_lines)
 
 
 def agent_problem_guard_current(guard: AgentProblemGuard) -> bool:
+    if guard.root is not None and not authoritative_problem_lines_current(guard.root, guard.problem_lines):
+        return False
     if guard.problem_id and guard.problem_claim_path is not None and active_problem_claim(
         read_claims(guard.problem_claim_path), guard.problem_id, guard.problem_owner_target, time.time()
     ) is not None:
@@ -908,6 +1050,8 @@ def run_verified_send(
     options: CodexSendOptions,
     pending_guard: PendingGuard | None = None,
     problem_guard: AgentProblemGuard | None = None,
+    root: Path | None = None,
+    root_identity: tuple[int, int] | None = None,
 ) -> None:
     """Verify the pending marker immediately before the tmux paste."""
 
@@ -915,14 +1059,32 @@ def run_verified_send(
     submit_started_s = time.monotonic()
 
     def before_paste() -> None:
+        if root is not None and root_identity is not None:
+            try:
+                current_root = root.lstat()
+            except OSError as exc:
+                raise PrePasteRejected("configured watcher root changed before tmux paste") from exc
+            if stat.S_ISLNK(current_root.st_mode) or not stat.S_ISDIR(current_root.st_mode) or (current_root.st_dev, current_root.st_ino) != root_identity:
+                raise PrePasteRejected("configured watcher root changed before tmux paste")
         if pending_guard is not None and not pending_marker_present(
             pending_guard.root,
             pending_guard.pending_file,
             pending_guard.pending_line,
             pending_guard.pending_digest,
             pending_guard.pending_text,
+            pending_guard.root_identity,
         ):
             raise PrePasteRejected("pending marker cleared before tmux paste")
+        if pending_guard is not None and pending_guard.task_metadata is not None:
+            try:
+                current_metadata = parse_task_metadata(
+                    read_pinned_markdown_file(pending_guard.root, pending_guard.root / pending_guard.pending_file, pending_guard.root_identity),
+                    pending_guard.root,
+                )
+            except (OSError, TaskFrontmatterError) as exc:
+                raise PrePasteRejected("task metadata changed before tmux paste") from exc
+            if current_metadata != pending_guard.task_metadata:
+                raise PrePasteRejected("task routing metadata changed before tmux paste")
         if pending_guard is not None and pending_guard.guest_owner is not None and not guest_hees_owner_is_current(
             pending_guard.root, pending_guard.guest_owner
         ):
@@ -931,16 +1093,22 @@ def run_verified_send(
             raise PrePasteRejected("agent problem resolved or changed before tmux paste")
 
     try:
-        if problem_guard is not None and problem_guard.problem_id and problem_guard.problem_claim_path is not None:
-            with locked_claims(problem_guard.problem_claim_path) as claims:
-                issue = read_issues(issue_path(problem_guard.problem_claim_path)).get(problem_guard.problem_id)
-                if issue is None or canonical_target(issue.manager_target) != canonical_target(problem_guard.problem_owner_target):
-                    raise PrePasteRejected("agent problem changed before tmux paste")
-                if active_problem_claim(claims, problem_guard.problem_id, problem_guard.problem_owner_target, time.time()) is not None:
-                    raise PrePasteRejected("agent problem was claimed before tmux paste")
-                verified_send_to_codex(target, message, options, before_paste=before_paste)
-        else:
-            verified_send_to_codex(target, message, options, before_paste=before_paste if pending_guard is not None or problem_guard is not None else None)
+        with tmux_input_lock(target), target_send_lock(target):
+            if problem_guard is not None and problem_guard.problem_id and problem_guard.problem_claim_path is not None:
+                with locked_claims(problem_guard.problem_claim_path) as claims:
+                    issue = read_issues(issue_path(problem_guard.problem_claim_path)).get(problem_guard.problem_id)
+                    if issue is None or canonical_target(issue.manager_target) != canonical_target(problem_guard.problem_owner_target):
+                        raise PrePasteRejected("agent problem changed before tmux paste")
+                    if active_problem_claim(claims, problem_guard.problem_id, problem_guard.problem_owner_target, time.time()) is not None:
+                        raise PrePasteRejected("agent problem was claimed before tmux paste")
+                    verified_send_to_codex(target, message, options, before_paste=before_paste)
+            else:
+                verified_send_to_codex(
+                    target,
+                    message,
+                    options,
+                    before_paste=before_paste if pending_guard is not None or problem_guard is not None or root_identity is not None else None,
+                )
     except Exception as exc:
         if definitely_rejected_before_paste(exc) and not isinstance(exc, PrePasteRejected):
             raise PrePasteRejected(str(exc)) from exc
@@ -966,13 +1134,14 @@ def log_send_result(
     root: Path | None = None,
     target: str = "",
     delivery_id: str = "",
+    root_identity: tuple[int, int] | None = None,
 ) -> None:
     """Log delivery failure or queue success-side effects for the main loop."""
 
     try:
         _ = future.result()
     except Exception as exc:
-        result = terminal_delivery_failure(root, target, delivery_id, exc)
+        result = terminal_delivery_failure(root, target, delivery_id, exc, root_identity=root_identity)
         if problem_guard is not None and not agent_problem_guard_current(problem_guard):
             print("omo_pending_watch: async delivery result is stale after watcher-state refresh", file=sys.stderr)
             if stale_event is not None:
@@ -999,11 +1168,12 @@ def log_send_result(
                 failure_fallback.pending_guard.pending_line,
                 failure_fallback.pending_guard.pending_digest,
                 failure_fallback.pending_guard.pending_text,
+                failure_fallback.pending_guard.root_identity,
             ):
                 print("omo_pending_watch: async fallback skipped; pending marker cleared before fallback paste", file=sys.stderr)
                 queue_delivery_failure_event(success_event)
                 return
-            if failure_fallback.defer_if_busy and inspect_codex(CodexStatusArgs(failure_fallback.target, 80)).status != "ready":
+            if failure_fallback.defer_if_busy and not runat_is_ready(failure_fallback.target):
                 print(f"omo_pending_watch: repeated manager fallback deferred until ready: {failure_fallback.target}", file=sys.stderr)
                 queue_delivery_failure_event(failure_fallback.success_event)
                 return
@@ -1018,6 +1188,7 @@ def log_send_result(
                         pending_guard=failure_fallback.pending_guard,
                         success_event=failure_fallback.success_event,
                         root=root,
+                        root_identity=root_identity,
                         **stale_kwargs,
                     )
                 else:
@@ -1029,6 +1200,7 @@ def log_send_result(
                         problem_guard=failure_fallback.problem_guard,
                         success_event=failure_fallback.success_event,
                         root=root,
+                        root_identity=root_identity,
                         **stale_kwargs,
                     )
             except Exception as fallback_exc:
@@ -1118,13 +1290,14 @@ def submit_send(
     failure_fallback: DeliveryFailureFallback | None = None,
     stale_event: DeliverySuccessEvent | None = None,
     root: Path | None = None,
+    root_identity: tuple[int, int] | None = None,
     delivery_id: str = "",
 ) -> Future[None]:
     """Submit verified tmux delivery without forking a helper process."""
 
     message = with_long_running_blocker_reminder(root, target, message)
-    future = send_executor().submit(run_verified_send, target, message, options, pending_guard, problem_guard)
-    retain_send_result(future, lambda completed: log_send_result(completed, success_event, failure_fallback, problem_guard, stale_event, root, target, delivery_id))
+    future = send_executor().submit(run_verified_send, target, message, options, pending_guard, problem_guard, root, root_identity)
+    retain_send_result(future, lambda completed: log_send_result(completed, success_event, failure_fallback, problem_guard, stale_event, root, target, delivery_id, root_identity))
     return future
 
 
@@ -1138,6 +1311,7 @@ def send_to_codex(
     success_event: DeliverySuccessEvent | None = None,
     failure_fallback: DeliveryFailureFallback | None = None,
     root: Path | None = None,
+    root_identity: tuple[int, int] | None = None,
     delivery_id: str = "",
 ) -> Future[None] | None:
     """Validate a target synchronously, then deliver through a background thread."""
@@ -1149,7 +1323,7 @@ def send_to_codex(
     if runat_kind(target) != "omnigent":
         require_sendable_codex_target(target, inspect_lines_for_message(message))
     if all(value is None for value in (pending_guard, problem_guard, success_event, failure_fallback)):
-        return submit_send(target, message, selected, root=root, delivery_id=delivery_id)
+        return submit_send(target, message, selected, root=root, root_identity=root_identity, delivery_id=delivery_id)
     return submit_send(
         target,
         message,
@@ -1159,6 +1333,7 @@ def send_to_codex(
         success_event=success_event,
         failure_fallback=failure_fallback,
         root=root,
+        root_identity=root_identity,
         delivery_id=delivery_id,
     )
 
@@ -1293,9 +1468,19 @@ class MarkdownChangeWatcher:
         self.libc = libc
         self.fd = fd
         self.wd_paths: dict[int, Path] = {}
+        self.wd_identities: dict[int, tuple[int, int]] = {}
+        self.root_ancestry_drifted = False
+        root_stat = root.lstat()
+        self.root_identity = (root_stat.st_dev, root_stat.st_ino)
 
     @classmethod
     def open(cls, root: Path) -> "MarkdownChangeWatcher | None":
+        try:
+            root_stat = root.lstat()
+        except OSError:
+            return None
+        if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+            return None
         libc_path = ctypes.util.find_library("c")
         if libc_path is None:
             return None
@@ -1308,7 +1493,8 @@ class MarkdownChangeWatcher:
             return None
         watcher = cls(root, libc, fd)
         try:
-            watcher.add_tree(root)
+            if not watcher.add_tree(root) or watcher.root_ancestry_drifted or root not in watcher.wd_paths.values():
+                raise OSError(errno.EACCES, "inotify could not watch the configured root", str(root))
         except OSError as exc:
             print(f"omo_pending_watch: inotify setup failed, falling back to polling: {exc}", file=sys.stderr)
             watcher.close()
@@ -1319,33 +1505,196 @@ class MarkdownChangeWatcher:
         if self.fd >= 0:
             os.close(self.fd)
             self.fd = -1
+        self.wd_paths.clear()
+        self.wd_identities.clear()
 
-    def add_watch(self, path: Path) -> None:
+    def open_directory_anchored(self, path: Path) -> tuple[int, tuple[int, int]] | None:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            directory_fd = os.open(self.root, flags)
+        except OSError:
+            return None
+        keep_open = False
+        try:
+            root_fd_stat = os.fstat(directory_fd)
+            root_path_stat = self.root.lstat()
+            root_identity = (root_fd_stat.st_dev, root_fd_stat.st_ino)
+            if root_identity != self.root_identity or stat.S_ISLNK(root_path_stat.st_mode) or (root_path_stat.st_dev, root_path_stat.st_ino) != self.root_identity:
+                self.root_ancestry_drifted = True
+                return None
+            relative_parts = path.relative_to(self.root).parts
+            for index, part in enumerate(relative_parts):
+                try:
+                    child_fd = os.open(part, flags, dir_fd=directory_fd)
+                except OSError as exc:
+                    if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
+                        return None
+                    self.root_ancestry_drifted = True
+                    return None
+                os.close(directory_fd)
+                directory_fd = child_fd
+                candidate = self.root.joinpath(*relative_parts[: index + 1])
+                candidate_stat = candidate.lstat()
+                opened_stat = os.fstat(directory_fd)
+                if stat.S_ISLNK(candidate_stat.st_mode) or (candidate_stat.st_dev, candidate_stat.st_ino) != (opened_stat.st_dev, opened_stat.st_ino):
+                    self.root_ancestry_drifted = True
+                    return None
+            opened_stat = os.fstat(directory_fd)
+            path_stat = path.lstat()
+            identity = (opened_stat.st_dev, opened_stat.st_ino)
+            if stat.S_ISLNK(path_stat.st_mode) or (path_stat.st_dev, path_stat.st_ino) != identity:
+                self.root_ancestry_drifted = True
+                return None
+            keep_open = True
+            return directory_fd, identity
+        except OSError:
+            return None
+        finally:
+            if not keep_open:
+                os.close(directory_fd)
+
+    def add_watch(self, path: Path, directory_fd: int, initial_identity: tuple[int, int]) -> bool:
         inotify_add_watch = self.libc.inotify_add_watch
         inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
         inotify_add_watch.restype = ctypes.c_int
-        wd = inotify_add_watch(self.fd, os.fsencode(path), WATCH_MASK)
+        watch_path = f"/proc/self/fd/{directory_fd}"
+        wd = inotify_add_watch(self.fd, os.fsencode(watch_path), WATCH_MASK & ~IN_DONT_FOLLOW)
         if wd < 0:
             err = ctypes.get_errno()
             if err in {errno.ENOENT, errno.ENOTDIR, errno.EACCES, errno.EPERM}:
-                return
+                return False
             raise OSError(err, os.strerror(err), str(path))
-        self.wd_paths[wd] = path
-
-    def add_tree(self, path: Path) -> None:
-        if path != self.root and is_ignored(path.relative_to(self.root)):
-            return
-        self.add_watch(path)
         try:
-            children = list(path.iterdir())
+            path_stat = path.lstat()
         except OSError:
-            return
-        for child in children:
-            if not child.is_dir() or is_ignored(child.relative_to(self.root)):
-                continue
-            self.add_tree(child)
+            _ = self.libc.inotify_rm_watch(self.fd, wd)
+            return False
+        fd_stat = os.fstat(directory_fd)
+        if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISDIR(path_stat.st_mode) or (path_stat.st_dev, path_stat.st_ino) != initial_identity or (fd_stat.st_dev, fd_stat.st_ino) != initial_identity:
+            _ = self.libc.inotify_rm_watch(self.fd, wd)
+            self.root_ancestry_drifted = True
+            return False
+        self.wd_paths[wd] = path
+        self.wd_identities[wd] = initial_identity
+        if not self.path_ancestry_is_current(path):
+            self.wd_paths.pop(wd, None)
+            self.wd_identities.pop(wd, None)
+            _ = self.libc.inotify_rm_watch(self.fd, wd)
+            self.root_ancestry_drifted = True
+            return False
+        return True
+
+    def path_ancestry_is_current(self, path: Path) -> bool:
+        current = path
+        while True:
+            try:
+                current_stat = current.lstat()
+            except OSError:
+                return False
+            if stat.S_ISLNK(current_stat.st_mode) or not stat.S_ISDIR(current_stat.st_mode):
+                return False
+            current_identity = (current_stat.st_dev, current_stat.st_ino)
+            for wd, watched_path in self.wd_paths.items():
+                if watched_path == current and self.wd_identities.get(wd) != current_identity:
+                    return False
+            if current == self.root:
+                return (current_stat.st_dev, current_stat.st_ino) == self.root_identity
+            parent = current.parent
+            if parent == current:
+                return False
+            current = parent
+
+    def add_tree(self, path: Path) -> bool:
+        try:
+            path_mode = path.lstat().st_mode
+        except OSError:
+            return False
+        # 🧑 "The pending watcher is broken."
+        # Task-record symlinks are references, not permission to watch external trees.
+        if path != self.root and (stat.S_ISLNK(path_mode) or not stat.S_ISDIR(path_mode)):
+            return False
+        if path != self.root and is_ignored(path.relative_to(self.root)):
+            return False
+        anchored = self.open_directory_anchored(path)
+        if anchored is None:
+            return False
+        directory_fd, initial_identity = anchored
+        try:
+            if not self.add_watch(path, directory_fd, initial_identity):
+                return False
+            try:
+                child_names = os.listdir(directory_fd)
+            except OSError:
+                return True
+            if not self.path_ancestry_is_current(path):
+                self.root_ancestry_drifted = True
+                return False
+            for child_name in child_names:
+                child = path / child_name
+                try:
+                    child_stat = os.stat(child_name, dir_fd=directory_fd, follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat.S_ISLNK(child_stat.st_mode) or not stat.S_ISDIR(child_stat.st_mode) or is_ignored(child.relative_to(self.root)):
+                    continue
+                if not self.add_tree(child) and self.root_ancestry_drifted:
+                    return False
+            final_stat = os.fstat(directory_fd)
+            if (final_stat.st_dev, final_stat.st_ino) != initial_identity or not self.path_ancestry_is_current(path):
+                self.root_ancestry_drifted = True
+                return False
+            return True
+        finally:
+            os.close(directory_fd)
+
+    def retire_tree(self, path: Path) -> None:
+        """Drop descriptors whose directory moved, vanished, or changed identity."""
+
+        retired = [wd for wd, watched_path in self.wd_paths.items() if watched_path == path or path in watched_path.parents]
+        for wd in retired:
+            self.wd_paths.pop(wd, None)
+            self.wd_identities.pop(wd, None)
+            if self.fd >= 0:
+                _ = self.libc.inotify_rm_watch(self.fd, wd)
+
+    def watch_is_current(self, wd: int, path: Path) -> bool:
+        try:
+            path_stat = path.lstat()
+        except OSError:
+            return False
+        return (
+            stat.S_ISDIR(path_stat.st_mode)
+            and not stat.S_ISLNK(path_stat.st_mode)
+            and self.wd_identities.get(wd) == (path_stat.st_dev, path_stat.st_ino)
+        )
+
+    def root_watch_is_current(self) -> bool:
+        return any(path == self.root and self.watch_is_current(wd, path) for wd, path in self.wd_paths.items())
+
+    def root_path_is_current(self) -> bool:
+        try:
+            root_stat = self.root.lstat()
+        except OSError:
+            return False
+        return (
+            stat.S_ISDIR(root_stat.st_mode)
+            and not stat.S_ISLNK(root_stat.st_mode)
+            and (root_stat.st_dev, root_stat.st_ino) == self.root_identity
+        )
+
+    def ensure_root_watch(self) -> bool:
+        if not self.root_path_is_current():
+            return False
+        if self.root_watch_is_current():
+            return True
+        self.retire_tree(self.root)
+        return self.add_tree(self.root)
 
     def wait(self, timeout_s: float) -> tuple[list[Path], bool, bool]:
+        if self.root_ancestry_drifted or not self.root_path_is_current() or not self.root_watch_is_current():
+            if self.ensure_root_watch():
+                return [], True, True
+            raise RuntimeError("configured pending-watcher root is unavailable; supervisor must restart")
         ready, _, _ = select.select([self.fd], [], [], max(0.0, timeout_s))
         if not ready:
             return [], False, False
@@ -1367,16 +1716,29 @@ class MarkdownChangeWatcher:
                 offset += INOTIFY_EVENT.size
                 raw_name = data[offset : offset + name_len].split(b"\0", 1)[0]
                 offset += name_len
-                base = self.wd_paths.get(wd, self.root)
+                base = self.wd_paths.get(wd)
+                if base is None:
+                    continue
+                if not self.watch_is_current(wd, base):
+                    self.retire_tree(base)
+                    full_scan = True
+                    continue
                 path = base / os.fsdecode(raw_name) if raw_name else base
                 if mask & (IN_Q_OVERFLOW | IN_UNMOUNT):
                     full_scan = True
                     continue
                 if mask & IN_IGNORED:
                     self.wd_paths.pop(wd, None)
+                    self.wd_identities.pop(wd, None)
                     full_scan = True
                     continue
+                if mask & (IN_DELETE_SELF | IN_MOVE_SELF):
+                    self.retire_tree(path)
+                    full_scan = True
                 if mask & IN_ISDIR:
+                    if mask & (IN_DELETE | IN_MOVED_FROM):
+                        self.retire_tree(path)
+                        full_scan = True
                     if mask & (IN_CREATE | IN_MOVED_TO):
                         self.add_tree(path)
                     if not is_ignored(path.relative_to(self.root)):
@@ -1392,6 +1754,8 @@ class MarkdownChangeWatcher:
                     continue
                 if path.suffix == ".txt" and path.parent.name == "manager_mail":
                     full_scan = True
+        if self.root_ancestry_drifted or not self.root_path_is_current() or not self.root_watch_is_current():
+            raise RuntimeError("configured pending-watcher root changed; supervisor must restart")
         return sorted(changed), full_scan, True
 
 
@@ -1411,6 +1775,8 @@ class ParsedArgs(argparse.Namespace):
     digest_idle_after_s: float = DEFAULT_DIGEST_IDLE_AFTER_S
     classify_done_ready: str = ""
     classify_blocked_ready: str = ""
+    ready_file: Path | None = None
+    expected_root_identity: str = ""
 
 
 SeenCache = dict[str, float]
@@ -1430,6 +1796,8 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--digest-script", type=Path, default=None)
     _ = parser.add_argument("--digest-idle-after-s", type=float, default=DEFAULT_DIGEST_IDLE_AFTER_S)
     _ = parser.add_argument("--once", action="store_true", help="Run one scan, then exit.")
+    _ = parser.add_argument("--ready-file", type=Path, default=None, help=argparse.SUPPRESS)
+    _ = parser.add_argument("--expected-root-identity", default="", help=argparse.SUPPRESS)
     _ = parser.add_argument(
         "--classify-done-ready",
         metavar="TASK_FILE",
@@ -1462,7 +1830,20 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--classify-done-ready and --classify-blocked-ready are mutually exclusive.")
     if parsed.dry_run and (parsed.classify_done_ready or parsed.classify_blocked_ready):
         parser.error("--dry-run cannot be combined with a classification command.")
-    root = parsed.root.resolve()
+    expected_root_identity: tuple[int, int] | None = None
+    if parsed.expected_root_identity:
+        match = re.fullmatch(r"([0-9]+):([0-9]+)", parsed.expected_root_identity)
+        if match is None:
+            parser.error("--expected-root-identity must be DEV:INO")
+        expected_root_identity = (int(match.group(1)), int(match.group(2)))
+    lexical_root = parsed.root.expanduser()
+    try:
+        root_stat = lexical_root.lstat()
+    except OSError:
+        root_stat = None
+    if root_stat is not None and stat.S_ISLNK(root_stat.st_mode):
+        parser.error("--root must name a real directory, not a symlink")
+    root = Path(os.path.abspath(os.fspath(lexical_root)))
     return Args(
         root,
         "",
@@ -1484,6 +1865,9 @@ def parse_args(argv: list[str]) -> Args:
         random.choice,
         parsed.classify_done_ready,
         parsed.classify_blocked_ready,
+        Path(os.path.abspath(parsed.ready_file.expanduser())) if parsed.ready_file is not None else None,
+        None,
+        expected_root_identity,
     )
 
 
@@ -1536,17 +1920,274 @@ def is_ignored(path: Path) -> bool:
     return any(part in IGNORE_PARTS for part in path.parts)
 
 
-def markdown_files(root: Path) -> list[Path]:
-    return [p for p in root.rglob("*.md") if p.is_file() and not is_ignored(p.relative_to(root))]
+@contextmanager
+def open_pinned_markdown_file(
+    root: Path,
+    path: Path,
+    expected_identity: tuple[int, int] | None = None,
+) -> Iterator[tuple[int, os.stat_result]]:
+    """Open one inventory path through no-follow, root-relative descriptors.
+
+    Inventory returns names, not capabilities.  Re-open those names relative to
+    a freshly pinned root before consuming them so a directory or leaf swap
+    cannot turn a marker read into an external-tree read.
+    """
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise OSError(errno.EPERM, "path is outside configured watcher root", str(path)) from exc
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise OSError(errno.EINVAL, "invalid root-relative Markdown path", str(path))
+    try:
+        root_fd = os.open(root, flags)
+    except OSError as exc:
+        raise RuntimeError("configured pending-watcher root changed during consumption; supervisor must restart") from exc
+    parent_fd = root_fd
+    leaf_fd = -1
+    try:
+        root_fd_stat = os.fstat(root_fd)
+        try:
+            root_path_stat = root.lstat()
+        except OSError as exc:
+            raise RuntimeError("configured pending-watcher root changed during consumption; supervisor must restart") from exc
+        root_identity = (root_fd_stat.st_dev, root_fd_stat.st_ino)
+        if (
+            stat.S_ISLNK(root_path_stat.st_mode)
+            or not stat.S_ISDIR(root_path_stat.st_mode)
+            or root_identity != (root_path_stat.st_dev, root_path_stat.st_ino)
+            or (expected_identity is not None and root_identity != expected_identity)
+        ):
+            raise RuntimeError("configured pending-watcher root changed; supervisor must restart")
+        for component in relative.parts[:-1]:
+            child_fd = os.open(component, flags, dir_fd=parent_fd)
+            try:
+                entry_stat = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+                opened_stat = os.fstat(child_fd)
+                if (
+                    stat.S_ISLNK(entry_stat.st_mode)
+                    or not stat.S_ISDIR(entry_stat.st_mode)
+                    or (entry_stat.st_dev, entry_stat.st_ino) != (opened_stat.st_dev, opened_stat.st_ino)
+                ):
+                    raise OSError(errno.ELOOP, "Markdown ancestry changed during consumption", str(path))
+            except Exception:
+                os.close(child_fd)
+                raise
+            if parent_fd != root_fd:
+                os.close(parent_fd)
+            parent_fd = child_fd
+        leaf_name = relative.parts[-1]
+        leaf_fd = os.open(leaf_name, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+        leaf_stat = os.fstat(leaf_fd)
+        entry_stat = os.stat(leaf_name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            stat.S_ISLNK(entry_stat.st_mode)
+            or not stat.S_ISREG(entry_stat.st_mode)
+            or (entry_stat.st_dev, entry_stat.st_ino) != (leaf_stat.st_dev, leaf_stat.st_ino)
+        ):
+            raise OSError(errno.ELOOP, "Markdown leaf changed during consumption", str(path))
+        try:
+            yield leaf_fd, leaf_stat
+        finally:
+            final_root_stat = root.lstat()
+            if (
+                stat.S_ISLNK(final_root_stat.st_mode)
+                or (final_root_stat.st_dev, final_root_stat.st_ino) != root_identity
+                or (expected_identity is not None and (final_root_stat.st_dev, final_root_stat.st_ino) != expected_identity)
+            ):
+                raise RuntimeError("configured pending-watcher root changed during consumption; supervisor must restart")
+    finally:
+        if leaf_fd >= 0:
+            os.close(leaf_fd)
+        if parent_fd != root_fd:
+            os.close(parent_fd)
+        os.close(root_fd)
 
 
-def mtime_changed_markdown_files(root: Path, state: FileState) -> list[Path]:
-    files = markdown_files(root)
+def read_pinned_markdown_file(
+    root: Path,
+    path: Path,
+    expected_identity: tuple[int, int] | None = None,
+    *,
+    errors: str = "strict",
+) -> str:
+    with open_pinned_markdown_file(root, path, expected_identity) as (file_fd, _file_stat):
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(file_fd, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    return b"".join(chunks).decode("utf-8", errors=errors)
+
+
+def pinned_markdown_mtime_ns(
+    root: Path,
+    path: Path,
+    expected_identity: tuple[int, int] | None = None,
+) -> int:
+    with open_pinned_markdown_file(root, path, expected_identity) as (_file_fd, file_stat):
+        return file_stat.st_mtime_ns
+
+
+@contextmanager
+def open_pinned_markdown_target(
+    root: Path,
+    path: Path,
+    expected_identity: tuple[int, int] | None = None,
+) -> Iterator[tuple[int, int, int, str, os.stat_result, tuple[int, int]]]:
+    """Hold root, parent, and leaf descriptors for one relative Markdown file."""
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    relative = path.relative_to(root)
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise OSError(errno.EINVAL, "invalid root-relative Markdown path", str(path))
+    root_fd = os.open(root, flags)
+    parent_fd = root_fd
+    leaf_fd = -1
+    try:
+        root_stat = os.fstat(root_fd)
+        root_path_stat = root.lstat()
+        root_identity = (root_stat.st_dev, root_stat.st_ino)
+        if (
+            stat.S_ISLNK(root_path_stat.st_mode)
+            or not stat.S_ISDIR(root_path_stat.st_mode)
+            or (root_path_stat.st_dev, root_path_stat.st_ino) != root_identity
+            or (expected_identity is not None and root_identity != expected_identity)
+        ):
+            raise RuntimeError("configured pending-watcher root changed; supervisor must restart")
+        for component in relative.parts[:-1]:
+            child_fd = os.open(component, flags, dir_fd=parent_fd)
+            entry_stat = os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+            opened_stat = os.fstat(child_fd)
+            if (
+                stat.S_ISLNK(entry_stat.st_mode)
+                or not stat.S_ISDIR(entry_stat.st_mode)
+                or (entry_stat.st_dev, entry_stat.st_ino) != (opened_stat.st_dev, opened_stat.st_ino)
+            ):
+                os.close(child_fd)
+                raise OSError(errno.ELOOP, "Markdown ancestry changed during consumption", str(path))
+            if parent_fd != root_fd:
+                os.close(parent_fd)
+            parent_fd = child_fd
+        leaf_name = relative.parts[-1]
+        leaf_fd = os.open(leaf_name, os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+        leaf_stat = os.fstat(leaf_fd)
+        entry_stat = os.stat(leaf_name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            stat.S_ISLNK(entry_stat.st_mode)
+            or not stat.S_ISREG(entry_stat.st_mode)
+            or (entry_stat.st_dev, entry_stat.st_ino) != (leaf_stat.st_dev, leaf_stat.st_ino)
+        ):
+            raise OSError(errno.ELOOP, "Markdown leaf changed during consumption", str(path))
+        try:
+            yield root_fd, parent_fd, leaf_fd, leaf_name, leaf_stat, root_identity
+        finally:
+            final_root_stat = root.lstat()
+            if (
+                stat.S_ISLNK(final_root_stat.st_mode)
+                or (final_root_stat.st_dev, final_root_stat.st_ino) != root_identity
+                or (expected_identity is not None and (final_root_stat.st_dev, final_root_stat.st_ino) != expected_identity)
+            ):
+                raise RuntimeError("configured pending-watcher root changed during consumption; supervisor must restart")
+    finally:
+        if leaf_fd >= 0:
+            os.close(leaf_fd)
+        if parent_fd != root_fd:
+            os.close(parent_fd)
+        os.close(root_fd)
+
+
+def markdown_files(root: Path, expected_identity: tuple[int, int] | None = None) -> list[Path]:
+    """Enumerate Markdown files through a pinned, no-symlink directory descriptor."""
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        root_fd = os.open(root, flags)
+    except OSError as exc:
+        raise RuntimeError(f"configured pending-watcher root is unavailable: {exc}") from exc
+    try:
+        root_fd_stat = os.fstat(root_fd)
+        root_path_stat = root.lstat()
+        root_identity = (root_fd_stat.st_dev, root_fd_stat.st_ino)
+        if (
+            not stat.S_ISDIR(root_fd_stat.st_mode)
+            or stat.S_ISLNK(root_path_stat.st_mode)
+            or not stat.S_ISDIR(root_path_stat.st_mode)
+            or root_identity != (root_path_stat.st_dev, root_path_stat.st_ino)
+            or (expected_identity is not None and root_identity != expected_identity)
+        ):
+            raise RuntimeError("configured pending-watcher root changed; supervisor must restart")
+        files: list[Path] = []
+
+        def walk(directory_fd: int, relative: Path) -> None:
+            try:
+                names = os.listdir(directory_fd)
+            except OSError as exc:
+                raise RuntimeError(f"pending-watcher inventory failed: {exc}") from exc
+            for name in names:
+                child_relative = relative / name
+                if is_ignored(child_relative):
+                    continue
+                try:
+                    child_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat.S_ISLNK(child_stat.st_mode):
+                    continue
+                if stat.S_ISDIR(child_stat.st_mode):
+                    try:
+                        child_fd = os.open(name, flags, dir_fd=directory_fd)
+                    except OSError as exc:
+                        if exc.errno in {errno.ENOENT, errno.ENOTDIR}:
+                            continue
+                        raise RuntimeError(f"pending-watcher inventory failed: {exc}") from exc
+                    try:
+                        opened_stat = os.fstat(child_fd)
+                        if (opened_stat.st_dev, opened_stat.st_ino) != (child_stat.st_dev, child_stat.st_ino):
+                            raise RuntimeError("configured pending-watcher root changed during inventory; supervisor must restart")
+                        walk(child_fd, child_relative)
+                        try:
+                            current_entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                        except OSError as exc:
+                            raise RuntimeError("configured pending-watcher directory moved during inventory; supervisor must restart") from exc
+                        if (
+                            stat.S_ISLNK(current_entry.st_mode)
+                            or (current_entry.st_dev, current_entry.st_ino) != (opened_stat.st_dev, opened_stat.st_ino)
+                        ):
+                            raise RuntimeError("configured pending-watcher directory moved during inventory; supervisor must restart")
+                        final_stat = os.fstat(child_fd)
+                        if (final_stat.st_dev, final_stat.st_ino) != (opened_stat.st_dev, opened_stat.st_ino):
+                            raise RuntimeError("configured pending-watcher directory changed during inventory; supervisor must restart")
+                    finally:
+                        os.close(child_fd)
+                    continue
+                if stat.S_ISREG(child_stat.st_mode) and child_relative.suffix == ".md":
+                    files.append(root / child_relative)
+
+        walk(root_fd, Path())
+        final_fd_stat = os.fstat(root_fd)
+        final_path_stat = root.lstat()
+        if (
+            (final_fd_stat.st_dev, final_fd_stat.st_ino) != root_identity
+            or stat.S_ISLNK(final_path_stat.st_mode)
+            or (final_path_stat.st_dev, final_path_stat.st_ino) != root_identity
+            or (expected_identity is not None and (final_fd_stat.st_dev, final_fd_stat.st_ino) != expected_identity)
+        ):
+            raise RuntimeError("configured pending-watcher root changed during inventory; supervisor must restart")
+        return sorted(files)
+    finally:
+        os.close(root_fd)
+
+
+def mtime_changed_markdown_files(root: Path, state: FileState, expected_identity: tuple[int, int] | None = None) -> list[Path]:
+    files = markdown_files(root, expected_identity)
     current: dict[Path, int] = {}
     changed: list[Path] = []
     for path in files:
         try:
-            mtime_ns = path.stat().st_mtime_ns
+            mtime_ns = pinned_markdown_mtime_ns(root, path, expected_identity)
         except OSError:
             continue
         current[path] = mtime_ns
@@ -1796,7 +2437,7 @@ def delegate_source(block_lines: list[str]) -> str:
 
 
 def marker_direct_target(args: Args, marker: Marker) -> str:
-    metadata = read_task_metadata(args.root / marker.file, args.root)
+    metadata = marker.task_metadata or read_task_metadata(args.root / marker.file, args.root)
     return metadata.runat if metadata is not None else ""
 
 
@@ -1810,7 +2451,7 @@ def email_source_attachment(root: Path, source: str) -> SourceAttachment | None:
     try:
         directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
         file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        root_fd = os.open(root.resolve(strict=True), directory_flags)
+        root_fd = os.open(root, directory_flags)
         descriptors.append(root_fd)
         mail_fd = os.open("manager_mail", directory_flags, dir_fd=root_fd)
         descriptors.append(mail_fd)
@@ -2596,8 +3237,13 @@ def agent_problem_target_attempt_key(target: str) -> str:
     return f"agent-problem-target-attempt:{canonical_target(target)}"
 
 
-def manager_problem_human_attempt_key(args: Args) -> str:
-    return f"manager-problem-human-attempt:{args.root}"
+def runat_is_ready(target: str) -> bool:
+    if runat_kind(target) == "omnigent":
+        try:
+            return omnigent_manager_status(omnigent_session_snapshot(target)) == "ready"
+        except RuntimeError:
+            return False
+    return inspect_codex(CodexStatusArgs(target, 80)).status == "ready"
 
 
 def agent_problem_target_is_ready(args: Args, seen: dict[str, float], target: str, now_s: float, *, bypass_repeat: bool = False) -> bool:
@@ -2608,7 +3254,7 @@ def agent_problem_target_is_ready(args: Args, seen: dict[str, float], target: st
     key = agent_problem_target_attempt_key(target)
     if not bypass_repeat and seen_contains(seen, key, now_s) and now_s - seen_get(seen, key, now_s=now_s) < args.agent_problem_repeat_s:
         return False
-    return inspect_codex(CodexStatusArgs(target, 80)).status == "ready"
+    return runat_is_ready(target)
 
 
 def repeated_manager_delivery_is_busy(args: Args, seen: dict[str, float], key: str, target: str, now_s: float) -> bool:
@@ -2616,7 +3262,7 @@ def repeated_manager_delivery_is_busy(args: Args, seen: dict[str, float], key: s
 
     if not seen_contains(seen, manager_delivery_attempt_key(key), now_s) or args.dry_run:
         return False
-    if inspect_codex(CodexStatusArgs(target, 80)).status == "ready":
+    if runat_is_ready(target):
         return False
     retry_seen_at_s = now_s - DEFAULT_SEEN_TTL_S + PENDING_DELIVERY_FAILURE_RETRY_S
     remember_seen(seen, key, retry_seen_at_s)
@@ -2629,7 +3275,7 @@ def remember_manager_delivery_attempt(seen: dict[str, float], key: str, now_s: f
 
 
 def marker_for_manager_target(args: Args, marker: Marker) -> str:
-    metadata = read_task_metadata(args.root / marker.file, args.root)
+    metadata = marker.task_metadata or read_task_metadata(args.root / marker.file, args.root)
     if metadata is not None:
         return metadata.managerat or args.manager_target
     return args.manager_target
@@ -2648,8 +3294,8 @@ def blocked_reason_before_pending(lines: list[str], pending_line: int) -> str:
     return ""
 
 
-def blocked_reason_for_marker(root: Path, path: Path, lines: list[str], pending_line: int) -> str:
-    metadata = read_task_metadata(path, root)
+def blocked_reason_for_marker(root: Path, path: Path, lines: list[str], pending_line: int, metadata: TaskMetadata | None = None) -> str:
+    metadata = metadata or read_task_metadata(path, root)
     if metadata is not None:
         return metadata.blocked_on if metadata.status == "blocked" else ""
     return blocked_reason_before_pending(lines, pending_line) if is_main_manager_task_file(path) else ""
@@ -3101,18 +3747,22 @@ def direct_delivery_fallback_text(marker: Marker, attachments: Sequence[SourceAt
     return "\n".join(parts)
 
 
-def find_markers(root: Path, files: list[Path]) -> list[Marker]:
+def find_markers(root: Path, files: list[Path], expected_identity: tuple[int, int] | None = None) -> list[Marker]:
     """Find unresolved `(pending)` blocks outside Markdown code fences."""
 
     markers: list[Marker] = []
     for path in files:
         first_marker = len(markers)
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = read_pinned_markdown_file(root, path, expected_identity).splitlines()
         except UnicodeDecodeError:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            lines = read_pinned_markdown_file(root, path, expected_identity, errors="replace").splitlines()
         except OSError:
             continue
+        try:
+            task_metadata = parse_task_metadata("\n".join(lines), root)
+        except TaskFrontmatterError:
+            task_metadata = None
         in_fence = False
         for idx, line in enumerate(lines, start=1):
             stripped = line.strip()
@@ -3134,7 +3784,7 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
                     break
             block_lines = remove_ignored_pending_notes(lines[idx - 1 : end_idx])
             pending_tail = "\n".join(remove_ignored_pending_notes(lines[idx - 1 :]))
-            origin, source = marker_origin_source(block_lines, task_record=read_task_metadata(path, root) is not None)
+            origin, source = marker_origin_source(block_lines, task_record=task_metadata is not None)
             digest = pending_tail_digest(rel, idx, pending_guard_text(lines, idx - 1))
             markers.append(
                 Marker(
@@ -3147,7 +3797,9 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
                     block_text="\n".join(block_lines),
                     pending_tail=pending_tail,
                     file_lines=len(lines),
-                    blocked_reason=blocked_reason_for_marker(root, path, lines, idx),
+                    blocked_reason=blocked_reason_for_marker(root, path, lines, idx, task_metadata),
+                    task_metadata=task_metadata,
+                    root_identity=expected_identity,
                 )
             )
         file_pending_count = len(markers) - first_marker
@@ -3184,11 +3836,12 @@ def pending_marker_present(
     pending_line: int,
     pending_digest: str = "",
     pending_text: str = "",
+    expected_identity: tuple[int, int] | None = None,
 ) -> bool:
     path = root / pending_file
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
+        lines = read_pinned_markdown_file(root, path, expected_identity).splitlines()
+    except (OSError, RuntimeError):
         return False
     idx = pending_line - 1
     if pending_text:
@@ -3238,53 +3891,77 @@ def clear_pending_marker_if_current(
     """Relocate and clear one delivered block under the shared task-file lock."""
 
     path = root / marker.file
-    tmp_path: Path | None = None
     try:
         with task_file_lock(path):
-            before = path.stat()
-            text = path.read_text(encoding="utf-8")
-            lines = text.splitlines()
-            idx = relocated_pending_index(lines, marker.block_text, marker.line - 1)
-            if idx is None:
-                return False
-            del lines[idx]
-            remove_direct_source_header(lines, idx)
-            updated = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
-                _ = handle.write(updated)
-                handle.flush()
-                os.fsync(handle.fileno())
-                tmp_path = Path(handle.name)
-            tmp_path.chmod(before.st_mode & 0o7777)
-            after = path.stat()
-            if (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_size) != (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_size):
-                return False
-            before_payload = text.encode("utf-8")
-            after_payload = updated.encode("utf-8")
-            if prepare is not None and not prepare(path, before_payload, after_payload):
-                return False
-            after_prepare = path.stat()
-            if (after_prepare.st_dev, after_prepare.st_ino, after_prepare.st_mtime_ns, after_prepare.st_size) != (
-                before.st_dev,
-                before.st_ino,
-                before.st_mtime_ns,
-                before.st_size,
+            with open_pinned_markdown_target(root, path, marker.root_identity) as (
+                _root_fd,
+                parent_fd,
+                leaf_fd,
+                leaf_name,
+                before,
+                _root_identity,
             ):
-                return False
-            os.replace(tmp_path, path)
-            tmp_path = None
-            directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-            return True
+                os.lseek(leaf_fd, 0, os.SEEK_SET)
+                chunks: list[bytes] = []
+                while chunk := os.read(leaf_fd, 1024 * 1024):
+                    chunks.append(chunk)
+                before_payload = b"".join(chunks)
+                text = before_payload.decode("utf-8")
+                lines = text.splitlines()
+                idx = relocated_pending_index(lines, marker.block_text, marker.line - 1)
+                if idx is None:
+                    return False
+                del lines[idx]
+                remove_direct_source_header(lines, idx)
+                updated = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+                after_payload = updated.encode("utf-8")
+                if prepare is not None and not prepare(path, before_payload, after_payload):
+                    return False
+                current = os.fstat(leaf_fd)
+                current_entry = os.stat(leaf_name, dir_fd=parent_fd, follow_symlinks=False)
+                if (
+                    (current.st_dev, current.st_ino, current.st_mtime_ns, current.st_size)
+                    != (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_size)
+                    or (current_entry.st_dev, current_entry.st_ino) != (before.st_dev, before.st_ino)
+                    or stat.S_ISLNK(current_entry.st_mode)
+                ):
+                    return False
+                temporary_name = f".{leaf_name}.{os.getpid()}.{secrets.token_hex(8)}"
+                temporary_fd = os.open(
+                    temporary_name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=parent_fd,
+                )
+                try:
+                    remaining = memoryview(after_payload)
+                    while remaining:
+                        remaining = remaining[os.write(temporary_fd, remaining) :]
+                    os.fchmod(temporary_fd, stat.S_IMODE(before.st_mode))
+                    os.fsync(temporary_fd)
+                except BaseException:
+                    os.unlink(temporary_name, dir_fd=parent_fd)
+                    temporary_name = ""
+                    raise
+                finally:
+                    os.close(temporary_fd)
+                with cleanup_descriptor_temp(parent_fd, temporary_name):
+                    current = os.fstat(leaf_fd)
+                    current_entry = os.stat(leaf_name, dir_fd=parent_fd, follow_symlinks=False)
+                    if (
+                        (current.st_dev, current.st_ino, current.st_mtime_ns, current.st_size)
+                        != (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_size)
+                        or (current_entry.st_dev, current_entry.st_ino) != (before.st_dev, before.st_ino)
+                        or stat.S_ISLNK(current_entry.st_mode)
+                    ):
+                        os.unlink(temporary_name, dir_fd=parent_fd)
+                        return False
+                    os.replace(temporary_name, leaf_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                    os.fsync(parent_fd)
+                    return True
     except OSError as exc:
         print(f"omo_pending_watch: failed to clear delivered pending marker in {marker.file}: {exc}", file=sys.stderr)
         return False
-    finally:
-        if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
 
 
 def clear_consumed_report_marker(
@@ -3300,130 +3977,73 @@ def clear_consumed_report_marker(
     binding = report_owner_binding(pointer, path)
     if binding is None:
         return False
-    tmp_path = watcher_report_manager_temporary(path, report_key)
-    created_temporary = False
     try:
         with task_file_lock(path):
-            before = path.lstat()
-            if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_size > 64 * 1024 * 1024:
-                return False
-            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(path, flags)
-            try:
-                opened = os.fstat(fd)
-                if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != (
-                    before.st_dev,
-                    before.st_ino,
-                    before.st_size,
-                    before.st_mtime_ns,
-                    before.st_ctime_ns,
-                ):
+            with open_pinned_markdown_target(args.root, path, hint.root_identity) as (
+                _root_fd,
+                parent_fd,
+                leaf_fd,
+                leaf_name,
+                before,
+                _root_identity,
+            ):
+                cleanup_stale_consumed_temps(parent_fd, leaf_name)
+                if before.st_uid != os.getuid() or before.st_size > 64 * 1024 * 1024:
                     return False
+                os.lseek(leaf_fd, 0, os.SEEK_SET)
                 payload = b""
-                while chunk := os.read(fd, 1024 * 1024):
+                while chunk := os.read(leaf_fd, 1024 * 1024):
                     payload += chunk
-                after_read = os.fstat(fd)
-                if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != (
-                    after_read.st_dev,
-                    after_read.st_ino,
-                    after_read.st_size,
-                    after_read.st_mtime_ns,
-                    after_read.st_ctime_ns,
-                ):
+                if (after_read := os.fstat(leaf_fd)).st_mtime_ns != before.st_mtime_ns or after_read.st_ctime_ns != before.st_ctime_ns or after_read.st_size != before.st_size:
                     return False
-            finally:
-                os.close(fd)
-            owner = payload[: binding.size_bytes]
-            suffix = b"\n" * binding.separator_bytes + b"(pending)\n" + pointer.encode("utf-8") + b"\n"
-            owner_is_bound = (
-                len(owner) == binding.size_bytes
-                and hashlib.sha256(owner).hexdigest() == binding.owner_sha256
-                and binding.separator_bytes == (1 if not owner or owner.endswith(b"\n") else 2)
-            )
-            if owner_is_bound and payload == owner + suffix:
-                replacement = owner
-                transition_protocol = "watcher-locked-pointer-transition-v1"
-            else:
-                pointer_bytes = pointer.encode("utf-8")
-                pointer_block = b"(pending)\n" + pointer_bytes + b"\n"
-                if payload.count(pointer_bytes) != 1 or payload.count(pointer_block) != 1:
-                    return False
-                replacement = payload.replace(pointer_block, b"", 1)
-                transition_protocol = "watcher-locked-pointer-removal-transition-v2"
-
-            temporary_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-            temporary_fd = os.open(tmp_path, temporary_flags, 0o600)
-            created_temporary = True
-            try:
-                os.fchmod(temporary_fd, stat.S_IMODE(before.st_mode))
-                view = memoryview(replacement)
-                while view:
-                    written = os.write(temporary_fd, view)
-                    if written <= 0:
-                        raise OSError("short watcher manager temporary write")
-                    view = view[written:]
-                os.fsync(temporary_fd)
-                temporary_info = os.fstat(temporary_fd)
-                if (
-                    not stat.S_ISREG(temporary_info.st_mode)
-                    or temporary_info.st_uid != before.st_uid
-                    or temporary_info.st_gid != before.st_gid
-                    or stat.S_IMODE(temporary_info.st_mode) != stat.S_IMODE(before.st_mode)
-                ):
-                    return False
-            finally:
-                os.close(temporary_fd)
-            current = path.lstat()
-            if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns) != (
-                before.st_dev,
-                before.st_ino,
-                before.st_size,
-                before.st_mtime_ns,
-                before.st_ctime_ns,
-            ):
-                return False
-            if not remember_consumed_report_transition(
-                args.state,
-                report_key,
-                path,
-                pointer,
-                payload,
-                replacement,
-                authority=authority,
-                protocol=transition_protocol,
-            ):
-                return False
-            current = path.lstat()
-            if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns) != (
-                before.st_dev,
-                before.st_ino,
-                before.st_size,
-                before.st_mtime_ns,
-                before.st_ctime_ns,
-            ):
-                return False
-            os.replace(tmp_path, path)
-            created_temporary = False
-            directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-            restored = path.lstat()
-            if (
-                path.read_bytes() != replacement
-                or restored.st_uid != before.st_uid
-                or restored.st_gid != before.st_gid
-                or stat.S_IMODE(restored.st_mode) != stat.S_IMODE(before.st_mode)
-            ):
-                return False
-            return True
-    except OSError as exc:
+                owner = payload[: binding.size_bytes]
+                suffix = b"\n" * binding.separator_bytes + b"(pending)\n" + pointer.encode("utf-8") + b"\n"
+                owner_is_bound = len(owner) == binding.size_bytes and hashlib.sha256(owner).hexdigest() == binding.owner_sha256 and binding.separator_bytes == (1 if not owner or owner.endswith(b"\n") else 2)
+                if owner_is_bound and payload == owner + suffix:
+                    replacement = owner
+                    transition_protocol = "watcher-locked-pointer-transition-v1"
+                else:
+                    pointer_bytes = pointer.encode("utf-8")
+                    pointer_block = b"(pending)\n" + pointer_bytes + b"\n"
+                    if payload.count(pointer_bytes) != 1 or payload.count(pointer_block) != 1:
+                        return False
+                    replacement = payload.replace(pointer_block, b"", 1)
+                    transition_protocol = "watcher-locked-pointer-removal-transition-v2"
+                temporary_name = f".{leaf_name}.omo-watch-{os.getpid()}-{secrets.token_hex(8)}.tmp"
+                temporary_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+                temporary_fd = os.open(temporary_name, temporary_flags, 0o600, dir_fd=parent_fd)
+                try:
+                    os.fchmod(temporary_fd, stat.S_IMODE(before.st_mode))
+                    view = memoryview(replacement)
+                    while view:
+                        written = os.write(temporary_fd, view)
+                        if written <= 0:
+                            raise OSError("short watcher manager temporary write")
+                        view = view[written:]
+                    os.fsync(temporary_fd)
+                except BaseException:
+                    os.unlink(temporary_name, dir_fd=parent_fd)
+                    temporary_name = ""
+                    raise
+                finally:
+                    os.close(temporary_fd)
+                with cleanup_descriptor_temp(parent_fd, temporary_name):
+                    current = os.fstat(leaf_fd)
+                    current_entry = os.stat(leaf_name, dir_fd=parent_fd, follow_symlinks=False)
+                    if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) or (current_entry.st_dev, current_entry.st_ino) != (before.st_dev, before.st_ino):
+                        return False
+                    if not remember_consumed_report_transition(args.state, report_key, path, pointer, payload, replacement, authority=authority, protocol=transition_protocol):
+                        return False
+                    current = os.fstat(leaf_fd)
+                    current_entry = os.stat(leaf_name, dir_fd=parent_fd, follow_symlinks=False)
+                    if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) or (current_entry.st_dev, current_entry.st_ino) != (before.st_dev, before.st_ino):
+                        return False
+                    os.replace(temporary_name, leaf_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                    os.fsync(parent_fd)
+                    return True
+    except (OSError, RuntimeError) as exc:
         print(f"omo_pending_watch: failed to restore delivered report owner in {hint.file}: {exc}", file=sys.stderr)
         return False
-    finally:
-        if created_temporary:
-            tmp_path.unlink(missing_ok=True)
 
 
 def push_marker_delivery(
@@ -3458,6 +4078,9 @@ def push_marker_delivery(
             failure_success_event=failure_success_event,
             failure_fallback_defer_if_busy=failure_fallback_defer_if_busy,
             guest_owner=guest_owner,
+            pending_root_identity=marker.root_identity,
+            pending_task_metadata=marker.task_metadata,
+            root_identity=args.root_identity,
         )
     return DeliveryResult(1, "missing delivery target")
 
@@ -3645,7 +4268,7 @@ def push_guest_hees_ref(
 
 
 def agent_report_target(args: Args, marker: Marker) -> str:
-    metadata = read_task_metadata(args.root / marker.file, args.root)
+    metadata = marker.task_metadata or read_task_metadata(args.root / marker.file, args.root)
     if metadata is None:
         return args.manager_target
     return metadata.runat if metadata.is_manager else metadata.managerat
@@ -3944,7 +4567,7 @@ def push_manager_text(args: Args, text: str, success_event: DeliverySuccessEvent
     if not args.manager_target:
         print("omo_pending_watch: OMO_MANAGER_TMUX_TARGET is required outside --dry-run", file=sys.stderr)
         return 1
-    return try_send_delivery_text("manager delivery", text, args.manager_target, root=args.root, success_event=success_event).status
+    return try_send_delivery_text("manager delivery", text, args.manager_target, root=args.root, root_identity=args.root_identity, success_event=success_event).status
 
 
 def push_manager_text_to_target(
@@ -3972,18 +4595,28 @@ def push_manager_text_to_target(
         root=scoped_args.root,
         success_event=success_event,
         failure_fallback_target=fallback_target,
-        failure_pending_guard=PendingGuard(args.root, marker.file, marker.line, marker.digest, marker.block_text) if marker is not None else None,
+        failure_pending_guard=PendingGuard(
+            args.root,
+            marker.file,
+            marker.line,
+            marker.digest,
+            marker.block_text,
+            root_identity=marker.root_identity,
+            task_metadata=marker.task_metadata,
+        ) if marker is not None else None,
         problem_guard=problem_guard,
         failure_problem_guard=fallback_problem_guard,
         failure_fallback_defer_if_busy=problem_guard is not None,
+        pending_root_identity=marker.root_identity if marker is not None else None,
+        root_identity=args.root_identity,
     )
     if result.status in {0, ASYNC_DELIVERY_STARTED} or not target_unavailable(result):
         return result.status
     if not fallback_target:
         return result.status
-    if marker is not None and not pending_marker_present(args.root, marker.file, marker.line, marker.digest, marker.block_text):
+    if marker is not None and not pending_marker_present(args.root, marker.file, marker.line, marker.digest, marker.block_text, marker.root_identity):
         return result.status
-    if problem_guard is not None and inspect_codex(CodexStatusArgs(fallback_target, 80)).status != "ready":
+    if problem_guard is not None and not runat_is_ready(fallback_target):
         return result.status
     return try_send_delivery_text(
         "manager delivery",
@@ -3996,6 +4629,8 @@ def push_manager_text_to_target(
         pending_text=marker.block_text if marker is not None else "",
         success_event=success_event,
         problem_guard=fallback_problem_guard,
+        pending_root_identity=marker.root_identity if marker is not None else None,
+        root_identity=args.root_identity,
     ).status
 
 
@@ -4010,8 +4645,9 @@ def send_delivery_text(
     pending_digest: str = "",
     pending_text: str = "",
     submit_verify_timeout_s: float = DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S,
+    root_identity: tuple[int, int] | None = None,
 ) -> int:
-    return try_send_delivery_text(name, text, target, root=root, pending_file=pending_file, pending_line=pending_line, pending_digest=pending_digest, pending_text=pending_text, submit_verify_timeout_s=submit_verify_timeout_s).status
+    return try_send_delivery_text(name, text, target, root=root, root_identity=root_identity, pending_file=pending_file, pending_line=pending_line, pending_digest=pending_digest, pending_text=pending_text, submit_verify_timeout_s=submit_verify_timeout_s).status
 
 
 def submit_delivery_send(
@@ -4024,6 +4660,7 @@ def submit_delivery_send(
     success_event: DeliverySuccessEvent | None,
     failure_fallback: DeliveryFailureFallback | None,
     root: Path | None,
+    root_identity: tuple[int, int] | None,
     delivery_id: str,
 ) -> Future[None] | None:
     """Submit a delivery while keeping older test/integration send shims compatible."""
@@ -4033,6 +4670,7 @@ def submit_delivery_send(
         "success_event": success_event,
         "failure_fallback": failure_fallback,
         "root": root,
+        "root_identity": root_identity,
         "delivery_id": delivery_id,
     }
     if problem_guard is not None:
@@ -4043,9 +4681,10 @@ def submit_delivery_send(
         # A few embedders still provide the pre-recovery send shim.  Retry only
         # the signature mismatch; real sender TypeErrors must propagate.
         detail = str(error)
-        if "unexpected keyword argument 'root'" not in detail and "unexpected keyword argument 'delivery_id'" not in detail:
+        if "unexpected keyword argument 'root'" not in detail and "unexpected keyword argument 'root_identity'" not in detail and "unexpected keyword argument 'delivery_id'" not in detail:
             raise
         kwargs.pop("root", None)
+        kwargs.pop("root_identity", None)
         kwargs.pop("delivery_id", None)
         return send_to_codex(target, text, options, **kwargs)  # type: ignore[arg-type]
 
@@ -4070,11 +4709,27 @@ def try_send_delivery_text(
     failure_problem_guard: AgentProblemGuard | None = None,
     failure_fallback_defer_if_busy: bool = False,
     guest_owner: GuestHeesOwner | None = None,
+    pending_root_identity: tuple[int, int] | None = None,
+    pending_task_metadata: TaskMetadata | None = None,
+    root_identity: tuple[int, int] | None = None,
 ) -> DeliveryResult:
-    if root is not None and pending_file is not None and not pending_marker_present(root, pending_file, pending_line, pending_digest, pending_text):
+    if root is not None and pending_file is not None and not pending_marker_present(root, pending_file, pending_line, pending_digest, pending_text, pending_root_identity):
         print(f"omo_pending_watch: {name} skipped; pending marker cleared before tmux paste", file=sys.stderr)
         return DeliveryResult(1, "pending marker cleared before tmux paste")
-    pending_guard = PendingGuard(root, pending_file, pending_line, pending_digest, pending_text, guest_owner) if root is not None and pending_file is not None else None
+    pending_guard = (
+        PendingGuard(
+            root,
+            pending_file,
+            pending_line,
+            pending_digest,
+            pending_text,
+            guest_owner,
+            pending_root_identity,
+            pending_task_metadata,
+        )
+        if root is not None and pending_file is not None
+        else None
+    )
     delivery_id = str(uuid.uuid4()) if root is not None else ""
     options = CodexSendOptions(
         DEFAULT_TMUX_ENTER_COUNT,
@@ -4107,6 +4762,7 @@ def try_send_delivery_text(
             success_event=success_event,
             failure_fallback=failure_fallback,
             root=root,
+            root_identity=root_identity,
             delivery_id=delivery_id,
         )
     except subprocess.CalledProcessError as exc:
@@ -4159,16 +4815,11 @@ def push_agent_pending_item_reminders(
         last_sent_s = seen_get(seen, key, now_s=now_wall_s)
         if not count or (key in seen and now_wall_s - last_sent_s < args.agent_problem_repeat_s):
             continue
-        if not args.dry_run:
-            if runat_kind(target) == "omnigent":
-                if omnigent_manager_status(omnigent_session_snapshot(target)) != "ready":
-                    continue
-            elif inspect_codex(CodexStatusArgs(target, 80)).status != "ready":
-                continue
-        if runat_kind(target) != "omnigent":
-            turn, nearby_report = ready_report_context(target)
-            if turn is not None and not nearby_report:
-                continue
+        if not args.dry_run and not runat_is_ready(target):
+            continue
+        turn, nearby_report = ready_report_context(target)
+        if turn is not None and not nearby_report:
+            continue
         reminder_text = AGENT_PENDING_ITEMS_REMINDER.format(count=count)
         if args.dry_run:
             print(reminder_text)
@@ -4184,6 +4835,7 @@ def push_agent_pending_item_reminders(
                 reminder_text,
                 target,
                 root=args.root,
+                root_identity=args.root_identity,
                 success_event=event,
             ).status
         changed = delivery_accepted(status) or changed
@@ -4382,10 +5034,21 @@ def ready_report_key(args: Args, target: str, turn: VisibleTurn) -> str:
 
 
 def ready_report_turn(target: str) -> VisibleTurn | None:
-    return latest_visible_turn(codex_tail(target, 2000))
+    turn, _ = ready_report_context(target)
+    return turn
 
 
 def ready_report_context(target: str) -> tuple[VisibleTurn | None, bool]:
+    if runat_kind(target) == "omnigent":
+        try:
+            latest = omnigent_session_ready_report(target)
+        except RuntimeError:
+            return None, False
+        if latest is None:
+            return None, False
+        item_id, nearby = latest
+        digest = hashlib.sha256(item_id.encode("utf-8")).hexdigest()
+        return VisibleTurn((item_id,), digest), nearby
     turns = recent_visible_turns(codex_tail(target, 2000))
     return (turns[-1] if turns else None, any(turn_invoked_report_helper(turn) for turn in turns))
 
@@ -4431,7 +5094,7 @@ def ready_report_guard_current(args: Args, target: str, fingerprint: str) -> boo
         and turn.fingerprint == fingerprint
         and not nearby_report
         and ready_report_target_is_eligible(args, target)
-        and inspect_codex(CodexStatusArgs(target, 80)).status == "ready"
+        and runat_is_ready(target)
     )
 
 
@@ -4440,12 +5103,20 @@ def run_ready_report_reminder(args: Args, target: str, fingerprint: str) -> None
         return
 
     def before_paste() -> None:
+        if args.root_identity is not None:
+            try:
+                current_root = args.root.lstat()
+            except OSError as exc:
+                raise PrePasteRejected("configured watcher root changed before tmux paste") from exc
+            if stat.S_ISLNK(current_root.st_mode) or not stat.S_ISDIR(current_root.st_mode) or (current_root.st_dev, current_root.st_ino) != args.root_identity:
+                raise PrePasteRejected("configured watcher root changed before tmux paste")
         if not ready_report_guard_current(args, target, fingerprint):
             raise PrePasteRejected("ready turn resolved or changed before tmux paste")
 
     options = CodexSendOptions(DEFAULT_TMUX_ENTER_COUNT, 0.15, False, DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S, True)
     message = with_long_running_blocker_reminder(args.root, target, AGENT_READY_REPORT_REMINDER)
-    verified_send_to_codex(target, message, options, before_paste=before_paste)
+    with tmux_input_lock(target), target_send_lock(target):
+        verified_send_to_codex(target, message, options, before_paste=before_paste)
 
 
 def log_ready_report_result(future: Future[None], args: Args, target_key: str, seen_key: str) -> None:
@@ -4798,6 +5469,7 @@ def update_idle_status_check(args: Args, last_check_s: float, now_s: float, stat
     if args.dry_run:
         _ = maybe_push_idle_status(args, last_check_s, now_s)
         return now_s, None
+    require_root_identity(args.root, args.root_identity)
     run = start_command("idle status check", status_command(args), 30)
     return now_s, run
 
@@ -4940,7 +5612,8 @@ def run_capacity_resume(target: str, options: CodexSendOptions, guard: AgentProb
         if not agent_problem_guard_current(guard):
             raise RuntimeError("selected-model-capacity problem resolved or changed before tmux paste")
 
-    return verified_send_capacity_resume(target, options, before_paste=before_paste)
+    with tmux_input_lock(target):
+        return verified_send_capacity_resume(target, options, before_paste=before_paste)
 
 
 def capacity_alert_text(row: ProblemRow, attempts: int, detail: str) -> str:
@@ -4970,6 +5643,7 @@ def route_capacity_main_manager_alert(
                 text,
                 route_target,
                 root=args.root,
+                root_identity=args.root_identity,
                 problem_guard=guard,
             ).status
         ):
@@ -5034,7 +5708,7 @@ def log_capacity_resume_result(
         if fallback is not None:
             failed: Future[None] = Future()
             failed.set_exception(exc)
-            log_send_result(failed, retry_event, fallback, root=args.root)
+            log_send_result(failed, retry_event, fallback, root=args.root, root_identity=args.root_identity)
             return
         queue_delivery_failure_event(retry_event)
         detail = (
@@ -5086,7 +5760,12 @@ def submit_capacity_resume(
     )
     owner_target = row.owner_target or args.manager_target
     options = CodexSendOptions(1, 0.15, False, DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S, False)
-    guard = AgentProblemGuard(tuple([*status_command(args, True), "--no-auto-unstick"]), (line,), root=args.root)
+    guard = AgentProblemGuard(
+        tuple([*status_command(args, True), "--no-auto-unstick"]),
+        (line,),
+        root=args.root,
+        root_identity=args.root_identity,
+    )
     fallback = (
         DeliveryFailureFallback(
             failed_target=row.target,
@@ -5472,28 +6151,75 @@ def filtered_problem_output(body_lines: list[str], *, suppress_message: str = ""
     return "\n".join([count_line, *manager_actions_for_problem_lines(body_lines), *body_lines])
 
 
+def filter_blocked_long_running_ready_output(root: Path, output: str) -> str:
+    """Drop ready rows for persistent roles intentionally blocked on an owner."""
+
+    lines = output.splitlines()
+    if not lines or not lines[0].startswith("agent-problems:"):
+        return output
+    kept: list[str] = []
+    removed = False
+    for line in lines[1:]:
+        if line.startswith("manager-action: "):
+            kept.append(line)
+            continue
+        if problem_line_status(line) != "ready":
+            kept.append(line)
+            continue
+        task_file = problem_line_task(line)
+        task_path = resolve_task_path(root, task_file) if task_file else None
+        metadata = read_task_metadata(task_path, root) if task_path is not None else None
+        state = scan_task_state(task_path, root) if task_path is not None else None
+        if (
+            metadata is None
+            or metadata.status != "long_running"
+            or not metadata.blocked_on
+            or not same_tmux_target(metadata.runat, problem_line_target(line))
+            or state is None
+            or not state.persistent_role
+        ):
+            kept.append(line)
+        else:
+            removed = True
+    if not removed:
+        return output
+    return filtered_problem_output([line for line in kept if not line.startswith("manager-action: ")]) or ""
+
+
 def target_aliases(target: str) -> set[str]:
-    return {target, target[:-2] if target.endswith(".0") else f"{target}.0"} if target else set()
+    if not target:
+        return set()
+    if runat_kind(target) == "omnigent":
+        return {target}
+    return {target, target[:-2] if target.endswith(".0") else f"{target}.0"}
 
 
 def canonical_target(target: str) -> str:
+    if runat_kind(target) == "omnigent":
+        return target
     return target[:-2] if target.endswith(".0") else target
 
 
 def target_session(target: str) -> str:
+    if runat_kind(target) != "tmux":
+        return ""
     return target.split(":", 1)[0] if ":" in target else ""
 
 
 def target_window(target: str) -> str:
+    if runat_kind(target) != "tmux":
+        return ""
     return target.split(":", 1)[1].split(".", 1)[0] if ":" in target else ""
 
 
 def target_has_explicit_pane(target: str) -> bool:
+    if runat_kind(target) != "tmux":
+        return False
     return "." in target.split(":", 1)[1] if ":" in target else False
 
 
 def same_tmux_window_unless_both_panes(left: str, right: str) -> bool:
-    if not left or not right:
+    if runat_kind(left) != "tmux" or runat_kind(right) != "tmux" or not left or not right:
         return False
     if target_session(left) != target_session(right) or target_window(left) != target_window(right):
         return False
@@ -6506,6 +7232,18 @@ def manager_human_email_problem_output(output: str, manager_target: str = "") ->
     return filtered_problem_output(kept) or ""
 
 
+def watcher_error_problem_output(output: str, manager_target: str = "") -> str:
+    lines = output.splitlines()
+    if not lines or not lines[0].startswith("agent-problems:"):
+        return ""
+    kept = [
+        line
+        for line in lines[1:]
+        if problem_line_status(line) == "error" or manager_human_email_problem_line(line, manager_target)
+    ]
+    return filtered_problem_output(kept) or ""
+
+
 def manager_problem_targets(output: str, manager_target: str = "") -> set[str]:
     targets = {manager_target} if manager_target else set()
     for line in output.splitlines()[1:]:
@@ -6578,17 +7316,38 @@ def manager_problem_seen_key(args: Args, output: str) -> str:
 
 
 def log_manager_problem_once(args: Args, seen: dict[str, float], output: str, key: str, now_wall_s: float) -> bool:
-    human_attempt_key = manager_problem_human_attempt_key(args)
-    if seen_contains(seen, human_attempt_key, now_wall_s) and now_wall_s - seen_get(seen, human_attempt_key, now_s=now_wall_s) < args.agent_problem_repeat_s:
-        return False
     sent = log_manager_problem(args, output)
     if sent:
         remember_seen(seen, key, now_wall_s)
-        remember_seen(seen, human_attempt_key, now_wall_s)
+    else:
+        remember_seen(seen, key, now_wall_s - args.agent_problem_repeat_s + PENDING_DELIVERY_FAILURE_RETRY_S)
     return sent
 
 
-def route_or_log_manager_problem(args: Args, seen: dict[str, float], output: str, now_wall_s: float) -> bool:
+def email_human_watcher_error_once(args: Args, seen: dict[str, float], output: str, now_wall_s: float) -> bool:
+    if not output:
+        return False
+    digest = hashlib.sha256(f"{args.root}\n{output}".encode()).hexdigest()[:16]
+    key = f"watcher-error-human-email:{digest}"
+    if seen_get(seen, key, now_s=now_wall_s) > now_wall_s:
+        return False
+    sent = log_manager_problem(args, output)
+    remember_seen(
+        seen,
+        key,
+        now_wall_s + (args.agent_problem_repeat_s if sent else PENDING_DELIVERY_FAILURE_RETRY_S),
+    )
+    return sent
+
+
+def route_or_log_manager_problem(
+    args: Args,
+    seen: dict[str, float],
+    output: str,
+    now_wall_s: float,
+    *,
+    allow_human_fallback: bool = True,
+) -> bool:
     if not output:
         return False
     key = manager_problem_seen_key(args, output)
@@ -6608,8 +7367,10 @@ def route_or_log_manager_problem(args: Args, seen: dict[str, float], output: str
             continue
         route_target = args.reminder_choice(tier)
         targets.extend((route_target, *(target for target in tier if target != route_target)))
-    if not targets:
+    if not targets and allow_human_fallback:
         return log_manager_problem_once(args, seen, output, key, now_wall_s)
+    if not targets:
+        return False
     text = manager_problem_route_text(args, output)
     event = DeliverySuccessEvent(
         seen_keys=(key,),
@@ -6622,36 +7383,74 @@ def route_or_log_manager_problem(args: Args, seen: dict[str, float], output: str
         guard = AgentProblemGuard(
             tuple([*status_command(args, True), "--no-auto-unstick"]),
             tuple(output.splitlines()[1:]),
+            root=args.root,
+            root_identity=args.root_identity,
             ready_target=target,
         )
         if args.dry_run:
             print(f"manager problem route due: target={target}\n{text}", flush=True)
             remember_seen(seen, key, now_wall_s)
             return True
-        result = try_send_delivery_text("manager problem routing", text, target, root=args.root, success_event=event, problem_guard=guard)
+        result = try_send_delivery_text(
+            "manager problem routing",
+            text,
+            target,
+            root=args.root,
+            root_identity=args.root_identity,
+            success_event=event,
+            problem_guard=guard,
+        )
         if delivery_accepted(result.status):
             reserve_async_marker(seen, attempt_key, now_wall_s, result.status)
             remember_seen(seen, agent_problem_target_attempt_key(target), now_wall_s)
             if result.status == 0:
                 remember_seen(seen, key, now_wall_s)
             return True
-    return log_manager_problem_once(args, seen, output, key, now_wall_s)
+    return log_manager_problem_once(args, seen, output, key, now_wall_s) if allow_human_fallback else False
 
 
 def log_manager_problem(args: Args, output: str) -> bool:
+    # 🧑 "When there is an error detected by the tmux watcher, or Omnigent watcher if that exists, directly email the human from the watcher automatically via scripting and include the relevant info."
     if not output:
         return False
-    subject = "manager watcher detected manager error"
+    subject = "Watcher detected agent error"
     body = (
-        "The manager watcher detected a manager pane problem that may prevent normal manager delivery.\n\n"
-        f"root: {args.root}\n"
-        f"manager_target: {args.manager_target or 'unset'}\n\n"
+        "The tmux/OmniGent watcher detected an agent error.\n\n"
+        f"Watcher root: {args.root}\n"
+        f"Manager target: {args.manager_target or 'unset'}\n\n"
         f"{output}\n"
     )
     if args.dry_run:
-        print(f"manager problem log due: {subject}\n{body}", flush=True)
+        print(f"manager human email due: {subject}\n{body}", flush=True)
         return True
-    print(f"omo_pending_watch: {subject}\n{body}", file=sys.stderr)
+    try:
+        with tempfile.TemporaryDirectory(prefix="omo-manager-problem-email.") as tmp:
+            tmp_path = Path(tmp)
+            tmp_path.chmod(0o700)
+            subject_file = tmp_path / "subject.txt"
+            body_file = tmp_path / "body.txt"
+            subject_file.write_text(f"{subject}\n", encoding="utf-8")
+            body_file.write_text(body, encoding="utf-8")
+            command = [
+                str(DEFAULT_HUMAN_EMAIL_HELPER),
+                "--require-human-recipient",
+                "--subject-file",
+                str(subject_file),
+                "--message-file",
+                str(body_file),
+            ]
+            if args.manager_target:
+                command.extend(("--tmux-target", args.manager_target))
+            result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"omo_pending_watch: manager problem human email failed: {exc}", file=sys.stderr)
+        return False
+    if result.returncode != 0:
+        print(
+            f"omo_pending_watch: manager problem human email exited status={result.returncode}: {result.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return False
     return True
 
 
@@ -7071,6 +7870,7 @@ def maybe_push_dependency_transitions(
             (),
             (),
             root=args.root,
+            root_identity=args.root_identity,
             report_state=args.state,
             dependency_task_file=task_file,
             dependency_snapshot=snapshot,
@@ -7124,6 +7924,19 @@ def handle_agent_problem_result(
     output = result.stdout.strip()
     if not output:
         return dependency_changed or reminders_changed
+    scan_output = output
+    output = filter_blocked_long_running_ready_output(args.root, output)
+    if not output:
+        if visibility_only:
+            return dependency_changed or reminders_changed
+        _, ready_report_changed = handle_ready_report_reminders(args, seen, scan_output, now_wall_s, reminder_targets)
+        return dependency_changed or reminders_changed or ready_report_changed
+    visibility_error_sent = (
+        email_human_watcher_error_once(args, seen, watcher_error_problem_output(output, args.manager_target), now_wall_s)
+        if visibility_only
+        else False
+    )
+    reminders_changed = reminders_changed or visibility_error_sent
     active_problem_task_files = {task_file for line in output.splitlines()[1:] if (task_file := problem_line_task(line))}
     prune_dependency_reported_snapshots(args.root, dependency_reported_state, active_problem_task_files, args.state)
     if not args.dry_run and dependency_reported_state != persisted_reported_state:
@@ -7154,19 +7967,18 @@ def handle_agent_problem_result(
         previous_dependency_reported_state = dict(dependency_reported_state)
     if result.stderr.strip():
         output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
+        scan_output = f"{scan_output}\nstderr:\n{result.stderr.strip()}".strip()
     if visibility_only:
         output = filtered_problem_output([line for line in output.splitlines() if line.startswith("malformed_task: ")]) or ""
-    if visibility_only:
         capacity_changed = False
-    else:
-        output, capacity_changed = handle_capacity_problems(args, seen, output, now_wall_s)
-    if not output:
-        return capacity_changed or dependency_changed or reminders_changed
-    if visibility_only:
         ready_report_changed = False
     else:
-        output, ready_report_changed = handle_ready_report_reminders(args, seen, output, now_wall_s, reminder_targets)
-    reminders_changed = reminders_changed or ready_report_changed
+        scan_output, capacity_changed = handle_capacity_problems(args, seen, scan_output, now_wall_s)
+        nagged, ready_report_changed = handle_ready_report_reminders(args, seen, scan_output, now_wall_s, reminder_targets)
+        output = filter_blocked_long_running_ready_output(args.root, nagged)
+    watcher_error_output = "" if visibility_only else watcher_error_problem_output(output, args.manager_target)
+    watcher_error_sent = email_human_watcher_error_once(args, seen, watcher_error_output, now_wall_s)
+    reminders_changed = reminders_changed or ready_report_changed or watcher_error_sent
     if not output:
         return capacity_changed or dependency_changed or reminders_changed
     compaction_changed = False if visibility_only else maybe_push_manager_compaction_reminder(args, seen, output, now_wall_s)
@@ -7174,7 +7986,13 @@ def handle_agent_problem_result(
     if not output:
         return capacity_changed or compaction_changed or dependency_changed or reminders_changed
     manager_problem_output = manager_human_email_problem_output(output, args.manager_target)
-    manager_problem_sent = route_or_log_manager_problem(args, seen, manager_problem_output, now_wall_s)
+    manager_problem_sent = route_or_log_manager_problem(
+        args,
+        seen,
+        manager_problem_output,
+        now_wall_s,
+        allow_human_fallback=not bool(watcher_error_output),
+    )
     output = filter_manager_self_problem_output(output, args.manager_target) or ""
     if not output:
         return capacity_changed or manager_problem_sent or compaction_changed or dependency_changed or reminders_changed
@@ -7200,6 +8018,10 @@ def handle_agent_problem_result(
             continue
         text = with_manager_policy_reminder(args, f"{dispatch.text}\n\n{problem_claim_instructions(problem_id, expired_claim)}")
         target = owner_target or args.manager_target
+        # Issue the exact evidence before any readiness probe or delivery side effect.
+        # A manager can receive the queued notice while this process is between
+        # those operations, so the claim helper must never observe a missing issue.
+        issue_problem(claim_path, problem_id, claim_owner_target, dispatch.problem_lines, now_wall_s)
         bypass_target_repeat = blocked_report_bypasses_target_repeat(
             args.root,
             dispatch.problem_lines,
@@ -7208,7 +8030,6 @@ def handle_agent_problem_result(
         )
         if (not target and not args.dry_run) or not agent_problem_target_is_ready(args, seen, target, now_wall_s, bypass_repeat=bypass_target_repeat):
             continue
-        issue_problem(claim_path, problem_id, claim_owner_target, dispatch.problem_lines, now_wall_s)
         dependency_reported_replacements = dependency_snapshot_replacements_for_problem_lines(args.root, dispatch.problem_lines, args.state)
         dependency_reported_removals = dependency_snapshot_removals_for_problem_lines(
             args.root,
@@ -7235,7 +8056,8 @@ def handle_agent_problem_result(
         guard = AgentProblemGuard(
             tuple([*status_command(args, True), "--no-auto-unstick"]),
             dispatch.problem_lines,
-            root=args.root if dependency_reported_replacements else None,
+            root=args.root,
+            root_identity=args.root_identity,
             report_state=args.state if dependency_reported_replacements else None,
             dependency_snapshots=dependency_reported_replacements,
             ready_target=target,
@@ -7346,10 +8168,24 @@ def queue_blocking_wakes(
 ) -> list[Path]:
     """Reconcile the enabled v2 graph and include newly queued wake files."""
 
+    if args.root_identity is not None:
+        try:
+            root_stat = args.root.lstat()
+        except OSError as exc:
+            raise RuntimeError("configured pending-watcher root changed before blocking reconciliation") from exc
+        if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode) or (root_stat.st_dev, root_stat.st_ino) != args.root_identity:
+            raise RuntimeError("configured pending-watcher root changed before blocking reconciliation")
     if not v2_enabled(args.root):
         return files
     if actor_controller is not None:
-        actor_controller.ensure()
+        actor_controller.ensure(args.root_identity)
+    if args.root_identity is not None:
+        try:
+            root_stat = args.root.lstat()
+        except OSError as exc:
+            raise RuntimeError("configured pending-watcher root changed before blocking reconciliation") from exc
+        if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode) or (root_stat.st_dev, root_stat.st_ino) != args.root_identity:
+            raise RuntimeError("configured pending-watcher root changed before blocking reconciliation")
     try:
         response = blocking_request(args.root, {"operation": "queue"})
     except BlockingError as exc:
@@ -7391,9 +8227,16 @@ def todo_previous_rows(todo_text: str) -> tuple[str, ...]:
     return tuple(rows)
 
 
-def todo_archive_preview(root: Path) -> TodoArchivePreview | None:
+def todo_archive_preview(root: Path, expected_identity: tuple[int, int] | None = None) -> TodoArchivePreview | None:
     """Return the material identity and verdict of the read-only retention preview."""
     helper = root / "scripts" / "manager-monthly-archive"
+    if expected_identity is not None:
+        try:
+            root_stat = root.lstat()
+        except OSError:
+            return None
+        if stat.S_ISLNK(root_stat.st_mode) or (root_stat.st_dev, root_stat.st_ino) != expected_identity:
+            return None
     try:
         result = subprocess.run(
             [str(helper), "--root", str(root), "--retain-previous", "0"],
@@ -7432,10 +8275,17 @@ def todo_archive_preview(root: Path) -> TodoArchivePreview | None:
             return None
         operation_rows.extend((header, *details))
     try:
-        todo_bytes = (root / "TODO.md").read_bytes()
-        todo_text = todo_bytes.decode("utf-8")
-    except (OSError, UnicodeError):
+        todo_text = read_pinned_markdown_file(root, root / "TODO.md", expected_identity)
+        todo_bytes = todo_text.encode("utf-8")
+    except (OSError, RuntimeError, UnicodeError):
         return None
+    if expected_identity is not None:
+        try:
+            root_stat = root.lstat()
+        except OSError:
+            return None
+        if stat.S_ISLNK(root_stat.st_mode) or (root_stat.st_dev, root_stat.st_ino) != expected_identity:
+            return None
     if hashlib.sha256(todo_bytes).hexdigest() != todo_matches[0]:
         return None
     previous_rows = todo_previous_rows(todo_text)
@@ -7503,15 +8353,23 @@ def scan_once(
     seen: dict[str, float],
     files: list[Path],
     actor_controller: BlockingActorController | None = None,
+    expected_identity: tuple[int, int] | None = None,
 ) -> bool:
     """Scan changed Markdown files and deliver newly observed pending refs once."""
 
+    if expected_identity is not None:
+        try:
+            current_root = args.root.lstat()
+        except OSError as exc:
+            raise RuntimeError("configured pending-watcher root changed before scan") from exc
+        if stat.S_ISLNK(current_root.st_mode) or (current_root.st_dev, current_root.st_ino) != expected_identity:
+            raise RuntimeError("configured pending-watcher root changed before scan")
     files = queue_blocking_wakes(args, files, actor_controller)
     now_s = time.time()
     changed = drain_delivery_successes(args, seen, now_s)
     todo = args.root / "TODO.md"
     if todo in files or not files:
-        n_todo_lines = markdown_line_count(todo)
+        n_todo_lines = markdown_line_count(todo, args.root, expected_identity)
         key_prefix = f"{args.root}:TODO.md:line-warning"
         if n_todo_lines <= TODO_LINE_WARNING_THRESHOLD:
             expired_keys = [key for key in seen if key == key_prefix or key.startswith(f"{key_prefix}:")]
@@ -7519,7 +8377,18 @@ def scan_once(
                 del seen[key]
                 changed = True
         else:
-            preview = todo_archive_preview(args.root)
+            preview = (
+                todo_archive_preview(args.root)
+                if expected_identity is None
+                else todo_archive_preview(args.root, expected_identity)
+            )
+            if expected_identity is not None:
+                try:
+                    current_root = args.root.lstat()
+                except OSError as exc:
+                    raise RuntimeError("configured pending-watcher root changed before TODO notification") from exc
+                if stat.S_ISLNK(current_root.st_mode) or (current_root.st_dev, current_root.st_ino) != expected_identity:
+                    raise RuntimeError("configured pending-watcher root changed before TODO notification")
             plan_state = todo_archive_plan_state_path(args)
             plan_identity = preview.identity if preview is not None else ""
             key = f"{key_prefix}:{plan_identity or 'preview-unavailable'}"
@@ -7558,7 +8427,7 @@ def scan_once(
                             except (OSError, ValueError) as exc:
                                 print(f"omo_pending_watch: failed to retain delivered TODO archive plan: {exc}", file=sys.stderr)
                     changed = True
-    for marker in find_markers(args.root, files):
+    for marker in find_markers(args.root, files, expected_identity):
         attachments = marker_attachments(args, marker)
         if marker.origin == "agent" and marker.source == "agent" and not marker_has_authenticated_agent_report(marker, attachments):
             continue
@@ -7580,30 +8449,143 @@ def scan_once(
     return drain_delivery_successes(args, seen, time.time()) or changed
 
 
-def markdown_line_count(path: Path) -> int:
+def markdown_line_count(path: Path, root: Path | None = None, expected_identity: tuple[int, int] | None = None) -> int:
     try:
-        return len(path.read_text(encoding="utf-8").splitlines())
+        text = read_pinned_markdown_file(root, path, expected_identity) if root is not None else path.read_text(encoding="utf-8")
+        return len(text.splitlines())
     except OSError:
         return 0
+
+
+def publish_ready(args: Args, expected_identity: tuple[int, int] | None = None) -> None:
+    """Publish one setup-only readiness record after the initial inventory."""
+
+    path = args.ready_file
+    if path is None:
+        return
+    try:
+        parent = path.parent.lstat()
+    except OSError as exc:
+        raise RuntimeError(f"pending watcher readiness directory is unavailable: {exc}") from exc
+    if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) & 0o077:
+        raise RuntimeError("pending watcher readiness directory must be owner-private")
+    try:
+        root_stat = args.root.lstat()
+    except OSError as exc:
+        raise RuntimeError(f"configured pending-watcher root is unavailable: {exc}") from exc
+    root_identity = (root_stat.st_dev, root_stat.st_ino)
+    if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode) or (expected_identity is not None and root_identity != expected_identity):
+        raise RuntimeError("configured pending-watcher root changed before readiness publication")
+    content = f"version=omo-pending-watch-ready-v1\npid={os.getpid()}\nroot={args.root}\nroot_dev={root_identity[0]}\nroot_ino={root_identity[1]}\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = -1
+    published = False
+    try:
+        fd = os.open(path, flags, 0o600)
+        current_root_stat = args.root.lstat()
+        current_identity = (current_root_stat.st_dev, current_root_stat.st_ino)
+        if stat.S_ISLNK(current_root_stat.st_mode) or not stat.S_ISDIR(current_root_stat.st_mode) or current_identity != root_identity:
+            raise RuntimeError("configured pending-watcher root changed during readiness publication")
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            fd = -1
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        ready_stat = path.lstat()
+        if stat.S_ISLNK(ready_stat.st_mode) or not stat.S_ISREG(ready_stat.st_mode) or ready_stat.st_uid != os.getuid() or stat.S_IMODE(ready_stat.st_mode) != 0o600:
+            raise RuntimeError("pending watcher readiness record changed during publication")
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            current_root_stat = args.root.lstat()
+            current_identity = (current_root_stat.st_dev, current_root_stat.st_ino)
+            if stat.S_ISLNK(current_root_stat.st_mode) or current_identity != root_identity:
+                raise RuntimeError("configured pending-watcher root changed during readiness publication")
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        published = True
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeError(f"pending watcher could not publish readiness: {exc}") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        if not published:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def run(args: Args, actor_controller: BlockingActorController) -> int:
     seen = new_seen_cache()
     dependency_snapshots: dict[str, str] = {}
     dependency_reported_snapshots = read_blocked_report_ledger(args)
+    try:
+        root_stat = args.root.lstat()
+    except OSError as exc:
+        if args.ready_file is not None:
+            raise RuntimeError(f"pending watcher could not establish an authenticated root watch: {exc}") from exc
+        raise RuntimeError(f"configured pending-watcher root is unavailable: {exc}") from exc
+    if stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode):
+        if args.ready_file is not None:
+            raise RuntimeError("pending watcher could not establish an authenticated root watch")
+        raise RuntimeError("configured pending-watcher root is unavailable")
+    initial_root_identity = (root_stat.st_dev, root_stat.st_ino)
+    if args.expected_root_identity is not None and initial_root_identity != args.expected_root_identity:
+        raise RuntimeError("configured pending-watcher root does not match the supervisor launch identity")
     if args.once:
-        _ = scan_once(args, seen, markdown_files(args.root), actor_controller)
+        object.__setattr__(args, "root_identity", initial_root_identity)
+        _ = scan_once(args, seen, markdown_files(args.root, initial_root_identity), actor_controller, initial_root_identity)
         _ = wait_for_delivery_successes(args, seen, max(10.0, DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S + 5.0))
         return 0
+    try:
+        initial_root_stat = args.root.lstat()
+    except OSError as exc:
+        if args.ready_file is not None:
+            raise RuntimeError(f"pending watcher could not establish an authenticated root watch: {exc}") from exc
+        raise RuntimeError(f"configured pending-watcher root is unavailable: {exc}") from exc
+    if stat.S_ISLNK(initial_root_stat.st_mode) or not stat.S_ISDIR(initial_root_stat.st_mode):
+        raise RuntimeError("configured pending-watcher root is unavailable")
+    initial_root_identity = (initial_root_stat.st_dev, initial_root_stat.st_ino)
+    if args.expected_root_identity is not None and initial_root_identity != args.expected_root_identity:
+        raise RuntimeError("configured pending-watcher root does not match the supervisor launch identity")
+    object.__setattr__(args, "root_identity", initial_root_identity)
     watcher = MarkdownChangeWatcher.open(args.root)
     if watcher is None:
+        if args.ready_file is not None:
+            raise RuntimeError("pending watcher could not establish an authenticated root watch")
         print("omo_pending_watch: using mtime polling fallback", file=sys.stderr)
+    elif (
+        watcher.root_identity != initial_root_identity
+        or not watcher.root_path_is_current()
+        or not watcher.root_watch_is_current()
+    ):
+        watcher.close()
+        raise RuntimeError("configured pending-watcher root changed while establishing its root watch")
+
+    def require_current_root() -> None:
+        try:
+            current = args.root.lstat()
+        except OSError as exc:
+            raise RuntimeError(f"configured pending-watcher root changed: {exc}") from exc
+        if stat.S_ISLNK(current.st_mode) or not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != initial_root_identity:
+            raise RuntimeError("configured pending-watcher root changed; supervisor must restart")
+
+    require_current_root()
     file_state = FileState(mtimes_ns={})
-    _ = mtime_changed_markdown_files(args.root, file_state)
+    _ = mtime_changed_markdown_files(args.root, file_state, initial_root_identity)
     next_full_s = time.monotonic() + args.full_scan_interval_s
     next_poll_s = time.monotonic() + args.poll_backstop_interval_s
     next_blocking_queue_s = time.monotonic() + BLOCKING_QUEUE_INTERVAL_S
-    pending_files = markdown_files(args.root)
+    pending_files = markdown_files(args.root, initial_root_identity)
+    if watcher is not None and (
+        watcher.root_identity != initial_root_identity
+        or not watcher.root_path_is_current()
+        or not watcher.root_watch_is_current()
+    ):
+        watcher.close()
+        raise RuntimeError("configured pending-watcher root changed before readiness publication")
+    publish_ready(args, initial_root_identity)
     fallback_mail_activity_s = time.time()
     last_digest_check_s = 0.0
     last_agent_problem_check_s = 0.0
@@ -7613,7 +8595,8 @@ def run(args: Args, actor_controller: BlockingActorController) -> int:
     digest_run: CommandRun | None = None
     worktree_run: CommandRun | None = None
     while True:
-        actor_controller.ensure()
+        require_current_root()
+        actor_controller.ensure(initial_root_identity)
         now_s = time.monotonic()
         now_wall_s = time.time()
         _ = drain_delivery_successes(args, seen, now_wall_s)
@@ -7621,17 +8604,21 @@ def run(args: Args, actor_controller: BlockingActorController) -> int:
             pending_files = queue_blocking_wakes(args, pending_files, actor_controller)
             next_blocking_queue_s = now_s + BLOCKING_QUEUE_INTERVAL_S
         if now_s >= next_full_s:
+            require_current_root()
             next_full_s = now_s + args.full_scan_interval_s
             next_poll_s = now_s + args.poll_backstop_interval_s
-            pending_files = markdown_files(args.root)
-            _ = mtime_changed_markdown_files(args.root, file_state)
+            pending_files = markdown_files(args.root, initial_root_identity)
+            _ = mtime_changed_markdown_files(args.root, file_state, initial_root_identity)
         elif watcher is not None and now_s >= next_poll_s:
+            require_current_root()
             next_poll_s = now_s + args.poll_backstop_interval_s
-            pending_files = mtime_changed_markdown_files(args.root, file_state)
+            pending_files = mtime_changed_markdown_files(args.root, file_state, initial_root_identity)
         if pending_files:
-            _ = scan_once(args, seen, pending_files, actor_controller)
+            require_current_root()
+            _ = scan_once(args, seen, pending_files, actor_controller, initial_root_identity)
             pending_files = []
         if agent_problem_run is None and now_s - last_agent_problem_check_s >= args.agent_problem_interval_s:
+            require_root_identity(args.root, args.root_identity)
             agent_problem_run = start_command("agent problem check", status_command(args, True), DEFAULT_AGENT_PROBLEM_TIMEOUT_S)
             last_agent_problem_check_s = now_s
         if agent_problem_run is not None:
@@ -7645,8 +8632,9 @@ def run(args: Args, actor_controller: BlockingActorController) -> int:
             if result is not None:
                 text = periodic_status_text(args, result)
                 if text is not None and args.manager_target:
-                    _ = send_delivery_text("idle status delivery", text, args.manager_target)
+                    _ = send_delivery_text("idle status delivery", text, args.manager_target, root=args.root, root_identity=args.root_identity)
                 if worktree_run is None and (worktree_command := worktree_check_command(args.root)) is not None:
+                    require_root_identity(args.root, args.root_identity)
                     worktree_run = start_command("worktree check", worktree_command, MANAGER_WORKTREE_CHECK_TIMEOUT_S)
                 idle_status_run = None
         if worktree_run is not None:
@@ -7654,13 +8642,16 @@ def run(args: Args, actor_controller: BlockingActorController) -> int:
             if result is not None:
                 text = worktree_reminder_text_from_result(result, args.root)
                 if text and args.manager_target:
-                    _ = send_delivery_text("worktree reminder delivery", text, args.manager_target)
+                    _ = send_delivery_text("worktree reminder delivery", text, args.manager_target, root=args.root, root_identity=args.root_identity)
                 worktree_run = None
         if now_s - last_digest_check_s >= min(args.digest_idle_after_s, 60.0):
+            require_current_root()
             if args.dry_run and maybe_deliver_idle_digest(args, fallback_mail_activity_s, now_wall_s):
                 fallback_mail_activity_s = now_wall_s
             elif digest_run is None and idle_digest_due(args, fallback_mail_activity_s, now_wall_s):
                 digest_script = args.digest_script or args.root / "scripts" / "manager-digest"
+                require_current_root()
+                require_root_identity(args.root, args.root_identity)
                 digest_run = start_command("digest delivery", [str(digest_script), "deliver"], 180, args.root)
             last_digest_check_s = now_s
         if digest_run is not None:
@@ -7689,13 +8680,15 @@ def run(args: Args, actor_controller: BlockingActorController) -> int:
         if watcher is None:
             time.sleep(timeout_s)
             now_s = time.monotonic()
-            pending_files = markdown_files(args.root) if now_s >= next_full_s else mtime_changed_markdown_files(args.root, file_state)
+            require_current_root()
+            pending_files = markdown_files(args.root, initial_root_identity) if now_s >= next_full_s else mtime_changed_markdown_files(args.root, file_state, initial_root_identity)
             continue
         event_files, full_scan, notified = watcher.wait(timeout_s)
         if notified:
             next_poll_s = time.monotonic() + args.poll_backstop_interval_s
         if full_scan:
-            pending_files = markdown_files(args.root)
+            require_current_root()
+            pending_files = markdown_files(args.root, initial_root_identity)
             next_full_s = time.monotonic() + args.full_scan_interval_s
             next_poll_s = time.monotonic() + args.poll_backstop_interval_s
         else:
@@ -7721,14 +8714,12 @@ def main(argv: list[str]) -> int:
         return 0
     if args.once and args.dry_run:
         actor_controller = BlockingActorController(args.root, allow_existing=True)
-        actor_controller.ensure()
         try:
             return run(args, actor_controller)
         finally:
             actor_controller.close()
     with exclusive_watcher_root(args.root):
         actor_controller = BlockingActorController(args.root, allow_existing=args.once)
-        actor_controller.ensure()
         try:
             return run(args, actor_controller)
         finally:

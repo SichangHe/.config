@@ -34,21 +34,23 @@ try:
     from omo_manager.omo_agent_instructions import launch_instructions
     from omo_manager.omo_omnigent import launch_session as launch_omnigent_session
     from omo_manager.omo_omnigent import send_message as send_omnigent_message
+    from omo_manager.omo_omnigent import session_id as omnigent_session_id
     from omo_manager.omo_codex_status import current_block, exact_pane_id, status, tail
     from omo_manager.omo_agent_status import DEFAULT_ROOT, TaskFrontmatterError, parse_task_metadata
     from omo_manager.omo_blocking import V2_VERSION, generated_id, load_yaml_mapping, render_task, split_task_text, v2_enabled
     from omo_manager.omo_manager_rotate import RotationError, is_codex_launch_argv, process_is_under, read_processes
-    from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1, TASK_FRONTMATTER_V2, first_version, frontmatter_text, runat_kind
+    from omo_manager.omo_task_metadata import ANTIGRAVITY_EFFORTS, OMNIGENT_TOOLS, TASK_FRONTMATTER_V1, TASK_FRONTMATTER_V2, first_version, frontmatter_text, runat_kind
     from omo_manager.omo_task_lock import process_start_ticks, task_file_lock, task_target_lock
 except ModuleNotFoundError:
     from omo_agent_instructions import launch_instructions  # pyright: ignore[reportImplicitRelativeImport]
     from omo_omnigent import launch_session as launch_omnigent_session
     from omo_omnigent import send_message as send_omnigent_message
+    from omo_omnigent import session_id as omnigent_session_id
     from omo_codex_status import current_block, exact_pane_id, status, tail
     from omo_agent_status import DEFAULT_ROOT, TaskFrontmatterError, parse_task_metadata
     from omo_blocking import V2_VERSION, generated_id, load_yaml_mapping, render_task, split_task_text, v2_enabled
     from omo_manager_rotate import RotationError, is_codex_launch_argv, process_is_under, read_processes
-    from omo_task_metadata import TASK_FRONTMATTER_V1, TASK_FRONTMATTER_V2, first_version, frontmatter_text, runat_kind
+    from omo_task_metadata import ANTIGRAVITY_EFFORTS, OMNIGENT_TOOLS, TASK_FRONTMATTER_V1, TASK_FRONTMATTER_V2, first_version, frontmatter_text, runat_kind
     from omo_task_lock import process_start_ticks, task_file_lock, task_target_lock
 
 PCODX_WRAPPER = HELPER_DIR / "pcodx"
@@ -318,8 +320,8 @@ def parse_args(argv: list[str]) -> Args:
   With --workdir, open a tmux window with its normal shell, create or update
   task frontmatter, link the task in TODO.md unless --no-link is passed, then
   start Cursor Agent there unless --tool codex or pcodx is selected. Pass --omnigent
-  to create a host-backed OmniGent session instead; --tool still names the
-  actual codex or cursor harness, while runat identifies the metaframework.
+  to create a host-backed OmniGent session instead, or --tool antigravity which selects OmniGent.
+  --tool still names the actual antigravity, codex, or cursor harness, while runat identifies the metaframework.
   This does not stop already running Codex panes. --prompt-file becomes the
   worker's initial prompt argument. Every new launch requires --model and
   --reasoning-effort; model selection in --codex-flag is rejected. Pass
@@ -348,7 +350,7 @@ Ownership migration:
     _ = parser.add_argument("--tmux-session", default="")
     _ = parser.add_argument("--tmux-window", default="")
     _ = parser.add_argument("--pane", default="", help=argparse.SUPPRESS)
-    _ = parser.add_argument("--tool", default=DEFAULT_TOOL, help="Worker CLI. Defaults to cursor; pass codex or pcodx to request those tools.")
+    _ = parser.add_argument("--tool", default=DEFAULT_TOOL, help="Worker CLI. Defaults to cursor. Tmux: codex, pcodx, or cursor. OmniGent: antigravity, codex, or cursor.")
     _ = parser.add_argument("--workdir", type=Path)
     _ = parser.add_argument("--window-name", default="")
     _ = parser.add_argument("--prompt-file", type=Path)
@@ -411,7 +413,12 @@ Ownership migration:
         parser.error("prepared-successor launch requires its journal plus exact journal, task, prompt, and queue SHA-256 values.")
     if parsed.pane:
         parser.error("pane selection is no longer supported; pane 0 is implied.")
-    if parsed.tool not in COMMAND_BY_TOOL:
+    if parsed.tool == "antigravity":
+        parsed.omnigent = True
+    if parsed.omnigent:
+        if parsed.tool not in OMNIGENT_TOOLS:
+            parser.error("--omnigent supports --tool antigravity, --tool codex, or --tool cursor.")
+    elif parsed.tool not in COMMAND_BY_TOOL:
         parser.error("only --tool codex, --tool pcodx, or --tool cursor is supported.")
     tool_explicit = any(arg == "--tool" or arg.startswith("--tool=") for arg in argv)
     amh_caller_agent_explicit = any(arg == "--amh-caller-agent" or arg.startswith("--amh-caller-agent=") for arg in argv)
@@ -463,9 +470,7 @@ Ownership migration:
         parser.error("--omnigent requires --workdir.")
     if parsed.omnigent and parsed.session_id:
         parser.error("--omnigent launch does not use Codex --session-id; the returned `runat` is the durable session identity.")
-    if parsed.omnigent and parsed.tool not in {"codex", "cursor"}:
-        parser.error("--omnigent supports --tool codex or --tool cursor.")
-    if parsed.omnigent and parsed.codex_flag and tuple(parsed.codex_flag) != ("--dangerously-bypass-approvals-and-sandbox",):
+    if parsed.omnigent and parsed.tool == "codex" and parsed.codex_flag and tuple(parsed.codex_flag) != ("--dangerously-bypass-approvals-and-sandbox",):
         parser.error("--omnigent accepts only one exact --codex-flag=--dangerously-bypass-approvals-and-sandbox token.")
     if parsed.omnigent_host_id and not parsed.omnigent:
         parser.error("--omnigent-host-id requires --omnigent.")
@@ -513,12 +518,14 @@ Ownership migration:
                 parser.error("prepared-successor SHA-256 values must be lowercase hexadecimal digests.")
     if parsed.workdir is not None and not parsed.resume_idle and (not parsed.model.strip() or not parsed.reasoning_effort.strip()):
         parser.error("--workdir requires nonempty --model MODEL and --reasoning-effort EFFORT.")
+    if parsed.omnigent and parsed.tool == "antigravity" and parsed.reasoning_effort not in ANTIGRAVITY_EFFORTS:
+        parser.error("--omnigent --tool antigravity accepts only --reasoning-effort low, medium, or high.")
     if invalid_model := model_error(parsed.model):
         parser.error(invalid_model)
     raw_model_flag_error = codex_flags_model_error(tuple(parsed.codex_flag or ()))
     if raw_model_flag_error:
         parser.error(raw_model_flag_error)
-    if parsed.tool == "cursor" and parsed.codex_flag:
+    if parsed.tool not in {"codex", "pcodx"} and parsed.codex_flag:
         parser.error("--codex-flag is only valid for Codex tools.")
     prelaunch_source = parsed.prelaunch_source.resolve() if parsed.prelaunch_source is not None else None
     return Args(
@@ -1065,6 +1072,7 @@ def managerat_for_task(args: Args, runat: str) -> str:
 def task_frontmatter(args: Args, runat: str, managerat: str) -> str:
     is_manager = "true" if args.is_manager else "false"
     status = "long_running" if args.is_manager else "running"
+    include_session_id = bool(args.session_id) and (effective_tool(args) == "codex" or runat_kind(runat) == "omnigent")
     if v2_enabled(args.root):
         blocked_on = [{"kind": "persistent", "reason": DEFAULT_LONG_RUNNING_BLOCKED_ON}] if args.is_manager else []
         rendered = render_task(
@@ -1074,7 +1082,7 @@ def task_frontmatter(args: Args, runat: str, managerat: str) -> str:
                 "status": status,
                 "runat": runat,
                 "tool": effective_tool(args),
-                **({"session_id": args.session_id} if args.session_id and effective_tool(args) == "codex" else {}),
+                **({"session_id": args.session_id} if include_session_id else {}),
                 "managerat": managerat,
                 "is_manager": args.is_manager,
                 **({"blocked_on": blocked_on} if blocked_on else {}),
@@ -1093,7 +1101,7 @@ def task_frontmatter(args: Args, runat: str, managerat: str) -> str:
             *([f"blocked_on: {DEFAULT_LONG_RUNNING_BLOCKED_ON}"] if args.is_manager else []),
             f"runat: {runat}",
             f"tool: {effective_tool(args)}",
-            *([f"session_id: {args.session_id}"] if args.session_id and effective_tool(args) == "codex" else []),
+            *([f"session_id: {args.session_id}"] if include_session_id else []),
             f"managerat: {managerat}",
             f"is_manager: {is_manager}",
             "pending_task_items: []",
@@ -1142,7 +1150,7 @@ def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> st
         external = [blocker for blocker in blockers if blocker.get("kind") not in {"pending_items", "persistent"}]
         values["runat"] = tmux_target
         values["tool"] = effective_tool(args)
-        if args.session_id and effective_tool(args) == "codex":
+        if args.session_id and (effective_tool(args) == "codex" or runat_kind(tmux_target) == "omnigent"):
             values["session_id"] = args.session_id
         if args.manager_target:
             values["managerat"] = args.manager_target
@@ -1165,7 +1173,7 @@ def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> st
         "runat": tmux_target,
         "tool": effective_tool(args),
     }
-    if args.session_id and effective_tool(args) == "codex":
+    if args.session_id and (effective_tool(args) == "codex" or runat_kind(tmux_target) == "omnigent"):
         updates["session_id"] = args.session_id
     if args.manager_target:
         updates["managerat"] = args.manager_target
@@ -1281,6 +1289,8 @@ def launch_omnigent_task(args: Args) -> tuple[Path, str]:
         title=args.window_name or Path(args.task_file).stem,
         codex_flags=args.codex_flags,
     )
+    # 🧑 "Basically we start each agent and immediately run /status and get their session ID. Of course for Omnigent that would be given by the API"
+    args = replace(args, session_id=omnigent_session_id(target))
     try:
         with task_target_lock(args.root, target):
             path = ensure_task_file(args, target)
@@ -2360,8 +2370,10 @@ def validate_inputs(args: Args) -> str:
         raise ValueError(raw_model_flag_error)
     if args.tool != "pcodx" and any("mcp_servers." in flag for flag in args.codex_flags):
         raise ValueError("MCP server config requires --tool pcodx.")
-    if args.tool == "cursor" and args.codex_flags:
+    if args.tool not in {"codex", "pcodx"} and args.codex_flags:
         raise ValueError("--codex-flag is only valid for Codex tools.")
+    if args.omnigent and args.tool == "antigravity" and args.reasoning_effort not in ANTIGRAVITY_EFFORTS:
+        raise ValueError("--omnigent --tool antigravity accepts only --reasoning-effort low, medium, or high.")
     if args.workdir is not None and args.prompt_file is None and is_vl_agent(args.task_file, target(args)) and not args.resume_idle:
         raise ValueError("VL launches require --prompt-file so the end-goal and reviewer guidance has task-local context.")
     if args.workdir is not None and is_vl_agent(args.task_file, target(args)) and not is_vl_submanager_task_file(args.task_file) and not args.manager_target:

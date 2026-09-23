@@ -393,7 +393,7 @@ def complete_status_responses(text: str) -> list[str]:
 
 
 def submitted_status_response(before: str, after: str) -> str:
-    """Return only output appended after this invocation's `/status`."""
+    """Return fresh `/status` output, allowing equivalent insertion positions."""
     if after.startswith(before):
         appended = after[len(before) :]
     else:
@@ -401,7 +401,7 @@ def submitted_status_response(before: str, after: str) -> str:
         before_lines = before.splitlines(keepends=True)
         after_lines = after.splitlines(keepends=True)
         inserted_line_count = len(after_lines) - len(before_lines)
-        insertion_candidates: list[str] = []
+        insertion_candidates: set[str] = set()
         if inserted_line_count > 0:
             for split in range(len(before_lines) + 1):
                 if before_lines[:split] != after_lines[:split]:
@@ -409,9 +409,9 @@ def submitted_status_response(before: str, after: str) -> str:
                 if before_lines[split:] == after_lines[split + inserted_line_count :]:
                     candidate = "".join(after_lines[split : split + inserted_line_count])
                     if candidate.splitlines() and candidate.splitlines()[0].strip() == "/status":
-                        insertion_candidates.append(candidate)
+                        insertion_candidates.add(candidate)
         if len(insertion_candidates) == 1:
-            appended = insertion_candidates[0]
+            appended = next(iter(insertion_candidates))
         elif insertion_candidates:
             return ""
         if not appended:
@@ -425,11 +425,11 @@ def submitted_status_response(before: str, after: str) -> str:
             before_markers = sum(line.strip() == "/status" for line in before.splitlines())
             after_markers = sum(line.strip() == "/status" for line in after.splitlines())
             if after_markers == before_markers + 1 and len(after_responses) == len(before_responses) + 1:
-                response_candidates = [
+                response_candidates = {
                     after_responses[split] for split in range(len(after_responses)) if before_responses[:split] == after_responses[:split] and before_responses[split:] == after_responses[split + 1 :]
-                ]
+                }
                 if len(response_candidates) == 1:
-                    return response_candidates[0]
+                    return next(iter(response_candidates))
     appended_lines = appended.splitlines(keepends=True)
     marker_positions = [index for index, line in enumerate(appended_lines) if line.strip() == "/status"]
     if marker_positions:

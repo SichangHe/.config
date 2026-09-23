@@ -19,6 +19,9 @@ from omo_manager.omo_completion_email import ordinary_pending_purpose
 from omo_manager.omo_task_metadata import parse_task_metadata
 
 
+PARTICIPANT_EVIDENCE = (hashlib.sha256(b"agent@example.test").hexdigest(), hashlib.sha256(b"human@example.test").hexdigest())
+
+
 class Source2003RecoveryTest(unittest.TestCase):
     def fixture(
         self,
@@ -197,7 +200,7 @@ class Source2003RecoveryTest(unittest.TestCase):
                     patch.multiple(omo_completion_email, **constants),  # pyright: ignore[reportCallIssue, reportArgumentType]
                     patch("omo_manager.omo_pending.current_pending_task", return_value=task),
                     patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
-                    patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True) as sent,
+                    patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE) as sent,
                     patch("omo_manager.omo_pending.require_owner_completion") as owner_sender,
                     patch("omo_manager.omo_completion_email.send_completion_email") as sender,
                     patch("omo_manager.omo_completion_email.subprocess.run") as email_process,
@@ -256,7 +259,7 @@ class Source2003RecoveryTest(unittest.TestCase):
                     patch.multiple(omo_completion_email, **constants),  # pyright: ignore[reportCallIssue, reportArgumentType]
                     patch("omo_manager.omo_pending.current_pending_task", return_value=task),
                     patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
-                    patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True) as sent,
+                    patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE) as sent,
                     patch("omo_manager.omo_completion_email.send_completion_email") as sender,
                     redirect_stdout(StringIO()),
                 ):
@@ -303,7 +306,7 @@ class Source2003RecoveryTest(unittest.TestCase):
                         patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
                         patch(
                             "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent",
-                            return_value=drift != "sent",
+                            return_value=None if drift == "sent" else PARTICIPANT_EVIDENCE,
                         ),
                         patch("omo_manager.omo_completion_email.send_completion_email") as sender,
                         redirect_stdout(StringIO()),

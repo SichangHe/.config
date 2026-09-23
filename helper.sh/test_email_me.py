@@ -723,6 +723,57 @@ class EmailMeTests(unittest.TestCase):
         ):
             email_me.inferred_tmux_target(False)
 
+    def test_explicit_omnigent_target_must_match_authenticated_runtime(self) -> None:
+        with (
+            patch.object(
+                email_me,
+                "inferred_tmux_target",
+                return_value="omnigent://current-session",
+            ),
+            self.assertRaisesRegex(
+                ValueError,
+                "omnigent://other-session conflicts with verified producer route omnigent://current-session",
+            ),
+        ):
+            email_me.validate_manager_route_identity(
+                "omnigent://other-session", "omnigent://other-session"
+            )
+
+    def test_ordinary_explicit_omnigent_target_must_match_authenticated_runtime(self) -> None:
+        with (
+            patch.object(
+                email_me,
+                "omnigent_inferred_target",
+                return_value="omnigent://current-session",
+            ),
+            patch.object(sys, "stdin", StringIO("body\n")),
+            patch("sys.stderr", new_callable=StringIO) as stderr,
+        ):
+            result = email_me.main(
+                [
+                    "--tmux-target",
+                    "omnigent://other-session",
+                    "--subject",
+                    "Topic",
+                ]
+            )
+        self.assertEqual(2, result)
+        self.assertIn("authenticated OmniGent producer identity", stderr.getvalue())
+
+    def test_ordinary_explicit_tmux_target_rejected_in_authenticated_omnigent_runtime(self) -> None:
+        with (
+            patch.object(
+                email_me,
+                "omnigent_inferred_target",
+                return_value="omnigent://current-session",
+            ),
+            patch.object(sys, "stdin", StringIO("body\n")),
+            patch("sys.stderr", new_callable=StringIO) as stderr,
+        ):
+            result = email_me.main(["--tmux-target", "wl:7", "--subject", "Topic"])
+        self.assertEqual(2, result)
+        self.assertIn("authenticated OmniGent producer identity", stderr.getvalue())
+
     def test_manager_human_fake_send_uses_authenticated_omnigent_subject_tag(self) -> None:
         class Settings:
             agent_address = "agent@example.test"
@@ -731,12 +782,25 @@ class EmailMeTests(unittest.TestCase):
 
         identity = SimpleNamespace(target="omnigent://session-1")
         with tempfile.TemporaryDirectory() as tmp:
-            sent = Path(tmp) / "sent.txt"
+            root = Path(tmp)
+            sent = root / "sent.txt"
+            (root / "TODO.md").write_text(
+                "current:\nb12_3x2_plot2.md omnigent://session-1\n\nprevious:\n",
+                encoding="utf-8",
+            )
+            (root / "b12_3x2_plot2.md").write_text(
+                "---\nversion: v1.0.0\nstatus: running\nrunat: omnigent://session-1\n"
+                "tool: codex\nmanagerat: dw:2\nis_manager: false\npending_task_items: []\n"
+                "session_id: session-1\n---\n",
+                encoding="utf-8",
+            )
             with (
                 patch.dict(
                     os.environ,
                     {
                         "EMAIL_ME_FAKE_SEND_LOG": str(sent),
+                        "OMO_WORK_LOGS_ROOT": str(root),
+                        "CODEX_SESSION_ID": "01a0369c-7895-70f2-ae4b-5f59d920e99a",
                         "TMUX_PANE": "%42",
                         "OMO_AGENT_TMUX_TARGET": "main:0",
                     },
@@ -761,9 +825,256 @@ class EmailMeTests(unittest.TestCase):
                 )
             self.assertTrue(
                 sent.read_text(encoding="utf-8").startswith(
-                    "[omnigent://session-1] Figure update\n"
+                    "[og:b12_3x2_plot2.md] Figure update\n"
                 )
             )
+
+    def test_omnigent_subject_tag_rejects_ambiguous_task_ownership(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = (
+                "---\nversion: v1.0.0\nstatus: running\nrunat: omnigent://session-1\n"
+                "tool: codex\nmanagerat: dw:2\nis_manager: false\npending_task_items: []\n"
+                "session_id: session-1\n---\n"
+            )
+            for name in ("one.md", "two.md"):
+                (root / name).write_text(task, encoding="utf-8")
+            (root / "TODO.md").write_text(
+                "current:\none.md omnigent://session-1\ntwo.md omnigent://session-1\n\nprevious:\n",
+                encoding="utf-8",
+            )
+            with (
+                patch.dict(os.environ, {"OMO_WORK_LOGS_ROOT": str(root)}),
+                self.assertRaisesRegex(ValueError, "one exact active task owner"),
+            ):
+                email_me.email_subject_target("omnigent://session-1")
+
+    def test_omnigent_subject_tag_rejects_duplicate_active_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for directory, session in (("a", "session-1"), ("b", "session-2")):
+                path = root / directory / "task.md"
+                path.parent.mkdir()
+                path.write_text(
+                    "---\nversion: v1.0.0\nstatus: running\n"
+                    f"runat: omnigent://{session}\ntool: codex\nmanagerat: dw:2\n"
+                    f"is_manager: false\npending_task_items: []\nsession_id: {session}\n---\n",
+                    encoding="utf-8",
+                )
+            (root / "TODO.md").write_text(
+                "current:\na/task.md omnigent://session-1\nb/task.md omnigent://session-2\n\nprevious:\n",
+                encoding="utf-8",
+            )
+            with (
+                patch.dict(os.environ, {"OMO_WORK_LOGS_ROOT": str(root)}),
+                self.assertRaisesRegex(ValueError, "unique active task filename"),
+            ):
+                email_me.email_subject_target("omnigent://session-1")
+
+    def test_omnigent_latest_thread_falls_back_to_legacy_session_tag(self) -> None:
+        missing = email_me.SubjectInputError(
+            "no recent email thread found for tmux target og:task.md"
+        )
+        with patch.object(
+            email_me,
+            "prepare_latest_thread_for_tmux_target",
+            side_effect=[missing, ("[omnigent://session-1] old", {})],
+        ) as lookup:
+            subject, headers = email_me.prepare_latest_producer_thread(
+                "omnigent://session-1", "og:task.md", None, None
+            )
+        self.assertEqual("[omnigent://session-1] old", subject)
+        self.assertEqual({}, headers)
+        self.assertEqual(
+            ["og:task.md", "omnigent://session-1"],
+            [call.args[0] for call in lookup.call_args_list],
+        )
+
+    def test_omnigent_primary_route_falls_back_on_exact_thread_error(self) -> None:
+        missing = email_me.SubjectInputError(
+            "no exact email thread found for tmux target og:task.md on route primary"
+        )
+        profile = email_me.MailRouteProfile(
+            "agent@example.test", "human@example.test", "primary"
+        )
+        with patch.object(
+            email_me,
+            "prepare_latest_thread_for_tmux_target",
+            side_effect=[missing, ("[omnigent://session-1] old", {})],
+        ) as lookup:
+            subject, _headers = email_me.prepare_latest_producer_thread(
+                "omnigent://session-1", "og:task.md", profile, None
+            )
+        self.assertEqual("[omnigent://session-1] old", subject)
+        self.assertEqual(
+            ["og:task.md", "omnigent://session-1"],
+            [call.args[0] for call in lookup.call_args_list],
+        )
+
+    def test_omnigent_legacy_thread_is_retagged_without_session_bound_lookup(self) -> None:
+        self.assertEqual(
+            "Re: [og:task.md] old topic",
+            email_me.retag_subject(
+                "Re: [omnigent://session-1] old topic", "og:task.md"
+            ),
+        )
+
+    def test_omnigent_retag_removes_manager_prefix_and_repeated_reply_prefixes(self) -> None:
+        self.assertEqual(
+            "Re: [og:task.md] old",
+            email_me.retag_subject(
+                "Re: Re: [a] [omnigent://session-1] old", "og:task.md"
+            ),
+        )
+
+    def test_explicit_reply_accepts_authenticated_legacy_omnigent_parent(self) -> None:
+        profile = omo_email_subject.MailRouteProfile(
+            "agent@example.test", "human@example.test", "primary"
+        )
+        header = omo_email_subject.RecentHeader(
+            "human@example.test",
+            "Re: [omnigent://session-1] Topic",
+            email_me.datetime.now().astimezone(),
+            "<current@example.test>",
+            recipient="agent@example.test",
+        )
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        with patch.object(
+            omo_email_subject,
+            "verified_recent_thread_header",
+            return_value=header,
+        ) as lookup:
+            subject, _headers = omo_email_subject.prepare_subject_and_headers(
+                "Re: [omnigent://session-1] Topic",
+                "og:task.md",
+                profile,
+                legacy_target="omnigent://session-1",
+                required_agent_session=session,
+            )
+        self.assertEqual("Re: [og:task.md] Topic", subject)
+        self.assertEqual(session, lookup.call_args.kwargs["required_agent_session"])
+
+    def test_omnigent_ordinary_thread_lookup_binds_current_session(self) -> None:
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        with patch.object(
+            email_me,
+            "prepare_latest_thread_for_tmux_target",
+            return_value=("[og:task.md] Topic", {}),
+        ) as lookup:
+            email_me.prepare_latest_producer_thread(
+                "omnigent://session-1", "og:task.md", None, session
+            )
+        self.assertEqual(session, lookup.call_args.kwargs["required_agent_session"])
+
+    def test_non_manager_explicit_omnigent_reply_binds_current_session(self) -> None:
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        header = omo_email_subject.RecentHeader(
+            "agent@example.test",
+            "Re: [og:task.md] Topic",
+            email_me.datetime.now().astimezone(),
+            "<current@example.test>",
+            agent_session=session,
+        )
+        with patch.object(
+            omo_email_subject, "find_recent_thread", return_value=header
+        ) as lookup:
+            subject, _headers = omo_email_subject.prepare_subject_and_headers(
+                "Re: [og:task.md] Topic",
+                "og:task.md",
+                required_agent_session=session,
+            )
+        self.assertEqual("Re: [og:task.md] Topic", subject)
+        self.assertEqual(session, lookup.call_args.kwargs["required_agent_session"])
+
+    def test_omnigent_non_reply_subject_is_always_fresh(self) -> None:
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        with patch.object(omo_email_subject, "recent_thread_header") as lookup:
+            subject, headers = omo_email_subject.prepare_subject_and_headers(
+                "Fresh topic", "og:task.md", required_agent_session=session
+            )
+        self.assertEqual("[og:task.md] Fresh topic", subject)
+        self.assertEqual({}, headers)
+        lookup.assert_not_called()
+
+    def test_non_manager_omitted_omnigent_reply_binds_current_session(self) -> None:
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        header = omo_email_subject.RecentHeader(
+            "agent@example.test",
+            "Re: [og:task.md] Topic",
+            email_me.datetime.now().astimezone(),
+            "<current@example.test>",
+            agent_session=session,
+        )
+        with patch.object(
+            omo_email_subject,
+            "find_recent_thread_for_tmux_target",
+            return_value=header,
+        ) as lookup:
+            subject, _headers = (
+                omo_email_subject.prepare_latest_thread_for_tmux_target(
+                    "og:task.md", required_agent_session=session
+                )
+            )
+        self.assertEqual(header.subject, subject)
+        self.assertEqual(session, lookup.call_args.kwargs["required_agent_session"])
+
+    def test_non_manager_explicit_omnigent_reply_main_binds_session_end_to_end(self) -> None:
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        target = "omnigent://runtime-session"
+        header = omo_email_subject.RecentHeader(
+            "agent@example.test",
+            f"Re: [{target}] Topic",
+            email_me.datetime.now().astimezone(),
+            "<current@example.test>",
+            agent_session=session,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sent = root / "sent.txt"
+            (root / "TODO.md").write_text(
+                f"current:\ntask.md {target}\n\nprevious:\n", encoding="utf-8"
+            )
+            (root / "task.md").write_text(
+                "---\nversion: v1.0.0\nstatus: running\n"
+                f"runat: {target}\ntool: codex\nmanagerat: dw:2\nis_manager: false\n"
+                f"pending_task_items: []\nsession_id: {target.removeprefix('omnigent://')}\n---\n",
+                encoding="utf-8",
+            )
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "EMAIL_ME_FAKE_SEND_LOG": str(sent),
+                        "OMO_WORK_LOGS_ROOT": str(root),
+                        "CODEX_SESSION_ID": session,
+                    },
+                ),
+                patch.object(sys, "stdin", StringIO("body\n")),
+                patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(email_me, "omnigent_inferred_target", return_value=target),
+                patch.object(
+                    omo_email_subject,
+                    "find_recent_thread_matching",
+                    return_value=header,
+                ) as lookup,
+            ):
+                self.assertEqual(
+                    0,
+                    email_me.main(
+                        ["--tmux-target", target, "--subject", f"Re: [{target}] Topic"]
+                    ),
+                )
+            self.assertTrue(
+                sent.read_text(encoding="utf-8").startswith(
+                    "Re: [og:task.md] Topic\n"
+                )
+            )
+        self.assertEqual(session, lookup.call_args.kwargs["required_agent_session"])
 
     def test_help_says_tmux_target_should_normally_be_omitted(self) -> None:
         with (
@@ -3817,6 +4128,31 @@ class EmailMeTests(unittest.TestCase):
                 "does not match its authenticated producer", stderr.getvalue()
             )
             self.assertFalse(send_log.exists())
+
+    def test_exact_once_receipt_uses_pre_send_omnigent_display_target(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": tmp}),
+            patch.object(email_me, "email_subject_target") as resolve_display,
+        ):
+            self.assertEqual(
+                "new",
+                email_me.exact_once_email_claim(
+                    "Topic",
+                    "[og:task.md] Topic",
+                    "body\0",
+                    "omnigent://session-1",
+                    "og:task.md",
+                ),
+            )
+            email_me.mark_exact_once_email_delivered(
+                "Topic",
+                "[og:task.md] Topic",
+                "body\0",
+                "omnigent://session-1",
+                "og:task.md",
+            )
+        resolve_display.assert_not_called()
 
     def test_manager_human_exact_once_binds_producer_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

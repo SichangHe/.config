@@ -43,22 +43,12 @@ from omo_manager.omo_completion_email import SOURCE1241_HUMAN
 from omo_manager.omo_completion_email import SOURCE1241_META_LINE
 
 
+PARTICIPANT_EVIDENCE = (hashlib.sha256(b"agent@example.test").hexdigest(), hashlib.sha256(b"human@example.test").hexdigest())
+
+
 def task_text(body: str = "", *, human_report: bool = True) -> str:
     human_report_line = "Report results directly to the Human.\n" if human_report else ""
-    return (
-        "---\n"
-        "version: v1.0.0\n"
-        "status: running\n"
-        "runat: cfg:2\n"
-        "tool: codex\n"
-        "managerat: cfg:1\n"
-        "is_manager: false\n"
-        "pending_task_items:\n"
-        "  - finish review\n"
-        "---\n"
-        f"{human_report_line}"
-        f"{body}\n"
-    )
+    return f"---\nversion: v1.0.0\nstatus: running\nrunat: cfg:2\ntool: codex\nmanagerat: cfg:1\nis_manager: false\npending_task_items:\n  - finish review\n---\n{human_report_line}{body}\n"
 
 
 def source1241_task(
@@ -300,24 +290,21 @@ class CompletionEmailTest(unittest.TestCase):
                 task, text, constants, keys = self.source1970_fixture(root, state)
                 stale_add, stale_removal, unrelated, *delivered = keys
                 before_rows = {
-                    row[0]: row
-                    for row in (line.split("\t") for line in (state / "completion-email-claims.tsv").read_text(encoding="utf-8").splitlines())
-                    if row[0] in {unrelated, *delivered}
+                    row[0]: row for row in (line.split("\t") for line in (state / "completion-email-claims.tsv").read_text(encoding="utf-8").splitlines()) if row[0] in {unrelated, *delivered}
                 }
                 unrelated_authorization = (state / "completion-email-authorizations" / unrelated).read_bytes()
-                with patch.multiple(omo_completion_email, **constants), patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
-                    "omo_manager.omo_pending.current_pending_task", return_value=task
-                ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task), patch(
-                    "omo_manager.omo_completion_email.validate_source1970_eval_authority"
-                ) as authority, patch(
-                    "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True
-                ), patch(
-                    "omo_manager.omo_pending.require_owner_completion"
-                ) as owner_sender, patch(
-                    "omo_manager.omo_completion_email.send_completion_email"
-                ) as sender, patch(
-                    "omo_manager.omo_completion_email.subprocess.run"
-                ) as email_process:
+                with (
+                    patch.multiple(omo_completion_email, **constants),
+                    patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
+                        "omo_manager.omo_pending.current_pending_task", return_value=task
+                    ),
+                    patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
+                    patch("omo_manager.omo_completion_email.validate_source1970_eval_authority") as authority,
+                    patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE),
+                    patch("omo_manager.omo_pending.require_owner_completion") as owner_sender,
+                    patch("omo_manager.omo_completion_email.send_completion_email") as sender,
+                    patch("omo_manager.omo_completion_email.subprocess.run") as email_process,
+                ):
                     args = omo_pending.parse_args(["recover-source1970-eval"])
                     request = omo_pending.sent_recovery_request(args)
                     plan = plan_sent_recovery_completion(
@@ -348,13 +335,11 @@ class CompletionEmailTest(unittest.TestCase):
                     self.assertEqual(1, len(transitions))
                     self.assertEqual(1, len(messages))
                     self.assertIn('"status":"committed"', transitions[0].read_text(encoding="utf-8"))
-                    self.assertTrue(messages[0].read_text(encoding="utf-8").startswith("transition_key="))
+                    _transition_line, _separator, ordinary_payload = messages[0].read_text(encoding="utf-8").partition("\n")
+                    ordinary_values = omo_completion_email.ordinary_completion_record_values(ordinary_payload)
+                    self.assertEqual(PARTICIPANT_EVIDENCE, (ordinary_values["sender_sha256"], ordinary_values["recipient_sha256"]))
                     self.assertTrue(omo_completion_email.ordinary_completion_is_reconciled(plan))
-                    first_snapshot = {
-                        path.relative_to(root): path.read_bytes()
-                        for path in root.rglob("*")
-                        if path.is_file()
-                    }
+                    first_snapshot = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
                     self.assertEqual(0, omo_pending.run(args, root=root))
                     self.assertEqual(
                         first_snapshot,
@@ -378,11 +363,15 @@ class CompletionEmailTest(unittest.TestCase):
             state = root / "state"
             with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
                 task, text, constants, _keys = self.source1970_fixture(root, state)
-                with patch.multiple(omo_completion_email, **constants), patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
-                    "omo_manager.omo_pending.current_pending_task", return_value=task
-                ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task), patch(
-                    "omo_manager.omo_completion_email.validate_source1970_eval_authority"
-                ) as authority, patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+                with (
+                    patch.multiple(omo_completion_email, **constants),
+                    patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
+                        "omo_manager.omo_pending.current_pending_task", return_value=task
+                    ),
+                    patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
+                    patch("omo_manager.omo_completion_email.validate_source1970_eval_authority") as authority,
+                    patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE),
+                ):
                     args = omo_pending.parse_args(["recover-source1970-eval"])
                     request = omo_pending.sent_recovery_request(args)
                     plan = plan_sent_recovery_completion(
@@ -437,11 +426,15 @@ class CompletionEmailTest(unittest.TestCase):
                 task, text, constants, _keys = self.source1970_fixture(root, state)
                 ledger = state / "completion-email-claims.tsv"
                 claims_before = ledger.read_bytes()
-                with patch.multiple(omo_completion_email, **constants), patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
-                    "omo_manager.omo_pending.current_pending_task", return_value=task
-                ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task), patch(
-                    "omo_manager.omo_completion_email.validate_source1970_eval_authority"
-                ) as authority, patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+                with (
+                    patch.multiple(omo_completion_email, **constants),
+                    patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
+                        "omo_manager.omo_pending.current_pending_task", return_value=task
+                    ),
+                    patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
+                    patch("omo_manager.omo_completion_email.validate_source1970_eval_authority") as authority,
+                    patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE),
+                ):
                     args = omo_pending.parse_args(["recover-source1970-eval"])
 
                     def crash_before_claim_rewrite(_ledger: Path, _previous: str, _rows: list[list[str]]) -> None:
@@ -468,11 +461,15 @@ class CompletionEmailTest(unittest.TestCase):
             state = root / "state"
             with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
                 task, _text, constants, _keys = self.source1970_fixture(root, state)
-                with patch.multiple(omo_completion_email, **constants), patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
-                    "omo_manager.omo_pending.current_pending_task", return_value=task
-                ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task), patch(
-                    "omo_manager.omo_completion_email.validate_source1970_eval_authority"
-                ) as authority, patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+                with (
+                    patch.multiple(omo_completion_email, **constants),
+                    patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
+                        "omo_manager.omo_pending.current_pending_task", return_value=task
+                    ),
+                    patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
+                    patch("omo_manager.omo_completion_email.validate_source1970_eval_authority") as authority,
+                    patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE),
+                ):
                     args = omo_pending.parse_args(["recover-source1970-eval"])
                     with patch("omo_manager.omo_pending.fsync_task_parent", side_effect=OSError("crash after task replace")):
                         with self.assertRaisesRegex(OSError, "crash after task replace"):
@@ -500,11 +497,15 @@ class CompletionEmailTest(unittest.TestCase):
                 message.chmod(0o600)
                 ledger = state / "completion-email-claims.tsv"
                 claims_before = ledger.read_bytes()
-                with patch.multiple(omo_completion_email, **constants), patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
-                    "omo_manager.omo_pending.current_pending_task", return_value=task
-                ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task), patch(
-                    "omo_manager.omo_completion_email.validate_source1970_eval_authority"
-                ) as authority, patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+                with (
+                    patch.multiple(omo_completion_email, **constants),
+                    patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
+                        "omo_manager.omo_pending.current_pending_task", return_value=task
+                    ),
+                    patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
+                    patch("omo_manager.omo_completion_email.validate_source1970_eval_authority") as authority,
+                    patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE),
+                ):
                     args = omo_pending.parse_args(["recover-source1970-eval"])
                     with self.assertRaisesRegex(OSError, "Message-ID is already bound"):
                         omo_pending.run(args, root=root)
@@ -591,17 +592,13 @@ class CompletionEmailTest(unittest.TestCase):
             source.chmod(0o600)
             items = omo_completion_email.SOURCE1990_PANGRAM_ITEMS
             task = root / omo_completion_email.SOURCE1990_PANGRAM_TASK
-            before = task_text().replace("cfg:2", "dw:15").replace("cfg:1", "dw:60").replace(
-                "  - finish review", "".join(f"  - {item}\n" for item in items).rstrip()
-            )
+            before = task_text().replace("cfg:2", "dw:15").replace("cfg:1", "dw:60").replace("  - finish review", "".join(f"  - {item}\n" for item in items).rstrip())
             claim_bound = f"{before}manager claim-bound update\n"
             authorized = f"{claim_bound}manager custody update\n"
             current = f"{authorized}human authorization update\n"
 
             def git(*arguments: str) -> str:
-                return subprocess.run(
-                    ["git", *arguments], cwd=root, check=True, capture_output=True, text=True, timeout=10
-                ).stdout.strip()
+                return subprocess.run(["git", *arguments], cwd=root, check=True, capture_output=True, text=True, timeout=10).stdout.strip()
 
             git("init", "-q")
             git("config", "user.email", "test@example.test")
@@ -720,15 +717,11 @@ class CompletionEmailTest(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, "does not bind"):
                     omo_completion_email.validate_source1990_pangram_authority(root, plan, items, evidence, request, wrong_prefix)
                 wrong_blob = replace(request, churn_before_blob="0" * 40)
-                with patch.object(
-                    omo_completion_email, "SOURCE1990_PANGRAM_CHURN", (claim_bound_commit, wrong_blob.churn_before_blob, after_blob, diff_sha256)
-                ):
+                with patch.object(omo_completion_email, "SOURCE1990_PANGRAM_CHURN", (claim_bound_commit, wrong_blob.churn_before_blob, after_blob, diff_sha256)):
                     with self.assertRaisesRegex(OSError, "does not contain"):
                         omo_completion_email.validate_source1990_pangram_authority(root, plan, items, evidence, wrong_blob, current)
                 wrong_diff = replace(request, churn_diff_sha256="0" * 64)
-                with patch.object(
-                    omo_completion_email, "SOURCE1990_PANGRAM_CHURN", (claim_bound_commit, before_blob, after_blob, wrong_diff.churn_diff_sha256)
-                ):
+                with patch.object(omo_completion_email, "SOURCE1990_PANGRAM_CHURN", (claim_bound_commit, before_blob, after_blob, wrong_diff.churn_diff_sha256)):
                     with self.assertRaisesRegex(OSError, "diff does not match"):
                         omo_completion_email.validate_source1990_pangram_authority(root, plan, items, evidence, wrong_diff, current)
 
@@ -786,9 +779,7 @@ class CompletionEmailTest(unittest.TestCase):
                 "SOURCE1990_PANGRAM_ROOT": str(root.resolve()),
                 "SOURCE1990_PANGRAM_TASK_SHA256": current_sha256,
             }
-            with patch.multiple(omo_completion_email, **authority_constants), patch(
-                "omo_manager.omo_completion_email.validate_manager_churn"
-            ):
+            with patch.multiple(omo_completion_email, **authority_constants), patch("omo_manager.omo_completion_email.validate_manager_churn"):
                 omo_completion_email.validate_source1990_pangram_authority(
                     root,
                     plan,
@@ -830,23 +821,18 @@ class CompletionEmailTest(unittest.TestCase):
             source.chmod(0o600)
             items = omo_completion_email.SOURCE1990_PANGRAM_ITEMS
             task = root / "src1964_pangram.md"
-            text = task_text().replace("cfg:2", "dw:15").replace("cfg:1", "dw:60").replace(
-                "  - finish review", "".join(f"  - {item}\n" for item in items).rstrip()
-            )
+            text = task_text().replace("cfg:2", "dw:15").replace("cfg:1", "dw:60").replace("  - finish review", "".join(f"  - {item}\n" for item in items).rstrip())
             task.write_text(text, encoding="utf-8")
             evidence = omo_completion_email.SOURCE1990_PANGRAM_EVIDENCE
             purpose = ordinary_pending_purpose("pending item removed after verification", items, evidence)
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
-                "omo_manager.omo_pending.current_pending_task", return_value=task
-            ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task), patch(
-                "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_pending.current_pending_task", return_value=task),
+                patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
+                patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE),
             ):
-                primary = plan_completion_email(
-                    root, task, text, "pending item completed", items=(items[0],), semantic_key="a" * 64, pending_item_owner=True
-                )
-                extra = plan_completion_email(
-                    root, task, text, "pending item completed", items=(items[1],), semantic_key="b" * 64, pending_item_owner=True
-                )
+                primary = plan_completion_email(root, task, text, "pending item completed", items=(items[0],), semantic_key="a" * 64, pending_item_owner=True)
+                extra = plan_completion_email(root, task, text, "pending item completed", items=(items[1],), semantic_key="b" * 64, pending_item_owner=True)
                 assert primary is not None and extra is not None
                 self.assertTrue(claim_completion_email(primary))
                 self.assertTrue(claim_completion_email(extra))
@@ -918,9 +904,7 @@ class CompletionEmailTest(unittest.TestCase):
                     "--extra-authorization-sha256",
                     extra_binding[-1],
                 ]
-                with patch.multiple(omo_completion_email, **source_constants), patch(
-                    "omo_manager.omo_completion_email.validate_manager_churn"
-                ):
+                with patch.multiple(omo_completion_email, **source_constants), patch("omo_manager.omo_completion_email.validate_manager_churn"):
                     parsed = omo_pending.parse_args(argv)
                     updated, _count = omo_pending.remove_pending_items(text, items)
                     updated = omo_pending.append_comment(updated, omo_pending.pending_remove_evidence_comment(len(items), evidence))
@@ -982,10 +966,11 @@ class CompletionEmailTest(unittest.TestCase):
             text = task_text().replace("  - finish review", "".join(f"  - {item}\n" for item in items).rstrip())
             task.write_text(text, encoding="utf-8")
             semantic_key = "a" * 64
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
-                "omo_manager.omo_pending.current_pending_task", return_value=task
-            ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task), patch(
-                "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_pending.current_pending_task", return_value=task),
+                patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
+                patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE),
             ):
                 prior = plan_completion_email(
                     root,
@@ -1051,12 +1036,12 @@ class CompletionEmailTest(unittest.TestCase):
             task = root / "task.md"
             text = task_text().replace("  - finish review", "  - 🧑 first")
             task.write_text(text, encoding="utf-8")
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
-                "omo_manager.omo_completion_email.current_pending_task", return_value=task
-            ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
-                prior = plan_completion_email(
-                    root, task, text, "pending item completed", items=("🧑 first",), semantic_key="a" * 64, pending_item_owner=True
-                )
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
+                patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE),
+            ):
+                prior = plan_completion_email(root, task, text, "pending item completed", items=("🧑 first",), semantic_key="a" * 64, pending_item_owner=True)
                 assert prior is not None
                 self.assertTrue(claim_completion_email(prior))
                 request = OrdinaryPendingRecoveryRequest(
@@ -1098,12 +1083,12 @@ class CompletionEmailTest(unittest.TestCase):
             items = ("🧑 first",)
             text = task_text().replace("  - finish review", "  - 🧑 first")
             task.write_text(text, encoding="utf-8")
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
-                "omo_manager.omo_completion_email.current_pending_task", return_value=task
-            ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
-                prior = plan_completion_email(
-                    root, task, text, "pending item completed", items=items, semantic_key="a" * 64, pending_item_owner=True
-                )
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
+                patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE),
+            ):
+                prior = plan_completion_email(root, task, text, "pending item completed", items=items, semantic_key="a" * 64, pending_item_owner=True)
                 assert prior is not None
                 self.assertTrue(claim_completion_email(prior))
                 authorization_sha256 = hashlib.sha256((state / "completion-email-authorizations" / prior.key).read_bytes()).hexdigest()
@@ -1124,18 +1109,12 @@ class CompletionEmailTest(unittest.TestCase):
                     "b" * 64,
                     hashlib.sha256(b"pending item deleted:\n- first\n").hexdigest(),
                 )
-                recovery = plan_sent_recovery_completion(
-                    root, task, text, "pending item removed after verification", items=items, evidence=evidence, semantic_key=purpose
-                )
+                recovery = plan_sent_recovery_completion(root, task, text, "pending item removed after verification", items=items, evidence=evidence, semantic_key=purpose)
                 assert recovery is not None
                 with patch("omo_manager.omo_completion_email.rewrite_claims", side_effect=RuntimeError("crash")):
                     with self.assertRaisesRegex(RuntimeError, "crash"):
-                        prepare_ordinary_pending_transition(
-                            recovery, items, evidence, "d" * 64, digest_fields("pending-queue-v1"), request, text
-                        )
-                prepared = prepare_ordinary_pending_transition(
-                    recovery, items, evidence, "d" * 64, digest_fields("pending-queue-v1"), request, text
-                )
+                        prepare_ordinary_pending_transition(recovery, items, evidence, "d" * 64, digest_fields("pending-queue-v1"), request, text)
+                prepared = prepare_ordinary_pending_transition(recovery, items, evidence, "d" * 64, digest_fields("pending-queue-v1"), request, text)
                 self.assertIn('"status":"prepared"', prepared.record)
                 changed_evidence = "different reviewed evidence"
                 changed_purpose = ordinary_pending_purpose("pending item removed after verification", items, changed_evidence)
@@ -1170,15 +1149,13 @@ class CompletionEmailTest(unittest.TestCase):
             items = ("🧑 first", "🧑 second")
             text = task_text().replace("  - finish review", "  - 🧑 first\n  - 🧑 second")
             task.write_text(text, encoding="utf-8")
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
-                "omo_manager.omo_completion_email.current_pending_task", return_value=task
-            ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
-                primary = plan_completion_email(
-                    root, task, text, "pending item completed", items=("🧑 first",), semantic_key="a" * 64, pending_item_owner=True
-                )
-                extra = plan_completion_email(
-                    root, task, text, "pending item completed", items=("🧑 second",), semantic_key="b" * 64, pending_item_owner=True
-                )
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
+                patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE),
+            ):
+                primary = plan_completion_email(root, task, text, "pending item completed", items=("🧑 first",), semantic_key="a" * 64, pending_item_owner=True)
+                extra = plan_completion_email(root, task, text, "pending item completed", items=("🧑 second",), semantic_key="b" * 64, pending_item_owner=True)
                 assert primary is not None and extra is not None
                 self.assertTrue(claim_completion_email(primary))
                 self.assertTrue(claim_completion_email(extra))
@@ -1255,9 +1232,11 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             task = root / "task.md"
             text = task_text(human_report=False)
             task.write_text(text, encoding="utf-8")
-            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
-                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
-            ), patch("omo_manager.omo_completion_email.subprocess.run") as email:
+            with (
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.subprocess.run") as email,
+            ):
                 plan = plan_completion_email(root, task, text, "task done", semantic_key="a" * 64)
                 assert plan is not None
                 self.assertEqual("", plan.subject)
@@ -1436,10 +1415,13 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             task = root / "task.md"
             text = task_text()
             task.write_text(text, encoding="utf-8")
-            with patch(
-                "omo_manager.omo_completion_email.current_active_task",
-                side_effect=TaskFrontmatterError("multiple active work queues match the current agent"),
-            ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task) as pending:
+            with (
+                patch(
+                    "omo_manager.omo_completion_email.current_active_task",
+                    side_effect=TaskFrontmatterError("multiple active work queues match the current agent"),
+                ),
+                patch("omo_manager.omo_completion_email.current_pending_task", return_value=task) as pending,
+            ):
                 plan = plan_completion_email(
                     root,
                     task,
@@ -1458,22 +1440,28 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             task = root / "task.md"
             text = task_text()
             task.write_text(text, encoding="utf-8")
-            with patch(
-                "omo_manager.omo_completion_email.current_active_task",
-                side_effect=TaskFrontmatterError("multiple active work queues match the current agent"),
-            ), patch("omo_manager.omo_completion_email.current_pending_task") as pending:
+            with (
+                patch(
+                    "omo_manager.omo_completion_email.current_active_task",
+                    side_effect=TaskFrontmatterError("multiple active work queues match the current agent"),
+                ),
+                patch("omo_manager.omo_completion_email.current_pending_task") as pending,
+            ):
                 plan = plan_completion_email(root, task, text, "task done", items=("completion context",))
 
             self.assertIsNone(plan)
             pending.assert_not_called()
 
     def test_ordinary_sent_verification_binds_message_participants_and_content(self) -> None:
+        items = ("🧑 finish review",)
+        evidence = "review passed"
+        body = f"Exact body\n\n{omo_completion_email.sent_reconciliation_record('Exact subject', items, evidence)}"
         message = EmailMessage()
         message["From"] = "agent@example.test"
         message["To"] = "human@example.test"
         message["Subject"] = "Exact subject"
         message["Message-ID"] = "<sent@example.test>"
-        message.set_content("Exact body\n")
+        message.set_content(body)
 
         class FakeImap:
             def login(self, _address: str, _password: str) -> None:
@@ -1496,15 +1484,16 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             (),
             {"agent_address": "agent@example.test", "human_address": "human@example.test", "app_password": "secret"},
         )()
-        with patch("omo_manager.omo_completion_email.configured_agent_mail", return_value=settings), patch(
-            "omo_manager.omo_completion_email.imaplib.IMAP4_SSL", return_value=FakeImap()
-        ):
-            self.assertTrue(
+        with patch("omo_manager.omo_completion_email.configured_agent_mail", return_value=settings), patch("omo_manager.omo_completion_email.imaplib.IMAP4_SSL", return_value=FakeImap()):
+            self.assertEqual(
+                PARTICIPANT_EVIDENCE,
                 verify_ordinary_completion_in_sent(
                     "<sent@example.test>",
                     hashlib.sha256(b"Exact subject").hexdigest(),
-                    hashlib.sha256(b"Exact body\n").hexdigest(),
-                )
+                    hashlib.sha256(body.encode()).hexdigest(),
+                    required_items=items,
+                    required_evidence=evidence,
+                ),
             )
 
     def delivered_receipt(
@@ -1591,11 +1580,12 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             subject_sha256 = hashlib.sha256(b"Exact completion subject").hexdigest()
             body_sha256 = hashlib.sha256(b"Exact completion body\n").hexdigest()
             semantic_key = "a" * 64
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
-                "omo_manager.omo_completion_email.current_active_task", return_value=task
-            ), patch(
-                "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True
-            ) as verify, patch("omo_manager.omo_completion_email.subprocess.run") as send:
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE) as verify,
+                patch("omo_manager.omo_completion_email.subprocess.run") as send,
+            ):
                 reconcile_ordinary_sent_completion(
                     root,
                     task,
@@ -1623,6 +1613,110 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             self.assertEqual(2, verify.call_count)
             send.assert_called_once()
 
+    def test_ordinary_sent_pending_reconciliation_uses_queue_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            text = task_text().replace("status: running", "status: blocked\nblocked_on: lifecycle repair")
+            task.write_text(text, encoding="utf-8")
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch(
+                    "omo_manager.omo_completion_email.current_active_task",
+                    side_effect=TaskFrontmatterError("not the running task"),
+                ),
+                patch("omo_manager.omo_completion_email.current_pending_task", return_value=task) as pending_owner,
+                patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE),
+            ):
+                reconcile_ordinary_sent_completion(
+                    root,
+                    task,
+                    "pending item removed after verification",
+                    "<already-sent@example.test>",
+                    "b" * 64,
+                    "c" * 64,
+                    items=("🧑 finish review",),
+                    evidence="review passed",
+                    semantic_key="a" * 64,
+                    pending_item_owner=True,
+                )
+
+            pending_owner.assert_called_once_with(root.resolve())
+
+    def test_ordinary_sent_reconciliation_rejects_same_key_for_changed_purpose(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            text = task_text()
+            task.write_text(text, encoding="utf-8")
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
+                patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE),
+                patch(
+                    "omo_manager.omo_completion_email.configured_agent_mail",
+                    return_value=type("Mail", (), {"agent_address": "agent@example.test", "human_address": "human@example.test"})(),
+                ),
+            ):
+                reconcile_ordinary_sent_completion(
+                    root,
+                    task,
+                    "pending item removed after verification",
+                    "<already-sent@example.test>",
+                    "b" * 64,
+                    "c" * 64,
+                    items=("🧑 finish review",),
+                    evidence="review passed",
+                    semantic_key="a" * 64,
+                    pending_item_owner=True,
+                )
+                changed = plan_completion_email(
+                    root,
+                    task,
+                    text,
+                    "pending item removed after verification",
+                    items=("🧑 different item",),
+                    evidence="different evidence",
+                    semantic_key="a" * 64,
+                    pending_item_owner=True,
+                )
+                assert changed is not None
+                with self.assertRaisesRegex(OSError, "does not match"):
+                    completion_email_is_delivered(changed)
+
+    def test_ordinary_sent_marker_persists_verified_participant_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            text = task_text()
+            task.write_text(text, encoding="utf-8")
+            exact = type("Mail", (), {"agent_address": "agent@example.test", "human_address": "human@example.test"})()
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
+                patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE),
+                patch("omo_manager.omo_completion_email.configured_agent_mail", return_value=exact),
+            ):
+                reconcile_ordinary_sent_completion(
+                    root,
+                    task,
+                    "pending item removed after verification",
+                    "<already-sent@example.test>",
+                    "b" * 64,
+                    "c" * 64,
+                    items=("🧑 finish review",),
+                    evidence="review passed",
+                    semantic_key="a" * 64,
+                    pending_item_owner=True,
+                )
+            markers = list((state / "ordinary-completion-by-notice").iterdir())
+            self.assertEqual(1, len(markers))
+            values = omo_completion_email.ordinary_completion_record_values(markers[0].read_text(encoding="utf-8"))
+            self.assertEqual(PARTICIPANT_EVIDENCE, (values["sender_sha256"], values["recipient_sha256"]))
+
     def test_ordinary_sent_message_cannot_be_reused_for_another_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1635,17 +1729,15 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             message_id = "<already-sent@example.test>"
             digest = hashlib.sha256(b"exact").hexdigest()
             active = first
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
-                "omo_manager.omo_completion_email.current_active_task", side_effect=lambda _root: active
-            ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
-                reconcile_ordinary_sent_completion(
-                    root, first, "completed", message_id, digest, digest, semantic_key="a" * 64
-                )
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.current_active_task", side_effect=lambda _root: active),
+                patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE),
+            ):
+                reconcile_ordinary_sent_completion(root, first, "completed", message_id, digest, digest, semantic_key="a" * 64)
                 active = second
                 with self.assertRaisesRegex(OSError, "different evidence"):
-                    reconcile_ordinary_sent_completion(
-                        root, second, "completed", message_id, digest, digest, semantic_key="a" * 64
-                    )
+                    reconcile_ordinary_sent_completion(root, second, "completed", message_id, digest, digest, semantic_key="a" * 64)
 
     def test_ordinary_sent_reconciliation_cannot_satisfy_task_close(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1653,9 +1745,7 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             task = root / "task.md"
             text = task_text().replace("pending_task_items:\n  - finish review", "pending_task_items: []")
             task.write_text(text, encoding="utf-8")
-            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch(
-                "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent"
-            ) as verify:
+            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent") as verify:
                 with self.assertRaisesRegex(ValueError, "cannot satisfy"):
                     reconcile_ordinary_sent_completion(
                         root,
@@ -1676,9 +1766,11 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             text = task_text().replace("pending_task_items:\n  - finish review", "pending_task_items: []")
             task.write_text(text, encoding="utf-8")
             digest = hashlib.sha256(b"exact").hexdigest()
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
-                "omo_manager.omo_completion_email.current_active_task", return_value=task
-            ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=False):
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=None),
+            ):
                 with self.assertRaisesRegex(OSError, "not exact verified"):
                     reconcile_ordinary_sent_completion(
                         root,
@@ -1691,6 +1783,126 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
                     )
             self.assertFalse(state.exists())
 
+    def test_pending_sent_reconciliation_rejects_empty_items_before_imap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            task.write_text(task_text(), encoding="utf-8")
+            with patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent") as verify:
+                with self.assertRaisesRegex(ValueError, "at least one exact item"):
+                    reconcile_ordinary_sent_completion(
+                        root,
+                        task,
+                        "pending item removed after verification",
+                        "<sent@example.test>",
+                        "b" * 64,
+                        "c" * 64,
+                        evidence="review passed",
+                        semantic_key="a" * 64,
+                        pending_item_owner=True,
+                    )
+            verify.assert_not_called()
+
+    def test_public_zero_item_sent_reconciliation_requires_canonical_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            task.write_text(task_text(), encoding="utf-8")
+            with (
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=None) as verify,
+                redirect_stdout(StringIO()),
+            ):
+                self.assertEqual(
+                    2,
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "--task",
+                            str(task),
+                            "--outcome",
+                            "completed",
+                            "--semantic-key",
+                            "a" * 64,
+                            "--reconcile-ordinary-sent",
+                            "--message-id",
+                            "<sent@example.test>",
+                            "--sent-subject-sha256",
+                            "b" * 64,
+                            "--sent-body-sha256",
+                            "c" * 64,
+                        ]
+                    ),
+                )
+            verify.assert_called_once_with(
+                "<sent@example.test>",
+                "b" * 64,
+                "c" * 64,
+                required_items=(),
+                required_evidence="",
+                require_record=True,
+            )
+
+    def test_unrelated_verified_sent_content_cannot_remove_human_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            text = task_text()
+            task.write_text(text, encoding="utf-8")
+            message = EmailMessage()
+            message["From"] = "agent@example.test"
+            message["To"] = "human@example.test"
+            message["Subject"] = "Unrelated result"
+            message["Message-ID"] = "<unrelated@example.test>"
+            message.set_content("review passed\n\nCompletion record:\npending item deleted:\n- finish review\n")
+
+            class FakeImap:
+                def login(self, _address: str, _password: str) -> None:
+                    return None
+
+                def select(self, _mailbox: str, *, readonly: bool) -> tuple[str, list[bytes]]:
+                    return "OK", []
+
+                def uid(self, command: str, *_args: str) -> tuple[str, list[bytes | tuple[bytes, bytes]]]:
+                    if command == "search":
+                        return "OK", [b"1"]
+                    return "OK", [(b"1", message.as_bytes())]
+
+                def logout(self) -> None:
+                    return None
+
+            settings = type(
+                "Settings",
+                (),
+                {"agent_address": "agent@example.test", "human_address": "human@example.test", "app_password": "secret"},
+            )()
+            body = "review passed\n\nCompletion record:\npending item deleted:\n- finish review\n"
+            with (
+                patch.dict(
+                    "os.environ",
+                    {"OMO_MANAGER_STATE_DIR": str(state), "OMO_COMPLETION_SENT_VERIFY_TIMEOUT_S": "0"},
+                ),
+                patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
+                patch("omo_manager.omo_completion_email.configured_agent_mail", return_value=settings),
+                patch("omo_manager.omo_completion_email.imaplib.IMAP4_SSL", return_value=FakeImap()),
+                self.assertRaisesRegex(OSError, "not exact verified"),
+            ):
+                reconcile_ordinary_sent_completion(
+                    root,
+                    task,
+                    "pending item removed after verification",
+                    "<unrelated@example.test>",
+                    hashlib.sha256(b"Unrelated result").hexdigest(),
+                    hashlib.sha256(body.encode()).hexdigest(),
+                    items=("🧑 finish review",),
+                    evidence="review passed",
+                    semantic_key="a" * 64,
+                    pending_item_owner=True,
+                )
+            self.assertFalse(state.exists())
+
     def test_ordinary_reconciliation_rejects_existing_structured_claim(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1699,9 +1911,15 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             text = task_text().replace("pending_task_items:\n  - finish review", "pending_task_items: []")
             task.write_text(text, encoding="utf-8")
             digest = hashlib.sha256(b"exact").hexdigest()
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
-                "omo_manager.omo_completion_email.current_active_task", return_value=task
-            ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE),
+                patch(
+                    "omo_manager.omo_completion_email.configured_agent_mail",
+                    return_value=type("Mail", (), {"agent_address": "agent@example.test", "human_address": "human@example.test"})(),
+                ),
+            ):
                 plan = plan_completion_email(root, task, text, "completed", semantic_key="a" * 64)
                 assert plan is not None
                 self.assertTrue(claim_completion_email(plan))
@@ -1725,9 +1943,7 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             before = task_text()
             task.write_text(before, encoding="utf-8")
             semantic_key = "a" * 64
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
-                "omo_manager.omo_completion_email.current_active_task", return_value=task
-            ):
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch("omo_manager.omo_completion_email.current_active_task", return_value=task):
                 old_plan = plan_completion_email(
                     root,
                     task,
@@ -1743,7 +1959,7 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
                 self.assertTrue((state / "completion-email-authorizations" / old_plan.key).is_file())
                 after = before.replace("pending_task_items:\n  - finish review", "pending_task_items: []")
                 task.write_text(after, encoding="utf-8")
-                with patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+                with patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE):
                     with self.assertRaisesRegex(OSError, "structured completion state"):
                         reconcile_ordinary_sent_completion(
                             root,
@@ -1763,17 +1979,18 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             authorization_dir.mkdir(mode=0o700, parents=True)
             legacy = authorization_dir / ("d" * 64)
             legacy.write_text(
-                "version=1\ntarget=cfg:9\nroot=/unrelated\ntask=old.md\n"
-                f"notice_key={'e' * 64}\nsubject_sha256={'f' * 64}\nbody_sha256={'0' * 64}\n",
+                f"version=1\ntarget=cfg:9\nroot=/unrelated\ntask=old.md\nnotice_key={'e' * 64}\nsubject_sha256={'f' * 64}\nbody_sha256={'0' * 64}\n",
                 encoding="utf-8",
             )
             legacy.chmod(0o600)
             task = root / "task.md"
             text = task_text().replace("pending_task_items:\n  - finish review", "pending_task_items: []")
             task.write_text(text, encoding="utf-8")
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
-                "omo_manager.omo_completion_email.current_active_task", return_value=task
-            ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE),
+            ):
                 reconcile_ordinary_sent_completion(
                     root,
                     task,
@@ -1791,9 +2008,15 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             task = root / "task.md"
             text = task_text().replace("pending_task_items:\n  - finish review", "pending_task_items: []")
             task.write_text(text, encoding="utf-8")
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
-                "omo_manager.omo_completion_email.current_active_task", return_value=task
-            ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE),
+                patch(
+                    "omo_manager.omo_completion_email.configured_agent_mail",
+                    return_value=type("Mail", (), {"agent_address": "agent@example.test", "human_address": "human@example.test"})(),
+                ),
+            ):
                 reconcile_ordinary_sent_completion(
                     root,
                     task,
@@ -1816,9 +2039,11 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             initial = task_text()
             task.write_text(initial, encoding="utf-8")
             semantic_key = "a" * 64
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
-                "omo_manager.omo_completion_email.current_active_task", return_value=task
-            ), patch("omo_manager.omo_completion_email.subprocess.run") as send:
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch("omo_manager.omo_completion_email.subprocess.run") as send,
+            ):
                 pending_plan = plan_completion_email(
                     root,
                     task,
@@ -1918,8 +2143,7 @@ work
                 semantic_key="a" * 64,
             )
             finished = initial.replace(
-                "pending_task_items:\n  - id: pi_019f0000-0000-7000-8000-000000000002\n"
-                "    text: 🧑 finish review\n    blocked_on: []\n    notices: []",
+                "pending_task_items:\n  - id: pi_019f0000-0000-7000-8000-000000000002\n    text: 🧑 finish review\n    blocked_on: []\n    notices: []",
                 "pending_task_items: []",
             )
             task.write_text(finished, encoding="utf-8")
@@ -1951,9 +2175,7 @@ work
             task = root / "task.md"
             text = task_text()
             task.write_text(text, encoding="utf-8")
-            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
-                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
-            ):
+            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
                 plan = plan_completion_email(root, task, text, "completed")
                 assert plan is not None
                 with patch("omo_manager.omo_completion_email.os.fsync", wraps=__import__("os").fsync) as fsync:
@@ -1971,19 +2193,13 @@ work
             manager = root / "manager.md"
             text = task_text()
             task.write_text(text, encoding="utf-8")
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
-                "omo_manager.omo_completion_email.current_active_task", return_value=manager
-            ), patch("omo_manager.omo_tmux_send.send_system_to_codex") as queue:
-                self.assertFalse(
-                    require_owner_completion(
-                        root, task, text, "pending item completed", items=("🧑 finish review",), evidence="passed", semantic_key="d" * 64
-                    )
-                )
-                self.assertFalse(
-                    require_owner_completion(
-                        root, task, text, "pending item completed", items=("🧑 finish review",), evidence="passed", semantic_key="d" * 64
-                    )
-                )
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=manager),
+                patch("omo_manager.omo_tmux_send.send_system_to_codex") as queue,
+            ):
+                self.assertFalse(require_owner_completion(root, task, text, "pending item completed", items=("🧑 finish review",), evidence="passed", semantic_key="d" * 64))
+                self.assertFalse(require_owner_completion(root, task, text, "pending item completed", items=("🧑 finish review",), evidence="passed", semantic_key="d" * 64))
             queue.assert_called_once()
             queued_message = queue.call_args.args[1]
             self.assertIn(f"--semantic-key {'d' * 64}", queued_message)
@@ -2048,11 +2264,7 @@ work
                 patch("omo_manager.omo_tmux_send.send_system_to_codex") as pane,
             ):
                 self.assertEqual(0, main(argv))
-                self.assertTrue(
-                    require_owner_completion(
-                        root, task, text, "task done", items=items, evidence=evidence, semantic_key="c" * 64
-                    )
-                )
+                self.assertTrue(require_owner_completion(root, task, text, "task done", items=items, evidence=evidence, semantic_key="c" * 64))
             pane.assert_not_called()
             self.assertEqual(text.encode(), task.read_bytes())
             self.assertEqual(1, len(tuple((manager_state / "completion-email-reconciled").iterdir())))
@@ -2080,9 +2292,7 @@ work
             changed_plan = build_completion_email(root, task, changed, "task done")
             assert changed_plan is not None
             self.assertNotEqual(receipt.name, changed_plan.key)
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(manager_state)}), self.assertRaisesRegex(
-                OSError, "canonical completion message"
-            ):
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(manager_state)}), self.assertRaisesRegex(OSError, "canonical completion message"):
                 reconcile_delivered_completion(
                     root,
                     task,
@@ -2130,9 +2340,7 @@ work
             plan = build_completion_email(root, task, text, "task done", semantic_key="b" * 64)
             assert plan is not None
 
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), self.assertRaisesRegex(
-                OSError, "completion claims ledger is malformed"
-            ):
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), self.assertRaisesRegex(OSError, "completion claims ledger is malformed"):
                 claim_completion_email(plan)
 
             self.assertEqual(malformed, ledger.read_text(encoding="utf-8"))
@@ -2151,11 +2359,11 @@ work
             receipt, receipt_sha256 = self.delivered_receipt(source_state, root, task, text, semantic_key="c" * 64)
             plan = build_completion_email(root, task, text, "task done", semantic_key="c" * 64)
             assert plan is not None
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(manager_state)}), patch(
-                "omo_manager.omo_completion_email.current_active_task", return_value=manager
-            ), patch(
-                "omo_manager.omo_tmux_send.send_system_to_codex", side_effect=OSError("pane changed from ready to running")
-            ) as queue:
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(manager_state)}),
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=manager),
+                patch("omo_manager.omo_tmux_send.send_system_to_codex", side_effect=OSError("pane changed from ready to running")) as queue,
+            ):
                 with self.assertRaisesRegex(OSError, "ready to running"):
                     require_owner_completion(root, task, text, "task done", semantic_key="c" * 64)
                 self.assertFalse((manager_state / "completion-email-requests" / plan.key).exists())
@@ -2186,9 +2394,11 @@ work
             task.write_text(text, encoding="utf-8")
             manager_state.mkdir(mode=0o700)
             receipt, receipt_sha256 = self.delivered_receipt(source_state, root, task, text, semantic_key="c" * 64)
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(source_state)}), patch(
-                "omo_manager.omo_completion_email.current_active_task", return_value=task
-            ), patch("omo_manager.omo_completion_email.subprocess.run") as email:
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(source_state)}),
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch("omo_manager.omo_completion_email.subprocess.run") as email,
+            ):
                 self.assertEqual(
                     0,
                     main(
@@ -2297,9 +2507,11 @@ work
             state = root / "state"
             task = root / "task.md"
             task.write_text(task_text(), encoding="utf-8")
-            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
-                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
-            ), patch("omo_manager.omo_completion_email.subprocess.run") as email:
+            with (
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.subprocess.run") as email,
+            ):
                 argv = [
                     "--root",
                     str(root),
@@ -2354,9 +2566,7 @@ work
             task = root / "task.md"
             text = task_text()
             task.write_text(text, encoding="utf-8")
-            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
-                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
-            ):
+            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
                 plan = plan_completion_email(root, task, text, "task done")
                 with self.assertRaisesRegex(ValueError, "semantic completion key"):
                     send_completion_email(plan)
@@ -2371,9 +2581,11 @@ work
             task.write_text(text, encoding="utf-8")
             entrypoint.write_text("#!/bin/sh\n", encoding="utf-8")
             entrypoint.chmod(0o600)
-            with patch("omo_manager.omo_completion_email.COMPLETION_ENTRYPOINT", entrypoint), patch(
-                "omo_manager.omo_completion_email.current_active_task", return_value=task
-            ), self.assertRaisesRegex(OSError, "not safely executable"):
+            with (
+                patch("omo_manager.omo_completion_email.COMPLETION_ENTRYPOINT", entrypoint),
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                self.assertRaisesRegex(OSError, "not safely executable"),
+            ):
                 _ = plan_completion_email(root, task, text, "completed")
             entrypoint.chmod(0o700)
             with patch("omo_manager.omo_completion_email.COMPLETION_ENTRYPOINT", entrypoint):
@@ -2389,12 +2601,12 @@ work
             task = root / "task.md"
             text = task_text()
             task.write_text(text, encoding="utf-8")
-            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
-                "omo_manager.omo_completion_email.subprocess.run"
-            ) as run:
-                plan = plan_completion_email(
-                    root, task, text, "completed", items=("finish review",), evidence="review passed", semantic_key="a" * 64
-                )
+            with (
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.subprocess.run") as run,
+            ):
+                plan = plan_completion_email(root, task, text, "completed", items=("finish review",), evidence="review passed", semantic_key="a" * 64)
                 self.assertIsNotNone(plan)
                 assert plan is not None
                 self.assertIn("Task: task.md", plan.body)
@@ -2409,14 +2621,14 @@ work
             authorization = state / "completion-email-authorizations" / plan.key
             self.assertTrue(authorization.is_file())
 
-    def test_pending_notice_rejects_combined_answer_override(self) -> None:
+    def test_pending_notice_combines_answer_with_canonical_completion_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task = root / "task.md"
             text = task_text()
             task.write_text(text, encoding="utf-8")
-            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), self.assertRaisesRegex(ValueError, "exact thread or body"):
-                plan_completion_email(
+            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task):
+                plan = plan_completion_email(
                     root,
                     task,
                     text,
@@ -2425,7 +2637,15 @@ work
                     evidence="answered",
                     human_subject="Re: Original question",
                     human_body="The concise answer.\n",
+                    semantic_key="a" * 64,
                 )
+            self.assertIsNotNone(plan)
+            assert plan is not None
+            self.assertEqual("Re: Original question", plan.subject)
+            self.assertIn("The concise answer.\n\nCompletion record:\n", plan.body)
+            self.assertIn("pending item deleted:", plan.body)
+            self.assertIn("answer question", plan.body)
+            self.assertEqual("a" * 64, plan.semantic_key)
 
     def test_combined_answer_claim_distinguishes_subject_and_resolved_item(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2448,9 +2668,11 @@ work
             task = root / "task.md"
             text = task_text()
             task.write_text(text, encoding="utf-8")
-            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
-                "omo_manager.omo_completion_email.subprocess.run", side_effect=OSError("uncertain")
-            ) as run:
+            with (
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.subprocess.run", side_effect=OSError("uncertain")) as run,
+            ):
                 plan = plan_completion_email(root, task, text, "task done", semantic_key="a" * 64)
                 self.assertFalse(send_completion_email(plan))
                 self.assertFalse(send_completion_email(plan))
@@ -2463,9 +2685,11 @@ work
             task = root / "task.md"
             text = task_text()
             task.write_text(text, encoding="utf-8")
-            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
-                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
-            ), patch("omo_manager.omo_completion_email.subprocess.run") as run:
+            with (
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.subprocess.run") as run,
+            ):
                 plan = plan_completion_email(root, task, text, "task done", semantic_key="a" * 64)
                 assert plan is not None
                 self.assertTrue(send_completion_email(plan))
@@ -2484,9 +2708,11 @@ work
             task = root / "task.md"
             text = task_text()
             task.write_text(text, encoding="utf-8")
-            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
-                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
-            ), patch("omo_manager.omo_completion_email.subprocess.run"):
+            with (
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.subprocess.run"),
+            ):
                 plan = plan_completion_email(root, task, text, "task done", semantic_key="a" * 64)
                 assert plan is not None
                 self.assertTrue(send_completion_email(plan))
@@ -2507,9 +2733,11 @@ work
             task = root / "task.md"
             text = task_text()
             task.write_text(text, encoding="utf-8")
-            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
-                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
-            ), patch("omo_manager.omo_completion_email.subprocess.run") as run:
+            with (
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.subprocess.run") as run,
+            ):
                 plan = plan_completion_email(root, task, text, "task done", semantic_key="a" * 64)
                 assert plan is not None
                 self.assertTrue(send_completion_email(plan))
@@ -2534,9 +2762,11 @@ work
             task = root / "task.md"
             initial = task_text()
             task.write_text(initial, encoding="utf-8")
-            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
-                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
-            ), patch("omo_manager.omo_completion_email.subprocess.run") as run:
+            with (
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.subprocess.run") as run,
+            ):
                 first = plan_completion_email(root, task, initial, "task done", semantic_key="a" * 64)
                 assert first is not None
                 self.assertTrue(send_completion_email(first))
@@ -2558,9 +2788,11 @@ work
             task = root / "task.md"
             initial = task_text()
             task.write_text(initial, encoding="utf-8")
-            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
-                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
-            ), patch("omo_manager.omo_completion_email.subprocess.run") as run:
+            with (
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.subprocess.run") as run,
+            ):
                 first = plan_completion_email(root, task, initial, "task done", semantic_key="a" * 64)
                 assert first is not None
                 self.assertTrue(send_completion_email(first))
@@ -2591,9 +2823,7 @@ work
             entrypoint.write_text("#!/bin/sh\n", encoding="utf-8")
             entrypoint.chmod(0o700)
 
-            with patch("omo_manager.omo_task_context.current_tmux_target", return_value="dw:29.0"), patch(
-                "omo_manager.omo_completion_email.COMPLETION_ENTRYPOINT", entrypoint
-            ):
+            with patch("omo_manager.omo_task_context.current_tmux_target", return_value="dw:29.0"), patch("omo_manager.omo_completion_email.COMPLETION_ENTRYPOINT", entrypoint):
                 plan = plan_completion_email(root, task, text, "task done", semantic_key="a" * 64)
 
             self.assertIsNotNone(plan)
@@ -2607,9 +2837,11 @@ work
             task = root / "task.md"
             initial = task_text()
             task.write_text(initial, encoding="utf-8")
-            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
-                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
-            ), patch("omo_manager.omo_completion_email.subprocess.run", side_effect=OSError("uncertain")) as run:
+            with (
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.subprocess.run", side_effect=OSError("uncertain")) as run,
+            ):
                 first = plan_completion_email(root, task, initial, "task done", semantic_key="a" * 64)
                 assert first is not None
                 self.assertFalse(send_completion_email(first))
@@ -2632,9 +2864,7 @@ work
             initial = task_text()
             task.write_text(initial, encoding="utf-8")
             semantic_key = "a" * 64
-            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
-                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
-            ):
+            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
                 old = plan_completion_email(root, task, initial, "completed", semantic_key=semantic_key)
                 assert old is not None
                 self.assertTrue(claim_completion_email(old))
@@ -2820,9 +3050,11 @@ work
             subject.write_text("Task result\n", encoding="utf-8")
             message.write_text("The task is complete.\n", encoding="utf-8")
             semantic_key = "a" * 64
-            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
-                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
-            ), patch("omo_manager.omo_completion_email.subprocess.run") as send:
+            with (
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.subprocess.run") as send,
+            ):
                 old = plan_completion_email(root, task, initial, "completed", semantic_key=semantic_key)
                 assert old is not None
                 self.assertTrue(claim_completion_email(old))
@@ -2857,14 +3089,10 @@ work
             task = root / "task.md"
             text = task_text()
             task.write_text(text, encoding="utf-8")
-            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
-                "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
-            ):
+            with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
                 plan = plan_completion_email(root, task, text, "task done")
                 assert plan is not None
-                with patch("omo_manager.omo_completion_email.os.replace", side_effect=OSError("injected claim failure")), self.assertRaisesRegex(
-                    OSError, "injected claim failure"
-                ):
+                with patch("omo_manager.omo_completion_email.os.replace", side_effect=OSError("injected claim failure")), self.assertRaisesRegex(OSError, "injected claim failure"):
                     claim_completion_email(plan)
 
             self.assertFalse((state / "completion-email-claims.tsv").exists())
@@ -2949,8 +3177,7 @@ work
                 text.replace(SOURCE1241_META_LINE, f"{SOURCE1241_META_LINE}\n{SOURCE1241_META_LINE}"),
                 text.replace(
                     SOURCE1241_CONTEXT,
-                    '<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1241.txt:1-7">\n'
-                    f"conflicting body\n</human_instruction>\n{SOURCE1241_CONTEXT}",
+                    f'<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1241.txt:1-7">\nconflicting body\n</human_instruction>\n{SOURCE1241_CONTEXT}',
                 ),
             )
             for changed in cases:
@@ -3009,9 +3236,7 @@ work
                 root = Path(tmp)
                 state = root / "state"
                 task, text = source1241_task(root)
-                with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict(
-                    "os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}
-                ):
+                with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
                     plan = plan_completion_email(root, task, text, "task done", semantic_key="a" * 64)
                     assert plan is not None
                     changed = task if drift == "task" else root / "manager_mail/85c5dff58359-1241.txt"
@@ -3025,19 +3250,7 @@ work
         items = omo_completion_email.WATCHER_PANGRAM_ITEMS
         queue = tuple(f"unrelated item {index}" for index in range(7)) + items + ("unrelated item after",)
         rendered = "".join(f"  - '{item.replace(chr(39), chr(39) * 2)}'\n" for item in queue)
-        text = (
-            "---\n"
-            "version: v1.0.0\n"
-            "status: running\n"
-            "runat: config:35\n"
-            "tool: codex\n"
-            "managerat: config:39\n"
-            "is_manager: false\n"
-            "pending_task_items:\n"
-            f"{rendered}"
-            "---\n"
-            "do not send another Human email\n"
-        )
+        text = f"---\nversion: v1.0.0\nstatus: running\nrunat: config:35\ntool: codex\nmanagerat: config:39\nis_manager: false\npending_task_items:\n{rendered}---\ndo not send another Human email\n"
         task = root / "watcher_repair.md"
         task.write_text(text, encoding="utf-8")
         return task, text, queue
@@ -3060,13 +3273,14 @@ work
                     omo_completion_email.WATCHER_PANGRAM_EVIDENCE,
                 ),
             }
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch.multiple(
-                omo_completion_email, **constants
-            ), patch("omo_manager.omo_pending.current_pending_task", return_value=task), patch(
-                "omo_manager.omo_completion_email.current_pending_task", return_value=task
-            ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True), patch(
-                "omo_manager.omo_completion_email.subprocess.run"
-            ) as email_process:
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch.multiple(omo_completion_email, **constants),
+                patch("omo_manager.omo_pending.current_pending_task", return_value=task),
+                patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
+                patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE),
+                patch("omo_manager.omo_completion_email.subprocess.run") as email_process,
+            ):
                 normal = build_completion_email(
                     root,
                     task,
@@ -3114,11 +3328,13 @@ work
                     omo_completion_email.WATCHER_PANGRAM_EVIDENCE,
                 ),
             }
-            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch.multiple(
-                omo_completion_email, **constants
-            ), patch("omo_manager.omo_pending.current_pending_task", return_value=task), patch(
-                "omo_manager.omo_completion_email.current_pending_task", return_value=task
-            ), patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True):
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch.multiple(omo_completion_email, **constants),
+                patch("omo_manager.omo_pending.current_pending_task", return_value=task),
+                patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
+                patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE),
+            ):
                 args = omo_pending.parse_args(["recover-watcher-pangram-reviewed-sent"])
                 request = omo_pending.sent_recovery_request(args)
                 plan = plan_sent_recovery_completion(
@@ -3132,9 +3348,7 @@ work
                 )
                 assert plan is not None
                 with self.assertRaisesRegex(OSError, "does not bind"):
-                    omo_completion_email.validate_watcher_pangram_reviewed_sent_authority(
-                        root, plan, args.items, args.evidence, replace(request, sent_body_sha256="0" * 64), text
-                    )
+                    omo_completion_email.validate_watcher_pangram_reviewed_sent_authority(root, plan, args.items, args.evidence, replace(request, sent_body_sha256="0" * 64), text)
                 task.write_text(text + "task drift\n", encoding="utf-8")
                 with self.assertRaisesRegex(omo_pending.BlockingError, "task bytes changed"):
                     omo_pending.run(args, root)
@@ -3291,13 +3505,17 @@ work
                     )
                     if (path := state / directory / key).is_file()
                 }
-                with patch.multiple(omo_completion_email, **constants), patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
-                    "omo_manager.omo_pending.current_pending_task", return_value=task
-                ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task), patch(
-                    "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True
-                ) as sent, patch("omo_manager.omo_pending.require_owner_completion") as owner_sender, patch(
-                    "omo_manager.omo_completion_email.send_completion_email"
-                ) as sender, patch("omo_manager.omo_completion_email.subprocess.run") as email_process:
+                with (
+                    patch.multiple(omo_completion_email, **constants),
+                    patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
+                        "omo_manager.omo_pending.current_pending_task", return_value=task
+                    ),
+                    patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
+                    patch("omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE) as sent,
+                    patch("omo_manager.omo_pending.require_owner_completion") as owner_sender,
+                    patch("omo_manager.omo_completion_email.send_completion_email") as sender,
+                    patch("omo_manager.omo_completion_email.subprocess.run") as email_process,
+                ):
                     args = omo_pending.parse_args(["recover-mail-compress-reviewed-sent"])
                     request = omo_pending.sent_recovery_request(args)
                     plan = plan_sent_recovery_completion(
@@ -3315,10 +3533,7 @@ work
                     metadata = parse_task_metadata(task.read_text(encoding="utf-8"), root)
                     assert metadata is not None
                     self.assertEqual(omo_completion_email.MAIL_COMPRESS_PRESERVED_ITEMS, metadata.pending_task_items)
-                    rows = [
-                        line.split("\t")
-                        for line in (state / "completion-email-claims.tsv").read_text(encoding="utf-8").splitlines()
-                    ]
+                    rows = [line.split("\t") for line in (state / "completion-email-claims.tsv").read_text(encoding="utf-8").splitlines()]
                     for key in failed_keys:
                         selected = [row for row in rows if row[0] == key]
                         self.assertEqual(1, len(selected))
@@ -3337,11 +3552,7 @@ work
                             if (path := state / directory / key).is_file()
                         },
                     )
-                    first_snapshot = {
-                        path.relative_to(root): path.read_bytes()
-                        for path in root.rglob("*")
-                        if path.is_file()
-                    }
+                    first_snapshot = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
                     self.assertEqual(0, omo_pending.run(args, root))
                     self.assertEqual(
                         first_snapshot,
@@ -3369,14 +3580,18 @@ work
                     before_claims = ledger.read_bytes()
                     sent_patch = patch(
                         "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent",
-                        side_effect=[True, False] if drift == "sent" else None,
-                        return_value=drift != "sent",
+                        side_effect=[PARTICIPANT_EVIDENCE, None] if drift == "sent" else None,
+                        return_value=PARTICIPANT_EVIDENCE,
                     )
-                    with patch.multiple(omo_completion_email, **constants), patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
-                        "omo_manager.omo_pending.current_pending_task", return_value=task
-                    ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task), sent_patch, patch(
-                        "omo_manager.omo_completion_email.subprocess.run"
-                    ) as email_process:
+                    with (
+                        patch.multiple(omo_completion_email, **constants),
+                        patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
+                            "omo_manager.omo_pending.current_pending_task", return_value=task
+                        ),
+                        patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
+                        sent_patch,
+                        patch("omo_manager.omo_completion_email.subprocess.run") as email_process,
+                    ):
                         args = omo_pending.parse_args(["recover-mail-compress-reviewed-sent"])
                         error = "task bytes changed|Sent-Mail evidence|delivered claim evidence changed"
                         with self.assertRaisesRegex((OSError, omo_pending.BlockingError), error):
@@ -3391,11 +3606,13 @@ work
             task = root / "task.md"
             task.write_text(task_text().replace("  - finish review", "  - 🧑 finish review"), encoding="utf-8")
             output = StringIO()
-            with patch("omo_manager.omo_pending.current_pending_task", return_value=task), patch(
-                "omo_manager.omo_pending.plan_completion_email", return_value=object()
-            ), patch("omo_manager.omo_pending.completion_email_is_delivered", return_value=True), patch(
-                "omo_manager.omo_pending.require_owner_completion", return_value=True
-            ), redirect_stdout(output):
+            with (
+                patch("omo_manager.omo_pending.current_pending_task", return_value=task),
+                patch("omo_manager.omo_pending.plan_completion_email", return_value=object()),
+                patch("omo_manager.omo_pending.completion_email_is_delivered", return_value=True),
+                patch("omo_manager.omo_pending.require_owner_completion", return_value=True),
+                redirect_stdout(output),
+            ):
                 self.assertEqual(
                     0,
                     omo_pending.run(

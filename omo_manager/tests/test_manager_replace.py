@@ -117,6 +117,11 @@ SOURCE1611_AUTHORITY = (
     b"Subject: Re: [cleanup_dw_tree.md] Config/DW replacement needs supported recursive lifecycle path\n\n"
     b"Replace the manager and let the new manager immediately replace their worker\r\n"
 )
+SOURCE1928_AUTHORITY = (
+    "Subject: Re: Taking over DW cleanup — dw_cleanup_mgr.md\n\n"
+    "Replace this agent\r\n"
+    "Consolidating every /shagent/dw* repo and make everything onto main and all repos clean should be a straightforward simple task and this agent has failed it after hours"
+).encode()
 SOURCE1601_AUTHORITY = (
     b"Subject: Re: Try Pangram for hard data\n\n"
     b"For a manager, replace this manager and DW for team, only tell them their\r\n"
@@ -598,6 +603,41 @@ class ManagerReplaceTests(unittest.TestCase):
         )
         protected_sha = manager_replace.protected_inventory_digest(provisional, identities)
         return root, replace(provisional, protected_targets_sha256=protected_sha), identities
+
+    def source1928_fixture(self, base: Path) -> tuple[Path, Args, tuple[PaneIdentity, ...]]:
+        root, args, identities = self.source1485_nonroot_fixture(
+            base,
+            ("dw_cleanup_mgr.md", "dw:33.0", "dw_cleanup_new.md", "dw:60.0", "dw:59.0"),
+        )
+        old_path = root / args.old_task
+        old = old_path.read_text().replace(f"session_id: {SESSION_ID}\n", "")
+        old = manager_replace.render_pending_items(old, OLD_QUEUE)
+        old_path.write_text(old)
+        (root / "parent_manager.md").rename(root / "dw_manager_new.md")
+        authority_path = root / manager_replace.SOURCE1928_FILE
+        authority_path.write_bytes(SOURCE1928_AUTHORITY)
+        authority_path.chmod(0o600)
+        self.assertEqual(manager_replace.SOURCE1928_SHA256, manager_replace.digest(SOURCE1928_AUTHORITY))
+        identities["human_data:9.0"] = PaneIdentity("human_data:9.0", "%91", 9001, 1901)
+        identities["dw:18.0"] = PaneIdentity("dw:18.0", "%92", 9002, 1902)
+        protected = tuple(identity for target, identity in sorted(identities.items()) if target != "dw:33.0")
+        provisional = replace(
+            args,
+            old_sha256=sha(old),
+            old_pane_id="%42",
+            old_pane_pid=4242,
+            old_pane_start_ticks=999,
+            old_queue_sha256=manager_replace.json_digest(list(OLD_QUEUE)),
+            authority_file=manager_replace.SOURCE1928_FILE,
+            authority_lines=LineRange(3, 4),
+            authority_sha256=manager_replace.SOURCE1928_SHA256,
+            authority_envelope_task=args.old_task,
+            authority_envelope_sha256=sha(old),
+            authority_envelope_file_sha256="",
+            successor_item_lines=(LineRange(4, 4),),
+            protected_targets=tuple(identity.target for identity in protected),
+        )
+        return root, replace(provisional, protected_targets_sha256=manager_replace.protected_inventory_digest(provisional, identities)), protected
 
     def source1597_fixture(self, base: Path) -> tuple[Path, Args, tuple[PaneIdentity, ...]]:
         root, args, files = self.fixture(base)
@@ -2777,6 +2817,186 @@ class ManagerReplaceTests(unittest.TestCase):
             ):
                 replace_manager(changed)
             stop_mock.assert_not_called()
+
+    def test_source1928_replacement_preserves_blank_session_queue_body_and_protected_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected = self.source1928_fixture(Path(tmp))
+            before = {path.name: path.read_bytes() for path in root.glob("*.md")}
+            self.assertEqual("", parsed(root / args.old_task, root).session_id)
+            runtime = self.source1597_runtime({"old_live": True}, args, protected)
+            with runtime[0], runtime[1] as stopped, runtime[2]:
+                self.assertIn("sole ownership", replace_manager(args))
+                self.assertIn("already committed", replace_manager(args))
+            stopped.assert_called_once()
+            self.assertEqual(SESSION_ID, stopped.call_args.args[0].bound_expected_session_id)
+            self.assertIsNotNone(stopped.call_args.args[0].bound_pre_input_check)
+            successor = parsed(root / args.successor_task, root)
+            self.assertEqual((*OLD_QUEUE, f"🧑 Source {manager_replace.SOURCE1928_FILE}:4-4: {manager_replace.SOURCE1928_GOAL}"), successor.pending_task_items)
+            self.assertEqual(("blocked", "codex", "", args.parent_target), (successor.status, successor.tool, successor.session_id, successor.managerat))
+            self.assertEqual(manager_replace.task_body(before[args.old_task]), manager_replace.task_body((root / args.successor_task).read_bytes()))
+            for child in args.children:
+                self.assertEqual(
+                    manager_replace.migrate_manager_owner(before[child.task], args.old_target, args.new_target, root),
+                    (root / child.task).read_bytes(),
+                )
+            for task in ("dw_manager_new.md", "dw_present_worker.md"):
+                self.assertEqual(before[task], (root / task).read_bytes())
+            audit = json.loads(args.audit_output.read_text())
+            self.assertEqual("dw_manager_new.md", audit["source1928_topology"]["ancestor_rows"][0]["task"])
+            self.assertIn("dw_present_worker.md", {row["task"] for row in audit["source1928_topology"]["rows"]})
+            self.assertIn("human_data:9.0", {row["target"] for row in audit["protected_inventory"]})
+            self.assertIn("dw:18.0", {row["target"] for row in audit["protected_inventory"]})
+
+    def test_source1928_rejects_authority_mapping_and_historical_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _protected = self.source1928_fixture(Path(tmp))
+            variants = (
+                {"old_task": "other.md"},
+                {"successor_task": "other.md"},
+                {"old_target": "dw:32"},
+                {"new_target": "dw:33"},
+                {"new_target": "other:60"},
+                {"parent_target": "dw:58"},
+                {"authority_file": manager_replace.SOURCE1611_FILE},
+                {"authority_sha256": "0" * 64},
+                {"authority_lines": LineRange(1, 4)},
+                {"successor_item_lines": (LineRange(3, 4),)},
+                {"authority_envelope_task": "other.md"},
+                {"authority_envelope_sha256": "0" * 64},
+                {"historical_task": "historical.md"},
+                {"stale_manager_task": "stale.md"},
+                {"closed_owner_audit": args.audit_output.with_name("prior.json")},
+                {"empty_tree_envelope_sha256": "0" * 64},
+                {"descendants": (DescendantPin(args.children[0].task, args.children[0].sha256, "dw:2", "%3", 3, 3, SESSION_ID, "0" * 64),)},
+                {"children": tuple(replace(child, queue_sha256="") for child in args.children)},
+            )
+            for changes in variants:
+                with self.subTest(changes=changes), self.assertRaises(ReplaceError):
+                    manager_replace.validate_targets(replace(args, **changes))
+
+    def test_source1928_rejects_queue_source_session_owner_and_successor_drift(self) -> None:
+        for drift in ("old_queue", "child_queue", "source", "session", "parent_name", "parent_collision", "successor", "old_collision"):
+            with self.subTest(drift=drift), tempfile.TemporaryDirectory() as tmp:
+                root, args, protected = self.source1928_fixture(Path(tmp))
+                if drift == "old_queue":
+                    args = replace(args, old_queue_sha256="0" * 64)
+                elif drift == "child_queue":
+                    args = replace(args, children=(replace(args.children[0], queue_sha256="0" * 64), *args.children[1:]))
+                elif drift == "source":
+                    (root / args.authority_file).write_bytes(SOURCE1928_AUTHORITY + b"drift")
+                elif drift == "session":
+                    old = (root / args.old_task).read_text().replace("tool: codex", "session_id: aaaaaaaa-2222-4333-8444-555555555555\ntool: codex")
+                    (root / args.old_task).write_text(old)
+                    args = replace(args, old_sha256=sha(old), authority_envelope_sha256=sha(old))
+                elif drift == "parent_name":
+                    (root / "dw_manager_new.md").rename(root / "different_parent.md")
+                elif drift == "parent_collision":
+                    (root / "duplicate_parent.md").write_bytes((root / "dw_manager_new.md").read_bytes())
+                elif drift == "successor":
+                    (root / args.successor_task).write_text("Previously used successor record\n")
+                else:
+                    (root / "duplicate_old.md").write_bytes((root / args.old_task).read_bytes())
+                runtime = self.source1597_runtime({"old_live": True}, args, protected)
+                with runtime[0], runtime[1] as stopped, runtime[2], self.assertRaises(ReplaceError):
+                    replace_manager(args)
+                stopped.assert_not_called()
+
+    def test_source1928_requires_complete_protected_inventory(self) -> None:
+        for drift in ("missing", "new", "changed"):
+            with self.subTest(drift=drift), tempfile.TemporaryDirectory() as tmp:
+                root, args, protected = self.source1928_fixture(Path(tmp))
+                state: dict[str, object] = {"old_live": True}
+                if drift == "missing":
+                    args = replace(args, protected_targets=tuple(target for target in args.protected_targets if not target.startswith("h")))
+                    args = replace(args, protected_targets_sha256=manager_replace.protected_inventory_digest(args, {pane.target: pane for pane in protected}))
+                elif drift == "new":
+                    state["extra_identity"] = PaneIdentity("human_new:0.0", "%100", 9999, 1999)
+                else:
+                    state["protected_drift"] = True
+                runtime = self.source1597_runtime(state, args, protected)
+                with runtime[0], runtime[1] as stopped, runtime[2], self.assertRaises(ReplaceError):
+                    replace_manager(args)
+                stopped.assert_not_called()
+                self.assertFalse((root / args.successor_task).exists())
+
+    def test_source1928_revalidates_parent_and_nested_graph_at_pre_input(self) -> None:
+        for task in ("dw_manager_new.md", "dw_present_worker.md", "dw_present_mgr_replacement.md", "dw_cleanup_mgr.md"):
+            with self.subTest(task=task), tempfile.TemporaryDirectory() as tmp:
+                root, args, protected = self.source1928_fixture(Path(tmp))
+                inventory = {pane.target: pane for pane in protected}
+                inventory["dw:33.0"] = PaneIdentity("dw:33.0", "%42", 4242, 999)
+                with patch.object(manager_replace, "pane_inventory", return_value=inventory):
+                    plan = manager_replace.prepare(args, manager_replace.markdown_paths(root))
+                    path = root / task
+                    path.write_bytes(path.read_bytes() + b"Concurrent task change\n")
+                    with self.assertRaises(ReplaceError):
+                        manager_replace.require_preclose_eligibility(args, plan)
+
+    def test_source1928_live_uuid_mismatch_never_interrupts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, protected = self.source1928_fixture(Path(tmp))
+            inventory = {pane.target: pane for pane in protected}
+            inventory["dw:33.0"] = PaneIdentity("dw:33.0", "%42", 4242, 999)
+            with (
+                patch.object(manager_replace, "pane_inventory", return_value=inventory),
+                patch("omo_manager.omo_codex_stop.bound_guarded_read", side_effect=("%42\n", "dw\n", "dw:33.0\n", "%42\tdw:33.0\n")),
+                patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%caller"),
+                patch("omo_manager.omo_codex_stop.guarded_capture", return_value="› Use /skills to list available skills\n"),
+                patch("omo_manager.omo_codex_stop.report_from_lines", return_value=type("ReadyReport", (), {"status": "ready"})()),
+                patch("omo_manager.omo_codex_stop.query_status_session_id", return_value=("aaaaaaaa-2222-4333-8444-555555555555", "fresh status response")) as query,
+                patch("omo_manager.omo_codex_stop.send_exit_keys") as interrupt,
+                patch("omo_manager.omo_codex_stop.close_bound_tmux_target") as close,
+                self.assertRaisesRegex(ReplaceError, "session id mismatch before interrupt"),
+            ):
+                replace_manager(args)
+            self.assertTrue(query.call_args.kwargs["strict_status_response"])
+            interrupt.assert_not_called()
+            close.assert_not_called()
+            self.assertEqual("long_running", parsed(root / args.old_task, root).status)
+
+    def test_source1928_commit_graph_drift_rolls_back_owned_writes(self) -> None:
+        for task in ("dw_manager_new.md", "dw_present_worker.md"):
+            with self.subTest(task=task), tempfile.TemporaryDirectory() as tmp:
+                root, args, protected = self.source1928_fixture(Path(tmp))
+                before = {path.name: path.read_bytes() for path in root.glob("*.md")}
+                path = root / task
+                concurrent = before[task] + b"Concurrent graph change\n"
+                state: dict[str, object] = {"old_live": True, "stop_hook": lambda: path.write_bytes(concurrent)}
+                runtime = self.source1597_runtime(state, args, protected)
+                with runtime[0], runtime[1], runtime[2], self.assertRaisesRegex(ReplaceError, "all lifecycle writes rolled back"):
+                    replace_manager(args)
+                for name, data in before.items():
+                    self.assertEqual(concurrent if name == task else data, (root / name).read_bytes())
+                self.assertFalse((root / args.successor_task).exists())
+
+    def test_source1928_partial_migration_recovery_rechecks_graph_and_does_not_reclose(self) -> None:
+        for drift in (False, True):
+            with self.subTest(drift=drift), tempfile.TemporaryDirectory() as tmp:
+                root, args, protected = self.source1928_fixture(Path(tmp))
+                original = manager_replace.replace_snapshot
+
+                def crash_after_child(expected, data, label):
+                    result = original(expected, data, label)
+                    if label == f"active child {args.children[0].task}":
+                        raise KeyboardInterrupt("simulated process exit")
+                    return result
+
+                state: dict[str, object] = {"old_live": True}
+                runtime = self.source1597_runtime(state, args, protected)
+                with runtime[0], runtime[1], runtime[2], patch.object(manager_replace, "replace_snapshot", side_effect=crash_after_child), self.assertRaises(KeyboardInterrupt):
+                    replace_manager(args)
+                if drift:
+                    path = root / "dw_present_worker.md"
+                    path.write_bytes(path.read_bytes() + b"Recovery graph drift\n")
+                runtime = self.source1597_runtime(state, args, protected)
+                with runtime[0], runtime[1] as stopped, runtime[2]:
+                    if drift:
+                        with self.assertRaisesRegex(ReplaceError, "topology is not canonical"):
+                            replace_manager(args)
+                    else:
+                        self.assertIn("sole ownership", replace_manager(args))
+                        self.assertEqual("committed", json.loads(args.audit_output.read_text())["state"])
+                stopped.assert_not_called()
 
     def test_source1597_exception_is_exact_source_only_and_non_reusable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

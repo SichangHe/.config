@@ -81,6 +81,7 @@ from omo_manager.omo_task_lock import task_target_lock
 from omo_manager.omo_task_lock import task_file_lock
 from omo_manager.omo_task_lock import process_start_ticks
 from omo_manager.omo_task_metadata import frontmatter_parts
+from omo_manager.omo_task_metadata import OMNIGENT_RUNAT_RE
 from omo_manager.omo_task_metadata import TARGET_RE
 from omo_manager.omo_task_metadata import UniqueKeyLoader
 from omo_manager.omo_task_metadata import runat_kind
@@ -88,6 +89,10 @@ from omo_manager.omo_blocking_actor import request as blocking_request
 from omo_manager.omo_completion_email import build_completion_email
 from omo_manager.omo_completion_email import require_owner_completion
 from omo_manager.omo_completion_email import validate_completion_notice_delivery
+from omo_manager.omo_omnigent import SessionNotFoundError
+from omo_manager.omo_omnigent import session_id as omnigent_session_id
+from omo_manager.omo_omnigent import session_snapshot as omnigent_session_snapshot
+from omo_manager.omo_omnigent import status_evidence as omnigent_status_evidence
 from omo_manager.omo_report_receipt import ReceiptError
 from omo_manager.omo_report_receipt import REPORT_ONLY_DISPOSITION_RE
 from omo_manager.omo_report_receipt import SPLIT_NO_MAIL_MANAGER_TARGET
@@ -237,6 +242,49 @@ SOURCE1982_MISSING_RECORDS = (
     ("manager_hierarchy.md", "config:26", "cancelled by Human fleet consolidation; administrative historical-state reconciliation is not worth new work"),
     ("mail_cleanup_x.md", "wl:124", "cancelled by Human fleet consolidation; repeated automated mailbox-threshold notices do not justify a worker"),
 )
+# 🧑 "Rid all the agents I closed"
+SOURCE2013_RID_AUTHORITY = "manager_mail/85c5dff58359-2013.txt:3-3"
+SOURCE2013_RID_SHA256 = "0c45d0c14c8f044371aa18ca6db4003b0faccf2a3f3dc0042a9841f32076bf08"
+SOURCE2013_RID_EXCERPT = "Rid all the agents I closed"
+SOURCE2013_RID_ENVELOPE = Path("cfg_cursor_mgr.md")
+SOURCE2013_RID_BYTES = b"Subject: Re: cfg_cursor_mgr.md owns the live config worker\n\nRid all the agents I closed\r\n"
+SOURCE2013_CLOSE_RECORDS = (
+    ("202608/dw_score_control.md", "dw:42", "Human closed this agent; no live worker remains"),
+    ("config_reconcile.md", "config:49", "completed and reported; worker pane ended before the completion-email close handshake"),
+)
+SOURCE2013_RECONCILE_RECORDS = (
+    ("cfg_cursor_mgr.md", "config:2", "Human close wording for Rid all the agents I closed"),
+    ("pb_news_cur.md", "pb:4", "PB watch loop is running under Cursor Grok 4.6 Low; omo_pending.py cannot identify the Cursor pane to reconcile its six Human items"),
+    ("paper_finish.md", "DeGenTWeb_writeup:0", "Human closed this agent"),
+)
+SOURCE2013_LIVE_SHELL_RECORD = ("paper_finish.md", "DeGenTWeb_writeup:0")
+SOURCE2013_RETAINED_SHELL_COMMANDS = frozenset({"fish", "zsh", "bash"})
+# 🧑 "yes" "permanently retire the obsolete empty pb:1 manager record while preserving pb:0"
+SOURCE2028_PB1_AUTHORITY = "manager_mail/85c5dff58359-2028.txt:3-3"
+SOURCE2028_PB1_SHA256 = "1b7e31ef6c9aa94ecbdb6fe23688afb907cea42e7f531ac96d24ce6f035d753b"
+SOURCE2028_PB1_EXCERPT = "yes"
+SOURCE2028_PB1_ENVELOPE = Path("pending_problems.md")
+SOURCE2028_PB1_BYTES = (
+    b"Subject: Re: Authorize retiring pb_news_mgr.md\n\n"
+    b"yes\r\n\r\n"
+    b"> On Sep 21, 2026, at 09:50, sichangheagent@gmail.com wrote:\r\n"
+    b"> \r\n"
+    b"> May I permanently retire the obsolete empty pb:1 manager record while preserving pb:0, its paused news service, browser state, database, and queue exactly as they are?\r\n"
+    b"> \r\n"
+    b"> Task: pb_news_mgr.md\r\n"
+    b"> \r\n\r\n"
+)
+SOURCE2028_TASK = "pb_news_mgr.md"
+SOURCE2028_TARGET = "pb:1"
+SOURCE2028_QUEUE_ITEM = "🧑 yes — permanently retire the obsolete empty pb:1 manager record while preserving pb:0, its paused news service, browser state, database, and queue exactly as they are."
+SOURCE2028_BLOCKER = (
+    "Human authorization to retire obsolete empty pb:1 record requested again in "
+    "Message-ID <178987443350.1747436.16895073798983491469@gmail.com>; preserve paused "
+    "news_service.md at pb:0 and all browser/database/queue state"
+)
+SOURCE2028_NEWS_SERVICE = Path("news_service.md")
+SOURCE2028_NEWS_TARGET = "pb:0"
+SOURCE2028_NEWS_BLOCKER = "explicit Human request to resume PB news"
 # 🧑 "Your queue is empty and Human delivery is complete. Close token_usage_1998.md now through the supported normal lifecycle command"
 SOURCE1998_TASK = "token_usage_1998.md"
 SOURCE1998_TARGET = "config:45"
@@ -288,6 +336,29 @@ SOURCE1998_RETIREMENT_NOTE = (
     "1febfdf1f5688e80e251eec8924b3279132710b51ab273c795c9f8100eff3789, Human authority "
     "manager_mail/85c5dff58359-1998.txt SHA-256 12e5ad1aaefb6eae7f1e265f2d41c6da1c6b21bdf8a36427dc7efa643d5a433d.)"
 )
+# 🧑 "Provide and execute the smallest supported no-duplicate lifecycle reconciliation; do not relaunch, stop, rerun analysis, or send Human email; preserve the shell, evidence, mailbox, and unrelated state."
+SOURCE2002_TASK = "source2002_usage.md"
+SOURCE2002_TARGET = "config:46"
+SOURCE2002_MANAGER = "config:27"
+SOURCE2002_BLOCKER = "watcher_repair.md: supported no-duplicate exited-shell lifecycle reconciliation"
+SOURCE2002_CLOSE_KEY = "853f491c8c0600a738b3c82ede2643f218f9c2d8ccdb21d5cbbce26cf759b320"
+SOURCE2002_COMPLETION_MESSAGE_ID = "178987691671.2204098.1628059170331284661@gmail.com"
+SOURCE2002_AUTHORITY = "manager_mail/85c5dff58359-2002.txt:3-4"
+SOURCE2002_AUTHORITY_SHA256 = "a215fb4c5a0d95e9c7daabf3afb8f3675c5d1f4046b5dc848802c4dc4bdc5394"
+SOURCE2002_AUTHORITY_TEXT = "Why did you investigate another Linux user's codex usage? This sounds\ncompletely off. You should have investigated the user you are on\n"
+SOURCE2002_TASK_SHA256 = "9a8a4a0dccf1e77af055d6e9735f8bd695f8f70459ccd041a5471add061becac"
+SOURCE2002_TODO_SHA256 = "0c9f21fd93bdaa545533ec19ef3843af50e1a08f5d0a1f2dd213e18979210bb5"
+SOURCE2002_TASK_AFTER_SHA256 = "98a2675a93e77ba695ec0bdfef85e10bca8f7b03e971f3a51e50020f86ccfe4b"
+SOURCE2002_TODO_AFTER_SHA256 = "90cacc1139c81a5f6aa45a1cef5828106eed4475d84011cf8be269dbcb0d6626"
+SOURCE2002_SESSION_ID = "01a0bce1-130b-75b2-8c18-1d6cc531b13b"
+SOURCE2002_TRANSCRIPT = Path("/home/sichanghe/.codex/sessions/2026/09/19/rollout-2026-09-19T20-34-22-01a0bce1-130b-75b2-8c18-1d6cc531b13b.jsonl")
+SOURCE2002_TRANSCRIPT_SHA256 = "b406c3fea4c218b80ca86f5839a8aabca208054060ca9ebad5f9d86ee1b98f9e"
+SOURCE2002_PANE_ID = "%3761"
+SOURCE2002_PANE_PID = 1909396
+SOURCE2002_PANE_COMMAND = "fish"
+SOURCE2002_PANE_CWD = "/home/sichangheagent/.config"
+SOURCE2002_PANE_START_TICKS = 130214210
+SOURCE2002_TRANSACTION = ".omo-source2002-reconcile.json"
 AUTHORITATIVE_HUMAN_ENVELOPE_RE = re.compile(
     r'<human_instruction[ \t]+authoritative="true"[ \t]+source="([^"\r\n]+)">\r?\n(.*?)</human_instruction>',
     re.DOTALL,
@@ -385,6 +456,8 @@ class Args:
     reconcile_dependency_blocked_current: bool = False
     reconcile_source1998_done: bool = False
     retire_source1998_done: bool = False
+    reconcile_source2002_done: bool = False
+    reconcile_absent_manager: bool = False
     dependency_sha256: str = ""
     dangerously_ignore_checks: bool = False
 
@@ -420,6 +493,8 @@ class ParsedArgs(argparse.Namespace):
     reconcile_dependency_blocked_current: bool = False
     reconcile_source1998_done: bool = False
     retire_source1998_done: bool = False
+    reconcile_source2002_done: bool = False
+    reconcile_absent_manager: bool = False
     closure_repository: Path | None = None
     dirty_path_handoff: Path | None = None
     restore_terminal_target: bool = False
@@ -558,6 +633,17 @@ shutdown.""",
         action="store_true",
         help="Retire the exact authenticated Source-1998 done record without relaunching or stopping its retained shell.",
     )
+    _ = parser.add_argument(
+        "--reconcile-source-2002-done",
+        dest="reconcile_source2002_done",
+        action="store_true",
+        help="Finish the exact authenticated Source-2002 exited-shell record without sending mail or mutating its retained shell.",
+    )
+    _ = parser.add_argument(
+        "--reconcile-absent-manager",
+        action="store_true",
+        help="Atomically block one absent long-running manager on its exact active children and move its previous TODO row to current without pane mutation.",
+    )
     _ = parser.add_argument("--session-id", default="", help="Session id captured by the prior close, if available.")
     _ = parser.add_argument("--replacement-task", type=Path, help="Active replacement task file; required with --finish-replaced-done.")
     _ = parser.add_argument("--replacement-custody-audit", type=Path, help="Accepted Source-1938 audit proving the exact dw:32/dw:33 custody history; only with --finish-replaced-done.")
@@ -637,7 +723,7 @@ shutdown.""",
     if any(consumed_receipt) and (not all(consumed_receipt) or not (parsed.close_done_live_no_mail or parsed.describe_done_live_no_mail)):
         parser.error("manager-consumed report evidence requires both receipt arguments with a done-live no-mail operation.")
     session_transcript = (parsed.session_transcript, parsed.session_transcript_sha256.strip())
-    if any(session_transcript) and (not all(session_transcript) or not (parsed.recover_exited_shell_done or parsed.reconcile_source1998_done or parsed.retire_source1998_done)):
+    if any(session_transcript) and (not all(session_transcript) or not (parsed.recover_exited_shell_done or parsed.reconcile_source1998_done or parsed.retire_source1998_done or parsed.reconcile_source2002_done)):
         parser.error("session transcript evidence requires both arguments with an exited-shell recovery mode.")
     if parsed.session_transcript is not None and (
         not parsed.session_transcript.is_absolute()
@@ -653,7 +739,7 @@ shutdown.""",
         parser.error("human-close authorization requires both source and digest.")
     if parsed.closure_repository is not None and (
         parsed.status != "done"
-        or any((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.retire_source1998_done))
+        or any((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.retire_source1998_done, parsed.reconcile_source2002_done))
     ):
         parser.error("--closure-repository is only valid with a normal done transition.")
     if parsed.closure_repository is not None and not parsed.closure_repository.is_absolute():
@@ -678,6 +764,8 @@ shutdown.""",
         parsed.reconcile_dependency_blocked_current,
         parsed.reconcile_source1998_done,
         parsed.retire_source1998_done,
+        parsed.reconcile_source2002_done,
+        parsed.reconcile_absent_manager,
         parsed.restore_terminal_target,
         parsed.close_shared_target,
         parsed.cancel_shared_target,
@@ -687,6 +775,23 @@ shutdown.""",
     )
     if sum(recovery_modes) > 1:
         parser.error("finish and recovery modes are mutually exclusive.")
+    if parsed.reconcile_absent_manager:
+        if (
+            parsed.status
+            or parsed.blocked_on
+            or SHA256_RE.fullmatch(parsed.expected_task_sha256.strip()) is None
+            or SHA256_RE.fullmatch(parsed.expected_todo_sha256.strip()) is None
+        ):
+            parser.error("--reconcile-absent-manager requires exact task/TODO digests and no status arguments.")
+        return Args(
+            parsed.root.resolve(),
+            parsed.task_file,
+            "",
+            "",
+            reconcile_absent_manager=True,
+            expected_task_sha256=parsed.expected_task_sha256.strip(),
+            expected_todo_sha256=parsed.expected_todo_sha256.strip(),
+        )
     if parsed.replacement_custody_audit is not None and (
         not parsed.finish_replaced_done
         or not parsed.replacement_custody_audit.is_absolute()
@@ -721,6 +826,7 @@ shutdown.""",
                 parsed.reconcile_dependency_blocked_current,
                 parsed.reconcile_source1998_done,
                 parsed.retire_source1998_done,
+                parsed.reconcile_source2002_done,
                 parsed.restore_terminal_target,
                 parsed.close_shared_target,
                 parsed.close_retired_done,
@@ -991,6 +1097,7 @@ shutdown.""",
         or parsed.close_done_live_no_mail
         or parsed.reconcile_source1998_done
         or parsed.retire_source1998_done
+        or parsed.reconcile_source2002_done
     ):
         parser.error("park-unlinked task, TODO, receipt, pane, and authority assertions require a park operation.")
     if parsed.retire_blocked_target:
@@ -1757,6 +1864,71 @@ shutdown.""",
             expected_todo_sha256=parsed.expected_todo_sha256.strip(),
             retire_source1998_done=True,
         )
+    if parsed.reconcile_source2002_done:
+        unrelated = (
+            parsed.status,
+            parsed.blocked_on,
+            parsed.finish_closed_done,
+            parsed.finish_replaced_done,
+            parsed.recover_exited_shell_done,
+            parsed.replacement_task,
+            parsed.replacement_custody_audit,
+            parsed.stale_target,
+            parsed.replacement_target,
+            parsed.replacement_sha256,
+            parsed.audit_output,
+            parsed.pane_id,
+            parsed.terminal_evidence,
+            parsed.closure_repository,
+            parsed.dirty_path_handoff,
+            parsed.historical_target,
+            parsed.task_sha256,
+            parsed.historical_commit,
+            parsed.shared_target,
+            parsed.source_sha256,
+            parsed.human_close_authorization_source,
+            parsed.human_close_authorization_sha256,
+            parsed.expected_receipt_sha256,
+            parsed.expected_pane_id,
+            parsed.expected_pane_pid,
+            parsed.expected_pane_start_ticks,
+            parsed.expected_session_id,
+            parsed.manager_consumed_report_receipt,
+            parsed.manager_consumed_report_receipt_sha256,
+            parsed.authority_file,
+            parsed.authority_lines,
+            parsed.authority_sha256,
+            parsed.no_mail_intent,
+            parsed.authority_envelope,
+            parsed.authority_envelope_sha256,
+            parsed.missing_target,
+            parsed.dangerously_ignore_checks,
+        )
+        if (
+            any(unrelated)
+            or parsed.root.resolve() != SOURCE1998_ROOT
+            or parsed.task_file.resolve(strict=False) != SOURCE1998_ROOT / SOURCE2002_TASK
+            or parsed.completion_key.strip() != SOURCE2002_CLOSE_KEY
+            or parsed.session_transcript is None
+            or parsed.session_transcript.resolve(strict=False) != SOURCE2002_TRANSCRIPT
+            or parsed.session_transcript_sha256.strip() != SOURCE2002_TRANSCRIPT_SHA256
+            or parsed.expected_task_sha256.strip() != SOURCE2002_TASK_SHA256
+            or parsed.expected_todo_sha256.strip() != SOURCE2002_TODO_SHA256
+        ):
+            parser.error("Source-2002 reconciliation requires the fixed completion, task, TODO, session, and transcript bindings.")
+        return Args(
+            parsed.root.resolve(),
+            parsed.task_file,
+            "done",
+            "",
+            session_id=SOURCE2002_SESSION_ID,
+            session_transcript=SOURCE2002_TRANSCRIPT,
+            session_transcript_sha256=SOURCE2002_TRANSCRIPT_SHA256,
+            completion_key=SOURCE2002_CLOSE_KEY,
+            expected_task_sha256=SOURCE2002_TASK_SHA256,
+            expected_todo_sha256=SOURCE2002_TODO_SHA256,
+            reconcile_source2002_done=True,
+        )
     if parsed.recover_exited_shell_done:
         if parsed.status not in {None, "", "done"}:
             parser.error("--recover-exited-shell-done only supports status `done`.")
@@ -1822,8 +1994,8 @@ shutdown.""",
             parser.error("--finish-replaced-done requires explicit stale/successor task, target, digest, status, evidence, and audit output values.")
         if SHA256_RE.fullmatch(parsed.stale_sha256.strip()) is None or SHA256_RE.fullmatch(parsed.replacement_sha256.strip()) is None:
             parser.error("replacement task digests must be lowercase SHA-256 values.")
-        if any(TARGET_RE.fullmatch(target) is None for target in parsed.protected_target):
-            parser.error("--protected-target values must be exact SESSION:WINDOW[.PANE] targets.")
+        if any(runat_kind(target) not in {"tmux", "omnigent"} for target in parsed.protected_target):
+            parser.error("--protected-target values must be exact tmux or OmniGent targets.")
         return Args(
             parsed.root.resolve(),
             parsed.task_file,
@@ -2531,6 +2703,10 @@ def validate_reconciled_todo_row(root: Path, path: Path, line: str, runat: str) 
     if match is None or len(list(TASK_RE.finditer(stripped))) != 1 or todo_row_task_paths(root, stripped) != (path,):
         raise TaskFrontmatterError(f"expected one unambiguous TODO entry for `{relative_task_ref(root, path)}`.")
     suffix = match.group(2) or ""
+    if runat_kind(runat) == "omnigent":
+        if suffix.strip() != runat or OMNIGENT_RUNAT_RE.fullmatch(suffix.strip()) is None:
+            raise TaskFrontmatterError(f"TODO entry for `{relative_task_ref(root, path)}` does not match its authoritative `runat`.")
+        return
     targets = TARGET_RE.findall(suffix)
     if len(targets) > 1 or (targets and not same_tmux_target(targets[0], runat)):
         raise TaskFrontmatterError(f"TODO entry for `{relative_task_ref(root, path)}` does not match its authoritative `runat`.")
@@ -2653,7 +2829,7 @@ def retire_blocked_target(args: Args, path: Path, text: str, before: os.stat_res
                 raise
 
 
-def reconciled_missing_task_text(text: str, target: str, root: Path, authority_locator: str, *, fleet_terminated: bool = False) -> str:
+def reconciled_missing_task_text(text: str, target: str, root: Path, authority_locator: str, *, fleet_terminated: bool = False, rid_closed: bool = False) -> str:
     """Replace one blocked task's absent run target with durable historical custody."""
 
     metadata = parse_task_metadata(text, root)
@@ -2666,6 +2842,7 @@ def reconciled_missing_task_text(text: str, target: str, root: Path, authority_l
         or (fleet_terminated and fleet_blocker is None)
         or (
             not fleet_terminated
+            and not rid_closed
             and (
                 NON_HUMAN_GATE_RE.search(metadata.blocked_on) is not None
                 or (
@@ -2755,6 +2932,121 @@ def source1982_missing_record_matches(args: Args, path: Path, text: str) -> bool
     return actual in SOURCE1982_MISSING_RECORDS
 
 
+def source2013_record_identity(args: Args, path: Path, text: str) -> tuple[str, str, str] | None:
+    """Return the bound Source-2013 task/target/blocker identity when metadata is valid."""
+
+    metadata = parse_task_metadata(text, args.root)
+    if metadata is None:
+        return None
+    return (relative_task_ref(args.root, path), args.missing_target, metadata.blocked_on)
+
+
+def has_source2013_rid_authority(args: Args, excerpt: str, authority_locator: str) -> bool:
+    """Recognize only the exact Human rid-closed-agents source and envelope."""
+
+    return (
+        authority_locator == SOURCE2013_RID_AUTHORITY
+        and args.authority_sha256 == SOURCE2013_RID_SHA256
+        and excerpt.replace("\r\n", "\n").rstrip("\n") == SOURCE2013_RID_EXCERPT
+        and args.authority_envelope == SOURCE2013_RID_ENVELOPE
+    )
+
+
+def source2013_close_record_matches(args: Args, path: Path, text: str) -> bool:
+    """Bind Source-2013 closure to the empty-queue Human-closed missing records."""
+
+    identity = source2013_record_identity(args, path, text)
+    metadata = parse_task_metadata(text, args.root)
+    return (
+        identity is not None
+        and metadata is not None
+        and identity in SOURCE2013_CLOSE_RECORDS
+        and not metadata.pending_task_items
+    )
+
+
+def source2013_reconcile_record_matches(args: Args, path: Path, text: str) -> bool:
+    """Bind Source-2013 retirement to the queued Human-closed records."""
+
+    identity = source2013_record_identity(args, path, text)
+    metadata = parse_task_metadata(text, args.root)
+    return identity is not None and metadata is not None and identity in SOURCE2013_RECONCILE_RECORDS and bool(metadata.pending_task_items)
+
+
+def source2013_live_shell_record_matches(args: Args, path: Path, text: str) -> bool:
+    """Bind the one Source-2013 retained-shell retirement."""
+
+    identity = source2013_record_identity(args, path, text)
+    return identity is not None and identity[:2] == SOURCE2013_LIVE_SHELL_RECORD and source2013_reconcile_record_matches(args, path, text)
+
+
+def source2013_pane_is_retained_shell(pane: str) -> bool:
+    """Return whether one exact pane id still holds an ordinary shell after Human close."""
+
+    if re.fullmatch(r"%[0-9]+", pane) is None:
+        return False
+    result = tmux(["display-message", "-t", pane, "-p", "#{pane_current_command}"])
+    return result.returncode == 0 and result.stdout.strip() in SOURCE2013_RETAINED_SHELL_COMMANDS
+
+
+def assert_reconcile_missing_target_custody(target: str, *, source1982: bool, live_shell: bool, reappeared: bool) -> None:
+    """Fail closed unless the target is absent, fleet-terminated, or a retained Human-closed shell."""
+
+    if source1982:
+        return
+    pane = park_target_pane_id(target)
+    if live_shell:
+        if pane is None:
+            raise TaskFrontmatterError("target is live or tmux could not prove it absent.")
+        if pane == "" or source2013_pane_is_retained_shell(pane):
+            return
+        raise TaskFrontmatterError("Source-2013 live-shell retirement requires an ordinary shell or an absent pane.")
+    if pane != "":
+        raise TaskFrontmatterError("target reappeared while reconciliation was prepared." if reappeared else "target is live or tmux could not prove it absent.")
+
+
+def has_source2028_pb1_close_authority(args: Args, path: Path, text: str, excerpt: str, authority_locator: str) -> bool:
+    """Recognize Source-2028 only for the obsolete missing pb:1 manager record."""
+
+    metadata = parse_task_metadata(text, args.root)
+    return (
+        authority_locator == SOURCE2028_PB1_AUTHORITY
+        and args.authority_sha256 == SOURCE2028_PB1_SHA256
+        and excerpt.replace("\r\n", "\n").rstrip("\n") == SOURCE2028_PB1_EXCERPT
+        and args.authority_envelope == SOURCE2028_PB1_ENVELOPE
+        and relative_task_ref(args.root, path) == SOURCE2028_TASK
+        and args.missing_target == SOURCE2028_TARGET
+        and metadata is not None
+        and metadata.status == "blocked"
+        and metadata.runat == SOURCE2028_TARGET
+        and metadata.blocked_on == SOURCE2028_BLOCKER
+        and metadata.is_manager
+        and metadata.pending_task_items in {(), (SOURCE2028_QUEUE_ITEM,)}
+        and not has_pending_marker(text)
+    )
+
+
+def validate_source2028_news_service(root: Path) -> None:
+    """Require paused news_service.md at pb:0 to remain a blocked empty non-manager."""
+
+    path = root / SOURCE2028_NEWS_SERVICE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise TaskFrontmatterError(f"Source-2028 closure cannot read paused {SOURCE2028_NEWS_SERVICE}: {exc}") from exc
+    metadata = parse_task_metadata(text, root)
+    if (
+        metadata is None
+        or metadata.status != "blocked"
+        or metadata.runat != SOURCE2028_NEWS_TARGET
+        or metadata.blocked_on != SOURCE2028_NEWS_BLOCKER
+        or metadata.is_manager
+        or metadata.pending_task_items
+        or has_pending_marker(text)
+    ):
+        raise TaskFrontmatterError("Source-2028 closure requires paused news_service.md at pb:0 to remain blocked, empty, and unresumed.")
+
+
 def reconcile_missing_target(args: Args, path: Path, text: str, before: os.stat_result) -> None:
     """Correct one absent task/TODO target under exact direct-human authority."""
 
@@ -2771,14 +3063,27 @@ def reconcile_missing_target(args: Args, path: Path, text: str, before: os.stat_
     excerpt, authority_locator = read_park_authority(args)
     # 🧑 "Terminate every other agent and collect all their pending task items"
     source1982 = has_source1982_fleet_authority(args, excerpt, authority_locator)
+    source2013 = has_source2013_rid_authority(args, excerpt, authority_locator)
     if authority_locator.startswith(SOURCE1982_FLEET_AUTHORITY.partition(":")[0] + ":") and not source1982:
         raise TaskFrontmatterError("Source-1982 authority bytes do not match the fixed reviewed source and envelope.")
-    if "correct the task records as opposed to reinstating the agents" not in excerpt and not source1982:
+    if authority_locator.startswith(SOURCE2013_RID_AUTHORITY.partition(":")[0] + ":") and not source2013:
+        raise TaskFrontmatterError("Source-2013 authority bytes do not match the fixed reviewed source and envelope.")
+    if "correct the task records as opposed to reinstating the agents" not in excerpt and not source1982 and not source2013:
         raise TaskFrontmatterError("authority excerpt does not authorize correcting missing task records.")
     if source1982 and not source1982_missing_record_matches(args, path, task_text):
         raise TaskFrontmatterError("Source-1982 authority does not match this exact stopped fleet record.")
+    if source2013 and not source2013_reconcile_record_matches(args, path, task_text):
+        raise TaskFrontmatterError("Source-2013 authority does not match this exact Human-closed queued record.")
     envelope_ref = read_park_authority_envelope(args, excerpt, authority_locator)
-    updated_task = reconciled_missing_task_text(task_text, args.missing_target, args.root, authority_locator, fleet_terminated=source1982)
+    live_shell = source2013 and source2013_live_shell_record_matches(args, path, task_text)
+    updated_task = reconciled_missing_task_text(
+        task_text,
+        args.missing_target,
+        args.root,
+        authority_locator,
+        fleet_terminated=source1982,
+        rid_closed=source2013,
+    )
     with root_membership_lock(args.root), task_target_lock(args.root, args.missing_target):
         with ExitStack() as locks:
             for locked_path in sorted({path, todo}, key=str):
@@ -2797,11 +3102,9 @@ def reconcile_missing_target(args: Args, path: Path, text: str, before: os.stat_
                 raise TaskFrontmatterError("authority changed while missing-target reconciliation was prepared.")
             if read_park_authority_envelope(args, excerpt, authority_locator) != envelope_ref:
                 raise TaskFrontmatterError("authority envelope changed while missing-target reconciliation was prepared.")
-            if not source1982 and park_target_pane_id(args.missing_target) != "":
-                raise TaskFrontmatterError("target is live or tmux could not prove it absent.")
+            assert_reconcile_missing_target_custody(args.missing_target, source1982=source1982, live_shell=live_shell, reappeared=False)
             updated_todo = reconciled_missing_todo_text(args.root, path, todo_text, args.missing_target, fleet_terminated=source1982)
-            if not source1982 and park_target_pane_id(args.missing_target) != "":
-                raise TaskFrontmatterError("target reappeared while reconciliation was prepared.")
+            assert_reconcile_missing_target_custody(args.missing_target, source1982=source1982, live_shell=live_shell, reappeared=True)
             replace_if_unchanged_locked(todo, updated_todo, todo_before)
             moved_todo_before = todo.stat()
             try:
@@ -3160,9 +3463,13 @@ def close_missing_target(args: Args, path: Path, text: str, before: os.stat_resu
         return not uncertain and re.search(direct_close, stripped, re.IGNORECASE) is not None
 
     source1506_authority = has_source1506_wl11_close_authority(args, path, text, excerpt, authority_locator)
+    source2013_authority = has_source2013_rid_authority(args, excerpt, authority_locator) and source2013_close_record_matches(args, path, text)
+    source2028_authority = has_source2028_pb1_close_authority(args, path, text, excerpt, authority_locator)
     explicit_authority = (
         has_source1503_dwplan_close_authority(args, path, text, excerpt, authority_locator)
         or source1506_authority
+        or source2013_authority
+        or source2028_authority
         or has_export_then_close_authority(normalized_excerpt)
         or any(unambiguous_close_authority(sentence) for sentence in sentences)
     )
@@ -3174,6 +3481,14 @@ def close_missing_target(args: Args, path: Path, text: str, before: os.stat_resu
     )
     if not explicit_authority or prohibited_authority is not None:
         raise TaskFrontmatterError("authority excerpt does not explicitly authorize closing missing-target records.")
+    news_bytes: bytes | None = None
+    if source2028_authority:
+        validate_source2028_news_service(args.root)
+        source2028_metadata = parse_task_metadata(text, args.root)
+        if source2028_metadata is None:
+            raise TaskFrontmatterError("missing-target closure requires a task record.")
+        ensure_manager_has_no_active_children(args.root, path, source2028_metadata)
+        news_bytes = (args.root / SOURCE2028_NEWS_SERVICE).read_bytes()
     authority_envelope = read_park_authority_envelope(args, excerpt, authority_locator)
     todo = args.root / "TODO.md"
     if path == todo or not todo.is_file():
@@ -3181,6 +3496,8 @@ def close_missing_target(args: Args, path: Path, text: str, before: os.stat_resu
     protected_paths = {path.resolve(), todo.resolve(), (args.root / authority_locator.partition(":")[0]).resolve()}
     if args.authority_envelope is not None:
         protected_paths.add((args.root / args.authority_envelope).resolve())
+    if source2028_authority:
+        protected_paths.add((args.root / SOURCE2028_NEWS_SERVICE).resolve())
     if args.audit_output.resolve() in protected_paths:
         raise TaskFrontmatterError("missing-target closure audit output must be distinct from task, TODO, and authority files.")
     preserved_replacement = validate_source1506_replacement(args.root) if source1506_authority else None
@@ -3189,6 +3506,8 @@ def close_missing_target(args: Args, path: Path, text: str, before: os.stat_resu
             locked_paths = {path, todo}
             if preserved_replacement is not None:
                 locked_paths.add(preserved_replacement[0])
+            if source2028_authority:
+                locked_paths.add(args.root / SOURCE2028_NEWS_SERVICE)
             for locked_path in sorted(locked_paths, key=str):
                 locks.enter_context(task_file_lock(locked_path))
             if preserved_replacement is not None:
@@ -3208,6 +3527,14 @@ def close_missing_target(args: Args, path: Path, text: str, before: os.stat_resu
                 raise TaskFrontmatterError("authority changed while missing-target closure was prepared.")
             if read_park_authority_envelope(args, excerpt, authority_locator) != authority_envelope:
                 raise TaskFrontmatterError("authority envelope changed while missing-target closure was prepared.")
+            if source2028_authority:
+                validate_source2028_news_service(args.root)
+                if news_bytes is None or (args.root / SOURCE2028_NEWS_SERVICE).read_bytes() != news_bytes:
+                    raise TaskFrontmatterError("paused news_service.md changed while missing-target closure was prepared.")
+                locked_metadata = parse_task_metadata(current_task, args.root)
+                if locked_metadata is None:
+                    raise TaskFrontmatterError("missing-target closure requires a task record.")
+                ensure_manager_has_no_active_children(args.root, path, locked_metadata)
             if preserved_replacement is not None:
                 replacement_path, replacement_text, replacement_before = preserved_replacement
                 if replacement_path.read_text(encoding="utf-8") != replacement_text or not same_file_state(replacement_before, replacement_path.lstat()):
@@ -4711,6 +5038,94 @@ def complete_live_no_mail(args: Args, path: Path, text: str, before: os.stat_res
                 todo_before=todo_before,
             )
     return metadata.runat
+
+
+def reconcile_absent_manager(args: Args, path: Path, text: str, before: os.stat_result) -> None:
+    """Block one absent manager on its exact active children without touching a pane."""
+
+    todo = args.root / "TODO.md"
+    source_bytes = path.read_bytes()
+    if hashlib.sha256(source_bytes).hexdigest() != args.expected_task_sha256:
+        raise TaskFrontmatterError("absent-manager task bytes do not match --expected-task-sha256.")
+    if b"\r" in source_bytes or source_bytes.decode("utf-8") != text:
+        raise TaskFrontmatterError("absent-manager reconciliation requires canonical UTF-8 LF task bytes.")
+    metadata = parse_task_metadata(text, args.root)
+    if (
+        metadata is None
+        or metadata.version == V2_VERSION
+        or metadata.status not in {"long_running", "blocked"}
+        or not metadata.is_manager
+        or metadata.pending_task_items
+        or has_pending_marker(text)
+        or runat_kind(metadata.runat) != "tmux"
+        or metadata.runat.partition(":")[0].startswith("h")
+    ):
+        raise TaskFrontmatterError("absent-manager reconciliation requires one queue-empty v1 long-running non-Human tmux manager.")
+    target_state = park_target_pane_id(metadata.runat)
+    if target_state is None:
+        raise TaskFrontmatterError("absent-manager reconciliation could not obtain an unambiguous tmux inventory.")
+    if target_state:
+        raise TaskFrontmatterError("absent-manager reconciliation requires the recorded manager target to be absent.")
+    with root_membership_lock(args.root), task_target_lock(args.root, metadata.runat):
+        with ExitStack() as locks:
+            task_files = {candidate.resolve(strict=False) for candidate in args.root.rglob("*.md")}
+            task_files.update((path, todo))
+            for locked_path in sorted(task_files, key=str):
+                locks.enter_context(task_file_lock(locked_path))
+            current_before = path.stat()
+            current_bytes = path.read_bytes()
+            todo_before = todo.stat()
+            todo_bytes = todo.read_bytes()
+            if (
+                not same_file_state(before, current_before)
+                or current_bytes != source_bytes
+                or hashlib.sha256(current_bytes).hexdigest() != args.expected_task_sha256
+                or hashlib.sha256(todo_bytes).hexdigest() != args.expected_todo_sha256
+            ):
+                raise TaskFrontmatterError("absent-manager task, TODO, or target changed while reconciliation was being prepared.")
+            target_state = park_target_pane_id(metadata.runat)
+            if target_state is None:
+                raise TaskFrontmatterError("absent-manager reconciliation could not recheck an unambiguous tmux inventory.")
+            if target_state:
+                raise TaskFrontmatterError("absent-manager target became live while reconciliation was being prepared.")
+            owners = authoritative_active_target_task_paths(args.root, metadata.runat)
+            if owners != (path.resolve(),):
+                refs = ", ".join(relative_task_ref(args.root, owner) for owner in owners) or "none"
+                raise TaskFrontmatterError(f"absent-manager target does not have exactly one active task owner: {refs}.")
+            children = active_child_task_refs(args.root, path, metadata.runat)
+            if not children:
+                raise TaskFrontmatterError("absent-manager reconciliation requires at least one active direct child.")
+            blocker = ", ".join(children)
+            if metadata.status == "blocked" and metadata.blocked_on != blocker:
+                raise TaskFrontmatterError("blocked absent-manager record does not name its exact active direct children.")
+            for child_ref in children:
+                child_path = (args.root / child_ref).resolve(strict=False)
+                child_metadata = parse_task_metadata(child_path.read_text(encoding="utf-8"), args.root)
+                if child_metadata is None or authoritative_active_target_task_paths(args.root, child_metadata.runat) != (child_path,):
+                    raise TaskFrontmatterError(f"absent-manager child `{child_ref}` does not have exactly one active task owner.")
+            updated_task = text if metadata.status == "blocked" else update_frontmatter_status(text, "blocked", blocker, args.root)
+            todo_text = todo_bytes.decode("utf-8")
+            allowed_sections = ("previous", "current") if metadata.status == "blocked" else ("previous",)
+            updated_todo = reconcile_todo_text(args.root, path, todo_text, metadata.runat, "current", allowed_sections)
+            if metadata.status == "blocked" and updated_todo == todo_text:
+                return
+            if park_target_pane_id(metadata.runat) != "":
+                raise TaskFrontmatterError("absent-manager target could not be proven absent immediately before mutation.")
+            if metadata.status == "blocked":
+                replace_if_unchanged_locked(todo, updated_todo, todo_before)
+                return
+            replace_if_unchanged_locked(path, updated_task, current_before)
+            blocked_before = path.stat()
+            try:
+                if park_target_pane_id(metadata.runat) != "":
+                    raise TaskFrontmatterError("absent-manager target could not be proven absent before TODO publication.")
+                replace_if_unchanged_locked(todo, updated_todo, todo_before)
+            except Exception as exc:
+                try:
+                    replace_if_unchanged_locked(path, text, blocked_before)
+                except Exception as rollback_exc:
+                    raise TaskFrontmatterError(f"absent-manager TODO write failed and task rollback also failed: {rollback_exc}") from exc
+                raise
 
 
 def active_task_tree_authority(args: Args) -> str:
@@ -7476,6 +7891,55 @@ def replacement_custody_history(args: Args, stale_path: Path, stale_text: str, r
     return audit_before
 
 
+def replacement_target_absent(target: str, tool: str) -> str:
+    if runat_kind(target) == "tmux":
+        if exact_pane_id(target):
+            raise TaskFrontmatterError("stale target is still live; replacement closure requires a stopped legacy target.")
+        return ""
+    try:
+        snapshot = omnigent_session_snapshot(target)
+    except SessionNotFoundError as exc:
+        raise TaskFrontmatterError("stale OmniGent session is unavailable; exact stopped-session identity cannot be verified.") from exc
+    except RuntimeError as exc:
+        raise TaskFrontmatterError(f"cannot verify stopped OmniGent target: {exc}") from exc
+    if snapshot.session_id != omnigent_session_id(target) or snapshot.harness != f"{tool}-native":
+        raise TaskFrontmatterError("stale OmniGent session identity or harness does not match its task.")
+    if snapshot.runner_online is True:
+        raise TaskFrontmatterError("stale OmniGent target is still live.")
+    if snapshot.runner_online is not False:
+        raise TaskFrontmatterError("stale OmniGent runner state is unknown.")
+    return omnigent_status_evidence(snapshot)
+
+
+def replacement_target_live(target: str, tool: str, expected_text: str) -> str:
+    if runat_kind(target) == "tmux":
+        pane = exact_pane_id(target)
+        if not pane:
+            raise TaskFrontmatterError("replacement target is not an exact live pane target.")
+        if expected_text not in capture(pane, 2000):
+            raise TaskFrontmatterError("replacement pane evidence is missing from the live reused pane.")
+        if exact_pane_id(target) != pane:
+            raise TaskFrontmatterError("replacement pane changed while evidence was checked; retry.")
+        return pane
+    try:
+        snapshot = omnigent_session_snapshot(target)
+    except (SessionNotFoundError, RuntimeError) as exc:
+        raise TaskFrontmatterError(f"cannot verify live OmniGent replacement: {exc}") from exc
+    expected_id = omnigent_session_id(target)
+    if (
+        snapshot.session_id != expected_id
+        or snapshot.harness != f"{tool}-native"
+        or snapshot.runner_online is not True
+        or snapshot.host_online is not True
+        or snapshot.status not in {"idle", "running", "waiting"}
+    ):
+        raise TaskFrontmatterError("OmniGent replacement is not the exact healthy live task session.")
+    evidence = omnigent_status_evidence(snapshot)
+    if expected_text not in evidence:
+        raise TaskFrontmatterError("replacement runtime evidence does not contain the supplied OmniGent evidence.")
+    return target
+
+
 def replacement_task_text(
     args: Args,
     stale_path: Path,
@@ -7493,30 +7957,36 @@ def replacement_task_text(
     if stale is None:
         raise TaskFrontmatterError("task file has no frontmatter.")
     _ = update_frontmatter_status(stale_text, "done", "", args.root)
-    if stale.status != "blocked" or stale.pending_task_items:
-        raise TaskFrontmatterError("--finish-replaced-done requires one blocked stale task with an empty pending queue.")
-    if TARGET_RE.fullmatch(args.stale_target) is None or TARGET_RE.fullmatch(args.replacement_target) is None:
-        raise TaskFrontmatterError("stale and replacement targets must be exact SESSION:WINDOW[.PANE] identities.")
+    target_kinds = (runat_kind(args.stale_target), runat_kind(args.replacement_target))
+    if any(kind not in {"tmux", "omnigent"} for kind in target_kinds) or target_kinds[0] != target_kinds[1]:
+        raise TaskFrontmatterError("stale and replacement targets must be exact identities of the same tmux or OmniGent kind.")
+    omnigent_replacement = target_kinds[0] == "omnigent"
+    if stale.pending_task_items or (stale.status not in {"blocked", "running", "long_running"} if omnigent_replacement else stale.status != "blocked"):
+        raise TaskFrontmatterError("--finish-replaced-done requires one eligible stale task with an empty pending queue.")
     if stale.runat != args.stale_target:
         raise TaskFrontmatterError("stale task `runat` does not equal --stale-target.")
     if SHA256_RE.fullmatch(args.stale_sha256) is None or hashlib.sha256(stale_text.encode()).hexdigest() != args.stale_sha256:
         raise TaskFrontmatterError("stale task bytes do not match --stale-sha256.")
     ensure_manager_has_no_active_children(args.root, stale_path, stale)
-    verified_empty_line = f"(verified empty stale task: {args.stopped_evidence})"
-    if verified_empty_line not in stale_text.splitlines():
-        raise TaskFrontmatterError("empty stale task requires an exact verified empty-stale-task record.")
-    if args.stale_target.partition(":")[0].startswith("h") or args.replacement_target.partition(":")[0].startswith("h"):
+    if target_kinds[0] == "tmux" and (args.stale_target.partition(":")[0].startswith("h") or args.replacement_target.partition(":")[0].startswith("h")):
         raise TaskFrontmatterError("replacement closure cannot inspect or modify a human-owned `h*` tmux session.")
-    if any(same_tmux_target(target, protected) for target in (args.stale_target, args.replacement_target) for protected in args.protected_targets):
-        raise TaskFrontmatterError("stale or replacement target is in the explicit protected-target set.")
-    if exact_pane_id(stale.runat):
-        raise TaskFrontmatterError("stale target is still live; replacement closure requires a stopped legacy target.")
+    if any(same_tmux_target(args.stale_target, protected) for protected in args.protected_targets):
+        raise TaskFrontmatterError("stale target is in the explicit protected-target set.")
+    if target_kinds[1] == "tmux" and any(same_tmux_target(args.replacement_target, protected) for protected in args.protected_targets):
+        raise TaskFrontmatterError("tmux replacement target is in the explicit protected-target set.")
+    verified_empty_line = f"(verified empty stale task: {args.stopped_evidence})"
+    stopped_runtime_evidence = replacement_target_absent(stale.runat, stale.tool)
+    if omnigent_replacement:
+        if args.stopped_evidence != stopped_runtime_evidence:
+            raise TaskFrontmatterError("stopped evidence does not equal the current OmniGent API evidence.")
+    elif verified_empty_line not in stale_text.splitlines():
+        raise TaskFrontmatterError("empty stale task requires an exact verified empty-stale-task record.")
     replacement_before = replacement_path.stat()
     replacement_text = replacement_path.read_text(encoding="utf-8")
     replacement = parse_task_metadata(replacement_text, args.root)
     if replacement is None:
         raise TaskFrontmatterError("replacement task file has no frontmatter.")
-    if replacement.status != args.replacement_status or replacement.status not in {"running", "long_running"} or not replacement.pending_task_items:
+    if replacement.status != args.replacement_status or replacement.status not in {"running", "long_running"} or (target_kinds[1] == "tmux" and not replacement.pending_task_items):
         raise TaskFrontmatterError("replacement task status or pending queue does not match the explicit active successor precondition.")
     if replacement.runat != args.replacement_target:
         raise TaskFrontmatterError("replacement task `runat` does not equal --replacement-target.")
@@ -7537,21 +8007,14 @@ def replacement_task_text(
     if owners != (replacement_path,):
         refs = ", ".join(relative_task_ref(args.root, owner) for owner in owners) or "none"
         raise TaskFrontmatterError(f"replacement task is not the sole authoritative active owner of `{replacement.runat}`: {refs}.")
-    pane_id = exact_pane_id(replacement.runat)
-    if not pane_id:
-        raise TaskFrontmatterError("replacement target is not an exact live pane target.")
-    pane_text = capture(pane_id, 2000)
-    if args.replacement_pane_evidence not in pane_text:
-        raise TaskFrontmatterError("replacement pane evidence is missing from the live reused pane.")
-    if exact_pane_id(replacement.runat) != pane_id:
-        raise TaskFrontmatterError("replacement pane changed while evidence was checked; retry.")
-    if exact_pane_id(stale.runat):
-        raise TaskFrontmatterError("stale target became live while replacement evidence was checked; retry.")
+    runtime_evidence = replacement_target_live(replacement.runat, replacement.tool, args.replacement_pane_evidence)
+    if replacement_target_absent(stale.runat, stale.tool) != stopped_runtime_evidence:
+        raise TaskFrontmatterError("stale OmniGent runtime evidence changed while replacement evidence was checked; retry.")
     if not same_file_state(stale_before, stale_path.stat()) or stale_path.read_text(encoding="utf-8") != stale_text:
         raise TaskFrontmatterError("stale task changed while replacement evidence was being checked; retry.")
     if not same_file_state(replacement_before, replacement_path.stat()) or replacement_path.read_text(encoding="utf-8") != replacement_text:
         raise TaskFrontmatterError("replacement task changed while evidence was being checked; retry.")
-    return update_frontmatter_status(stale_text, "done", "", args.root), stale, replacement, replacement_text, replacement_before, pane_id, custody_before
+    return update_frontmatter_status(stale_text, "done", "", args.root), stale, replacement, replacement_text, replacement_before, runtime_evidence, custody_before
 
 
 def finish_closed_done(args: Args, path: Path, text: str, before: os.stat_result) -> tuple[str, str]:
@@ -7727,6 +8190,39 @@ def interrupted_delivery_command_matches(item: dict[str, object], args: Args, pa
     return root == args.root and task == path and interrupted_done_script_matches(lines[3], args, path, key)
 
 
+def completed_delivery_command_matches(item: dict[str, object], args: Args, path: Path) -> bool:
+    """Recognize one successful direct owner completion-email invocation."""
+
+    command = item.get("command")
+    if (
+        not isinstance(command, list)
+        or command[:2] != ["/usr/bin/zsh", "-lc"]
+        or len(command) != 3
+        or not isinstance(command[2], str)
+    ):
+        return False
+    tokens = interrupted_command_tokens(command[2])
+    if not tokens or not interrupted_helper_matches(tokens.pop(0), Path(__file__).with_name("omo_completion_email.py")):
+        return False
+    options: dict[str, str] = {}
+    allowed = {"--root", "--task", "--outcome", "--semantic-key"}
+    index = 0
+    while index < len(tokens):
+        option = tokens[index]
+        if option not in allowed or option in options or index + 1 >= len(tokens):
+            return False
+        options[option] = tokens[index + 1]
+        index += 2
+    if set(options) != allowed or options["--outcome"] != "task done" or options["--semantic-key"] != args.completion_key:
+        return False
+    try:
+        root = Path(options["--root"]).expanduser().resolve(strict=False)
+        task = task_path(root, Path(options["--task"]))
+    except (OSError, TaskFrontmatterError):
+        return False
+    return root == args.root and task == path
+
+
 def _interrupted_done_session_evidence(args: Args, path: Path) -> tuple[bytes, os.stat_result]:
     """Read one immutable Codex transcript beneath the configured session root."""
 
@@ -7827,6 +8323,18 @@ def validate_interrupted_done_session(args: Args, path: Path, payload: bytes) ->
         and item.get("aggregated_output") == item.get("stdout")
         and item.get("formatted_output") == item.get("stdout")
     ]
+    completed_delivered = [
+        index
+        for index, item in executions
+        if completed_delivery_command_matches(item, args, path)
+        and item.get("status") == "completed"
+        and item.get("exit_code") == 0
+        and isinstance(item.get("stdout"), str)
+        and separate_delivery_output.fullmatch(str(item["stdout"])) is not None
+        and item.get("stderr") == ""
+        and item.get("aggregated_output") == item.get("stdout")
+        and item.get("formatted_output") == item.get("stdout")
+    ]
     interrupted = [
         index
         for index, item in executions
@@ -7835,7 +8343,7 @@ def validate_interrupted_done_session(args: Args, path: Path, payload: bytes) ->
         and item.get("exit_code") == -1
         and all(item.get(field) == "" for field in ("stdout", "stderr", "aggregated_output", "formatted_output"))
     ]
-    delivered = normal_delivered + separate_delivered
+    delivered = normal_delivered + separate_delivered + completed_delivered
     separate_final_cwd = not separate_delivered or executions[-1][1].get("cwd") == Path(__file__).resolve().parents[1].as_uri()
     final_interrupted = bool(interrupted) and interrupted[-1] == len(records) - 1
     unique_separate_interruption = not separate_delivered or len(interrupted) == 1
@@ -8481,6 +8989,26 @@ def retire_source1998_done(args: Args, path: Path, text: str, before: os.stat_re
     return "retired"
 
 
+def source1998_canonical_targetless_previous(todo_text: str, root: Path, path: Path) -> bool:
+    relative = relative_task_ref(root, path)
+    section: str | None = None
+    previous_headers = 0
+    references: list[tuple[str | None, str]] = []
+    token = re.compile(rf"(?<![A-Za-z0-9_.-]){re.escape(relative)}(?=$|[\s\]\[(){{}},;:])")
+    known_headers = {"current:": "current", "human pending:": "human pending", "low priority:": "low priority", "previous:": "previous"}
+    header_pattern = re.compile(r"^\s*[A-Za-z][A-Za-z0-9 _-]*:+\s*$")
+    for line in todo_text.splitlines():
+        if line in known_headers:
+            section = known_headers[line]
+            if section == "previous":
+                previous_headers += 1
+        elif re.fullmatch(r"\s*(?:current|previous|human pending|low priority)\s*(?:: *|)", line, re.IGNORECASE) or header_pattern.fullmatch(line):
+            return False
+        if token.search(line):
+            references.append((section, line))
+    return previous_headers == 1 and references == [("previous", relative)]
+
+
 def source1998_reconcile_final_evidence_pass(
     args: Args,
     path: Path,
@@ -8529,12 +9057,15 @@ def source1998_reconcile_final_evidence_pass(
         raise TaskFrontmatterError("Source-1998 reconciliation replay bytes are not the exact reviewed transition.")
     validate_source1998_envelope(task_before.decode("utf-8"))
     source_path = path.resolve(strict=False)
+    if todo_state == "after" and not source1998_canonical_targetless_previous(current_todo.decode("utf-8"), args.root, path):
+        raise TaskFrontmatterError("Source-1998 reconciliation postimage requires one canonical targetless previous row.")
     owners = authoritative_active_target_task_paths(args.root, SOURCE1998_TARGET)
     todo_claims = source1998_todo_target_claims(args.root, SOURCE1998_TARGET, current_todo.decode("utf-8"))
     all_todo_claims = source1998_all_todo_target_claims(args.root, SOURCE1998_TARGET, current_todo.decode("utf-8"))
     expected_owners = (source_path,) if task_state == "before" else ()
     expected_claims = (source_path,) if todo_state == "before" else ()
-    if owners != expected_owners or todo_claims != expected_claims or all_todo_claims != (source_path,):
+    expected_all_claims = (source_path,) if todo_state == "before" else ()
+    if owners != expected_owners or todo_claims != expected_claims or all_todo_claims != expected_all_claims:
         refs = ", ".join(relative_task_ref(args.root, owner) for owner in (*owners, *todo_claims, *all_todo_claims)) or "none"
         raise TaskFrontmatterError(f"Source-1998 reconciliation replay ownership or TODO claim drifted: {refs}.")
     authority_payload, authority_state = source1998_authority_snapshot(args.root)
@@ -8675,6 +9206,368 @@ def reconcile_source1998_done(args: Args, path: Path, text: str, before: os.stat
     return SOURCE1998_TARGET
 
 
+def source2002_authority_snapshot(root: Path) -> tuple[bytes, os.stat_result]:
+    path = root / SOURCE2002_AUTHORITY.partition(":")[0]
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or stat.S_IMODE(before.st_mode) & 0o077 or before.st_nlink != 1:
+            raise TaskFrontmatterError("Source-2002 Human authority is not a stable owner-private file.")
+        payload = path.read_bytes()
+        after = path.lstat()
+    except OSError as exc:
+        raise TaskFrontmatterError(f"Source-2002 Human authority is unavailable: {exc}") from exc
+    if not same_file_generation(before, after) or hashlib.sha256(payload).hexdigest() != SOURCE2002_AUTHORITY_SHA256:
+        raise TaskFrontmatterError("Source-2002 Human authority changed or is not the fixed reviewed source.")
+    try:
+        normalized = payload.decode("utf-8").replace("\r\n", "\n")
+    except UnicodeDecodeError as exc:
+        raise TaskFrontmatterError("Source-2002 Human authority is not valid UTF-8.") from exc
+    if SOURCE2002_AUTHORITY_TEXT not in normalized:
+        raise TaskFrontmatterError("Source-2002 Human authority does not contain the reviewed correction.")
+    return payload, after
+
+
+def source2002_transcript_snapshot(args: Args) -> os.stat_result:
+    if args.session_transcript != SOURCE2002_TRANSCRIPT:
+        raise TaskFrontmatterError("Source-2002 transcript path is not the fixed reviewed session.")
+    try:
+        before = args.session_transcript.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_mode & 0o022 or before.st_nlink != 1:
+            raise TaskFrontmatterError("Source-2002 session transcript is not a stable owner-private file.")
+        payload = args.session_transcript.read_bytes()
+        after = args.session_transcript.lstat()
+    except OSError as exc:
+        raise TaskFrontmatterError(f"Source-2002 session transcript is unavailable: {exc}") from exc
+    if not same_file_generation(before, after) or hashlib.sha256(payload).hexdigest() != SOURCE2002_TRANSCRIPT_SHA256:
+        raise TaskFrontmatterError("Source-2002 session transcript changed or is not the fixed reviewed session.")
+    try:
+        records = [json.loads(line) for line in payload.decode("utf-8").splitlines()]
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TaskFrontmatterError("Source-2002 session transcript is not valid JSONL.") from exc
+    sessions = [record.get("payload", {}).get("session_id") for record in records if record.get("type") == "session_meta"]
+    if sessions != [SOURCE2002_SESSION_ID]:
+        raise TaskFrontmatterError("Source-2002 transcript does not bind the exact reviewed session.")
+    return after
+
+
+def source2002_pane_snapshot() -> tuple[str, int, str, str, str, int]:
+    result = subprocess.run(
+        ["tmux", "display-message", "-p", "-t", SOURCE2002_PANE_ID, "#{pane_id}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}\t#{session_name}:#{window_index}.#{pane_index}"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    fields = result.stdout.rstrip("\n").split("\t") if result.returncode == 0 else []
+    if len(fields) != 5:
+        raise TaskFrontmatterError("Source-2002 retained pane is unavailable.")
+    pane_id_value, raw_pid, command, cwd, symbolic = fields
+    try:
+        pid = int(raw_pid)
+    except ValueError as exc:
+        raise TaskFrontmatterError("Source-2002 retained pane has an invalid process identity.") from exc
+    start_ticks = process_start_ticks(pid)
+    if (
+        pane_id_value != SOURCE2002_PANE_ID
+        or pid != SOURCE2002_PANE_PID
+        or command != SOURCE2002_PANE_COMMAND
+        or cwd != SOURCE2002_PANE_CWD
+        or symbolic != "config:46.0"
+        or start_ticks != SOURCE2002_PANE_START_TICKS
+    ):
+        raise TaskFrontmatterError("Source-2002 retained pane is not the exact reviewed fish shell identity.")
+    return pane_id_value, pid, command, cwd, symbolic, start_ticks
+
+
+def source2002_all_todo_claims(root: Path, target: str, todo_text: str) -> tuple[Path, ...]:
+    claims: list[Path] = []
+    for task in parse_task_text(todo_text):
+        if task.section not in {"todo:current", "todo:human pending", "todo:low priority", "todo:previous"} or not task.target or not same_tmux_target(task.target, target):
+            continue
+        candidate = (root / task.task_file).resolve(strict=False)
+        if candidate != root and root in candidate.parents:
+            claims.append(candidate)
+    return tuple(claims)
+
+
+def source2002_validate_task(task_bytes: bytes, root: Path) -> None:
+    text = task_bytes.decode("utf-8")
+    metadata = parse_task_metadata(text, root)
+    envelope = f'<human_instruction authoritative="true" source="{SOURCE2002_AUTHORITY}">\n{SOURCE2002_AUTHORITY_TEXT}</human_instruction>'
+    if (
+        metadata is None
+        or metadata.status != "blocked"
+        or metadata.blocked_on != SOURCE2002_BLOCKER
+        or metadata.runat != SOURCE2002_TARGET
+        or metadata.managerat != SOURCE2002_MANAGER
+        or metadata.tool != "codex"
+        or metadata.session_id != SOURCE2002_SESSION_ID
+        or metadata.is_manager
+        or metadata.pending_task_items
+        or text.count(envelope) != 1
+        or SOURCE2002_COMPLETION_MESSAGE_ID not in text
+        or "(verified removed pending item:" not in text
+        or has_pending_marker(text)
+    ):
+        raise TaskFrontmatterError("Source-2002 reconciliation requires the exact blocked queue-empty task and reviewed Human evidence.")
+
+
+def source2002_validate_after_task(task_bytes: bytes, root: Path) -> None:
+    if hashlib.sha256(task_bytes).hexdigest() != SOURCE2002_TASK_AFTER_SHA256:
+        raise TaskFrontmatterError("Source-2002 terminal task is not the fixed reviewed result.")
+    metadata = parse_task_metadata(task_bytes.decode("utf-8"), root)
+    if metadata is None or metadata.status != "done" or metadata.runat != SOURCE2002_TARGET or metadata.managerat != SOURCE2002_MANAGER or metadata.pending_task_items or has_pending_marker(task_bytes.decode("utf-8")):
+        raise TaskFrontmatterError("Source-2002 terminal task metadata is not the fixed reviewed result.")
+
+
+def source2002_transaction_record(task_before: bytes, task_after: bytes, todo_before: bytes, todo_after: bytes) -> dict[str, str]:
+    return {
+        "schema": "omo-source2002-reconcile/v1",
+        "task": SOURCE2002_TASK,
+        "todo": "TODO.md",
+        "target": SOURCE2002_TARGET,
+        "task_before": base64.b64encode(task_before).decode("ascii"),
+        "task_after": base64.b64encode(task_after).decode("ascii"),
+        "todo_before": base64.b64encode(todo_before).decode("ascii"),
+        "todo_after": base64.b64encode(todo_after).decode("ascii"),
+    }
+
+
+def source2002_transaction_payload(record: dict[str, str]) -> tuple[bytes, bytes, bytes, bytes]:
+    expected = {"schema", "task", "todo", "target", "task_before", "task_after", "todo_before", "todo_after"}
+    if set(record) != expected or any(not isinstance(value, str) for value in record.values()) or record["schema"] != "omo-source2002-reconcile/v1" or record["task"] != SOURCE2002_TASK or record["todo"] != "TODO.md" or record["target"] != SOURCE2002_TARGET:
+        raise TaskFrontmatterError("Source-2002 durable transition record is malformed.")
+    try:
+        decoded = tuple(base64.b64decode(record[key], validate=True) for key in ("task_before", "task_after", "todo_before", "todo_after"))
+    except (ValueError, binascii.Error) as exc:
+        raise TaskFrontmatterError("Source-2002 durable transition record has invalid file bytes.") from exc
+    if any(not value for value in decoded):
+        raise TaskFrontmatterError("Source-2002 durable transition record has empty file bytes.")
+    return decoded  # type: ignore[return-value]
+
+
+def source2002_write_transaction(path: Path, record: dict[str, str]) -> None:
+    payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if path.exists():
+        state = path.lstat()
+        if not stat.S_ISREG(state.st_mode) or state.st_uid != os.getuid() or stat.S_IMODE(state.st_mode) & 0o077 or path.read_bytes() != payload:
+            raise TaskFrontmatterError("an unrelated Source-2002 transition record already exists.")
+        return
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile("wb", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fchmod(handle.fileno(), 0o600)
+            os.fsync(handle.fileno())
+            temporary = Path(handle.name)
+        os.replace(temporary, path)
+        temporary = None
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def source2002_read_transaction(path: Path) -> tuple[dict[str, str], tuple[bytes, bytes, bytes, bytes]] | None:
+    try:
+        before = path.lstat()
+        payload = path.read_bytes()
+        after = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise TaskFrontmatterError(f"Source-2002 durable transition record is unavailable: {exc}") from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or stat.S_IMODE(before.st_mode) & 0o077 or not same_file_generation(before, after):
+        raise TaskFrontmatterError("Source-2002 durable transition record is not a stable owner-private file.")
+    try:
+        record = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TaskFrontmatterError("Source-2002 durable transition record is not valid JSON.") from exc
+    if not isinstance(record, dict):
+        raise TaskFrontmatterError("Source-2002 durable transition record is not an object.")
+    typed = {key: value for key, value in record.items() if isinstance(key, str) and isinstance(value, str)}
+    if len(typed) != len(record):
+        raise TaskFrontmatterError("Source-2002 durable transition record has invalid fields.")
+    return typed, source2002_transaction_payload(typed)
+
+
+def source2002_remove_transaction(path: Path) -> None:
+    path.unlink(missing_ok=True)
+    directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def source2002_apply_transaction(
+    args: Args,
+    path: Path,
+    todo: Path,
+    marker: Path,
+    payload: tuple[bytes, bytes, bytes, bytes],
+    *,
+    task_generation: os.stat_result | None = None,
+    todo_generation: os.stat_result | None = None,
+    expected_authority: tuple[bytes, os.stat_result] | None = None,
+    expected_pane: tuple[str, int, str, str, str, int] | None = None,
+    expected_transcript: os.stat_result | None = None,
+    allow_partial: bool = False,
+) -> None:
+    task_before, task_after, todo_before, todo_after = payload
+    if hashlib.sha256(task_before).hexdigest() != SOURCE2002_TASK_SHA256 or hashlib.sha256(task_after).hexdigest() != SOURCE2002_TASK_AFTER_SHA256 or hashlib.sha256(todo_before).hexdigest() != SOURCE2002_TODO_SHA256 or hashlib.sha256(todo_after).hexdigest() != SOURCE2002_TODO_AFTER_SHA256:
+        raise TaskFrontmatterError("Source-2002 durable transition is not the fixed reviewed result.")
+    task_generation, todo_generation = source2002_final_evidence_pass(
+        args,
+        path,
+        todo,
+        payload,
+        expected_task_state=task_generation,
+        expected_todo_state=todo_generation,
+        expected_authority=expected_authority,
+        expected_pane=expected_pane,
+        expected_transcript=expected_transcript,
+        allow_partial=allow_partial,
+    )
+    current_task, current_task_state = source1998_stable_file_snapshot(path)
+    current_todo, current_todo_state = source1998_stable_file_snapshot(todo)
+    if (task_generation is not None and not same_file_generation(task_generation, current_task_state)) or (todo_generation is not None and not same_file_generation(todo_generation, current_todo_state)):
+        raise TaskFrontmatterError("Source-2002 task or TODO changed after final evidence; retry.")
+    task_state = "before" if current_task == task_before else "after" if current_task == task_after else "other"
+    todo_state = "before" if current_todo == todo_before else "after" if current_todo == todo_after else "other"
+    if "other" in {task_state, todo_state} or (task_state == "after" and todo_state == "before"):
+        raise TaskFrontmatterError("Source-2002 task or TODO bytes do not match an allowed durable transition.")
+    if task_state == "after" and todo_state == "after":
+        source2002_remove_transaction(marker)
+        return
+    if todo_state == "before":
+        replace_if_unchanged_locked(todo, todo_after.decode("utf-8"), todo_generation or current_todo_state)
+    if task_state == "before":
+        replace_if_unchanged_locked(path, task_after.decode("utf-8"), task_generation or current_task_state)
+    if path.read_bytes() != task_after or todo.read_bytes() != todo_after:
+        raise TaskFrontmatterError("Source-2002 durable transition did not reach its exact committed state.")
+    source2002_remove_transaction(marker)
+
+
+def source2002_final_evidence_pass(args: Args, path: Path, todo: Path, payload: tuple[bytes, bytes, bytes, bytes], *, expected_task_state: os.stat_result | None = None, expected_todo_state: os.stat_result | None = None, expected_authority: tuple[bytes, os.stat_result] | None = None, expected_pane: tuple[str, int, str, str, str, int] | None = None, expected_transcript: os.stat_result | None = None, allow_partial: bool = False, terminal_after: bool = False) -> tuple[os.stat_result, os.stat_result]:
+    task_before, task_after, todo_before, todo_after = payload
+    current_task, task_generation = source1998_stable_file_snapshot(path)
+    current_todo, todo_generation = source1998_stable_file_snapshot(todo)
+    task_states = {task_before, task_after} if allow_partial else {task_before}
+    todo_states = {todo_before, todo_after} if allow_partial else {todo_before}
+    if current_task not in task_states or current_todo not in todo_states or (expected_task_state is not None and not same_file_generation(task_generation, expected_task_state)) or (expected_todo_state is not None and not same_file_generation(todo_generation, expected_todo_state)):
+        raise TaskFrontmatterError("Source-2002 task or TODO changed before the final evidence pass; retry.")
+    task_state = "after" if terminal_after else "before" if current_task == task_before else "after"
+    todo_state = "after" if terminal_after else "before" if current_todo == todo_before else "after"
+    if terminal_after and (current_task != task_after or current_todo != todo_after):
+        raise TaskFrontmatterError("Source-2002 terminal task or TODO bytes are not the fixed reviewed result.")
+    if task_state == "after" and todo_state == "before":
+        raise TaskFrontmatterError("Source-2002 has an impossible task-after/TODO-before partial state.")
+    source_path = path.resolve(strict=False)
+    claims = source2002_all_todo_claims(args.root, SOURCE2002_TARGET, current_todo.decode("utf-8"))
+    expected_claims = (source_path,)
+    owners = authoritative_active_target_task_paths(args.root, SOURCE2002_TARGET)
+    expected_owners = (source_path,) if task_state == "before" else ()
+    if claims != expected_claims or owners != expected_owners:
+        raise TaskFrontmatterError("Source-2002 target has an unrelated active owner or TODO claim.")
+    authority_payload, authority_state = source2002_authority_snapshot(args.root)
+    pane_state = source2002_pane_snapshot()
+    transcript_generation = source2002_transcript_snapshot(args)
+    if (expected_authority is not None and (authority_payload != expected_authority[0] or not same_file_generation(authority_state, expected_authority[1]))) or (expected_pane is not None and pane_state != expected_pane) or (expected_transcript is not None and not same_file_generation(transcript_generation, expected_transcript)):
+        raise TaskFrontmatterError("Source-2002 authority, transcript, pane, or task ownership changed before the final evidence pass; retry.")
+    return task_generation, todo_generation
+
+
+def reconcile_source2002_done(args: Args, path: Path, text: str, before: os.stat_result) -> str:
+    todo = args.root / "TODO.md"
+    marker = args.root / SOURCE2002_TRANSACTION
+    if (
+        args.root.resolve() != SOURCE1998_ROOT
+        or relative_task_ref(args.root, path) != SOURCE2002_TASK
+        or args.completion_key != SOURCE2002_CLOSE_KEY
+        or args.session_id != SOURCE2002_SESSION_ID
+        or args.session_transcript != SOURCE2002_TRANSCRIPT
+        or args.session_transcript_sha256 != SOURCE2002_TRANSCRIPT_SHA256
+        or getattr(args, "expected_task_sha256", "") != SOURCE2002_TASK_SHA256
+        or getattr(args, "expected_todo_sha256", "") != SOURCE2002_TODO_SHA256
+        or not todo.is_file()
+    ):
+        raise TaskFrontmatterError("Source-2002 reconciliation arguments do not bind the fixed task, shell, and transcript.")
+    with root_membership_lock(args.root), task_target_lock(args.root, SOURCE2002_TARGET):
+        with ExitStack() as locks:
+            for locked_path in sorted({path, todo, marker}, key=str):
+                locks.enter_context(task_file_lock(locked_path))
+            transaction = source2002_read_transaction(marker)
+            if transaction is not None:
+                record, payload = transaction
+                authority_payload, authority_state = source2002_authority_snapshot(args.root)
+                pane_state = source2002_pane_snapshot()
+                transcript_generation = source2002_transcript_snapshot(args)
+                task_generation, todo_generation = source2002_final_evidence_pass(args, path, todo, payload, expected_authority=(authority_payload, authority_state), expected_pane=pane_state, expected_transcript=transcript_generation, allow_partial=True)
+                source2002_apply_transaction(
+                    args,
+                    path,
+                    todo,
+                    marker,
+                    payload,
+                    task_generation=task_generation,
+                    todo_generation=todo_generation,
+                    expected_authority=(authority_payload, authority_state),
+                    expected_pane=pane_state,
+                    expected_transcript=transcript_generation,
+                    allow_partial=True,
+                )
+                return SOURCE2002_TARGET
+            current_bytes, current_before = source1998_stable_file_snapshot(path)
+            todo_bytes, todo_before = source1998_stable_file_snapshot(todo)
+            if hashlib.sha256(current_bytes).hexdigest() == SOURCE2002_TASK_AFTER_SHA256 and hashlib.sha256(todo_bytes).hexdigest() == SOURCE2002_TODO_AFTER_SHA256:
+                source2002_validate_after_task(current_bytes, args.root)
+                authority_payload, authority_state = source2002_authority_snapshot(args.root)
+                pane_state = source2002_pane_snapshot()
+                transcript_generation = source2002_transcript_snapshot(args)
+                source2002_final_evidence_pass(
+                    args,
+                    path,
+                    todo,
+                    (current_bytes, current_bytes, todo_bytes, todo_bytes),
+                    expected_authority=(authority_payload, authority_state),
+                    expected_pane=pane_state,
+                    expected_transcript=transcript_generation,
+                    allow_partial=True,
+                    terminal_after=True,
+                )
+                return SOURCE2002_TARGET
+            if not same_file_generation(before, current_before) or current_bytes != text.encode("utf-8") or hashlib.sha256(current_bytes).hexdigest() != SOURCE2002_TASK_SHA256 or hashlib.sha256(todo_bytes).hexdigest() != SOURCE2002_TODO_SHA256:
+                raise TaskFrontmatterError("Source-2002 task or TODO changed before reconciliation; retry after rereading both files.")
+            source2002_validate_task(current_bytes, args.root)
+            authority_payload, authority_state = source2002_authority_snapshot(args.root)
+            pane_state = source2002_pane_snapshot()
+            transcript_generation = source2002_transcript_snapshot(args)
+            updated_task = update_frontmatter_status(current_bytes.decode("utf-8"), "done", "", args.root).encode("utf-8")
+            updated_todo = reconcile_todo_text(args.root, path, todo_bytes.decode("utf-8"), SOURCE2002_TARGET, "previous", ("human pending",)) .encode("utf-8")
+            record = source2002_transaction_record(current_bytes, updated_task, todo_bytes, updated_todo)
+            task_generation, todo_generation = source2002_final_evidence_pass(args, path, todo, (current_bytes, updated_task, todo_bytes, updated_todo), expected_task_state=current_before, expected_todo_state=todo_before, expected_authority=(authority_payload, authority_state), expected_pane=pane_state, expected_transcript=transcript_generation)
+            source2002_write_transaction(marker, record)
+            source2002_apply_transaction(
+                args,
+                path,
+                todo,
+                marker,
+                (current_bytes, updated_task, todo_bytes, updated_todo),
+                task_generation=task_generation,
+                todo_generation=todo_generation,
+                expected_authority=(authority_payload, authority_state),
+                expected_pane=pane_state,
+                expected_transcript=transcript_generation,
+            )
+    return SOURCE2002_TARGET
+
+
 def recover_exited_shell_done(args: Args, path: Path, text: str, before: os.stat_result) -> tuple[str, str]:
     """Close one proven exited worker shell and finish its done bookkeeping."""
 
@@ -8698,7 +9591,7 @@ def recover_exited_shell_done(args: Args, path: Path, text: str, before: os.stat
             legacy_blocker = f"{CLOSE_FAILED_PREFIX}: target is not a supported live Codex pane: {args.pane_id} status=not_codex"
             legacy_recovery = metadata.blocked_on == legacy_blocker and bool(args.terminal_evidence) and not any((args.completion_key, args.session_transcript, args.session_transcript_sha256))
             interrupted_recovery = (
-                metadata.blocked_on == DONE_CLOSE_IN_PROGRESS
+                metadata.blocked_on in {DONE_CLOSE_IN_PROGRESS, legacy_blocker}
                 and not args.terminal_evidence
                 and bool(args.completion_key and args.session_transcript and args.session_transcript_sha256)
             )
@@ -8805,12 +9698,14 @@ def finish_replaced_done(args: Args, path: Path, text: str, before: os.stat_resu
         current_text = path.read_text(encoding="utf-8")
         if not same_file_state(before, current_before) or current_text != text:
             raise TaskFrontmatterError("stale task changed before replacement closure acquired its locks; retry.")
-        updated, stale, replacement, replacement_text, replacement_before, replacement_pane_id, custody_before = replacement_task_text(args, path, current_text, current_before)
+        updated, stale, replacement, replacement_text, replacement_before, replacement_runtime_id, custody_before = replacement_task_text(args, path, current_text, current_before)
         todo_before = todo.stat()
         todo_text = todo.read_text(encoding="utf-8")
         prepared_todo = None
-        if custody_before is not None:
-            prepared_todo = reconcile_todo_text(args.root, path, todo_text, stale.runat, "previous", ("previous",))
+        strict_todo = custody_before is not None or runat_kind(stale.runat) == "omnigent"
+        if strict_todo:
+            allowed_stale_sections = ("previous",) if custody_before is not None else ("current", "previous")
+            prepared_todo = reconcile_todo_text(args.root, path, todo_text, stale.runat, "previous", allowed_stale_sections)
             _ = reconcile_todo_text(args.root, replacement_path, todo_text, replacement.runat, "current", ("current",))
         prepared = "\n".join(
             (
@@ -8822,7 +9717,7 @@ def finish_replaced_done(args: Args, path: Path, text: str, before: os.stat_resu
                 f"replacement-target: {replacement.runat}",
                 f"replacement-sha256: {args.replacement_sha256}",
                 f"replacement-status: {replacement.status}",
-                f"replacement-pane-id: {replacement_pane_id}",
+                f"replacement-runtime-id: {replacement_runtime_id}",
                 f"stopped-evidence-sha256: {hashlib.sha256(args.stopped_evidence.encode()).hexdigest()}",
                 f"replacement-pane-evidence-sha256: {hashlib.sha256(args.replacement_pane_evidence.encode()).hexdigest()}",
                 f"manager-target: {stale.managerat}",
@@ -8851,16 +9746,16 @@ def finish_replaced_done(args: Args, path: Path, text: str, before: os.stat_resu
                 ensure_manager_has_no_active_children(args.root, path, stale)
                 if authoritative_active_target_task_paths(args.root, replacement.runat) != (replacement_path,):
                     raise TaskFrontmatterError("replacement ownership changed after reservation; retry.")
-            if exact_pane_id(stale.runat):
-                raise TaskFrontmatterError("stale target became live after audit reservation; retry.")
-            if exact_pane_id(replacement.runat) != replacement_pane_id:
-                raise TaskFrontmatterError("replacement pane changed after audit reservation; retry.")
-            if args.replacement_pane_evidence not in capture(replacement_pane_id, 2000):
-                raise TaskFrontmatterError("replacement pane evidence disappeared after audit reservation; retry.")
-            if exact_pane_id(replacement.runat) != replacement_pane_id:
-                raise TaskFrontmatterError("replacement pane changed while post-reservation evidence was checked; retry.")
-            if exact_pane_id(stale.runat):
-                raise TaskFrontmatterError("stale target became live while post-reservation evidence was checked; retry.")
+            if runat_kind(stale.runat) == "omnigent" and replacement_target_absent(stale.runat, stale.tool) != args.stopped_evidence:
+                raise TaskFrontmatterError("stale OmniGent runtime evidence changed after audit reservation; retry.")
+            if runat_kind(stale.runat) == "tmux":
+                replacement_target_absent(stale.runat, stale.tool)
+            if replacement_target_live(replacement.runat, replacement.tool, args.replacement_pane_evidence) != replacement_runtime_id:
+                raise TaskFrontmatterError("replacement runtime changed after audit reservation; retry.")
+            if runat_kind(stale.runat) == "omnigent" and replacement_target_absent(stale.runat, stale.tool) != args.stopped_evidence:
+                raise TaskFrontmatterError("stale OmniGent runtime evidence changed during final validation; retry.")
+            if runat_kind(stale.runat) == "tmux":
+                replacement_target_absent(stale.runat, stale.tool)
             if custody_before is not None:
                 assert args.replacement_custody_audit is not None
                 if not same_file_generation(custody_before, args.replacement_custody_audit.lstat()):
@@ -8871,9 +9766,9 @@ def finish_replaced_done(args: Args, path: Path, text: str, before: os.stat_resu
                     raise TaskFrontmatterError("stale task changed during post-reservation validation; retry.")
             finish_done_transaction(
                 args.root, path, updated, current_before, locked=True,
-                todo_text=todo_text if custody_before is not None else None,
+                todo_text=todo_text if strict_todo else None,
                 prepared_todo=prepared_todo,
-                todo_before=todo_before if custody_before is not None else None,
+                todo_before=todo_before if strict_todo else None,
             )
         except Exception as mutation_error:
             try:
@@ -8903,6 +9798,7 @@ def automatic_done_email_eligible(args: Args, initial_status: str | None) -> boo
             args.describe_done_live_no_mail,
             args.reconcile_source1998_done,
             args.retire_source1998_done,
+            args.reconcile_source2002_done,
         )
     )
     return args.status == "done" and not special_done and initial_status is not None and initial_status != "done"
@@ -8927,6 +9823,7 @@ def run(args: Args) -> int:
     described_done_live_no_mail = False
     source1998_reconciled = False
     source1998_retired = False
+    source2002_reconciled = False
     try:
         path = task_path(args.root, args.task_file)
         before = path.stat()
@@ -8971,6 +9868,11 @@ def run(args: Args) -> int:
         elif args.retire_source1998_done:
             target = retire_source1998_done(args, path, text, before)
             source1998_retired = True
+        elif args.reconcile_source2002_done:
+            target = reconcile_source2002_done(args, path, text, before)
+            source2002_reconciled = True
+        elif args.reconcile_absent_manager:
+            reconcile_absent_manager(args, path, text, before)
         elif args.reconcile_blocked_index:
             reconcile_previous_blocked_index(args, path, text, before)
         elif args.retire_blocked_target:
@@ -9098,13 +10000,15 @@ def run(args: Args) -> int:
         elif completed_live_no_mail:
             print(f"Completed live worker metadata for {target} without email or pane mutation.")
         elif preserved_replacement:
-            print(f"Finalized stopped stale task {target} without signaling it or the live successor pane.")
+            print(f"Finalized stopped stale task {target} without signaling it or the live successor runtime.")
         elif args.close_retired_done:
             print(f"Finalized retired task metadata with historical target {target}; no pane was signalled.")
         elif source1998_reconciled:
             print(f"Finalized the authenticated Source-1998 task metadata for {target}; retained shell pane and sent no email.")
         elif source1998_retired:
             print("Retired the authenticated Source-1998 task as historical metadata; retained shell pane was not signalled and no email was sent.")
+        elif source2002_reconciled:
+            print(f"Finalized the authenticated Source-2002 task metadata for {target}; retained shell pane and sent no email.")
         elif target and not shared_target_closure:
             print(done_close_message(target, session_id))
         if not closed_done_live_no_mail:

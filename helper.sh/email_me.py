@@ -59,7 +59,9 @@ from omo_email_subject import (  # noqa: E402
     prepare_subject,
     prepare_subject_and_headers,
     reply_headers_for_subject,
+    starts_w_re,
     strip_leading_tmux_tags,
+    subject_base,
     worker_lifecycle_report_guard,
 )
 from omo_guest_images import GuestImageError, ValidatedImage, reply_attachments  # noqa: E402
@@ -70,7 +72,7 @@ TMUX_WINDOW_RE = re.compile(r"[^:\n]+:\d+(?:\.\d+)?\Z")
 AGENT_SESSION_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z", re.IGNORECASE
 )
-PRODUCER_TARGET = r"(?:[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?|omnigent://[A-Za-z0-9._-]+)"
+PRODUCER_TARGET = r"(?:[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?|omnigent://[A-Za-z0-9._-]+|og:[A-Za-z0-9_.-]+\.md)"
 TMUX_SUBJECT_TAG_RE = re.compile(
     rf"^\s*(?:\[{PRODUCER_TARGET}\]|{PRODUCER_TARGET})(?:\s+|$)"
 )
@@ -737,6 +739,14 @@ def validate_manager_route_identity(
     inferred_target = inferred_tmux_target(True)
     if inferred_target is None:
         return
+    if (
+        OMNIGENT_TARGET_RE.fullmatch(inferred_target)
+        and canonical_email_tmux_target(explicit_target)
+        != canonical_email_tmux_target(inferred_target)
+    ):
+        raise ValueError(
+            f"explicit tmux target {canonical_email_tmux_target(explicit_target)} conflicts with verified producer route {canonical_email_tmux_target(inferred_target)}"
+        )
     if guest_hees_tmux_target(explicit_target) != guest_hees_tmux_target(
         inferred_target
     ):
@@ -748,6 +758,20 @@ def validate_manager_route_identity(
     ):
         raise ValueError(
             "selected email route conflicts with verified producer identity"
+        )
+
+
+def validate_explicit_omnigent_identity(explicit_target: str | None) -> None:
+    """Require an explicit OmniGent route to equal the authenticated runtime."""
+
+    if explicit_target is None:
+        return
+    inferred_target = omnigent_inferred_target()
+    if inferred_target is not None and canonical_email_tmux_target(
+        inferred_target
+    ) != canonical_email_tmux_target(explicit_target):
+        raise ValueError(
+            f"explicit tmux target {canonical_email_tmux_target(explicit_target)} conflicts with authenticated OmniGent producer identity"
         )
 
 
@@ -814,6 +838,69 @@ def omnigent_inferred_target() -> str | None:
     if not isinstance(target, str) or OMNIGENT_TARGET_RE.fullmatch(target) is None:
         raise ValueError("OmniGent producer identity could not be authenticated")
     return target
+
+
+# 🧑 "emails from omnigent agents should render their tags as [og:task_file_name], instead of the long session ID"
+def email_subject_target(authenticated_target: str) -> str:
+    """Return the visible tag for one authenticated producer target."""
+
+    if OMNIGENT_TARGET_RE.fullmatch(authenticated_target) is None:
+        return authenticated_target
+    from omo_agent_status import DEFAULT_ROOT, parse_task_lines, read_task_metadata, resolve_task_path
+    from omo_task_context import ACTIVE_STATUSES, LIVE_SECTIONS, infer_pending_task
+
+    root = Path(os.environ.get("OMO_WORK_LOGS_ROOT", DEFAULT_ROOT)).expanduser().resolve()
+    try:
+        task = infer_pending_task(root, authenticated_target)
+    except (OSError, ValueError) as exc:
+        raise ValueError("OmniGent email tag requires one exact active task owner") from exc
+    same_name = []
+    for row in parse_task_lines(root / "TODO.md"):
+        if row.section not in LIVE_SECTIONS:
+            continue
+        candidate = resolve_task_path(root, row.task_file)
+        metadata = read_task_metadata(candidate, root) if candidate is not None else None
+        if candidate is not None and candidate.name == task.name and metadata is not None and metadata.status in ACTIVE_STATUSES:
+            same_name.append(candidate)
+    if len(set(same_name)) != 1:
+        raise ValueError("OmniGent email tag requires a unique active task filename")
+    return f"og:{task.name}"
+
+
+def retag_subject(subject: str, target: str) -> str:
+    """Replace one prepared subject's producer tag without changing reply state."""
+
+    reply = starts_w_re(subject)
+    base = subject_base(subject)
+    tagged = f"[{target}] {base}" if target else base
+    return f"Re: {tagged}" if reply else tagged
+
+
+def prepare_latest_producer_thread(
+    authenticated_target: str,
+    display_target: str,
+    route_profile: MailRouteProfile | None,
+    required_agent_session: str | None,
+) -> tuple[str, dict[str, str]]:
+    """Find the current display-tag thread, then one legacy OmniGent thread."""
+
+    try:
+        return prepare_latest_thread_for_tmux_target(
+            display_target,
+            route_profile=route_profile,
+            required_agent_session=required_agent_session,
+        )
+    except SubjectInputError as exc:
+        missing = str(exc).startswith(
+            ("no recent email thread found", "no exact email thread found")
+        )
+        if display_target == authenticated_target or not missing:
+            raise
+        return prepare_latest_thread_for_tmux_target(
+            authenticated_target,
+            route_profile=route_profile,
+            required_agent_session=required_agent_session,
+        )
 
 
 def agent_session_id() -> str:
@@ -1761,6 +1848,7 @@ def exact_once_email_record(
     display_subject: str,
     content: str,
     authenticated_producer_target: str,
+    producer_display_target: str = "",
 ) -> tuple[str, bytes]:
     targets = BRACKETED_TMUX_TAG_RE.findall(display_subject)
     if len(targets) != 1:
@@ -1768,7 +1856,10 @@ def exact_once_email_record(
             "manager email exact-once subject has no unique producer target"
         )
     producer_target = canonical_email_tmux_target(authenticated_producer_target)
-    if canonical_email_tmux_target(targets[0][1:-1]) != producer_target:
+    expected_display_target = producer_display_target or email_subject_target(
+        producer_target
+    )
+    if targets[0][1:-1] != expected_display_target:
         raise ValueError(
             "manager email exact-once subject target does not match its authenticated producer"
         )
@@ -1794,6 +1885,7 @@ def exact_once_email_claim(
     display_subject: str,
     content: str,
     authenticated_producer_target: str,
+    producer_display_target: str = "",
 ) -> str:
     """Reserve one non-completion Human email permanently before SMTP."""
 
@@ -1820,7 +1912,11 @@ def exact_once_email_claim(
             "manager email exact-once claim directory is not owner-private"
         )
     digest, payload = exact_once_email_record(
-        dedupe_subject, display_subject, content, authenticated_producer_target
+        dedupe_subject,
+        display_subject,
+        content,
+        authenticated_producer_target,
+        producer_display_target,
     )
     claim = claims / f"{digest}.claim"
     delivered = claim.with_suffix(".delivered")
@@ -1894,11 +1990,16 @@ def mark_exact_once_email_delivered(
     display_subject: str,
     content: str,
     authenticated_producer_target: str,
+    producer_display_target: str = "",
 ) -> None:
     """Commit a successful SMTP return without changing the reserved bytes."""
 
     digest, payload = exact_once_email_record(
-        dedupe_subject, display_subject, content, authenticated_producer_target
+        dedupe_subject,
+        display_subject,
+        content,
+        authenticated_producer_target,
+        producer_display_target,
     )
     claims = manager_state_dir() / "human-email-exact-once"
     claim = claims / f"{digest}.claim"
@@ -1933,11 +2034,16 @@ def release_exact_once_email_claim(
     display_subject: str,
     content: str,
     authenticated_producer_target: str,
+    producer_display_target: str = "",
 ) -> None:
     """Release a reservation only after proving SMTP was never attempted."""
 
     digest, payload = exact_once_email_record(
-        dedupe_subject, display_subject, content, authenticated_producer_target
+        dedupe_subject,
+        display_subject,
+        content,
+        authenticated_producer_target,
+        producer_display_target,
     )
     claims = manager_state_dir() / "human-email-exact-once"
     claim = claims / f"{digest}.claim"
@@ -1984,10 +2090,15 @@ def claim_email_delivery(
     authenticated_producer_target: str,
     *,
     exact_once: bool,
+    producer_display_target: str = "",
 ) -> str:
     if exact_once:
         return exact_once_email_claim(
-            dedupe_subject, display_subject, content, authenticated_producer_target
+            dedupe_subject,
+            display_subject,
+            content,
+            authenticated_producer_target,
+            producer_display_target,
         )
     return (
         "new"
@@ -2006,10 +2117,15 @@ def release_email_delivery(
     authenticated_producer_target: str,
     *,
     exact_once: bool,
+    producer_display_target: str = "",
 ) -> None:
     if exact_once:
         release_exact_once_email_claim(
-            dedupe_subject, display_subject, content, authenticated_producer_target
+            dedupe_subject,
+            display_subject,
+            content,
+            authenticated_producer_target,
+            producer_display_target,
         )
     else:
         release_manager_email_key(dedupe_subject, display_subject, content, state_scope)
@@ -2047,6 +2163,7 @@ def main(argv: list[str]) -> int:
     digest_authorization: tuple[Path, bytes] | None = None
     non_completion_manager = False
     try:
+        validate_explicit_omnigent_identity(args.tmux_target)
         subject_tmux_target = footer_tmux_target(args.tmux_target, args.manager_human)
         if args.manager_human and subject_tmux_target is not None:
             validate_manager_route_identity(args.tmux_target, subject_tmux_target)
@@ -2164,6 +2281,15 @@ def main(argv: list[str]) -> int:
                 )
         if args.digest_authorization:
             digest_authorization = validate_digest_authorization(args)
+        display_target = email_subject_target(subject_tmux_target or "")
+        omnigent_sender = bool(
+            subject_tmux_target and OMNIGENT_TARGET_RE.fullmatch(subject_tmux_target)
+        )
+        omnigent_agent_session = agent_session_id() if omnigent_sender else None
+        if omnigent_sender and not omnigent_agent_session:
+            raise ValueError(
+                "OmniGent email thread lookup requires the current agent session identity"
+            )
         if args.title is None:
             if subject_tmux_target is None:
                 raise ValueError(
@@ -2175,7 +2301,7 @@ def main(argv: list[str]) -> int:
                 )
             session_bound_thread = bool(
                 args.completion_authorization or args.pending_notice_key
-            )
+            ) or omnigent_sender
             required_agent_session = (
                 agent_session_id() if session_bound_thread else None
             )
@@ -2183,47 +2309,54 @@ def main(argv: list[str]) -> int:
                 raise ValueError(
                     "email thread lookup requires the current agent session identity"
                 )
-            if route_profile is None:
-                if required_agent_session is None:
-                    subject, reply_headers = prepare_latest_thread_for_tmux_target(
-                        subject_tmux_target
-                    )
-                else:
-                    subject, reply_headers = prepare_latest_thread_for_tmux_target(
-                        subject_tmux_target,
-                        required_agent_session=required_agent_session,
-                    )
-            else:
-                subject, reply_headers = prepare_latest_thread_for_tmux_target(
-                    subject_tmux_target,
-                    route_profile=route_profile,
-                    required_agent_session=required_agent_session,
-                )
+            subject, reply_headers = prepare_latest_producer_thread(
+                subject_tmux_target,
+                display_target,
+                route_profile,
+                required_agent_session,
+            )
+            if OMNIGENT_TARGET_RE.fullmatch(subject_tmux_target):
+                subject = retag_subject(subject, display_target)
             title = subject
         elif args.digest_authorization:
             subject, reply_headers = (
-                fresh_manager_subject(args.title, subject_tmux_target or ""),
+                fresh_manager_subject(
+                    args.title,
+                    display_target,
+                ),
                 {},
             )
             title = args.title
         elif prepare_subject_and_headers is not None:
             if route_profile is None:
                 subject, reply_headers = prepare_subject_and_headers(
-                    args.title, subject_tmux_target or ""
+                    args.title,
+                    display_target,
+                    legacy_target=subject_tmux_target
+                    if OMNIGENT_TARGET_RE.fullmatch(subject_tmux_target or "")
+                    else "",
+                    required_agent_session=omnigent_agent_session,
                 )
             else:
                 subject, reply_headers = prepare_subject_and_headers(
                     args.title,
-                    subject_tmux_target or "",
+                    display_target,
                     route_profile=route_profile,
                     preserve_verified_thread_target=SOURCE2048_RECOVERY_THREAD_TARGET
                     if args.preserve_source2048_thread
                     else "",
+                    legacy_target=subject_tmux_target
+                    if OMNIGENT_TARGET_RE.fullmatch(subject_tmux_target or "")
+                    else "",
+                    required_agent_session=omnigent_agent_session,
                 )
             title = args.title
         else:
             subject, reply_headers = (
-                normalize_subject(args.title, subject_tmux_target or ""),
+                normalize_subject(
+                    args.title,
+                    display_target,
+                ),
                 {},
             )
             title = args.title
@@ -2326,7 +2459,10 @@ def main(argv: list[str]) -> int:
         and not args.guest_hees
     )
     delivery_state_subject = (
-        normalize_subject("pending item notice", subject_tmux_target or "")
+        normalize_subject(
+            "pending item notice",
+            display_target,
+        )
         if args.pending_notice_key
         else subject
     )
@@ -2358,6 +2494,7 @@ def main(argv: list[str]) -> int:
                     state_scope,
                     subject_tmux_target or "",
                     exact_once=exact_once,
+                    producer_display_target=display_target,
                 )
             except (OSError, ValueError) as exc:
                 print(
@@ -2389,6 +2526,7 @@ def main(argv: list[str]) -> int:
                     state_scope,
                     subject_tmux_target or "",
                     exact_once=exact_once,
+                    producer_display_target=display_target,
                 )
             raise
         if exact_once:
@@ -2398,6 +2536,7 @@ def main(argv: list[str]) -> int:
                     delivery_state_subject,
                     dedupe_content,
                     subject_tmux_target or "",
+                    display_target,
                 )
             except (OSError, ValueError) as exc:
                 print(
@@ -2543,6 +2682,7 @@ def main(argv: list[str]) -> int:
                 state_scope,
                 subject_tmux_target or "",
                 exact_once=exact_once,
+                producer_display_target=display_target,
             )
         except (OSError, ValueError) as exc:
             print(
@@ -2579,6 +2719,7 @@ def main(argv: list[str]) -> int:
                 state_scope,
                 subject_tmux_target or "",
                 exact_once=exact_once,
+                producer_display_target=display_target,
             )
         elif args.completion_authorization:
             release_completion_authorization(
@@ -2610,6 +2751,7 @@ def main(argv: list[str]) -> int:
                     state_scope,
                     subject_tmux_target or "",
                     exact_once=exact_once,
+                    producer_display_target=display_target,
                 )
             elif args.completion_authorization:
                 release_completion_authorization(
@@ -2658,6 +2800,7 @@ def main(argv: list[str]) -> int:
                 delivery_state_subject,
                 dedupe_content,
                 subject_tmux_target or "",
+                display_target,
             )
         except (OSError, ValueError) as exc:
             print(

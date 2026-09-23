@@ -142,7 +142,7 @@ class OmoTaskTests(unittest.TestCase):
                         "--tool",
                         "codex",
                         "--manager-target",
-                        "mgr:1",
+                        "wl:1",
                         "--workdir",
                         str(root),
                         "--window-name",
@@ -161,8 +161,9 @@ class OmoTaskTests(unittest.TestCase):
             assert metadata is not None
             self.assertEqual("omnigent://session-123", metadata.runat)
             self.assertEqual("codex", metadata.tool)
+            self.assertEqual("session-123", metadata.session_id)
             self.assertIn("x.md omnigent://session-123", (root / "TODO.md").read_text(encoding="utf-8"))
-            self.assertIn('<manager_delegation from="mgr:1">', send.call_args.args[1])
+            self.assertIn('<manager_delegation from="wl:1">', send.call_args.args[1])
             launch.assert_called_once_with("codex", root, "gpt-5.6-sol", "high", host_id="", title="task", codex_flags=())
 
     def test_parse_omnigent_accepts_only_one_full_access_codex_flag(self) -> None:
@@ -184,6 +185,81 @@ class OmoTaskTests(unittest.TestCase):
         for flags in (("--codex-flag=--profile",), ("--codex-flag=--dangerously-bypass-approvals-and-sandbox",) * 2):
             with self.subTest(flags=flags), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 parse_args([*base, *flags])
+
+    def test_parse_omnigent_accepts_antigravity_and_rejects_tmux_antigravity(self) -> None:
+        parsed = parse_args(
+            [
+                "--task-file",
+                "x.md",
+                "--omnigent",
+                "--tool",
+                "antigravity",
+                "--workdir",
+                "/work",
+                "--model",
+                "gemini-3.5-flash",
+                "--reasoning-effort",
+                "high",
+            ]
+        )
+        self.assertEqual("antigravity", parsed.tool)
+        self.assertTrue(parsed.omnigent)
+        implied = parse_args(
+            [
+                "--task-file",
+                "x.md",
+                "--tool",
+                "antigravity",
+                "--workdir",
+                "/work",
+                "--model",
+                "gemini-3.5-flash",
+                "--reasoning-effort",
+                "high",
+            ]
+        )
+        self.assertTrue(implied.omnigent)
+        self.assertEqual("antigravity", implied.tool)
+        for extra, pattern in (
+            (("--codex-flag=--dangerously-bypass-approvals-and-sandbox",), "only valid for Codex"),
+            (("--codex-flag=--profile",), "only valid for Codex"),
+            (("--reasoning-effort", "xhigh"), "low, medium, or high"),
+        ):
+            argv = [
+                "--task-file",
+                "x.md",
+                "--omnigent",
+                "--tool",
+                "antigravity",
+                "--workdir",
+                "/work",
+                "--model",
+                "gemini-3.5-flash",
+                "--reasoning-effort",
+                "high",
+                *extra,
+            ]
+            err = io.StringIO()
+            with self.subTest(extra=extra), contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+                parse_args(argv)
+            self.assertRegex(err.getvalue(), pattern)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parse_args(
+                [
+                    "--task-file",
+                    "x.md",
+                    "--tmux-session",
+                    "cfg",
+                    "--tool",
+                    "antigravity",
+                    "--workdir",
+                    "/work",
+                    "--model",
+                    "gemini-3.5-flash",
+                    "--reasoning-effort",
+                    "high",
+                ]
+            )
 
     @patch("omo_manager.omo_task.send_omnigent_message")
     @patch("omo_manager.omo_task.launch_omnigent_session", return_value="omnigent://session-123")

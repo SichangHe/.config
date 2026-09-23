@@ -14,6 +14,7 @@ import tempfile
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import UUID
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -28,19 +29,22 @@ from omo_manager.omo_blocking import load_task
 from omo_manager.omo_blocking import v2_enabled
 from omo_manager.omo_blocking_actor import request as blocking_request
 from omo_manager.omo_completion_email import plan_completion_email
+from omo_manager.omo_completion_email import digest_fields
 from omo_manager.omo_completion_email import require_owner_completion
 from omo_manager.omo_completion_email import send_completion_email
 from omo_manager.omo_task_context import current_active_task
 from omo_manager.omo_task_lock import task_file_lock
 from omo_manager.omo_task_status import parse_manager_child_metadata
+from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1
+from omo_manager.omo_task_metadata import runat_kind
 from omo_manager.omo_task_status import replace_if_unchanged
 from omo_manager.omo_task_status import replace_if_unchanged_locked
 from omo_manager.omo_task_status import same_file_state
 from omo_manager.omo_task_status import task_path
-from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1
 from omo_manager.omo_task_metadata import PENDING_ITEM_PROVENANCE_HELP
 from omo_manager.omo_task_metadata import frontmatter_parts
 from omo_manager.omo_task_metadata import human_authored_pending_items
+from omo_manager.omo_task_metadata import load_v2_mapping
 from omo_manager.omo_task_metadata import pending_items_with_origin
 from omo_manager.omo_task_metadata import pending_replacement_with_origin
 from omo_manager.omo_task_metadata import render_v1_pending_scalar
@@ -76,6 +80,25 @@ SOURCE1788_DISPOSITION_RECORD = (
     "(verified removed pending item: Human Source-1788 says the obsolete mailbox-limit blocker is stale; task status is running and fresh cleanup resumed. "
     "The item is reconciled without changing the separate book task or cleanup threshold items.)"
 )
+# 🧑 Human: "Terminate this agent. This is mostly a repeated send, and the task has been dispatched to another agent"
+SOURCE2050_ROOT = "/ssd1/sichangheagent/work_logs"
+SOURCE2050_TASK = Path("watcher_repair.md")
+SOURCE2050_TASK_SHA256 = "bd6201c3c6a89266a52fdc640d9f27887f2fd700c600bd7040bdb8cacb78754b"
+SOURCE2050_QUEUE_SHA256 = "f01d92a00d1d4365ef974a08615ec52f90b25d3f2effc720d98c1274cbc938c5"
+SOURCE2050_PANGRAM_TASK = Path("src1964_pangram.md")
+SOURCE2050_PANGRAM_SHA256 = "5a85ca7a0ee27d866936cd50c4bd07b8227d1aed60adcf1a32b8f8951cf1966e"
+SOURCE2050_TODO_SHA256 = "a20e84b2a6c03ea7fd93ef1504c392e3b4346efda4d81ae206c4f8f0a5b08432"
+SOURCE2050_ITEMS = (
+    "Provide and execute the supported no-email terminal closure for queue-empty src1964_pangram.md at live dw:15, preserving Pangram repository/artifact custody and sending no duplicate Human email.",
+    "Provide and execute supported no-email, no-duplicate recording of the three exact Human-authored Source-2003 items in src1964_pangram.md using acknowledgement Message-ID <178987548847.1940621.13225615650843671377@gmail.com> and authenticated report replay 1bec2f5a79d7e6b70bdf2032dd24fc03d071a70f7ebbb80156744c5650bcadf8; preserve Human provenance, dw:15 ownership, and send no further email.",
+)
+SOURCE2050_BODY_EVIDENCE = (
+    "(verified removed pending item: Reviewed commit 2887f74d57eb0b047638d3d9bbfef01ca804daae; authenticated dw:15 artifact executed once, recorded exactly three Source-2003 Human items with no recovery email; substantive reviewed answer then sent in existing thread as <178987810510.2416648.579597486821177650@gmail.com>.)",
+    "(pending marker cleared line=356: superseded: Superseded by Human Source-2050 termination of dw:15 and supported closure of src1964_pangram.md; no recovery or email remains authorized.)",
+)
+SOURCE2050_EVIDENCE = "Source-2003 recording is complete, and Human Source-2050 superseded the live dw:15 closure recovery; src1964_pangram.md is done and queue-empty under TODO previous."
+SOURCE2050_GUARD = "Source-2050 Pangram cleanup publication is incomplete; retain this item until exact evidence is revalidated."
+SOURCE2050_ROLLBACK_ATTEMPTS = 8
 
 COMMAND_ALIASES = {
     "list": "pending-list",
@@ -120,6 +143,8 @@ class Args:
     expected_source_sha256: str = ""
     expected_disposition_task_sha256: str = ""
     exact_line: str = ""
+    blocked_on: str = ""
+    expected_todo_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -157,6 +182,9 @@ class ParsedArgs(argparse.Namespace):
     expected_source_sha256: str = ""
     expected_disposition_task_sha256: str = ""
     exact_line: str = ""
+    blocked_on: str = ""
+    done: bool = False
+    expected_todo_sha256: str = ""
     item_origin: str
 
 
@@ -310,6 +338,40 @@ def parse_args(argv: list[str]) -> Args:
     _ = normalize_parser.add_argument("task_file", type=Path)
     _ = normalize_parser.add_argument("--line", type=int, required=True, help="One-based line number of the duplicate opening marker.")
 
+    closed_parser = subparsers.add_parser(
+        "closed-status-normalize",
+        help="Replace one invalid legacy `closed` status with a digest-bound blocked status without changing runtime state.",
+    )
+    closed_parser.set_defaults(command="closed-status-normalize")
+    _ = closed_parser.add_argument("task_file", type=Path)
+    _ = closed_parser.add_argument("--expected-task-sha256", required=True)
+    closed_outcome = closed_parser.add_mutually_exclusive_group(required=True)
+    _ = closed_outcome.add_argument("--blocked-on")
+    _ = closed_outcome.add_argument("--done", action="store_true")
+
+    report_parser = subparsers.add_parser(
+        "report-todo-remove",
+        help="Remove one digest-bound targetless TODO row for a preserved non-task report.",
+    )
+    report_parser.set_defaults(command="report-todo-remove")
+    _ = report_parser.add_argument("task_file", type=Path)
+    _ = report_parser.add_argument("--expected-task-sha256", required=True)
+    _ = report_parser.add_argument("--expected-todo-sha256", required=True)
+
+    session_parser = subparsers.add_parser(
+        "non-codex-session-normalize",
+        help="Move one invalid Codex UUID from non-Codex tmux frontmatter into body history.",
+    )
+    session_parser.set_defaults(command="non-codex-session-normalize")
+    _ = session_parser.add_argument("task_file", type=Path)
+    _ = session_parser.add_argument("--expected-task-sha256", required=True)
+
+    source2050_parser = subparsers.add_parser(
+        "recover-source2050-pangram-cleanup",
+        help="Remove the two digest-bound obsolete Pangram recovery items without email or lifecycle changes.",
+    )
+    source2050_parser.set_defaults(command="recover-source2050-pangram-cleanup", task_file=SOURCE2050_TASK)
+
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     try:
         root = parsed.root.resolve()
@@ -318,6 +380,36 @@ def parse_args(argv: list[str]) -> Args:
             if parsed.line < 2:
                 parser.error("--line must identify a later frontmatter block.")
             return Args(root, parsed.task_file, command, line=parsed.line)
+        if command == "closed-status-normalize":
+            expected = parsed.expected_task_sha256.strip()
+            if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+                parser.error("--expected-task-sha256 must be a lowercase SHA-256 digest.")
+            return Args(
+                root,
+                parsed.task_file,
+                command,
+                expected_task_sha256=expected,
+                blocked_on="" if parsed.done else normalized_comment_message(parsed.blocked_on),
+            )
+        if command == "report-todo-remove":
+            report_digest = parsed.expected_task_sha256.strip()
+            todo_digest = parsed.expected_todo_sha256.strip()
+            if any(re.fullmatch(r"[0-9a-f]{64}", value) is None for value in (report_digest, todo_digest)):
+                parser.error("report and TODO digests must be lowercase SHA-256 values.")
+            return Args(
+                root,
+                parsed.task_file,
+                command,
+                expected_task_sha256=report_digest,
+                expected_todo_sha256=todo_digest,
+            )
+        if command == "non-codex-session-normalize":
+            expected = parsed.expected_task_sha256.strip()
+            if re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+                parser.error("--expected-task-sha256 must be a lowercase SHA-256 digest.")
+            return Args(root, parsed.task_file, command, expected_task_sha256=expected)
+        if command == "recover-source2050-pangram-cleanup":
+            return Args(root, SOURCE2050_TASK, command, items=SOURCE2050_ITEMS, evidence=SOURCE2050_EVIDENCE)
         if command == "summary":
             task_files = tuple(parsed.task_file)
             return Args(root, task_files[0], command, task_files=task_files)
@@ -801,6 +893,107 @@ def pending_remove_evidence_comment(n_items: int, evidence: str) -> str:
     return f"verified removed pending {noun}: {evidence}"
 
 
+def restore_source2050_items(path: Path, original_items: tuple[str, ...]) -> bool:
+    """Restore the two cleanup items while preserving a concurrent watcher edit."""
+
+    for _attempt in range(SOURCE2050_ROLLBACK_ATTEMPTS):
+        before = path.stat()
+        current = path.read_text(encoding="utf-8")
+        metadata = require_metadata(current, path.parent)
+        items = list(metadata.pending_task_items)
+        if items.count(SOURCE2050_GUARD) > 1:
+            raise TaskFrontmatterError("Source-2050 rollback found duplicate publication guards.")
+        items = [item for item in items if item != SOURCE2050_GUARD]
+        for item in SOURCE2050_ITEMS:
+            if items.count(item) > 1:
+                raise TaskFrontmatterError("Source-2050 rollback found duplicate Pangram recovery items.")
+            if item in items:
+                continue
+            original_idx = original_items.index(item)
+            successors = (candidate for candidate in original_items[original_idx + 1 :] if candidate in items)
+            successor = next(successors, None)
+            items.insert(items.index(successor) if successor is not None else len(items), item)
+        restored = render_pending_items(current, tuple(items))
+        try:
+            replace_if_unchanged_locked(path, restored, before)
+            return True
+        except TaskFrontmatterError:
+            continue
+    return False
+
+
+def recover_source2050_pangram_cleanup(args: Args, path: Path) -> int:
+    """Remove only the two obsolete Pangram recovery items from exact reviewed state."""
+
+    pangram = args.root / SOURCE2050_PANGRAM_TASK
+    todo = args.root / "TODO.md"
+    with ExitStack() as locks:
+        for locked_path in sorted({path, pangram, todo}, key=str):
+            locks.enter_context(task_file_lock(locked_path))
+        task_before = path.stat()
+        pangram_before = pangram.stat()
+        todo_before = todo.stat()
+        task_bytes = path.read_bytes()
+        pangram_bytes = pangram.read_bytes()
+        todo_bytes = todo.read_bytes()
+        if (
+            str(args.root.resolve()) != SOURCE2050_ROOT
+            or path != args.root / SOURCE2050_TASK
+            or hashlib.sha256(task_bytes).hexdigest() != SOURCE2050_TASK_SHA256
+            or hashlib.sha256(pangram_bytes).hexdigest() != SOURCE2050_PANGRAM_SHA256
+            or hashlib.sha256(todo_bytes).hexdigest() != SOURCE2050_TODO_SHA256
+        ):
+            raise TaskFrontmatterError("Source-2050 Pangram cleanup state changed from its reviewed digests.")
+        task_text = task_bytes.decode("utf-8")
+        task_metadata = require_metadata(task_text, args.root)
+        pangram_metadata = require_metadata(pangram_bytes.decode("utf-8"), args.root)
+        queue_sha256 = digest_fields("pending-queue-v1", *task_metadata.pending_task_items)
+        if (
+            task_metadata.status != "running"
+            or task_metadata.runat != "config:35"
+            or task_metadata.managerat != "config:39"
+            or task_metadata.is_manager
+            or queue_sha256 != SOURCE2050_QUEUE_SHA256
+            or args.items != SOURCE2050_ITEMS
+            or args.evidence != SOURCE2050_EVIDENCE
+            or any(task_metadata.pending_task_items.count(item) != 1 for item in SOURCE2050_ITEMS)
+            or any(task_text.splitlines().count(line) != 1 for line in SOURCE2050_BODY_EVIDENCE)
+            or pangram_metadata.status != "done"
+            or pangram_metadata.pending_task_items
+            or pangram_metadata.runat != "dw:15"
+            or todo_bytes.decode("utf-8").splitlines().count("src1964_pangram.md dw:15") != 1
+        ):
+            raise TaskFrontmatterError("Source-2050 Pangram cleanup bindings changed.")
+        removed, count = remove_pending_items(task_text, SOURCE2050_ITEMS)
+        if count != len(SOURCE2050_ITEMS):
+            raise TaskFrontmatterError("Source-2050 Pangram cleanup did not remove exactly two items.")
+        removed_metadata = require_metadata(removed, args.root)
+        prepared = render_pending_items(removed, (*removed_metadata.pending_task_items, SOURCE2050_GUARD))
+        updated = append_comment(removed, pending_remove_evidence_comment(count, SOURCE2050_EVIDENCE))
+        if (
+            not same_file_state(pangram_before, pangram.stat())
+            or pangram.read_bytes() != pangram_bytes
+            or not same_file_state(todo_before, todo.stat())
+            or todo.read_bytes() != todo_bytes
+        ):
+            raise TaskFrontmatterError("Source-2050 Pangram completion evidence changed before cleanup.")
+        replace_if_unchanged_locked(path, prepared, task_before)
+        prepared_before = path.stat()
+        if (
+            path.read_bytes() != prepared.encode()
+            or not same_file_state(pangram_before, pangram.stat())
+            or pangram.read_bytes() != pangram_bytes
+            or not same_file_state(todo_before, todo.stat())
+            or todo.read_bytes() != todo_bytes
+        ):
+            restored = restore_source2050_items(path, task_metadata.pending_task_items)
+            outcome = "watcher change rolled back" if restored else "publication guard retained"
+            raise TaskFrontmatterError(f"Source-2050 Pangram completion evidence changed during cleanup publication; {outcome}.")
+        replace_if_unchanged_locked(path, updated, prepared_before)
+    print("removed exactly two obsolete Pangram recovery items; no email or lifecycle action taken")
+    return 0
+
+
 def append_comment(text: str, comment: str) -> str:
     _ = require_v1_metadata(text)
     value = normalized_comment(comment)
@@ -1221,6 +1414,58 @@ def write_if_changed(path: Path, text: str, updated: str, before: os.stat_result
         replace_if_unchanged(path, updated, before)
 
 
+def normalize_closed_status(text: str, blocked_on: str, root: Path) -> str:
+    lines = text.splitlines(keepends=True)
+    closing = next((idx for idx, line in enumerate(lines[1:], start=1) if line.strip() == "---"), None)
+    if not lines or lines[0].strip() != "---" or closing is None:
+        raise TaskFrontmatterError("task frontmatter opening marker has no closing marker.")
+    status_rows = [idx for idx in range(1, closing) if lines[idx].partition(":")[0].strip() == "status"]
+    blocker_rows = [idx for idx in range(1, closing) if lines[idx].partition(":")[0].strip() == "blocked_on"]
+    if len(status_rows) != 1 or lines[status_rows[0]].partition(":")[2].strip() != "closed" or blocker_rows:
+        raise TaskFrontmatterError("closed-status normalization requires exactly one `status: closed` and no `blocked_on` field.")
+    idx = status_rows[0]
+    newline = lines[idx][len(lines[idx].rstrip("\r\n")) :]
+    replacement = [f"status: blocked{newline}", f"blocked_on: {blocked_on}{newline}"] if blocked_on else [f"status: done{newline}"]
+    lines[idx : idx + 1] = replacement
+    updated = "".join(lines)
+    metadata = require_metadata(updated, root)
+    if metadata.version != TASK_FRONTMATTER_V1:
+        raise TaskFrontmatterError("closed-status normalization only supports v1 task records.")
+    if blocked_on:
+        if metadata.status != "blocked" or metadata.blocked_on != blocked_on or not metadata.pending_task_items:
+            raise TaskFrontmatterError("blocked closed-status normalization requires a nonempty preserved queue.")
+    elif metadata.status != "done" or metadata.pending_task_items:
+        raise TaskFrontmatterError("done closed-status normalization requires an empty queue.")
+    elif not metadata.session_id or re.search(rf"\(human closed `{re.escape(metadata.session_id)}` as done\)", text) is None:
+        raise TaskFrontmatterError("done closed-status normalization requires exact recorded Human closure of the session.")
+    return updated
+
+
+def normalize_non_codex_session(text: str, root: Path) -> str:
+    lines = text.splitlines(keepends=True)
+    closing = next((idx for idx, line in enumerate(lines[1:], start=1) if line.strip() == "---"), None)
+    if not lines or lines[0].strip() != "---" or closing is None:
+        raise TaskFrontmatterError("task frontmatter opening marker has no closing marker.")
+    session_rows = [idx for idx in range(1, closing) if lines[idx].partition(":")[0].strip() == "session_id"]
+    if len(session_rows) != 1:
+        raise TaskFrontmatterError("non-Codex session normalization requires exactly one `session_id` field.")
+    session_id = lines[session_rows[0]].partition(":")[2].strip()
+    try:
+        UUID(session_id)
+    except ValueError as exc:
+        raise TaskFrontmatterError("non-Codex session normalization requires a Codex UUID.") from exc
+    del lines[session_rows[0]]
+    updated = "".join(lines)
+    metadata = require_metadata(updated, root)
+    if metadata.tool == "codex" or runat_kind(metadata.runat) != "tmux":
+        raise TaskFrontmatterError("non-Codex session normalization requires a non-Codex tmux task.")
+    note = f"(historical Codex session_id preserved after tool migration: `{session_id}`.)"
+    if note in updated:
+        raise TaskFrontmatterError("historical session note already exists.")
+    separator = "" if updated.endswith("\n") else preferred_newline(updated)
+    return f"{updated}{separator}{note}{preferred_newline(updated)}"
+
+
 def run(args: Args) -> int:
     try:
         command = canonical_command(args.command)
@@ -1278,7 +1523,78 @@ def run(args: Args) -> int:
 
         path = task_path(args.root, require_task_file(args.task_file))
         before = path.stat()
-        text = path.read_text(encoding="utf-8")
+        raw_bytes = path.read_bytes()
+        text = raw_bytes.decode("utf-8")
+        if command == "recover-source2050-pangram-cleanup":
+            return recover_source2050_pangram_cleanup(args, path)
+        if command == "closed-status-normalize":
+            if hashlib.sha256(raw_bytes).hexdigest() != args.expected_task_sha256:
+                raise TaskFrontmatterError("raw task bytes do not match --expected-task-sha256.")
+            updated = normalize_closed_status(text, args.blocked_on, args.root)
+            with task_file_lock(path):
+                current_before = path.stat()
+                current_bytes = path.read_bytes()
+                if not same_file_state(before, current_before) or current_bytes != raw_bytes:
+                    raise TaskFrontmatterError("task changed before closed-status normalization.")
+                replace_if_unchanged_locked(path, updated, current_before)
+            outcome = "blocked" if args.blocked_on else "done"
+            print(f"normalized invalid closed status in {path.name} to {outcome} without runtime mutation")
+            return 0
+        if command == "report-todo-remove":
+            todo = args.root / "TODO.md"
+            if path == todo:
+                raise TaskFrontmatterError("report TODO reconciliation requires a report distinct from TODO.md.")
+            with ExitStack() as locks:
+                for locked_path in sorted({path, todo}, key=str):
+                    locks.enter_context(task_file_lock(locked_path))
+                current_before = path.stat()
+                current_bytes = path.read_bytes()
+                todo_before = todo.stat()
+                todo_bytes = todo.read_bytes()
+                todo_text = todo_bytes.decode("utf-8")
+                if not same_file_state(before, current_before) or current_bytes != raw_bytes:
+                    raise TaskFrontmatterError("report changed before TODO reconciliation.")
+                if hashlib.sha256(current_bytes).hexdigest() != args.expected_task_sha256:
+                    raise TaskFrontmatterError("report bytes do not match --expected-task-sha256.")
+                if hashlib.sha256(todo_bytes).hexdigest() != args.expected_todo_sha256:
+                    raise TaskFrontmatterError("TODO bytes do not match --expected-todo-sha256.")
+                parts = frontmatter_parts(text)
+                if parts is not None:
+                    keys = set(load_v2_mapping("\n".join(parts[0])))
+                    task_keys = {"version", "status", "runat", "tool", "managerat", "is_manager", "pending_task_items"}
+                    if keys & task_keys:
+                        _ = parse_task_metadata(text, args.root)
+                        raise TaskFrontmatterError("report TODO reconciliation requires a file without task frontmatter.")
+                relative = path.relative_to(args.root).as_posix()
+                section = ""
+                matches: list[int] = []
+                lines = todo_text.splitlines(keepends=True)
+                for idx, line in enumerate(lines):
+                    stripped = line.strip()
+                    if stripped.endswith(":"):
+                        section = stripped[:-1].casefold()
+                    elif stripped == relative:
+                        if section != "human pending":
+                            raise TaskFrontmatterError("targetless report row must be under `human pending`.")
+                        matches.append(idx)
+                if len(matches) != 1:
+                    raise TaskFrontmatterError("report TODO reconciliation requires exactly one targetless row.")
+                del lines[matches[0]]
+                replace_if_unchanged_locked(todo, "".join(lines), todo_before)
+            print(f"removed targetless non-task report row for {path.name}; report bytes preserved")
+            return 0
+        if command == "non-codex-session-normalize":
+            if hashlib.sha256(raw_bytes).hexdigest() != args.expected_task_sha256:
+                raise TaskFrontmatterError("raw task bytes do not match --expected-task-sha256.")
+            updated = normalize_non_codex_session(text, args.root)
+            with task_file_lock(path):
+                current_before = path.stat()
+                current_bytes = path.read_bytes()
+                if not same_file_state(before, current_before) or current_bytes != raw_bytes:
+                    raise TaskFrontmatterError("task changed before non-Codex session normalization.")
+                replace_if_unchanged_locked(path, updated, current_before)
+            print(f"moved invalid frontmatter session evidence into {path.name} body history")
+            return 0
         initial_metadata = parse_task_metadata(text, args.root)
         if initial_metadata is not None and initial_metadata.version == TASK_FRONTMATTER_V1 and v2_enabled(args.root):
             raise TaskFrontmatterError("v1 task writes are disabled after v2 enablement")

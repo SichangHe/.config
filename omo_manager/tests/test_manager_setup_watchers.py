@@ -16,6 +16,12 @@ ROOT = Path(__file__).resolve().parents[2]
 SETUP = ROOT / "omo_manager" / "omo_manager_setup_watchers.sh"
 TEST_MANAGER_TARGET = "omo-watcher-test:1"
 TMUX = shutil.which("tmux")
+SLEEP = shutil.which("sleep")
+FLOCK = shutil.which("flock")
+READLINK = shutil.which("readlink")
+SED = shutil.which("sed")
+SETSID = shutil.which("setsid")
+CHMOD = shutil.which("chmod")
 
 
 class WatcherSetupTests(unittest.TestCase):
@@ -39,11 +45,142 @@ class WatcherSetupTests(unittest.TestCase):
         root.mkdir(exist_ok=True)
         state.mkdir(exist_ok=True)
         fake_uv_log = tmp / "fake-uv.log"
+        fake_sleep = bin_dir / "sleep"
+        fake_sleep.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${FAKE_UV_MODE:-real}" = root-swap-ready || "${FAKE_UV_MODE:-real}" = stopped-ready || "${FAKE_UV_MODE:-real}" = ancestor-loss-ready || "${FAKE_UV_MODE:-real}" = real-root-replaced-ready ]] \
+  && [ "${1:-}" = 0.2 ] \
+  && mkdir "${FAKE_SLEEP_BARRIER:?}.claim" 2>/dev/null; then
+  printf 'waiting\n' >"${FAKE_SLEEP_BARRIER}.waiting"
+  while [ ! -e "${FAKE_SLEEP_BARRIER}.released" ]; do
+    "${REAL_SLEEP:?}" 0.01
+  done
+  exit 0
+fi
+exec "${REAL_SLEEP:?}" "$@"
+""",
+            encoding="utf-8",
+        )
+        fake_sleep.chmod(0o755)
+        fake_flock = bin_dir / "flock"
+        fake_flock.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+if [ "${FAKE_UV_MODE:-real}" = pre-teardown-root-swap ] \
+  && [ "${1:-}" = -n ] \
+  && [ "${2:-}" = 8 ] \
+  && mkdir "${FAKE_FLOCK_BARRIER:?}.claim" 2>/dev/null; then
+  mv "${FAKE_PREFLIGHT_ROOT:?}" "${FAKE_PREFLIGHT_ROOT}.moved"
+  ln -s "${FAKE_PREFLIGHT_ROOT}.moved" "${FAKE_PREFLIGHT_ROOT}"
+fi
+exec "${REAL_FLOCK:?}" "$@"
+""",
+            encoding="utf-8",
+        )
+        fake_flock.chmod(0o755)
+        fake_readlink = bin_dir / "readlink"
+        fake_readlink.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+if [ "${FAKE_UV_MODE:-real}" = final-trailing-symlink ] \
+  && [ "${3:-}" = "${FAKE_FINAL_ROOT:-}" ] \
+  && mkdir "${FAKE_READLINK_BARRIER:?}.claim" 2>/dev/null; then
+  mv "${FAKE_FINAL_ROOT_LEXICAL:?}" "${FAKE_FINAL_ROOT_LEXICAL}.moved"
+  ln -s "${FAKE_FINAL_ROOT_LEXICAL}.moved" "${FAKE_FINAL_ROOT_LEXICAL}"
+fi
+if [ "${FAKE_UV_MODE:-real}" = final-auth-root-swap ] \
+  && [ "${1:-}" = -f ] \
+  && [ "${2:-}" = -- ] \
+  && [ "${3:-}" = "${FAKE_TEARDOWN_ROOT:-}" ]; then
+  readlink_count=0
+  if [ -r "${FAKE_READLINK_COUNT:?}" ]; then
+    read -r readlink_count <"${FAKE_READLINK_COUNT}"
+  fi
+  readlink_count=$((readlink_count + 1))
+  printf '%s\n' "$readlink_count" >"${FAKE_READLINK_COUNT}"
+  if [ "$readlink_count" -eq 3 ] \
+    && mkdir "${FAKE_READLINK_BARRIER:?}.claim" 2>/dev/null; then
+    mv "${FAKE_TEARDOWN_ROOT}" "${FAKE_TEARDOWN_ROOT}.moved"
+    mkdir "${FAKE_TEARDOWN_ROOT}"
+  fi
+fi
+exec "${REAL_READLINK:?}" "$@"
+""",
+            encoding="utf-8",
+        )
+        fake_readlink.chmod(0o755)
+        fake_sed = bin_dir / "sed"
+        fake_sed.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${FAKE_UV_MODE:-real}" = teardown-real-root-swap || "${FAKE_UV_MODE:-real}" = dead-pidfile-root-swap || "${FAKE_UV_MODE:-real}" = stale-pidfile-root-swap ]] \
+  && [ "${3:-}" = "${FAKE_CURRENT_PID_FILE:-}" ] \
+  && mkdir "${FAKE_SED_BARRIER:?}.claim" 2>/dev/null; then
+  mv "${FAKE_TEARDOWN_ROOT:?}" "${FAKE_TEARDOWN_ROOT}.moved"
+  mkdir "${FAKE_TEARDOWN_ROOT}"
+fi
+exec "${REAL_SED:?}" "$@"
+""",
+            encoding="utf-8",
+        )
+        fake_sed.chmod(0o755)
+        fake_setsid = bin_dir / "setsid"
+        fake_setsid.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${FAKE_UV_MODE:-real}" = launch-timeout || "${FAKE_UV_MODE:-real}" = launch-timeout-root-swap ]]; then
+  launch_pid_file=""
+  for arg in "$@"; do
+    case "$arg" in
+      */.pending-supervisor.*.pid) launch_pid_file="$arg"; break ;;
+    esac
+  done
+  [ -n "$launch_pid_file" ] || exit 13
+  : >"$launch_pid_file"
+  printf '%s\n' "$$" >"${FAKE_TIMEOUT_LAUNCHER_PID:?}"
+  if [ "${FAKE_UV_MODE:-real}" = launch-timeout-root-swap ]; then
+    mv "${FAKE_TEARDOWN_ROOT:?}" "${FAKE_TEARDOWN_ROOT}.moved"
+    mkdir "${FAKE_TEARDOWN_ROOT}"
+  fi
+  exec "${REAL_SETSID:?}" bash -c 'while :; do sleep 30; done' launch-timeout-watch-supervisor
+fi
+exec "${REAL_SETSID:?}" "$@"
+""",
+            encoding="utf-8",
+        )
+        fake_setsid.chmod(0o755)
+        fake_chmod = bin_dir / "chmod"
+        fake_chmod.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+if [ "${FAKE_UV_MODE:-real}" = post-pidfile-guardian-exit ] \
+  && [ "${2:-}" = "${FAKE_STABLE_PID_FILE:-}" ] \
+  && mkdir "${FAKE_CHMOD_BARRIER:?}.claim" 2>/dev/null; then
+  supervisor_pid="$(sed -n 's/^pid=//p' "$2" | sed -n '1p')"
+  kill -TERM "$supervisor_pid"
+  for (( attempt=0; attempt<200; attempt++ )); do
+    if [ ! -r "/proc/$supervisor_pid/stat" ]; then
+      break
+    fi
+    supervisor_stat="$(<"/proc/$supervisor_pid/stat")"
+    supervisor_rest="${supervisor_stat##*) }"
+    [ "${supervisor_rest%% *}" = Z ] && break
+    "${REAL_SLEEP:?}" 0.01
+  done
+fi
+exec "${REAL_CHMOD:?}" "$@"
+""",
+            encoding="utf-8",
+        )
+        fake_chmod.chmod(0o755)
         fake_uv = bin_dir / "uv"
+        # 🧑 "If harness fake watcher exits too early, make it realistically stay alive through acceptance and prove cleanup."
         fake_uv.write_text(
             """#!/usr/bin/env bash
 set -euo pipefail
 printf 'OMO_MANAGER_TMUX_TARGET=%s\\n' "${OMO_MANAGER_TMUX_TARGET-}" >>"${FAKE_UV_LOG:?}"
+printf 'FAKE_UV_PID=%s\\n' "$$" >>"${FAKE_UV_LOG:?}"
 printf '%s\\n' "$*" >>"${FAKE_UV_LOG:?}"
 is_email=0
 script=""
@@ -59,12 +196,126 @@ for arg in "$script" "$@"; do
 done
 case "${FAKE_UV_MODE:-real}" in
   real) exec "$script" "$@" ;;
-  wrapper) exec python3 -c 'import time; time.sleep(5)' "$script" "$@" ;;
-  spoof-argv0) exec -a "${script##*/}" sleep "${FAKE_UV_SLEEP:-30}" ;;
-  wrong-child) exec -a not_watcher sleep "${FAKE_UV_SLEEP:-30}" ;;
-  email-wrong-child)
+  wrapper) exec python3 -c 'import signal; signal.pause()' "$script" "$@" ;;
+  spoof-argv0) exec -a "${script##*/}" sleep infinity ;;
+  wrong-child) exec -a not_watcher sleep infinity ;;
+  root-swap-ready|stopped-ready|ancestor-loss-ready|real-root-replaced-ready)
+    root_arg=""
+    ready_file=""
+    next_arg=""
+    for arg in "$@"; do
+      case "$next_arg" in
+        root) root_arg="$arg"; next_arg=""; continue ;;
+        ready) ready_file="$arg"; next_arg=""; continue ;;
+      esac
+      case "$arg" in
+        --root) next_arg=root ;;
+        --ready-file) next_arg=ready ;;
+      esac
+    done
+    while [ ! -e "${FAKE_SLEEP_BARRIER:?}.waiting" ]; do
+      "${REAL_SLEEP:?}" 0.01
+    done
+    root_arg_lexical="$root_arg"
+    while [ "$root_arg_lexical" != / ] && [[ "$root_arg_lexical" == */ ]]; do
+      root_arg_lexical="${root_arg_lexical%/}"
+    done
+    if [ "${FAKE_UV_MODE:-real}" = real-root-replaced-ready ]; then
+      mv "$root_arg_lexical" "$root_arg_lexical.moved"
+      mkdir "$root_arg_lexical"
+    fi
+    "$script" "$@" &
+    watcher_pid=$!
+    while [ ! -s "$ready_file" ]; do
+      if ! kill -0 "$watcher_pid" 2>/dev/null; then
+        wait "$watcher_pid"
+        exit 8
+      fi
+      "${REAL_SLEEP:?}" 0.01
+    done
+    ready_pid="$(sed -n 's/^pid=//p' "$ready_file" | sed -n '1p')"
+    [ "$ready_pid" = "$watcher_pid" ] || exit 9
+    cp "$ready_file" "${FAKE_READY_SNAPSHOT:?}"
+    if [ "${FAKE_UV_MODE:-real}" = stopped-ready ]; then
+      kill -STOP "$watcher_pid"
+      watcher_stat="$(<"/proc/$watcher_pid/stat")"
+      watcher_rest="${watcher_stat##*) }"
+      [ "${watcher_rest%% *}" = T ] || exit 10
+    fi
+    printf 'AUTHENTIC_WATCHER_PID=%s\n' "$watcher_pid" >>"${FAKE_UV_LOG:?}"
+    if [ "${FAKE_UV_MODE:-real}" = root-swap-ready ]; then
+      mv "$root_arg_lexical" "$root_arg_lexical.moved"
+      ln -s "$root_arg_lexical.moved" "$root_arg_lexical"
+    elif [ "${FAKE_UV_MODE:-real}" = ancestor-loss-ready ]; then
+      root_parent="$(dirname "$root_arg")"
+      [ -L "$root_parent" ] || exit 11
+      rm "$root_parent"
+    fi
+    printf 'released\n' >"${FAKE_SLEEP_BARRIER}.released"
+    wait "$watcher_pid"
+    ;;
+  mismatched-root-ready|mismatched-ready-file)
+    root_arg=""
+    ready_file=""
+    next_arg=""
+    for arg in "$@"; do
+      case "$next_arg" in
+        root) root_arg="$arg"; next_arg=""; continue ;;
+        ready) ready_file="$arg"; next_arg=""; continue ;;
+      esac
+      case "$arg" in
+        --root) next_arg=root ;;
+        --ready-file) next_arg=ready ;;
+      esac
+    done
+    launched_root="$root_arg"
+    launched_ready_file="$ready_file"
+    if [ "${FAKE_UV_MODE:-real}" = mismatched-root-ready ]; then
+      launched_root="${FAKE_WRONG_ROOT:?}"
+    else
+      launched_ready_file="$ready_file.other"
+    fi
+    "$script" --root "$launched_root" --ready-file "$launched_ready_file" &
+    watcher_pid=$!
+    while [ ! -s "$launched_ready_file" ]; do
+      if ! kill -0 "$watcher_pid" 2>/dev/null; then
+        wait "$watcher_pid"
+        exit 12
+      fi
+      "${REAL_SLEEP:?}" 0.01
+    done
+    root_dev="$(stat -Lc '%d' "$root_arg")"
+    root_ino="$(stat -Lc '%i' "$root_arg")"
+    umask 077
+    printf 'version=omo-pending-watch-ready-v1\npid=%s\nroot=%s\nroot_dev=%s\nroot_ino=%s\n' \
+      "$watcher_pid" "$root_arg" "$root_dev" "$root_ino" >"$ready_file"
+    cp "$ready_file" "${FAKE_READY_SNAPSHOT:?}"
+    printf 'AUTHENTIC_WATCHER_PID=%s\n' "$watcher_pid" >>"${FAKE_UV_LOG:?}"
+    wait "$watcher_pid"
+    ;;
+  late-fork-failure|late-setsid-failure)
+    late_fork() {
+      python3 -c 'import os, pathlib, signal, sys; os.setsid() if sys.argv[2].startswith("late-setsid") else os.setpgrp(); pathlib.Path(sys.argv[1]).write_text(f"{os.getpid()} {os.getpgrp()} {os.getsid(0)}\\n", encoding="utf-8"); signal.pause()' "${FAKE_LATE_INFO:?}" "${FAKE_UV_MODE}" &
+      while [ ! -s "${FAKE_LATE_INFO}" ]; do
+        "${REAL_SLEEP:?}" 0.01
+      done
+      read -r late_pid late_pgid late_sid <"${FAKE_LATE_INFO}"
+      printf 'LATE_FORK_PID=%s\nLATE_FORK_PGID=%s\nLATE_FORK_SID=%s\n' "$late_pid" "$late_pgid" "$late_sid" >>"${FAKE_UV_LOG:?}"
+      exit 0
+    }
+    trap late_fork TERM
+    while :; do
+      "${REAL_SLEEP:?}" 1
+    done
+    ;;
+  email-wrong-child|email-health-root-swap)
     if [ "$is_email" -eq 1 ]; then
-      exec -a not_watcher sleep "${FAKE_UV_SLEEP:-30}"
+      if [ "${FAKE_UV_MODE:-real}" = email-health-root-swap ] \
+        && mkdir "${FAKE_HEALTH_SWAP_BARRIER:?}.claim" 2>/dev/null; then
+        mv "${FAKE_TEARDOWN_ROOT:?}" "${FAKE_TEARDOWN_ROOT}.moved"
+        mkdir "${FAKE_TEARDOWN_ROOT}"
+      fi
+      exec -a not_watcher sleep infinity
     fi
     exec "$script" "$@"
     ;;
@@ -95,7 +346,29 @@ esac
             "OMO_MANAGER_EMAIL_SUPERVISOR_STARTUP_GRACE_S": email_grace_s,
             "FAKE_UV_LOG": str(fake_uv_log),
             "FAKE_UV_MODE": fake_uv_mode,
-            "FAKE_UV_SLEEP": "5",
+            "FAKE_SLEEP_BARRIER": str(tmp / "fake-sleep-barrier"),
+            "FAKE_READY_SNAPSHOT": str(tmp / "fake-ready-snapshot"),
+            "FAKE_FLOCK_BARRIER": str(tmp / "fake-flock-barrier"),
+            "FAKE_PREFLIGHT_ROOT": str(root),
+            "FAKE_READLINK_BARRIER": str(tmp / "fake-readlink-barrier"),
+            "FAKE_READLINK_COUNT": str(tmp / "fake-readlink-count"),
+            "FAKE_SED_BARRIER": str(tmp / "fake-sed-barrier"),
+            "FAKE_HEALTH_SWAP_BARRIER": str(tmp / "fake-health-swap-barrier"),
+            "FAKE_CHMOD_BARRIER": str(tmp / "fake-chmod-barrier"),
+            "FAKE_FINAL_ROOT": str(root),
+            "FAKE_FINAL_ROOT_LEXICAL": str(root),
+            "FAKE_TEARDOWN_ROOT": str(root),
+            "FAKE_CURRENT_PID_FILE": str(state / "pending-supervisor.pid"),
+            "FAKE_LATE_INFO": str(tmp / "fake-late-info"),
+            "FAKE_TIMEOUT_LAUNCHER_PID": str(tmp / "fake-timeout-launcher-pid"),
+            "FAKE_STABLE_PID_FILE": str(state / "pending-supervisor.pid"),
+            "FAKE_WRONG_ROOT": str(tmp / "wrong-work-logs"),
+            "REAL_FLOCK": str(FLOCK),
+            "REAL_READLINK": str(READLINK),
+            "REAL_SED": str(SED),
+            "REAL_SETSID": str(SETSID),
+            "REAL_CHMOD": str(CHMOD),
+            "REAL_SLEEP": str(SLEEP),
         }
         env.update(extra_env or {})
         return subprocess.run([str(setup)], env=env, text=True, capture_output=True, timeout=timeout_s, check=False)
@@ -185,6 +458,48 @@ esac
         rest = stat.rsplit(") ", 1)[1].split()
         return rest[19]
 
+    def supervisor_pidfile_contents(
+        self, pid: int, token: str, root: Path, *, containment: str = ""
+    ) -> str:
+        root_stat = root.stat()
+        contents = (
+            f"pid={pid}\n"
+            f"start={self.process_start_ticks(pid)}\n"
+            f"token={token}\n"
+            f"root_dev={root_stat.st_dev}\n"
+            f"root_ino={root_stat.st_ino}\n"
+        )
+        if containment:
+            contents += f"containment={containment}\n"
+        return contents
+
+    def start_owned_pending_supervisor(self, root: Path, state: Path, token: str) -> subprocess.Popen[str]:
+        launch_pid_file = state / f".pending-supervisor.{token}.pid"
+        current = subprocess.Popen(
+            [
+                "bash",
+                "-c",
+                "while :; do sleep 30; done # pending watcher exited status",
+                "pending-watch-supervisor",
+                str(launch_pid_file),
+                token,
+                "uv",
+                "run",
+                "--project",
+                str(ROOT / "omo_manager"),
+                str(ROOT / "omo_manager" / "omo_pending_watch.py"),
+                "--root",
+                str(root),
+            ],
+            start_new_session=True,
+            text=True,
+        )
+        (state / "pending-supervisor.pid").write_text(
+            self.supervisor_pidfile_contents(current.pid, token, root),
+            encoding="utf-8",
+        )
+        return current
+
     def process_active(self, pid: int) -> bool:
         try:
             stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
@@ -192,6 +507,22 @@ esac
             return False
         state = stat.rsplit(") ", 1)[1].split()[0]
         return state != "Z"
+
+    def fake_uv_pids(self, tmp: Path) -> list[int]:
+        return [int(match.group(1)) for line in (tmp / "fake-uv.log").read_text(encoding="utf-8").splitlines() if (match := re.fullmatch(r"FAKE_UV_PID=([0-9]+)", line)) is not None]
+
+    def authentic_watcher_pids(self, tmp: Path) -> list[int]:
+        return [int(match.group(1)) for line in (tmp / "fake-uv.log").read_text(encoding="utf-8").splitlines() if (match := re.fullmatch(r"AUTHENTIC_WATCHER_PID=([0-9]+)", line)) is not None]
+
+    def late_fork_pids(self, tmp: Path) -> list[int]:
+        return [int(match.group(1)) for line in (tmp / "fake-uv.log").read_text(encoding="utf-8").splitlines() if (match := re.fullmatch(r"LATE_FORK_PID=([0-9]+)", line)) is not None]
+
+    def wait_for_process_exit(self, pid: int) -> None:
+        for _ in range(50):
+            if not Path(f"/proc/{pid}").exists():
+                return
+            time.sleep(0.1)
+        self.fail(f"timed out waiting for process {pid} to exit")
 
     def wait_for_file(self, path: Path) -> None:
         for _ in range(50):
@@ -203,18 +534,30 @@ esac
     def test_setup_writes_pidfile_and_verifies_child_watcher(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
+            watcher_pid: int | None = None
             try:
                 result = self.run_setup(tmp)
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertIn("watchers ready", result.stdout)
                 self.assertTrue((tmp / "state" / "pending-supervisor.pid").exists())
-                pending_pid = self.pid_from_file(tmp / "state" / "pending-supervisor.pid")
+                pidfile = tmp / "state" / "pending-supervisor.pid"
+                pidfile_text = pidfile.read_text(encoding="utf-8")
+                self.assertIn("containment=subreaper-v1\n", pidfile_text)
+                root_stat = (tmp / "work_logs").stat()
+                self.assertIn(f"root_dev={root_stat.st_dev}\n", pidfile_text)
+                self.assertIn(f"root_ino={root_stat.st_ino}\n", pidfile_text)
+                pending_pid = self.pid_from_file(pidfile)
                 self.assertIsNotNone(pending_pid)
                 assert pending_pid is not None
                 self.assertEqual(pending_pid, os.getsid(pending_pid))
                 self.assertIn("omo_pending_watch.py", (tmp / "fake-uv.log").read_text(encoding="utf-8"))
+                self.assertEqual(1, len(fake_uv_pids := self.fake_uv_pids(tmp)))
+                watcher_pid = fake_uv_pids[0]
+                self.assertTrue(self.process_active(watcher_pid))
             finally:
                 self.stop_supervisors(tmp / "state")
+                if watcher_pid is not None:
+                    self.wait_for_process_exit(watcher_pid)
 
     def test_agent_audit_is_disabled_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -626,19 +969,85 @@ esac
             try:
                 result = self.run_setup(tmp, fake_uv_mode="wrapper")
                 self.assertNotEqual(0, result.returncode)
-                self.assertIn("pending watcher did not start omo_pending_watch.py", result.stderr)
+                self.assertIn("pending watcher did not become ready", result.stderr)
                 self.assertFalse((tmp / "state" / "pending-supervisor.pid").exists())
             finally:
                 self.stop_supervisors(tmp / "state")
+
+    # 🧑 "Bind readiness to exact live-process `--root ROOT` and token-specific `--ready-file FILE` argv pairs, rejecting same-script descendants with either mismatch."
+    def test_setup_rejects_authentic_watcher_with_mismatched_ready_argv(self) -> None:
+        for mode in ("mismatched-root-ready", "mismatched-ready-file"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as raw_tmp:
+                tmp = Path(raw_tmp)
+                (tmp / "wrong-work-logs").mkdir()
+                try:
+                    result = self.run_setup(tmp, fake_uv_mode=mode, health_timeout_s="1")
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertIn("pending watcher did not become ready", result.stderr)
+                    self.assertEqual(1, len(watcher_pids := self.authentic_watcher_pids(tmp)))
+                    watcher_pid = watcher_pids[0]
+                    ready_record = (tmp / "fake-ready-snapshot").read_text(encoding="utf-8")
+                    self.assertIn(f"pid={watcher_pid}\n", ready_record)
+                    self.assertIn(f"root={tmp / 'work_logs'}\n", ready_record)
+                    self.assertFalse((tmp / "state" / "pending-supervisor.pid").exists())
+                    self.wait_for_process_exit(watcher_pid)
+                finally:
+                    self.stop_supervisors(tmp / "state")
+
+    def test_readiness_failure_cleans_late_fork_reparented_from_supervisor(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            try:
+                result = self.run_setup(tmp, fake_uv_mode="late-fork-failure", health_timeout_s="1")
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("pending watcher did not become ready", result.stderr)
+                self.assertTrue(late_pids := self.late_fork_pids(tmp))
+                fake_uv_log = (tmp / "fake-uv.log").read_text(encoding="utf-8")
+                late_pgid = int(re.search(r"^LATE_FORK_PGID=([0-9]+)$", fake_uv_log, re.MULTILINE).group(1))
+                late_sid = int(re.search(r"^LATE_FORK_SID=([0-9]+)$", fake_uv_log, re.MULTILINE).group(1))
+                self.assertNotEqual(late_pgid, late_sid)
+                for late_pid in late_pids:
+                    self.wait_for_process_exit(late_pid)
+                self.assertFalse((tmp / "state" / "pending-supervisor.pid").exists())
+            finally:
+                self.stop_supervisors(tmp / "state")
+                for late_pid in self.late_fork_pids(tmp):
+                    if self.process_active(late_pid):
+                        os.kill(late_pid, signal.SIGKILL)
+
+    def test_readiness_failure_cleans_late_setsid_fork_via_subreaper(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            try:
+                result = self.run_setup(tmp, fake_uv_mode="late-setsid-failure", health_timeout_s="1")
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("pending watcher did not become ready", result.stderr)
+                self.assertTrue(late_pids := self.late_fork_pids(tmp))
+                fake_uv_log = (tmp / "fake-uv.log").read_text(encoding="utf-8")
+                late_pgid = int(re.search(r"^LATE_FORK_PGID=([0-9]+)$", fake_uv_log, re.MULTILINE).group(1))
+                late_sid = int(re.search(r"^LATE_FORK_SID=([0-9]+)$", fake_uv_log, re.MULTILINE).group(1))
+                self.assertEqual(late_pids[0], late_pgid)
+                self.assertEqual(late_pids[0], late_sid)
+                for late_pid in late_pids:
+                    self.wait_for_process_exit(late_pid)
+                self.assertFalse((tmp / "state" / "pending-supervisor.pid").exists())
+            finally:
+                self.stop_supervisors(tmp / "state")
+                for late_pid in self.late_fork_pids(tmp):
+                    if self.process_active(late_pid):
+                        os.kill(late_pid, signal.SIGKILL)
 
     def test_duplicate_pending_watcher_exit_is_not_restarted(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             setup_text = SETUP.read_text(encoding="utf-8")
-            match = re.search(r"setsid bash -c '\n(.*?)\n' pending-watch-supervisor", setup_text, re.DOTALL)
+            match = re.search(r"bash -c '\n(.*?)\n' pending-watch-supervisor", setup_text, re.DOTALL)
             self.assertIsNotNone(match)
             assert match is not None
             calls = tmp / "calls"
+            root = tmp / "work_logs"
+            root.mkdir()
+            root_stat = root.stat()
             result = subprocess.run(
                 [
                     "bash",
@@ -647,6 +1056,8 @@ esac
                     "pending-watch-supervisor",
                     str(tmp / "launch.pid"),
                     "token",
+                    f"{root_stat.st_dev}:{root_stat.st_ino}",
+                    str(root),
                     "bash",
                     "-c",
                     f"printf x >>{shlex.quote(str(calls))}; exit 75",
@@ -667,7 +1078,7 @@ esac
             try:
                 result = self.run_setup(tmp, fake_uv_mode="spoof-argv0")
                 self.assertNotEqual(0, result.returncode)
-                self.assertIn("pending watcher did not start omo_pending_watch.py", result.stderr)
+                self.assertIn("pending watcher did not become ready", result.stderr)
                 self.assertFalse((tmp / "state" / "pending-supervisor.pid").exists())
             finally:
                 self.stop_supervisors(tmp / "state")
@@ -678,7 +1089,7 @@ esac
             try:
                 result = self.run_setup(tmp, fake_uv_mode="wrong-child", email="true")
                 self.assertNotEqual(0, result.returncode)
-                self.assertIn("pending watcher did not start omo_pending_watch.py", result.stderr)
+                self.assertIn("pending watcher did not become ready", result.stderr)
                 self.assertFalse((tmp / "state" / "pending-supervisor.pid").exists())
                 self.assertFalse((tmp / "state" / "email-supervisor.pid").exists())
             finally:
@@ -808,7 +1219,7 @@ esac
                 )
                 email_pidfile = state / "email-supervisor.pid"
                 email_pidfile.write_text(
-                    f"pid={email.pid}\nstart={self.process_start_ticks(email.pid)}\ntoken={email_token}\n",
+                    self.supervisor_pidfile_contents(email.pid, email_token, local_root),
                     encoding="utf-8",
                 )
                 email_before = email_pidfile.read_text(encoding="utf-8")
@@ -851,7 +1262,50 @@ esac
             finally:
                 self.stop_supervisors(tmp / "state")
 
-    def test_setup_accepts_inherited_alias_of_locally_configured_root(self) -> None:
+    def test_setup_accepts_real_root_beneath_symlinked_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            trusted = tmp / "trusted"
+            actual = trusted / "actual"
+            alias = trusted / "alias"
+            root = alias / "work_logs"
+            (actual / "work_logs").mkdir(parents=True)
+            alias.symlink_to(actual, target_is_directory=True)
+            try:
+                result = self.run_setup(tmp, extra_env={"OMO_WORK_LOGS_ROOT": str(root)})
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn(f"--root {root}", (tmp / "fake-uv.log").read_text(encoding="utf-8"))
+            finally:
+                self.stop_supervisors(tmp / "state")
+
+    def test_setup_replaces_supervisor_through_equivalent_symlinked_ancestor_root(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            trusted = tmp / "trusted"
+            actual = trusted / "actual"
+            alias = trusted / "alias"
+            real_root = actual / "work_logs"
+            alias_root = alias / "work_logs"
+            state = tmp / "state"
+            real_root.mkdir(parents=True)
+            alias.symlink_to(actual, target_is_directory=True)
+            state.mkdir()
+            current = self.start_owned_pending_supervisor(real_root, state, "ancestor-alias-root")
+            try:
+                result = self.run_setup(tmp, extra_env={"OMO_WORK_LOGS_ROOT": str(alias_root)})
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                current.wait(timeout=2)
+                replacement_pid = self.pid_from_file(state / "pending-supervisor.pid")
+                self.assertIsNotNone(replacement_pid)
+                self.assertNotEqual(current.pid, replacement_pid)
+                self.assertIn(f"--root {alias_root}", (tmp / "fake-uv.log").read_text(encoding="utf-8"))
+            finally:
+                if current.poll() is None:
+                    self.terminate_tree(current.pid)
+                    current.wait(timeout=2)
+                self.stop_supervisors(state)
+
+    def test_setup_rejects_inherited_symlink_root_before_starting_watchers(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             local_root = tmp / "configured-work-logs"
@@ -868,10 +1322,453 @@ esac
                         "OMO_WORK_LOGS_ROOT": str(root_alias),
                     },
                 )
-                self.assertEqual(0, result.returncode, result.stderr)
-                self.assertIn(f"--root {root_alias}", (tmp / "fake-uv.log").read_text(encoding="utf-8"))
+                self.assertEqual(2, result.returncode)
+                self.assertIn("must be a real directory, not a symlink", result.stderr)
+                self.assertFalse((tmp / "fake-uv.log").exists())
             finally:
                 self.stop_supervisors(tmp / "state")
+
+    def test_setup_rejects_root_symlink_created_after_authentic_ready_publication(self) -> None:
+        for trailing_slash in (False, True):
+            with self.subTest(trailing_slash=trailing_slash), tempfile.TemporaryDirectory() as raw_tmp:
+                tmp = Path(raw_tmp)
+                root = tmp / "work_logs"
+                root_arg = f"{root}/" if trailing_slash else str(root)
+                try:
+                    result = self.run_setup(
+                        tmp,
+                        fake_uv_mode="root-swap-ready",
+                        health_timeout_s="3",
+                        extra_env={"OMO_WORK_LOGS_ROOT": root_arg},
+                    )
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertIn("pending watcher did not become ready", result.stderr)
+                    self.assertEqual(1, len(watcher_pids := self.authentic_watcher_pids(tmp)))
+                    watcher_pid = watcher_pids[0]
+                    ready_record = (tmp / "fake-ready-snapshot").read_text(encoding="utf-8")
+                    self.assertIn("version=omo-pending-watch-ready-v1\n", ready_record)
+                    self.assertIn(f"pid={watcher_pid}\n", ready_record)
+                    self.assertIn(f"root={root}\n", ready_record)
+                    self.assertTrue(root.is_symlink())
+                    self.wait_for_process_exit(watcher_pid)
+                finally:
+                    self.stop_supervisors(tmp / "state")
+
+    def test_setup_rejects_real_root_replacement_after_teardown_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root = tmp / "work_logs"
+            moved_root = tmp / "work_logs.moved"
+            try:
+                result = self.run_setup(tmp, fake_uv_mode="real-root-replaced-ready", health_timeout_s="3")
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("pending watcher did not become ready", result.stderr)
+                self.assertEqual(1, len(watcher_pids := self.authentic_watcher_pids(tmp)))
+                watcher_pid = watcher_pids[0]
+                ready_record = (tmp / "fake-ready-snapshot").read_text(encoding="utf-8")
+                self.assertIn(f"pid={watcher_pid}\n", ready_record)
+                self.assertIn(f"root={root}\n", ready_record)
+                self.assertTrue(root.is_dir())
+                self.assertTrue(moved_root.is_dir())
+                self.assertIn(f"root_ino={root.stat().st_ino}\n", ready_record)
+                self.assertNotEqual(root.stat().st_ino, moved_root.stat().st_ino)
+                self.wait_for_process_exit(watcher_pid)
+            finally:
+                self.stop_supervisors(tmp / "state")
+
+    def test_pending_supervisor_does_not_restart_after_post_readiness_root_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root = tmp / "work_logs"
+            state = tmp / "state"
+            supervisor_pid: int | None = None
+            try:
+                result = self.run_setup(tmp)
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                pidfile = state / "pending-supervisor.pid"
+                pidfile_contents = pidfile.read_text(encoding="utf-8")
+                supervisor_pid = self.pid_from_file(pidfile)
+                self.assertIsNotNone(supervisor_pid)
+                self.assertEqual(1, len(self.fake_uv_pids(tmp)))
+                root.rename(tmp / "work_logs.moved")
+                root.mkdir()
+                assert supervisor_pid is not None
+                self.wait_for_process_exit(supervisor_pid)
+                time.sleep(0.2)
+                self.assertEqual(1, len(self.fake_uv_pids(tmp)))
+                self.assertEqual(pidfile_contents, pidfile.read_text(encoding="utf-8"))
+                self.assertIn("pending watcher root identity changed; stopping supervisor", (state / "pending-watch.log").read_text(encoding="utf-8"))
+            finally:
+                self.stop_supervisors(state)
+                if supervisor_pid is not None and self.process_active(supervisor_pid):
+                    self.terminate_tree(supervisor_pid)
+
+    def test_setup_rejects_stopped_authentic_watcher_after_ready_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            try:
+                result = self.run_setup(tmp, fake_uv_mode="stopped-ready", health_timeout_s="3")
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("pending watcher did not become ready", result.stderr)
+                self.assertEqual(1, len(watcher_pids := self.authentic_watcher_pids(tmp)))
+                watcher_pid = watcher_pids[0]
+                ready_record = (tmp / "fake-ready-snapshot").read_text(encoding="utf-8")
+                self.assertIn("version=omo-pending-watch-ready-v1\n", ready_record)
+                self.assertIn(f"pid={watcher_pid}\n", ready_record)
+                self.assertIn(f"root={tmp / 'work_logs'}\n", ready_record)
+                self.assertFalse((tmp / "work_logs").is_symlink())
+                self.wait_for_process_exit(watcher_pid)
+            finally:
+                self.stop_supervisors(tmp / "state")
+
+    def test_setup_cleans_authentic_watcher_after_root_ancestor_disappears(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            trusted = tmp / "trusted"
+            actual = trusted / "actual"
+            alias = trusted / "alias"
+            root = alias / "work_logs"
+            (actual / "work_logs").mkdir(parents=True)
+            alias.symlink_to(actual, target_is_directory=True)
+            try:
+                result = self.run_setup(
+                    tmp,
+                    fake_uv_mode="ancestor-loss-ready",
+                    health_timeout_s="3",
+                    extra_env={"OMO_WORK_LOGS_ROOT": str(root)},
+                )
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn("pending watcher did not become ready", result.stderr)
+                self.assertEqual(1, len(watcher_pids := self.authentic_watcher_pids(tmp)))
+                watcher_pid = watcher_pids[0]
+                ready_record = (tmp / "fake-ready-snapshot").read_text(encoding="utf-8")
+                self.assertIn(f"pid={watcher_pid}\n", ready_record)
+                self.assertIn(f"root={root}\n", ready_record)
+                self.assertFalse(alias.exists())
+                self.assertFalse((tmp / "state" / "pending-supervisor.pid").exists())
+                self.wait_for_process_exit(watcher_pid)
+            finally:
+                self.stop_supervisors(tmp / "state")
+
+    def test_setup_rejects_invalid_root_before_stopping_current_supervisor(self) -> None:
+        for kind in ("missing", "file", "symlink"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as raw_tmp:
+                tmp = Path(raw_tmp)
+                previous_root = tmp / "work_logs"
+                state = tmp / "state"
+                invalid_root = tmp / f"{kind}-root"
+                previous_root.mkdir()
+                state.mkdir()
+                if kind == "file":
+                    invalid_root.write_text("not a directory\n", encoding="utf-8")
+                elif kind == "symlink":
+                    invalid_root.symlink_to(previous_root, target_is_directory=True)
+                token = f"invalid-root-{kind}"
+                launch_pid_file = state / f".pending-supervisor.{token}.pid"
+                current = subprocess.Popen(
+                    [
+                        "bash",
+                        "-c",
+                        "while :; do sleep 30; done # pending watcher exited status",
+                        "pending-watch-supervisor",
+                        str(launch_pid_file),
+                        token,
+                        "uv",
+                        "run",
+                        "--project",
+                        str(ROOT / "omo_manager"),
+                        str(ROOT / "omo_manager" / "omo_pending_watch.py"),
+                        "--root",
+                        str(previous_root),
+                    ],
+                    start_new_session=True,
+                )
+                (state / "pending-supervisor.pid").write_text(
+                    self.supervisor_pidfile_contents(current.pid, token, previous_root),
+                    encoding="utf-8",
+                )
+                try:
+                    result = self.run_setup(tmp, extra_env={"OMO_WORK_LOGS_ROOT": str(invalid_root)})
+                    self.assertEqual(2, result.returncode)
+                    expected_error = "must be a real directory, not a symlink" if kind == "symlink" else "must be an existing directory"
+                    self.assertIn(expected_error, result.stderr)
+                    self.assertIsNone(current.poll())
+                    self.assertFalse((tmp / "fake-uv.log").exists())
+                finally:
+                    if current.poll() is None:
+                        self.terminate_tree(current.pid)
+                        current.wait(timeout=2)
+
+    # 🧑 "Add realistic inherited/configured/final trailing-slash symlink cases proving the current authenticated supervisor remains alive and unchanged."
+    def test_setup_rejects_trailing_slash_symlink_at_each_root_preflight(self) -> None:
+        for source in ("inherited", "configured", "final"):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as raw_tmp:
+                tmp = Path(raw_tmp)
+                previous_root = tmp / "work_logs"
+                state = tmp / "state"
+                previous_root.mkdir()
+                state.mkdir()
+                token = f"trailing-symlink-{source}"
+                current = self.start_owned_pending_supervisor(previous_root, state, token)
+                pidfile = state / "pending-supervisor.pid"
+                pidfile_contents = pidfile.read_text(encoding="utf-8")
+                local_env = tmp / "local.env"
+                fake_uv_mode = "real"
+                extra_env: dict[str, str] = {"OMO_MANAGER_LOCAL_ENV": str(local_env)}
+                if source == "final":
+                    final_root = tmp / "final-work-logs"
+                    final_root.mkdir()
+                    alias_parent = tmp / "alias-parent"
+                    alias_parent.symlink_to(tmp, target_is_directory=True)
+                    inherited_root = f"{final_root}/"
+                    configured_root = alias_parent / final_root.name
+                    local_env.write_text(f'OMO_WORK_LOGS_ROOT="{configured_root}"\n', encoding="utf-8")
+                    extra_env.update(
+                        {
+                            "OMO_WORK_LOGS_ROOT": inherited_root,
+                            "FAKE_FINAL_ROOT": inherited_root,
+                            "FAKE_FINAL_ROOT_LEXICAL": str(final_root),
+                        }
+                    )
+                    fake_uv_mode = "final-trailing-symlink"
+                else:
+                    target = tmp / "symlink-target"
+                    symlink_root = tmp / "symlink-root"
+                    target.mkdir()
+                    symlink_root.symlink_to(target, target_is_directory=True)
+                    trailing_symlink = f"{symlink_root}/"
+                    if source == "inherited":
+                        local_env.write_text('OMO_WORK_LOGS_ROOT=""\n', encoding="utf-8")
+                        extra_env["OMO_WORK_LOGS_ROOT"] = trailing_symlink
+                    else:
+                        local_env.write_text(f'OMO_WORK_LOGS_ROOT="{trailing_symlink}"\n', encoding="utf-8")
+                        extra_env["OMO_WORK_LOGS_ROOT"] = str(previous_root)
+                try:
+                    result = self.run_setup(tmp, fake_uv_mode=fake_uv_mode, extra_env=extra_env)
+                    self.assertEqual(2, result.returncode)
+                    self.assertIn("must be a real directory, not a symlink", result.stderr)
+                    self.assertIsNone(current.poll())
+                    self.assertEqual(pidfile_contents, pidfile.read_text(encoding="utf-8"))
+                    self.assertFalse((tmp / "fake-uv.log").exists())
+                finally:
+                    if current.poll() is None:
+                        self.terminate_tree(current.pid)
+                        current.wait(timeout=2)
+
+    def test_setup_rejects_terminal_dot_after_symlink_root_before_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root = tmp / "work_logs"
+            state = tmp / "state"
+            root.mkdir()
+            state.mkdir()
+            current = self.start_owned_pending_supervisor(root, state, "terminal-dot-symlink")
+            pidfile = state / "pending-supervisor.pid"
+            pidfile_contents = pidfile.read_text(encoding="utf-8")
+            alias = tmp / "root-alias"
+            alias.symlink_to(root, target_is_directory=True)
+            try:
+                result = self.run_setup(tmp, extra_env={"OMO_WORK_LOGS_ROOT": f"{alias}/."})
+                self.assertEqual(2, result.returncode)
+                self.assertIn("must be a real directory, not a symlink", result.stderr)
+                self.assertIsNone(current.poll())
+                self.assertEqual(pidfile_contents, pidfile.read_text(encoding="utf-8"))
+                self.assertFalse((tmp / "fake-uv.log").exists())
+            finally:
+                if current.poll() is None:
+                    self.terminate_tree(current.pid)
+                    current.wait(timeout=2)
+
+    def test_setup_revalidates_root_identity_before_stopping_current_supervisor(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root = tmp / "work_logs"
+            state = tmp / "state"
+            root.mkdir()
+            state.mkdir()
+            token = "pre-teardown-root-swap"
+            launch_pid_file = state / f".pending-supervisor.{token}.pid"
+            current = subprocess.Popen(
+                [
+                    "bash",
+                    "-c",
+                    "while :; do sleep 30; done # pending watcher exited status",
+                    "pending-watch-supervisor",
+                    str(launch_pid_file),
+                    token,
+                    "uv",
+                    "run",
+                    "--project",
+                    str(ROOT / "omo_manager"),
+                    str(ROOT / "omo_manager" / "omo_pending_watch.py"),
+                    "--root",
+                    str(root),
+                ],
+                start_new_session=True,
+            )
+            (state / "pending-supervisor.pid").write_text(
+                self.supervisor_pidfile_contents(current.pid, token, root),
+                encoding="utf-8",
+            )
+            try:
+                result = self.run_setup(tmp, fake_uv_mode="pre-teardown-root-swap")
+                self.assertEqual(2, result.returncode)
+                self.assertIn("must be a real directory, not a symlink", result.stderr)
+                self.assertIsNone(current.poll())
+                self.assertFalse((tmp / "fake-uv.log").exists())
+            finally:
+                if current.poll() is None:
+                    self.terminate_tree(current.pid)
+                    current.wait(timeout=2)
+
+    def test_setup_revalidates_root_identity_inside_current_supervisor_teardown(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root = tmp / "work_logs"
+            state = tmp / "state"
+            root.mkdir()
+            state.mkdir()
+            current = self.start_owned_pending_supervisor(root, state, "teardown-real-root-swap")
+            pidfile = state / "pending-supervisor.pid"
+            pidfile_contents = pidfile.read_text(encoding="utf-8")
+            try:
+                result = self.run_setup(tmp, fake_uv_mode="teardown-real-root-swap")
+                self.assertEqual(2, result.returncode)
+                self.assertIn("work-log root changed before watcher teardown", result.stderr)
+                self.assertIsNone(current.poll())
+                self.assertEqual(pidfile_contents, pidfile.read_text(encoding="utf-8"))
+                self.assertTrue(root.is_dir())
+                self.assertTrue((tmp / "work_logs.moved").is_dir())
+                self.assertFalse((tmp / "fake-uv.log").exists())
+            finally:
+                if current.poll() is None:
+                    self.terminate_tree(current.pid)
+                    current.wait(timeout=2)
+
+    def test_setup_revalidates_root_after_final_process_authentication(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root = tmp / "work_logs"
+            state = tmp / "state"
+            root.mkdir()
+            state.mkdir()
+            current = self.start_owned_pending_supervisor(root, state, "final-auth-root-swap")
+            pidfile = state / "pending-supervisor.pid"
+            pidfile_contents = pidfile.read_text(encoding="utf-8")
+            try:
+                result = self.run_setup(tmp, fake_uv_mode="final-auth-root-swap")
+                self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                self.assertIn("work-log root changed before watcher teardown", result.stderr)
+                self.assertIsNone(current.poll())
+                self.assertEqual(pidfile_contents, pidfile.read_text(encoding="utf-8"))
+                self.assertTrue(root.is_dir())
+                self.assertTrue((tmp / "work_logs.moved").is_dir())
+                self.assertFalse((tmp / "fake-uv.log").exists())
+            finally:
+                if current.poll() is None:
+                    self.terminate_tree(current.pid)
+                    current.wait(timeout=2)
+
+    def test_setup_revalidates_root_before_removing_dead_or_stale_pidfile(self) -> None:
+        for kind in ("dead", "stale"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as raw_tmp:
+                tmp = Path(raw_tmp)
+                root = tmp / "work_logs"
+                state = tmp / "state"
+                root.mkdir()
+                state.mkdir()
+                stale_process: subprocess.Popen[str] | None = None
+                if kind == "dead":
+                    pid = 999_999_999
+                    start = "1"
+                else:
+                    stale_process = subprocess.Popen(["sleep", "30"], text=True)
+                    pid = stale_process.pid
+                    start = self.process_start_ticks(pid)
+                pidfile = state / "pending-supervisor.pid"
+                pidfile_contents = f"pid={pid}\nstart={start}\ntoken={'a' * 32}\n"
+                pidfile.write_text(pidfile_contents, encoding="utf-8")
+                try:
+                    result = self.run_setup(tmp, fake_uv_mode=f"{kind}-pidfile-root-swap")
+                    self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                    self.assertIn("work-log root changed before watcher teardown", result.stderr)
+                    self.assertEqual(pidfile_contents, pidfile.read_text(encoding="utf-8"))
+                    self.assertTrue((tmp / "work_logs.moved").is_dir())
+                    self.assertFalse((tmp / "fake-uv.log").exists())
+                    if stale_process is not None:
+                        self.assertIsNone(stale_process.poll())
+                finally:
+                    if stale_process is not None and stale_process.poll() is None:
+                        stale_process.terminate()
+                        stale_process.wait(timeout=2)
+
+    def test_launch_report_timeout_preserves_process_and_record_after_root_change(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            launcher_pid: int | None = None
+            try:
+                result = self.run_setup(tmp, fake_uv_mode="launch-timeout-root-swap")
+                self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                self.assertIn("work-log root changed before watcher teardown", result.stderr)
+                launcher_pid = int((tmp / "fake-timeout-launcher-pid").read_text(encoding="utf-8"))
+                self.assertTrue(self.process_active(launcher_pid))
+                launch_records = list((tmp / "state").glob(".pending-supervisor.*.pid"))
+                self.assertEqual(1, len(launch_records))
+                self.assertTrue(launch_records[0].exists())
+                self.assertFalse((tmp / "state" / "pending-supervisor.pid").exists())
+                self.assertTrue((tmp / "work_logs.moved").is_dir())
+            finally:
+                if launcher_pid is not None and self.process_active(launcher_pid):
+                    self.terminate_tree(launcher_pid)
+
+    def test_launch_report_timeout_preserves_process_and_record_with_stable_root(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            launcher_pid: int | None = None
+            try:
+                result = self.run_setup(tmp, fake_uv_mode="launch-timeout")
+                self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+                self.assertIn(
+                    "pending watcher supervisor did not report an authenticated pid; retaining launch record and process",
+                    result.stderr,
+                )
+                launcher_pid = int((tmp / "fake-timeout-launcher-pid").read_text(encoding="utf-8"))
+                self.assertTrue(self.process_active(launcher_pid))
+                launch_records = list((tmp / "state").glob(".pending-supervisor.*.pid"))
+                self.assertEqual(1, len(launch_records))
+                self.assertTrue(launch_records[0].exists())
+                self.assertFalse((tmp / "state" / "pending-supervisor.pid").exists())
+                self.assertTrue((tmp / "work_logs").is_dir())
+                self.assertFalse((tmp / "work_logs.moved").exists())
+            finally:
+                if launcher_pid is not None and self.process_active(launcher_pid):
+                    self.terminate_tree(launcher_pid)
+
+    def test_launch_identity_is_rechecked_before_launch_record_deletion(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            state = tmp / "state"
+            supervisor_pid: int | None = None
+            try:
+                result = self.run_setup(tmp, fake_uv_mode="post-pidfile-guardian-exit")
+                self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+                self.assertIn(
+                    "pending watcher supervisor identity changed before launch record deletion; retaining recovery records",
+                    result.stderr,
+                )
+                pidfile = state / "pending-supervisor.pid"
+                self.assertTrue(pidfile.exists())
+                supervisor_pid = self.pid_from_file(pidfile)
+                self.assertIsNotNone(supervisor_pid)
+                launch_records = list(state.glob(".pending-supervisor.*.pid"))
+                self.assertEqual(1, len(launch_records))
+                self.assertEqual(f"{supervisor_pid}\n", launch_records[0].read_text(encoding="utf-8"))
+                assert supervisor_pid is not None
+                self.wait_for_process_exit(supervisor_pid)
+            finally:
+                self.stop_supervisors(state)
+                if supervisor_pid is not None and self.process_active(supervisor_pid):
+                    self.terminate_tree(supervisor_pid)
 
     def test_setup_rejects_partial_split_email_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -921,8 +1818,18 @@ esac
             )
             try:
                 result = self.run_setup(tmp)
-                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertNotEqual(0, result.returncode)
+                self.assertRegex(
+                    result.stderr,
+                    r"pending watcher (?:supervisor exited|supervisor identity changed before launch record deletion)",
+                )
                 self.assertIsNone(direct.poll())
+                pidfile = tmp / "state" / "pending-supervisor.pid"
+                if "identity changed before launch record deletion" in result.stderr:
+                    self.assertTrue(pidfile.exists())
+                    self.assertEqual(1, len(list((tmp / "state").glob(".pending-supervisor.*.pid"))))
+                else:
+                    self.assertFalse(pidfile.exists())
             finally:
                 try:
                     os.killpg(direct.pid, signal.SIGTERM)
@@ -1180,7 +2087,7 @@ while :; do sleep 30; done
                 start_new_session=True,
             )
             (state / "pending-supervisor.pid").write_text(
-                f"pid={current.pid}\nstart={self.process_start_ticks(current.pid)}\ntoken={token}\n",
+                self.supervisor_pidfile_contents(current.pid, token, root),
                 encoding="utf-8",
             )
             try:
@@ -1230,16 +2137,16 @@ while :; do sleep 30; done
             )
             try:
                 result = self.run_setup(tmp, extra_env={"OMO_WORK_LOGS_ROOT": str(root_alias)})
-                self.assertEqual(0, result.returncode, result.stderr)
-                current.wait(timeout=2)
-                self.assertNotIn("stale pending watcher pidfile points at unowned", result.stderr)
+                self.assertEqual(2, result.returncode)
+                self.assertIn("must be a real directory, not a symlink", result.stderr)
+                self.assertIsNone(current.poll())
             finally:
                 if current.poll() is None:
                     self.terminate_tree(current.pid)
                     current.wait(timeout=2)
                 self.stop_supervisors(state)
 
-    def test_setup_replaces_authenticated_pidfile_supervisors_after_root_change(self) -> None:
+    def test_setup_preserves_pidfile_supervisors_with_a_different_root(self) -> None:
         for name, script_name in (
             ("pending", "omo_pending_watch.py"),
             ("email", "email_idle_watcher.py"),
@@ -1275,15 +2182,22 @@ while :; do sleep 30; done
                 try:
                     self.wait_for_file(child_pid_file)
                     child_pid = int(child_pid_file.read_text(encoding="utf-8").strip())
-                    (state / f"{name}-supervisor.pid").write_text(
-                        f"pid={current.pid}\nstart={self.process_start_ticks(current.pid)}\ntoken={token}\n",
+                    pidfile = state / f"{name}-supervisor.pid"
+                    pidfile_contents = self.supervisor_pidfile_contents(current.pid, token, old_root)
+                    pidfile.write_text(
+                        pidfile_contents,
                         encoding="utf-8",
                     )
                     result = self.run_setup(tmp)
-                    self.assertEqual(0, result.returncode, result.stderr)
-                    current.wait(timeout=2)
-                    self.assertFalse(self.process_active(child_pid))
-                    self.assertNotIn(f"stale {name} watcher pidfile points at unowned", result.stderr)
+                    self.assertEqual(1, result.returncode, result.stderr)
+                    self.assertIsNone(current.poll())
+                    self.assertTrue(self.process_active(child_pid))
+                    self.assertIn(
+                        f"authenticated {name} watcher pidfile has no matching launch root identity; refusing replacement",
+                        result.stderr,
+                    )
+                    self.assertEqual(pidfile_contents, pidfile.read_text(encoding="utf-8"))
+                    self.assertFalse((tmp / "fake-uv.log").exists())
                 finally:
                     if current.poll() is None:
                         self.terminate_tree(current.pid)
@@ -1291,6 +2205,138 @@ while :; do sleep 30; done
                     if child_pid is not None and self.process_active(child_pid):
                         os.kill(child_pid, signal.SIGKILL)
                     self.stop_supervisors(state)
+
+    def test_setup_preserves_same_path_supervisor_after_cross_run_root_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root = tmp / "work_logs"
+            state = tmp / "state"
+            root.mkdir()
+            state.mkdir()
+            current = self.start_owned_pending_supervisor(root, state, "cross-run-root-replacement")
+            pidfile = state / "pending-supervisor.pid"
+            pidfile_contents = pidfile.read_text(encoding="utf-8")
+            root.rename(tmp / "work_logs.moved")
+            root.mkdir()
+            try:
+                result = self.run_setup(tmp)
+                self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+                self.assertIn(
+                    "authenticated pending watcher pidfile has no matching launch root identity; refusing replacement",
+                    result.stderr,
+                )
+                self.assertIsNone(current.poll())
+                self.assertEqual(pidfile_contents, pidfile.read_text(encoding="utf-8"))
+                self.assertFalse((tmp / "fake-uv.log").exists())
+            finally:
+                if current.poll() is None:
+                    self.terminate_tree(current.pid)
+                    current.wait(timeout=2)
+
+    def test_setup_replaces_authenticated_supervisors_with_transitional_pidfiles(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root = tmp / "work_logs"
+            state = tmp / "state"
+            try:
+                first = self.run_setup(tmp)
+                self.assertEqual(0, first.returncode, first.stdout + first.stderr)
+                root_stat = root.stat()
+                old_pids: dict[Path, int] = {}
+                pending_pidfile = state / "pending-supervisor.pid"
+                pending_text = pending_pidfile.read_text(encoding="utf-8")
+                pending_pid = self.pid_from_file(pending_pidfile)
+                self.assertIsNotNone(pending_pid)
+                assert pending_pid is not None
+                old_pids[pending_pidfile] = pending_pid
+                pending_pidfile.write_text(
+                    "\n".join(
+                        line
+                        for line in pending_text.splitlines()
+                        if not line.startswith(("root_dev=", "root_ino="))
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                email_token = "a" * 32
+                email_launch = state / f".email-supervisor.{email_token}.pid"
+                email = subprocess.Popen(
+                    [
+                        "bash",
+                        "-c",
+                        "while :; do sleep 30; done # email watcher exited status",
+                        "email-watch-supervisor",
+                        str(email_launch),
+                        email_token,
+                        "uv",
+                        "run",
+                        "--project",
+                        str(ROOT / "omo_manager"),
+                        str(ROOT / "omo_manager" / "email_idle_watcher.py"),
+                        "--root",
+                        str(root),
+                        "--mail-dir",
+                        str(root / "manager_mail"),
+                        "--state-dir",
+                        str(state),
+                    ],
+                    start_new_session=True,
+                )
+                email_pidfile = state / "email-supervisor.pid"
+                email_pidfile.write_text(
+                    f"pid={email.pid}\nstart={self.process_start_ticks(email.pid)}\ntoken={email_token}\n",
+                    encoding="utf-8",
+                )
+
+                second = self.run_setup(tmp)
+
+                self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+                email.wait(timeout=2)
+                self.assertFalse(email_pidfile.exists())
+                for pidfile, old_pid in old_pids.items():
+                    self.wait_for_process_exit(old_pid)
+                    if pidfile.exists():
+                        refreshed = pidfile.read_text(encoding="utf-8")
+                        self.assertIn(f"root_dev={root_stat.st_dev}\n", refreshed)
+                        self.assertIn(f"root_ino={root_stat.st_ino}\n", refreshed)
+                        self.assertNotEqual(old_pid, self.pid_from_file(pidfile))
+            finally:
+                self.stop_supervisors(state)
+
+    def test_setup_refuses_present_invalid_or_duplicate_root_identity(self) -> None:
+        for identity_lines in (
+            "root_dev=\nroot_ino=\n",
+            "root_dev={dev}\nroot_dev=1\nroot_ino={ino}\n",
+            "root_dev\nroot_ino = {ino}\n",
+        ):
+            with self.subTest(identity_lines=identity_lines), tempfile.TemporaryDirectory() as raw_tmp:
+                tmp = Path(raw_tmp)
+                root = tmp / "work_logs"
+                state = tmp / "state"
+                root.mkdir()
+                state.mkdir()
+                current = self.start_owned_pending_supervisor(root, state, "invalid-root-identity")
+                pidfile = state / "pending-supervisor.pid"
+                root_stat = root.stat()
+                identity_lines = identity_lines.format(dev=root_stat.st_dev, ino=root_stat.st_ino)
+                base = "\n".join(
+                    line
+                    for line in pidfile.read_text(encoding="utf-8").splitlines()
+                    if not line.startswith(("root_dev=", "root_ino="))
+                )
+                pidfile.write_text(f"{base}\n{identity_lines}", encoding="utf-8")
+                try:
+                    result = self.run_setup(tmp)
+                    self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+                    self.assertIsNone(current.poll())
+                    self.assertIn(
+                        "authenticated pending watcher pidfile has no matching launch root identity; refusing replacement",
+                        result.stderr,
+                    )
+                finally:
+                    if current.poll() is None:
+                        self.terminate_tree(current.pid)
+                        current.wait(timeout=2)
 
     def test_setup_does_not_kill_pidfile_supervisor_from_another_state_dir(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -1732,6 +2778,25 @@ while :; do sleep 30; done
                 self.assertFalse((tmp / "state" / "email-supervisor.pid").exists())
             finally:
                 self.stop_supervisors(tmp / "state")
+
+    def test_root_change_during_email_health_failure_preserves_launched_supervisors(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            state = tmp / "state"
+            try:
+                result = self.run_setup(tmp, fake_uv_mode="email-health-root-swap", email="true")
+                self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                self.assertIn("work-log root changed before watcher teardown", result.stderr)
+                self.assertTrue((tmp / "work_logs.moved").is_dir())
+                for name in ("pending", "email"):
+                    pidfile = state / f"{name}-supervisor.pid"
+                    self.assertTrue(pidfile.exists())
+                    pid = self.pid_from_file(pidfile)
+                    self.assertIsNotNone(pid)
+                    assert pid is not None
+                    self.assertTrue(self.process_active(pid))
+            finally:
+                self.stop_supervisors(state)
 
     def test_auto_email_failure_removes_email_pidfile_and_keeps_pending(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

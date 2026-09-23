@@ -36,7 +36,7 @@ if __package__ in {None, ""}:
 
 from omo_manager.email_idle_watcher import LEGACY_MANAGER_SUBJECT_TOKENS, is_mail_cleanup_excluded_subject, message_text, parse_env_config
 from omo_manager.omo_email_config import configured_agent_mail, human_config_path, parse_env_file
-from omo_manager.omo_email_subject import TMUX_TARGET_RE, canonical_tmux_target, subject_tmux_target
+from omo_manager.omo_email_subject import OMNIGENT_TARGET_RE, TMUX_TARGET_RE, canonical_tmux_target, current_agent_session_id, is_producer_target, subject_tmux_target
 
 HEADER_FETCH = "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID X-OMO-AGENT-SESSION-ID)])"
 HEADER_BATCH_FETCH = "(UID BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID X-OMO-AGENT-SESSION-ID)])"
@@ -1770,6 +1770,18 @@ def cmd_unread_summary(args: argparse.Namespace) -> int:
 
 
 def current_agent_mail_target() -> str:
+    try:
+        from omo_manager.omo_omnigent_identity import NotOmniGentEnvironment, OmniGentIdentityError, authenticate_current_omnigent
+
+        authenticated = canonical_tmux_target(authenticate_current_omnigent().target)
+    except NotOmniGentEnvironment:
+        authenticated = ""
+    except (ImportError, OmniGentIdentityError, OSError) as exc:
+        raise RuntimeError("could not authenticate the current OmniGent agent") from exc
+    if authenticated:
+        if OMNIGENT_TARGET_RE.fullmatch(authenticated) is None:
+            raise RuntimeError("authenticated OmniGent agent returned an invalid target")
+        return authenticated
     pane = os.environ.get("TMUX_PANE", "").strip()
     if pane:
         result = subprocess.run(
@@ -1784,15 +1796,14 @@ def current_agent_mail_target() -> str:
         target = result.stdout.strip()
     else:
         target = os.environ.get("OMO_AGENT_TMUX_TARGET", "").strip()
+        if not target:
+            target = ""
     target = canonical_tmux_target(target)
-    if TMUX_TARGET_RE.fullmatch(target) is None:
+    if TMUX_TARGET_RE.fullmatch(target) is None and OMNIGENT_TARGET_RE.fullmatch(target) is None:
         raise RuntimeError("could not resolve the current agent tmux target")
+    if OMNIGENT_TARGET_RE.fullmatch(target) is not None:
+        raise RuntimeError("configured OmniGent target is not authenticated by the current process")
     return target
-
-
-def current_agent_session_id() -> str:
-    value = (os.environ.get("CODEX_SESSION_ID", "").strip() or os.environ.get("CODEX_THREAD_ID", "").strip()).lower()
-    return value if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", value) else ""
 
 
 def agent_unread_records(client: imaplib.IMAP4_SSL, sender_email: str, recipient_email: str, target: str, agent_session: str) -> list[MailRecord]:
@@ -1803,8 +1814,17 @@ def agent_unread_records(client: imaplib.IMAP4_SSL, sender_email: str, recipient
         record
         for record in records
         if r"\Seen" not in record.flags
-        and subject_tmux_target(record.subject) == target
-        and record.agent_session_id in {"", agent_session}
+        and (
+            bool(agent_session)
+            and record.agent_session_id == agent_session
+            and (
+                subject_tmux_target(record.subject) == target
+                or subject_tmux_target(record.subject).startswith("og:")
+            )
+            if OMNIGENT_TARGET_RE.fullmatch(target) is not None
+            else subject_tmux_target(record.subject) == target
+            and record.agent_session_id in {"", agent_session}
+        )
     ]
 
 
@@ -1923,12 +1943,18 @@ def cmd_agent_trash_replaced(args: argparse.Namespace) -> int:
             raise RuntimeError("required Gmail All Mail, Sent, or Trash mailbox is unavailable")
         if not replacement_exists(client, all_mailbox, args.replacement_message_id, sender_email, recipient_email):
             raise RuntimeError("replacement Message-ID is missing, ambiguous, or outside the agent-human mail boundary")
-        if subject_tmux_target(replacement_subject(client, all_mailbox, args.replacement_message_id, sender_email, recipient_email)) != target:
+        replacement_route = subject_tmux_target(replacement_subject(client, all_mailbox, args.replacement_message_id, sender_email, recipient_email))
+        replacement_session = ""
+        if replacement_route != target and OMNIGENT_TARGET_RE.fullmatch(target) is not None and replacement_route.startswith("og:"):
+            replacement_session = replacement_agent_session_id(client, all_mailbox, args.replacement_message_id)
+        if replacement_route != target and not (bool(agent_session) and replacement_session == agent_session):
             raise RuntimeError("replacement was not sent by the current agent target")
         source_message_ids = {record.message_id for record in sources}
         if "" in source_message_ids or replacement_supersedes_ids(client, all_mailbox, args.replacement_message_id) != source_message_ids:
             raise RuntimeError("replacement does not explicitly supersede exactly the selected sources")
-        if replacement_agent_session_id(client, all_mailbox, args.replacement_message_id) != agent_session:
+        if not replacement_session:
+            replacement_session = replacement_agent_session_id(client, all_mailbox, args.replacement_message_id)
+        if replacement_session != agent_session:
             raise RuntimeError("replacement was not sent by the current agent session")
         replacement_gmail_id = replacement_gmail_msgid(client, all_mailbox, args.replacement_message_id)
         if replacement_gmail_id in {record.gmail_msgid for record in sources}:
@@ -3700,8 +3726,8 @@ def parse_route_resolutions(values: list[str], task_ids: list[str]) -> dict[str,
     resolutions: dict[str, str] = {}
     for value in values:
         task_id, separator, raw_target = value.rpartition("=")
-        if not separator or not task_id or tsv_value(task_id) != task_id or not TMUX_TARGET_RE.fullmatch(raw_target):
-            raise ValueError("route-resolution must be TASK-ID=SESSION:WINDOW[.PANE]")
+        if not separator or not task_id or tsv_value(task_id) != task_id or not is_producer_target(raw_target):
+            raise ValueError("route-resolution must be TASK-ID=SESSION:WINDOW[.PANE] or TASK-ID=omnigent://SESSION_ID")
         if task_id in resolutions:
             raise ValueError("route-resolution contains a duplicate task identity")
         resolutions[task_id] = canonical_tmux_target(raw_target)

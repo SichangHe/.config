@@ -20,6 +20,9 @@ from omo_manager.omo_task_edit import pending_remove_evidence_comment
 from omo_manager.omo_task_metadata import parse_task_metadata
 
 
+PARTICIPANT_EVIDENCE = (hashlib.sha256(b"agent@example.test").hexdigest(), hashlib.sha256(b"human@example.test").hexdigest())
+
+
 class Source1994RecoveryTest(unittest.TestCase):
     def fixture(
         self,
@@ -96,7 +99,7 @@ class Source1994RecoveryTest(unittest.TestCase):
                 with patch.multiple(omo_completion_email, **constants), patch(  # pyright: ignore[reportCallIssue, reportArgumentType]
                     "omo_manager.omo_completion_email.current_pending_task", return_value=task
                 ), patch(
-                    "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True
+                    "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE
                 ) as sent, patch(
                     "omo_manager.omo_completion_email.git_output",
                     side_effect=[f"{omo_completion_email.SOURCE1994_RESULT_COMMIT}\n".encode(), b""],
@@ -165,7 +168,7 @@ class Source1994RecoveryTest(unittest.TestCase):
                 ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task), patch(
                     "omo_manager.omo_completion_email.validate_source1994_plot_authority"
                 ) as authority, patch(
-                    "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True
+                    "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE
                 ) as sent, patch(
                     "omo_manager.omo_pending.require_owner_completion"
                 ) as owner_sender, patch(
@@ -235,7 +238,7 @@ class Source1994RecoveryTest(unittest.TestCase):
                 ), patch("omo_manager.omo_completion_email.current_pending_task", return_value=task), patch(
                     "omo_manager.omo_completion_email.validate_source1994_plot_authority"
                 ) as authority, patch(
-                    "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=True
+                    "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent", return_value=PARTICIPANT_EVIDENCE
                 ) as sent, patch(
                     "omo_manager.omo_completion_email.send_completion_email"
                 ) as sender, redirect_stdout(StringIO()):
@@ -278,7 +281,7 @@ class Source1994RecoveryTest(unittest.TestCase):
                         "omo_manager.omo_completion_email.validate_source1994_plot_authority"
                     ), patch(
                         "omo_manager.omo_completion_email.verify_ordinary_completion_in_sent",
-                        return_value=drift != "result",
+                        return_value=None if drift == "result" else PARTICIPANT_EVIDENCE,
                     ), redirect_stdout(StringIO()):
                         error = "task bytes changed|Sent-Mail evidence|authorization digest"
                         with self.assertRaisesRegex((OSError, BlockingError), error):

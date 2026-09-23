@@ -896,7 +896,7 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual('running', status(lines, current_block(lines)))
         self.assertFalse(can_submit_stuck_input(lines))
 
-    def test_status_running_with_queued_input_footer_without_model_footer(self) -> None:
+    def test_status_stuck_with_queued_input_during_working_turn(self) -> None:
         lines = [
             '• Working (19m 47s • esc to interrupt)',
             '',
@@ -906,8 +906,8 @@ class CodexStatusTests(unittest.TestCase):
             '',
             '  tab to queue message                                                                                    28% context left',
         ]
-        self.assertEqual('running', status(lines, current_block(lines)))
-        self.assertFalse(can_submit_stuck_input(lines))
+        self.assertEqual('stuck_input', status(lines, current_block(lines)))
+        self.assertTrue(can_submit_stuck_input(lines))
 
     def test_status_running_with_new_queued_input_marker(self) -> None:
         lines = [
@@ -916,6 +916,17 @@ class CodexStatusTests(unittest.TestCase):
             '» <agent_message from="manager:0">',
             '  Continue the current task.',
             '  </agent_message>',
+            '',
+            '  tab to queue message                                                                                    64% context left',
+        ]
+        self.assertEqual('stuck_input', status(lines, current_block(lines)))
+        self.assertTrue(can_submit_stuck_input(lines))
+
+    def test_status_running_with_queued_placeholder_during_work(self) -> None:
+        lines = [
+            '• Working (1m 23s • esc to interrupt)',
+            '',
+            '› Implement {feature}',
             '',
             '  tab to queue message                                                                                    64% context left',
         ]
@@ -930,8 +941,8 @@ class CodexStatusTests(unittest.TestCase):
             *[f'  queued line {idx}' for idx in range(25)],
             '  tab to queue message                                                                                    28% context left',
         ]
-        self.assertEqual('running', status(lines, current_block(lines)))
-        self.assertFalse(can_submit_stuck_input(lines))
+        self.assertEqual('stuck_input', status(lines, current_block(lines)))
+        self.assertTrue(can_submit_stuck_input(lines))
 
     def test_status_stuck_input_with_idle_queued_pasted_content_footer(self) -> None:
         lines = [
@@ -2079,6 +2090,25 @@ class CodexStatusTests(unittest.TestCase):
     def test_submit_stuck_input_if_present_sends_enter_while_latest_screen_is_busy(self) -> None:
         report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
         with patch('omo_manager.omo_codex_status.tail', return_value=['• Working', '', '› Continue task', '  gpt-5.5']), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
+            self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
+        self.assert_guarded_key_call(run, 'Enter')
+
+    def test_submit_stuck_input_sends_enter_for_working_turn_composer(self) -> None:
+        lines = [
+            '• Working (48m 14s • esc to interrupt)',
+            '',
+            '› [Pasted Content 1014 chars]ype item requires authenticated human resume authority',
+            '',
+            '  tab to queue message                                                                                    16% context left',
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual('stuck_input', report.status)
+        self.assertTrue(report.can_submit_input)
+        with patch('omo_manager.omo_codex_status.tail', return_value=lines), patch(
+            'omo_manager.omo_codex_status.exact_pane_id', return_value='%7'
+        ), patch(
+            'omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)
+        ) as run:
             self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
         self.assert_guarded_key_call(run, 'Enter')
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -141,6 +142,209 @@ raise SystemExit(submitted.returncode)
                         "--listen",
                         "ws://127.0.0.1:9876",
                     ],
+                    cwd=work,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    timeout=15,
+                    check=False,
+                )
+            finally:
+                server.shutdown()
+                thread.join()
+                server.server_close()
+            self.assertEqual(0, result.returncode, result.stderr)
+            manager_text = dated_manager_file(root).read_text(encoding="utf-8")
+            self.assertIn(f"(from agent {target} ", manager_text)
+
+    def test_omo_report_authenticates_antigravity_omnigent_producer_without_tmux(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            home = tmp_path / "home"
+            root = tmp_path / "logs"
+            work = tmp_path / "work"
+            root.mkdir()
+            work.mkdir()
+            session_id = "session-agy-1"
+            thread_id = "thread-agy-1"
+            bridge = home / ".omnigent" / "antigravity-native" / "bridge"
+            gemini = bridge / "agy-home" / ".gemini"
+            gemini.mkdir(parents=True)
+            state = bridge / "state.json"
+            state.write_text(
+                json.dumps(
+                    {
+                        "active_turn_id": None,
+                        "conversation_id": thread_id,
+                        "session_id": session_id,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state.chmod(0o600)
+            target = f"omnigent://{session_id}"
+            (root / "TODO.md").write_text(f"current:\ntask.md {target}\n", encoding="utf-8")
+            (root / "task.md").write_text(task_frontmatter(runat=target).replace("tool: codex", "tool: antigravity"), encoding="utf-8")
+            local_env = tmp_path / "local.env"
+            local_env.write_text(f"OMO_WORK_LOGS_ROOT={root}\nOMO_MANAGER_TMUX_TARGET=main:0.0\n", encoding="utf-8")
+
+            class Handler(BaseHTTPRequestHandler):
+                def do_GET(self) -> None:
+                    payload = (
+                        "{"
+                        f'"id":"{session_id}","external_session_id":"{thread_id}",'
+                        '"harness":"antigravity-native","runner_online":true,"host_online":true,'
+                        f'"workspace":{json.dumps(str(work))},'
+                        '"archived":false,"status":"idle"}'
+                    ).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+
+                def log_message(self, _format: str, *_args: object) -> None:
+                    return
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            launcher = tmp_path / "launcher.py"
+            launcher.write_text(
+                """from pathlib import Path
+import subprocess
+import sys
+helper = sys.argv[1]
+allocated = subprocess.run([helper, '--alloc-message-file'], text=True, capture_output=True, check=False)
+if allocated.returncode:
+    print(allocated.stderr, file=sys.stderr, end='')
+    raise SystemExit(allocated.returncode)
+message = Path(allocated.stdout.strip())
+message.write_text('antigravity omnigent report\\n', encoding='utf-8')
+submitted = subprocess.run([helper, '--status', 'blocked', '--agent', 'remote-owner', '--message-file', str(message)], text=True, capture_output=True, check=False)
+print(submitted.stdout, end='')
+print(submitted.stderr, file=sys.stderr, end='')
+raise SystemExit(submitted.returncode)
+""",
+                encoding="utf-8",
+            )
+            agy_executable = tmp_path / "agy"
+            agy_executable.symlink_to(Path(sys.executable).resolve())
+            env = {
+                **{key: value for key, value in os.environ.items() if key not in {"HARNESS_ANTIGRAVITY_NATIVE_BRIDGE_DIR"}},
+                "CODEX_HOME": str(tmp_path / "not-omnigent-codex"),
+                "HOME": str(home),
+                "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                "OMO_MANAGER_OMNIGENT_URL": f"http://127.0.0.1:{server.server_port}",
+                "OMNIGENT_RUNNER_LAUNCH_HARNESS": "antigravity-native",
+                "OMNIGENT_RUNNER_PRIMARY_SESSION_ID": session_id,
+                "TMUX": "/tmp/agy-tmux.sock,1,1",
+                "TMUX_PANE": "%99",
+                "XDG_STATE_HOME": str(tmp_path / "state"),
+            }
+            try:
+                result = subprocess.run(
+                    [
+                        str(agy_executable),
+                        str(launcher),
+                        str(OMO_DIR / "omo_report.sh"),
+                        f"--gemini_dir={gemini}",
+                    ],
+                    cwd=work,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    timeout=15,
+                    check=False,
+                )
+            finally:
+                server.shutdown()
+                thread.join()
+                server.server_close()
+            self.assertEqual(0, result.returncode, result.stderr)
+            manager_text = dated_manager_file(root).read_text(encoding="utf-8")
+            self.assertIn(f"(from agent {target} ", manager_text)
+
+    def test_omo_report_authenticates_cursor_omnigent_producer_without_tmux(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            home = tmp_path / "home"
+            root = tmp_path / "logs"
+            work = tmp_path / "work"
+            root.mkdir()
+            work.mkdir()
+            session_id = "session-cursor-1"
+            thread_id = "3a976813-79e8-442b-b7fc-d7b753d80887"
+            bridge = tmp_path / "omnigent-1" / "cursor-native" / hashlib.sha256(session_id.encode()).hexdigest()[:32]
+            bridge.mkdir(parents=True)
+            (bridge / "tmux.json").write_text(json.dumps({"socket_path": "/tmp/cursor.sock", "tmux_target": "main"}), encoding="utf-8")
+            (bridge / "tmux.json").chmod(0o644)
+            (bridge / "cursor_forwarder.json").write_text(json.dumps({"store_path": f"/cursor/chats/{thread_id}/store.db"}), encoding="utf-8")
+            (bridge / "cursor_forwarder.json").chmod(0o644)
+            target = f"omnigent://{session_id}"
+            (root / "TODO.md").write_text(f"current:\ntask.md {target}\n", encoding="utf-8")
+            (root / "task.md").write_text(task_frontmatter(runat=target).replace("tool: codex", "tool: cursor"), encoding="utf-8")
+            local_env = tmp_path / "local.env"
+            local_env.write_text(f"OMO_WORK_LOGS_ROOT={root}\nOMO_MANAGER_TMUX_TARGET=main:0.0\n", encoding="utf-8")
+
+            class Handler(BaseHTTPRequestHandler):
+                def do_GET(self) -> None:
+                    payload = (
+                        "{"
+                        f'"id":"{session_id}","external_session_id":"{thread_id}",'
+                        '"harness":"cursor-native","runner_online":true,"host_online":true,'
+                        f'"workspace":{json.dumps(str(work))},'
+                        '"archived":false,"status":"idle"}'
+                    ).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+
+                def log_message(self, _format: str, *_args: object) -> None:
+                    return
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            launcher = tmp_path / "launcher.py"
+            launcher.write_text(
+                """from pathlib import Path
+import subprocess
+import sys
+helper = sys.argv[1]
+allocated = subprocess.run([helper, '--alloc-message-file'], text=True, capture_output=True, check=False)
+if allocated.returncode:
+    print(allocated.stderr, file=sys.stderr, end='')
+    raise SystemExit(allocated.returncode)
+message = Path(allocated.stdout.strip())
+message.write_text('cursor omnigent report\\n', encoding='utf-8')
+submitted = subprocess.run([helper, '--status', 'blocked', '--agent', 'remote-owner', '--message-file', str(message)], text=True, capture_output=True, check=False)
+print(submitted.stdout, end='')
+print(submitted.stderr, file=sys.stderr, end='')
+raise SystemExit(submitted.returncode)
+""",
+                encoding="utf-8",
+            )
+            agent_executable = tmp_path / "agent"
+            agent_executable.symlink_to(Path(sys.executable).resolve())
+            env = {
+                **{key: value for key, value in os.environ.items() if key not in {"HARNESS_ANTIGRAVITY_NATIVE_BRIDGE_DIR", "HARNESS_CURSOR_NATIVE_BRIDGE_DIR"}},
+                "CODEX_HOME": str(tmp_path / "not-omnigent-codex"),
+                "HOME": str(home),
+                "HARNESS_CURSOR_NATIVE_BRIDGE_DIR": str(bridge),
+                "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                "OMO_MANAGER_OMNIGENT_URL": f"http://127.0.0.1:{server.server_port}",
+                "OMNIGENT_RUNNER_LAUNCH_HARNESS": "cursor-native",
+                "OMNIGENT_RUNNER_PRIMARY_SESSION_ID": session_id,
+                "TMUX": "/tmp/cursor-tmux.sock,1,1",
+                "TMUX_PANE": "%99",
+                "XDG_STATE_HOME": str(tmp_path / "state"),
+            }
+            try:
+                result = subprocess.run(
+                    [str(agent_executable), str(launcher), str(OMO_DIR / "omo_report.sh")],
                     cwd=work,
                     env=env,
                     text=True,

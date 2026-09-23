@@ -99,6 +99,40 @@ if [ -f "$local_env" ]; then
 fi
 configured_root="${OMO_WORK_LOGS_ROOT:-}"
 inherited_root="${env_root#x}"
+# 🧑 "Normalize only trailing slashes for lexical final-component validation, preserving `/` ... and derive identity from that same lexical form."
+lexical_root_path() {
+  local lexical_candidate="$1"
+  while :; do
+    while [ "$lexical_candidate" != / ] && [[ "$lexical_candidate" == */ ]]; do
+      lexical_candidate="${lexical_candidate%/}"
+    done
+    if [[ "$lexical_candidate" == */. ]]; then
+      lexical_candidate="${lexical_candidate%/.}"
+      [ -n "$lexical_candidate" ] || lexical_candidate=/
+      continue
+    fi
+    break
+  done
+  printf '%s\n' "$lexical_candidate"
+}
+require_real_root() {
+  local candidate="$1" lexical_candidate
+  lexical_candidate="$(lexical_root_path "$candidate")"
+  if [ -L "$lexical_candidate" ]; then
+    echo "work-log root must be a real directory, not a symlink: $candidate" >&2
+    exit 2
+  fi
+  if [ ! -d "$lexical_candidate" ]; then
+    echo "work-log root must be an existing directory: $candidate" >&2
+    exit 2
+  fi
+}
+if [ -n "$inherited_root" ]; then
+  require_real_root "$inherited_root"
+fi
+if [ -n "$configured_root" ]; then
+  require_real_root "$configured_root"
+fi
 if [ -n "$inherited_root" ] && [ -n "$configured_root" ] && [ "$inherited_root" != "$configured_root" ]; then
   inherited_root_resolved="$(readlink -f -- "$inherited_root" 2>/dev/null || true)"
   configured_root_resolved="$(readlink -f -- "$configured_root" 2>/dev/null || true)"
@@ -121,6 +155,23 @@ fi
 [ -n "${env_default_contact_agent#x}" ] && DEFAULT_CONTACT_AGENT="${env_default_contact_agent#x}"
 [ -n "${env_guest_hees_email_enable#x}" ] && OMO_MANAGER_ENABLE_GUEST_HEES_EMAIL_WATCHER="${env_guest_hees_email_enable#x}"
 root="${OMO_WORK_LOGS_ROOT:-$HOME/work_logs}"
+root_lexical="$(lexical_root_path "$root")"
+require_real_root "$root"
+root_identity="$(stat -c '%d:%i' -- "$root_lexical" 2>/dev/null || true)"
+if [ -z "$root_identity" ]; then
+  echo "work-log root identity is unavailable: $root" >&2
+  exit 2
+fi
+require_root_identity() {
+  local current_identity
+  require_real_root "$root"
+  current_identity="$(stat -c '%d:%i' -- "$root_lexical" 2>/dev/null || true)"
+  if [ -z "$current_identity" ] || [ "$current_identity" != "$root_identity" ]; then
+    echo "work-log root changed before watcher teardown: $root" >&2
+    exit 2
+  fi
+}
+require_root_identity
 manager_url="${OMO_MANAGER_URL:-}"
 manager_target="${OMO_MANAGER_TMUX_TARGET:-}"
 default_contact_agent="${DEFAULT_CONTACT_AGENT:-}"
@@ -219,6 +270,19 @@ process_active() {
   rest="${stat##*) }"
   set -- $rest
   [ "${1:-}" != Z ]
+}
+
+# 🧑 "... without weakening authenticated readiness"
+ready_process_is_active() {
+  local pid="${1:-}" stat rest
+  process_alive "$pid" || return 1
+  [ -r "/proc/$pid/stat" ] || return 1
+  stat="$(<"/proc/$pid/stat")"
+  rest="${stat##*) }"
+  set -- $rest
+  case "${1:-}" in
+    ''|Z|T|t|X|x) return 1 ;;
+  esac
 }
 
 owner_token() {
@@ -352,6 +416,97 @@ process_has_ancestor() {
   return 1
 }
 
+supervisor_guardian_code="$(cat <<'PY'
+import ctypes
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+SUBREAPER_MARKER = "omo-watcher-subreaper-v1"
+PR_SET_CHILD_SUBREAPER = 36
+
+if len(sys.argv) < 4 or sys.argv[1] != SUBREAPER_MARKER:
+    raise SystemExit(125)
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+    error = ctypes.get_errno()
+    print(f"watcher supervisor could not enable child subreaping: errno={error}", file=sys.stderr)
+    raise SystemExit(125)
+
+launch_pid_file = Path(sys.argv[2])
+command = sys.argv[3:]
+os.umask(0o077)
+temporary_pid_file = launch_pid_file.with_name(f"{launch_pid_file.name}.tmp.{os.getpid()}")
+temporary_pid_file.write_text(f"{os.getpid()}\n", encoding="utf-8")
+os.chmod(temporary_pid_file, 0o600)
+os.replace(temporary_pid_file, launch_pid_file)
+
+stop_signal = 0
+
+
+def request_stop(signum: int, _frame: object) -> None:
+    global stop_signal
+    if stop_signal == 0:
+        stop_signal = signum
+
+
+signal.signal(signal.SIGTERM, request_stop)
+signal.signal(signal.SIGINT, request_stop)
+child = subprocess.Popen(command)
+main_status: int | None = None
+termination_started: float | None = None
+
+
+def reap_children() -> None:
+    global main_status
+    while True:
+        try:
+            pid, status = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            return
+        if pid == child.pid:
+            main_status = os.waitstatus_to_exitcode(status)
+
+
+def direct_children() -> list[int]:
+    try:
+        contents = Path(f"/proc/self/task/{os.getpid()}/children").read_text(encoding="ascii")
+    except OSError:
+        return []
+    return [int(value) for value in contents.split()]
+
+
+while True:
+    reap_children()
+    if main_status is not None and stop_signal == 0:
+        stop_signal = signal.SIGTERM
+    if stop_signal != 0:
+        if termination_started is None:
+            termination_started = time.monotonic()
+            try:
+                os.killpg(os.getpgrp(), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        children = direct_children()
+        if not children:
+            raise SystemExit(main_status if main_status is not None else 128 + stop_signal)
+        cleanup_signal = signal.SIGKILL if time.monotonic() - termination_started >= 1.0 else signal.SIGTERM
+        for pid in children:
+            try:
+                os.kill(pid, cleanup_signal)
+            except ProcessLookupError:
+                pass
+        time.sleep(0.02)
+        continue
+    time.sleep(0.05)
+PY
+)"
+
 supervisor_has_watcher_descendant() {
   local supervisor_pid="$1" script_path="$2" pid
   while read -r pid; do
@@ -390,46 +545,70 @@ known_active_pids() {
   done
 }
 
+# 🧑 "... prove every supervisor-tree PID is gone before setup returns."
 stop_process_tree() {
-  local pid="$1"
-  local -a descendants=() records=() extra_records=() live=() rescanned=()
+  local pid="$1" stop_signal attempt
+  local -a descendants=() discovered=() records=() extra_records=() live=() survivor_records=()
   mapfile -t descendants < <(descendant_pids "$pid")
   mapfile -t records < <(record_active_targets "$pid" "${descendants[@]}")
-  mapfile -t live < <(known_active_pids "${records[@]}")
-  [ "${#live[@]}" -eq 0 ] && return 0
-  kill "${live[@]}" >/dev/null 2>&1 || true
-  for _ in 1 2 3 4 5; do
-    mapfile -t live < <(known_active_pids "${records[@]}")
-    [ "${#live[@]}" -eq 0 ] && return 0
-    sleep 0.2
+  for stop_signal in TERM KILL; do
+    for attempt in 1 2 3 4 5 6; do
+      mapfile -t discovered < <({
+        pgrep -g "$pid" 2>/dev/null || true
+        pgrep -s "$pid" 2>/dev/null || true
+        for target in "${live[@]}"; do
+          descendant_pids "$target"
+        done
+      } | awk 'NF && !seen[$0]++')
+      mapfile -t extra_records < <(record_active_targets "${discovered[@]}")
+      mapfile -t records < <(printf '%s\n' "${records[@]}" "${extra_records[@]}" | awk 'NF && !seen[$0]++')
+      mapfile -t live < <(known_active_pids "${records[@]}" | awk 'NF && !seen[$0]++')
+      if [ "${#live[@]}" -eq 0 ]; then
+        mapfile -t discovered < <({ pgrep -g "$pid" 2>/dev/null || true; pgrep -s "$pid" 2>/dev/null || true; } | awk 'NF && !seen[$0]++')
+        mapfile -t extra_records < <(record_active_targets "${discovered[@]}")
+        [ "${#extra_records[@]}" -eq 0 ] && return 0
+        mapfile -t records < <(printf '%s\n' "${records[@]}" "${extra_records[@]}" | awk 'NF && !seen[$0]++')
+        continue
+      fi
+      [ "$attempt" -eq 6 ] && break
+      kill -s "$stop_signal" -- "-$pid" >/dev/null 2>&1 || true
+      kill -s "$stop_signal" "${live[@]}" >/dev/null 2>&1 || true
+      sleep 0.2
+    done
   done
-  mapfile -t rescanned < <(
-    {
-      for target in "${live[@]}"; do
-        descendant_pids "$target"
-      done
-    } | awk 'NF && !seen[$0]++'
-  )
-  mapfile -t extra_records < <(record_active_targets "${rescanned[@]}")
-  records+=("${extra_records[@]}")
-  mapfile -t live < <(known_active_pids "${records[@]}")
-  [ "${#live[@]}" -eq 0 ] && return 0
-  kill -9 "${live[@]}" >/dev/null 2>&1 || true
-  for _ in 1 2 3 4 5; do
-    mapfile -t live < <(known_active_pids "${records[@]}")
-    [ "${#live[@]}" -eq 0 ] && return 0
-    sleep 0.2
+  mapfile -t survivor_records < <(record_active_targets "${live[@]}")
+  [ "${#survivor_records[@]}" -eq 0 ] && return 0
+  printf 'failed to stop process tree rooted at pid %s; live pid:start=%s\n' "$pid" "${survivor_records[*]}" >&2
+  return 1
+}
+
+stop_subreaper_supervisor() {
+  local pid="$1" start="$2" current_start
+  kill -TERM "$pid" >/dev/null 2>&1 || true
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
+    current_start="$(process_start_ticks "$pid" 2>/dev/null || true)"
+    if [ -z "$current_start" ] || [ "$current_start" != "$start" ] || ! process_active "$pid"; then
+      return 0
+    fi
+    sleep 0.05
   done
+  echo "failed to stop subreaper-contained supervisor pid=$pid start=$start; retaining recovery pidfile" >&2
+  return 1
 }
 
 write_pidfile() {
-  local name="$1" pid="$2" token="$3" file start
+  local name="$1" pid="$2" token="$3" containment="${4:-}" file start root_dev root_ino
   file="$(pid_file "$name")"
   start="$(process_start_ticks "$pid")"
+  root_dev="${root_identity%%:*}"
+  root_ino="${root_identity#*:}"
   {
     printf 'pid=%s\n' "$pid"
     printf 'start=%s\n' "$start"
     printf 'token=%s\n' "$token"
+    printf 'root_dev=%s\n' "$root_dev"
+    printf 'root_ino=%s\n' "$root_ino"
+    [ -z "$containment" ] || printf 'containment=%s\n' "$containment"
   } >"$file"
   chmod 600 "$file"
 }
@@ -440,34 +619,65 @@ pidfile_value() {
 }
 
 owned_supervisor_process() {
-  local pid="$1" start="$2" token="$3" name="$4" script_path="$5" root_arg="$6" state_arg="${7:-}" loop_marker="${8:-}" allow_prior_root="${9:-0}" current_start
+  local pid="$1" start="$2" token="$3" name="$4" script_path="$5" root_arg="$6" state_arg="${7:-}" loop_marker="${8:-}" root_match_mode="${9:-0}" containment="${10:-}" current_start session_id
   process_alive "$pid" || return 1
   current_start="$(process_start_ticks "$pid")" || return 1
   [ "$current_start" = "$start" ] || return 1
+  session_id="$(process_session_id "$pid")" || return 1
+  [ "$session_id" = "$pid" ] || return 1
   cmdline_has_fragment "$pid" "$loop_marker" || return 1
   cmdline_has_arg "$pid" "$name-watch-supervisor" || return 1
   cmdline_has_resolved_path_arg "$pid" "$state_dir/.$name-supervisor.$token.pid" || return 1
   cmdline_has_arg "$pid" "$token" || return 1
   cmdline_has_resolved_path_arg "$pid" "$script_path" || return 1
-  if [ "$allow_prior_root" -eq 1 ]; then
-    cmdline_has_option_value "$pid" --root || return 1
-  else
-    cmdline_has_resolved_path_arg_pair "$pid" --root "$root_arg" || return 1
-  fi
+  case "$root_match_mode" in
+    0) cmdline_has_resolved_path_arg_pair "$pid" --root "$root_arg" || return 1 ;;
+    1) cmdline_has_arg_pair "$pid" --root "$root_arg" || return 1 ;;
+    2) cmdline_has_option_value "$pid" --root || return 1 ;;
+    *) return 1 ;;
+  esac
+  case "$containment" in
+    '') ;;
+    subreaper-v1) cmdline_has_arg "$pid" omo-watcher-subreaper-v1 || return 1 ;;
+    *) return 1 ;;
+  esac
   [ -z "$state_arg" ] || cmdline_has_arg_pair "$pid" --state-dir "$state_arg"
 }
 
 stop_owned_supervisor() {
-  local name="$1" pid="$2" start="$3" token="$4" script_path="$5" root_arg="$6" state_arg="${7:-}" loop_marker="${8:-}" allow_prior_root="${9:-0}"
-  if owned_supervisor_process "$pid" "$start" "$token" "$name" "$script_path" "$root_arg" "$state_arg" "$loop_marker" "$allow_prior_root"; then
-    stop_process_tree "$pid"
-    return 0
+  local name="$1" pid="$2" start="$3" token="$4" script_path="$5" root_arg="$6" state_arg="${7:-}" loop_marker="${8:-}" root_match_mode="${9:-0}" containment="${10:-}"
+  if owned_supervisor_process "$pid" "$start" "$token" "$name" "$script_path" "$root_arg" "$state_arg" "$loop_marker" "$root_match_mode" "$containment"; then
+    if [ "$root_match_mode" -eq 0 ]; then
+      require_root_identity
+    fi
+    if [ "$containment" = subreaper-v1 ]; then
+      stop_subreaper_supervisor "$pid" "$start"
+    else
+      stop_process_tree "$pid"
+    fi
+    return
   fi
   return 1
 }
 
+rollback_launched_supervisor() {
+  local name="$1" pid="$2" start="$3" token="$4" script_path="$5" root_arg="$6" state_arg="${7:-}" loop_marker="${8:-}" containment="${9:-}" stopped=0
+  require_root_identity
+  if stop_owned_supervisor "$name" "$pid" "$start" "$token" "$script_path" "$root_arg" "$state_arg" "$loop_marker" 0 "$containment"; then
+    stopped=1
+  elif [ "$containment" != subreaper-v1 ] && ! process_active "$pid" && stop_process_tree "$pid"; then
+    stopped=1
+  fi
+  if [ "$stopped" -ne 1 ]; then
+    echo "authenticated $name watcher supervisor tree is still live; retaining pidfile" >&2
+    return 1
+  fi
+  require_root_identity
+  rm -f "$(pid_file "$name")"
+}
+
 stop_pidfile_supervisor() {
-  local name="$1" script_path="$2" root_arg="$3" state_arg="${4:-}" loop_marker="${5:-}" file pid start token
+  local name="$1" script_path="$2" root_arg="$3" state_arg="${4:-}" loop_marker="${5:-}" file pid start token containment pid_root_dev pid_root_ino pid_root_dev_count pid_root_ino_count
   file="$(pid_file "$name")"
   if [ ! -r "$file" ]; then
     return 0
@@ -475,10 +685,44 @@ stop_pidfile_supervisor() {
   pid="$(pidfile_value "$file" pid)"
   start="$(pidfile_value "$file" start)"
   token="$(pidfile_value "$file" token)"
-  if process_alive "$pid" && ! stop_owned_supervisor "$name" "$pid" "$start" "$token" "$script_path" "$root_arg" "$state_arg" "$loop_marker" 1; then
-    echo "stale $name watcher pidfile points at unowned pid $pid; ignoring" >&2
+  pid_root_dev="$(pidfile_value "$file" root_dev)"
+  pid_root_ino="$(pidfile_value "$file" root_ino)"
+  pid_root_dev_count="$(grep -c '^root_dev' "$file" 2>/dev/null || true)"
+  pid_root_ino_count="$(grep -c '^root_ino' "$file" 2>/dev/null || true)"
+  containment="$(pidfile_value "$file" containment)"
+  if process_alive "$pid"; then
+    if owned_supervisor_process "$pid" "$start" "$token" "$name" "$script_path" "$root_arg" "$state_arg" "$loop_marker" 2 "$containment"; then
+      if [[ ! "$pid_root_dev" =~ ^[0-9]+$ ]] \
+        || [[ ! "$pid_root_ino" =~ ^[0-9]+$ ]] \
+        || [ "$pid_root_dev:$pid_root_ino" != "$root_identity" ]; then
+        if [ "$pid_root_dev_count" -ne 0 ] \
+          || [ "$pid_root_ino_count" -ne 0 ] \
+          || ! owned_supervisor_process "$pid" "$start" "$token" "$name" "$script_path" "$root_arg" "$state_arg" "$loop_marker" 0 "$containment"; then
+          echo "authenticated $name watcher pidfile has no matching launch root identity; refusing replacement" >&2
+          return 1
+        fi
+      elif [ "$pid_root_dev_count" -ne 1 ] || [ "$pid_root_ino_count" -ne 1 ]; then
+        echo "authenticated $name watcher pidfile has no matching launch root identity; refusing replacement" >&2
+        return 1
+      fi
+      if ! owned_supervisor_process "$pid" "$start" "$token" "$name" "$script_path" "$root_arg" "$state_arg" "$loop_marker" 0 "$containment"; then
+        echo "authenticated $name watcher pidfile belongs to a different or unresolved root; refusing replacement" >&2
+        return 1
+      fi
+      require_root_identity
+      if ! stop_owned_supervisor "$name" "$pid" "$start" "$token" "$script_path" "$root_arg" "$state_arg" "$loop_marker" 0 "$containment"; then
+        echo "authenticated $name watcher supervisor tree is still live; refusing replacement" >&2
+        return 1
+      fi
+    else
+      echo "stale $name watcher pidfile points at unowned pid $pid; ignoring" >&2
+    fi
   fi
+  require_root_identity
   rm -f "$file"
+  if [ "$name" = pending ] && [[ "$token" =~ ^[0-9a-f]{32}$ ]]; then
+    rm -f "$state_dir/.pending-ready.$token"
+  fi
 }
 
 legacy_supervisor_process() {
@@ -533,10 +777,11 @@ stop_legacy_supervisors() {
     [ -n "$pid" ] || continue
     if cmdline_has_arg "$pid" "$name-watch-supervisor" \
       && legacy_supervisor_process "$pid" "$name" "$script_path" "$root_arg" "$state_arg"; then
+      require_root_identity
       echo "stopping legacy $name watcher supervisor pid=$pid"
       stop_process_tree "$pid"
     fi
-  done < <(ps -eo pid=)
+  done < <(pgrep -f -- "$name-watch-supervisor" 2>/dev/null || true)
 }
 
 wait_supervised_child() {
@@ -557,47 +802,135 @@ wait_supervised_child() {
   return 1
 }
 
+pending_watcher_is_ready() (
+  local supervisor_pid="$1" script_path="$2" ready_file="$3" root_arg="$4" expected_root_identity="$5"
+  local ready_pid ready_root ready_version ready_mode ready_uid ready_dev ready_ino root_dev root_ino ready_contents
+  local root_fd ready_fd ready_path_dev ready_path_ino ready_fd_dev ready_fd_ino lexical_root_arg
+  lexical_root_arg="$(lexical_root_path "$root_arg")"
+  [ ! -L "$lexical_root_arg" ] || return 1
+  [ -f "$ready_file" ] && [ ! -L "$ready_file" ] || return 1
+  exec {root_fd}<"$lexical_root_arg" || return 1
+  exec {ready_fd}<"$ready_file" || return 1
+  ready_mode="$(stat -Lc '%a' "/proc/self/fd/$ready_fd" 2>/dev/null || true)"
+  ready_uid="$(stat -Lc '%u' "/proc/self/fd/$ready_fd" 2>/dev/null || true)"
+  [ "$ready_mode" = 600 ] && [ "$ready_uid" = "$(id -u)" ] || return 1
+  ready_contents="$(cat <&$ready_fd 2>/dev/null || true)"
+  ready_version="$(sed -n 's/^version=//p' <<< "$ready_contents" | sed -n '1p')"
+  ready_pid="$(sed -n 's/^pid=//p' <<< "$ready_contents" | sed -n '1p')"
+  ready_root="$(sed -n 's/^root=//p' <<< "$ready_contents" | sed -n '1p')"
+  ready_dev="$(sed -n 's/^root_dev=//p' <<< "$ready_contents" | sed -n '1p')"
+  ready_ino="$(sed -n 's/^root_ino=//p' <<< "$ready_contents" | sed -n '1p')"
+  [ "$ready_version" = omo-pending-watch-ready-v1 ] || return 1
+  case "$ready_pid" in ''|*[!0-9]*) return 1 ;; esac
+  case "$ready_dev" in ''|*[!0-9]*) return 1 ;; esac
+  case "$ready_ino" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$ready_dev:$ready_ino" = "$expected_root_identity" ] || return 1
+  same_resolved_path "$ready_root" "$root_arg" || return 1
+  [ ! -L "$lexical_root_arg" ] || return 1
+  root_dev="$(stat -Lc '%d' "/proc/self/fd/$root_fd" 2>/dev/null || true)"
+  root_ino="$(stat -Lc '%i' "/proc/self/fd/$root_fd" 2>/dev/null || true)"
+  [ "$ready_dev" = "$root_dev" ] && [ "$ready_ino" = "$root_ino" ] || return 1
+  ready_process_is_active "$ready_pid" || return 1
+  watcher_runtime_process "$ready_pid" "$script_path" || return 1
+  cmdline_has_arg_pair "$ready_pid" --root "$root_arg" || return 1
+  cmdline_has_arg_pair "$ready_pid" --ready-file "$ready_file" || return 1
+  process_has_ancestor "$ready_pid" "$supervisor_pid" || return 1
+  [ ! -L "$lexical_root_arg" ] || return 1
+  root_path_dev="$(stat -c '%d' "$lexical_root_arg" 2>/dev/null || true)"
+  root_path_ino="$(stat -c '%i' "$lexical_root_arg" 2>/dev/null || true)"
+  [ "$root_path_dev" = "$root_dev" ] && [ "$root_path_ino" = "$root_ino" ] || return 1
+  ready_fd_dev="$(stat -Lc '%d' "/proc/self/fd/$ready_fd" 2>/dev/null || true)"
+  ready_fd_ino="$(stat -Lc '%i' "/proc/self/fd/$ready_fd" 2>/dev/null || true)"
+  ready_path_dev="$(stat -c '%d' "$ready_file" 2>/dev/null || true)"
+  ready_path_ino="$(stat -c '%i' "$ready_file" 2>/dev/null || true)"
+  [ "$ready_fd_dev" = "$ready_path_dev" ] && [ "$ready_fd_ino" = "$ready_path_ino" ] || return 1
+  return 0
+)
+
+wait_pending_ready() {
+  local pid="$1" script_path="$2" timeout_s="$3" log_path="$4" ready_file="$5" root_arg="$6" expected_root_identity="$7"
+  local deadline_s
+  deadline_s=$((SECONDS + timeout_s))
+  while [ "$SECONDS" -le "$deadline_s" ]; do
+    if ! process_alive "$pid"; then
+      echo "pending watcher supervisor exited; see $log_path" >&2
+      return 1
+    fi
+    if pending_watcher_is_ready "$pid" "$script_path" "$ready_file" "$root_arg" "$expected_root_identity"; then
+      rm -f "$ready_file"
+      return 0
+    fi
+    sleep 0.2
+  done
+  echo "pending watcher did not become ready after its initial watch tree and inventory; see $log_path" >&2
+  return 1
+}
+
 wait_launch_pid() {
-  local name="$1" launcher_pid="$2" launcher_start="$3" launch_pid_file="$4" current_start pid
+  local name="$1" launch_pid_file="$2" pid reported_start reported_session
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     if [ -s "$launch_pid_file" ]; then
       pid="$(sed -n '1p' "$launch_pid_file")"
-      if process_alive "$pid"; then
-        rm -f "$launch_pid_file"
+      case "$pid" in ''|*[!0-9]*) sleep 0.1; continue ;; esac
+      reported_start="$(process_start_ticks "$pid" 2>/dev/null || true)"
+      reported_session="$(process_session_id "$pid" 2>/dev/null || true)"
+      if [ -n "$reported_start" ] \
+        && [ "$reported_session" = "$pid" ] \
+        && process_alive "$pid" \
+        && cmdline_has_arg "$pid" "$name-watch-supervisor" \
+        && cmdline_has_arg "$pid" omo-watcher-subreaper-v1 \
+        && cmdline_has_resolved_path_arg "$pid" "$launch_pid_file"; then
         printf '%s\n' "$pid"
         return 0
       fi
     fi
     sleep 0.1
   done
-  rm -f "$launch_pid_file"
-  current_start="$(process_start_ticks "$launcher_pid" 2>/dev/null || true)"
-  if [ -n "$launcher_start" ] \
-    && [ "$current_start" = "$launcher_start" ] \
-    && cmdline_has_arg "$launcher_pid" "$name-watch-supervisor"; then
-    stop_process_tree "$launcher_pid"
-  fi
-  echo "$name watcher supervisor did not report its pid" >&2
+  require_root_identity
+  echo "$name watcher supervisor did not report an authenticated pid; retaining launch record and process" >&2
   return 1
 }
 
+finalize_launched_supervisor() {
+  local name="$1" pid="$2" start="$3" token="$4" script_path="$5" root_arg="$6" state_arg="$7" loop_marker="$8" launch_pid_file="$9"
+  if ! owned_supervisor_process "$pid" "$start" "$token" "$name" "$script_path" "$root_arg" "$state_arg" "$loop_marker" 0 subreaper-v1; then
+    echo "$name watcher supervisor identity changed before launch record deletion; retaining recovery records" >&2
+    return 1
+  fi
+  require_root_identity
+  rm -f "$launch_pid_file"
+}
+
+require_root_identity
 stop_pidfile_supervisor pending "$helper_dir/omo_pending_watch.py" "$root" "" "pending watcher exited status"
 stop_legacy_supervisors pending "$helper_dir/omo_pending_watch.py" "$root"
 stop_pidfile_supervisor email "$helper_dir/email_idle_watcher.py" "$root" "$state_dir" "email watcher exited status"
 stop_legacy_supervisors email "$helper_dir/email_idle_watcher.py" "$root" "$state_dir"
 stop_pidfile_supervisor guest-hees-email "$helper_dir/email_idle_watcher.py" "$root" "$state_dir" "guest-hees email watcher exited status"
 stop_pidfile_supervisor audit "$helper_dir/omo_agent_audit.py" "$root" "$state_dir" "audit watcher exited status"
-pending_args=(--root "$root")
+require_root_identity
 pending_token="$(owner_token)"
+pending_ready_file="$state_dir/.pending-ready.$pending_token"
+rm -f "$pending_ready_file"
+pending_args=(--root "$root" --ready-file "$pending_ready_file" --expected-root-identity "$root_identity")
 pending_launch_pid_file="$state_dir/.pending-supervisor.$pending_token.pid"
-setsid bash -c '
+require_root_identity
+setsid python3 -c "$supervisor_guardian_code" omo-watcher-subreaper-v1 "$pending_launch_pid_file" bash -c '
 launch_pid_file="$1"
 owner_token="$2"
-shift 2
-printf "%s\n" "$$" >"$launch_pid_file"
+expected_root_identity="$3"
+root_lexical="$4"
+shift 4
+ready_file="$(dirname "$launch_pid_file")/.pending-ready.$owner_token"
 while :; do
   "$@"
   st=$?
+  rm -f "$ready_file"
+  current_root_identity="$(stat -c "%d:%i" -- "$root_lexical" 2>/dev/null || true)"
+  if [ -L "$root_lexical" ] || [ "$current_root_identity" != "$expected_root_identity" ]; then
+    printf "%s pending watcher root identity changed; stopping supervisor\n" "$(date "+%Y-%m-%d %H:%M:%S %z")" >&2
+    exit 76
+  fi
   if [ "$st" -eq 75 ]; then
     printf "%s pending watcher duplicate-root refusal; stopping supervisor\n" "$(date "+%Y-%m-%d %H:%M:%S %z")" >&2
     exit "$st"
@@ -605,13 +938,28 @@ while :; do
   printf "%s pending watcher exited status=%s; restarting in 5s\n" "$(date "+%Y-%m-%d %H:%M:%S %z")" "$st" >&2
   sleep 5
 done
-' pending-watch-supervisor "$pending_launch_pid_file" "$pending_token" "${uv_run[@]}" "$helper_dir/omo_pending_watch.py" "${pending_args[@]}" 8>&- >>"$state_dir/pending-watch.log" 2>&1 &
-pending_launcher_pid=$!
-pending_launcher_start="$(process_start_ticks "$pending_launcher_pid" 2>/dev/null || true)"
-pending_pid="$(wait_launch_pid pending "$pending_launcher_pid" "$pending_launcher_start" "$pending_launch_pid_file")"
+' pending-watch-supervisor "$pending_launch_pid_file" "$pending_token" "$root_identity" "$root_lexical" "${uv_run[@]}" "$helper_dir/omo_pending_watch.py" "${pending_args[@]}" 8>&- >>"$state_dir/pending-watch.log" 2>&1 &
+pending_pid="$(wait_launch_pid pending "$pending_launch_pid_file")"
 pending_start="$(process_start_ticks "$pending_pid")"
-write_pidfile pending "$pending_pid" "$pending_token"
+write_pidfile pending "$pending_pid" "$pending_token" subreaper-v1
+finalize_launched_supervisor pending "$pending_pid" "$pending_start" "$pending_token" "$helper_dir/omo_pending_watch.py" "$root" "" "pending watcher exited status" "$pending_launch_pid_file" || exit 1
 echo "started pending watcher supervisor pid=$pending_pid log=$state_dir/pending-watch.log"
+if ! wait_pending_ready "$pending_pid" "$helper_dir/omo_pending_watch.py" "$watcher_health_timeout_s" "$state_dir/pending-watch.log" "$pending_ready_file" "$root" "$root_identity"; then
+  rm -f "$pending_ready_file"
+  pending_cleanup_ok=0
+  if stop_owned_supervisor pending "$pending_pid" "$pending_start" "$pending_token" "$helper_dir/omo_pending_watch.py" "$root" "" "pending watcher exited status" 1 subreaper-v1; then
+    pending_cleanup_ok=1
+  elif ! process_active "$pending_pid"; then
+    pending_cleanup_ok=1
+  fi
+  if [ "$pending_cleanup_ok" -eq 1 ]; then
+    wait "$pending_pid" 2>/dev/null || true
+    rm -f "$(pid_file pending)"
+  else
+    echo "pending watcher readiness failed and its authenticated supervisor tree could not be stopped" >&2
+  fi
+  exit 1
+fi
 if [ "$start_email" -eq 1 ]; then
   mkdir -p -m 700 "$mail_dir"
   chmod 700 "$mail_dir"
@@ -621,11 +969,11 @@ if [ "$start_email" -eq 1 ]; then
   [ -n "$default_contact_agent" ] && email_args+=(--default-contact-agent "$default_contact_agent")
   email_token="$(owner_token)"
   email_launch_pid_file="$state_dir/.email-supervisor.$email_token.pid"
-  setsid bash -c '
+  require_root_identity
+  setsid python3 -c "$supervisor_guardian_code" omo-watcher-subreaper-v1 "$email_launch_pid_file" bash -c '
 launch_pid_file="$1"
 owner_token="$2"
 shift 2
-printf "%s\n" "$$" >"$launch_pid_file"
 startup_grace_s="${OMO_MANAGER_EMAIL_SUPERVISOR_STARTUP_GRACE_S:-2}"
 started=0
 while :; do
@@ -641,11 +989,10 @@ while :; do
   sleep 5
 done
 ' email-watch-supervisor "$email_launch_pid_file" "$email_token" "${uv_run[@]}" "$helper_dir/email_idle_watcher.py" "${email_args[@]}" 8>&- >>"$state_dir/email-watch.log" 2>&1 &
-  email_launcher_pid=$!
-  email_launcher_start="$(process_start_ticks "$email_launcher_pid" 2>/dev/null || true)"
-  email_pid="$(wait_launch_pid email "$email_launcher_pid" "$email_launcher_start" "$email_launch_pid_file")"
+  email_pid="$(wait_launch_pid email "$email_launch_pid_file")"
   email_start="$(process_start_ticks "$email_pid")"
-  write_pidfile email "$email_pid" "$email_token"
+  write_pidfile email "$email_pid" "$email_token" subreaper-v1
+  finalize_launched_supervisor email "$email_pid" "$email_start" "$email_token" "$helper_dir/email_idle_watcher.py" "$root" "$state_dir" "email watcher exited status" "$email_launch_pid_file" || exit 1
   echo "started email watcher supervisor pid=$email_pid log=$state_dir/email-watch.log mail_dir=$mail_dir"
 else
   echo "skipped email watcher; configure the split agent/human email values or enable the legacy email config"
@@ -659,13 +1006,13 @@ if [ "$start_guest_hees_email" -eq 1 ]; then
   guest_hees_email_lock="$state_dir/source1269-guest-watcher.lock"
   guest_hees_email_token="$(owner_token)"
   guest_hees_email_launch_pid_file="$state_dir/.guest-hees-email-supervisor.$guest_hees_email_token.pid"
-  setsid bash -c '
+  require_root_identity
+  setsid python3 -c "$supervisor_guardian_code" omo-watcher-subreaper-v1 "$guest_hees_email_launch_pid_file" bash -c '
 launch_pid_file="$1"
 owner_token="$2"
 lock_file="$3"
 shift 3
 umask 077
-printf "%s\n" "$$" >"$launch_pid_file"
 startup_grace_s="${OMO_MANAGER_EMAIL_SUPERVISOR_STARTUP_GRACE_S:-2}"
 started=0
 while :; do
@@ -685,11 +1032,10 @@ while :; do
   sleep 5
 done
 ' guest-hees-email-watch-supervisor "$guest_hees_email_launch_pid_file" "$guest_hees_email_token" "$guest_hees_email_lock" "${uv_run[@]}" "$helper_dir/email_idle_watcher.py" "${guest_hees_email_args[@]}" 8>&- >>"$state_dir/guest-hees-email-watch.log" 2>&1 &
-  guest_hees_email_launcher_pid=$!
-  guest_hees_email_launcher_start="$(process_start_ticks "$guest_hees_email_launcher_pid" 2>/dev/null || true)"
-  guest_hees_email_pid="$(wait_launch_pid guest-hees-email "$guest_hees_email_launcher_pid" "$guest_hees_email_launcher_start" "$guest_hees_email_launch_pid_file")"
+  guest_hees_email_pid="$(wait_launch_pid guest-hees-email "$guest_hees_email_launch_pid_file")"
   guest_hees_email_start="$(process_start_ticks "$guest_hees_email_pid")"
-  write_pidfile guest-hees-email "$guest_hees_email_pid" "$guest_hees_email_token"
+  write_pidfile guest-hees-email "$guest_hees_email_pid" "$guest_hees_email_token" subreaper-v1
+  finalize_launched_supervisor guest-hees-email "$guest_hees_email_pid" "$guest_hees_email_start" "$guest_hees_email_token" "$helper_dir/email_idle_watcher.py" "$root" "$state_dir" "guest-hees email watcher exited status" "$guest_hees_email_launch_pid_file" || exit 1
   echo "started guest-hees email watcher supervisor pid=$guest_hees_email_pid log=$state_dir/guest-hees-email-watch.log"
 else
   echo "skipped guest-hees email watcher; approval-gated and disabled by default"
@@ -698,11 +1044,11 @@ if [ "$start_audit" -eq 1 ]; then
   audit_args=(--root "$root" --state-dir "$state_dir" --loop --enable)
   audit_token="$(owner_token)"
   audit_launch_pid_file="$state_dir/.audit-supervisor.$audit_token.pid"
-  setsid bash -c '
+  require_root_identity
+  setsid python3 -c "$supervisor_guardian_code" omo-watcher-subreaper-v1 "$audit_launch_pid_file" bash -c '
 launch_pid_file="$1"
 owner_token="$2"
 shift 2
-printf "%s\n" "$$" >"$launch_pid_file"
 while :; do
   "$@"
   st=$?
@@ -710,60 +1056,35 @@ while :; do
   sleep 5
 done
 ' audit-watch-supervisor "$audit_launch_pid_file" "$audit_token" "${uv_run[@]}" "$helper_dir/omo_agent_audit.py" "${audit_args[@]}" 8>&- >>"$state_dir/audit-watch.log" 2>&1 &
-  audit_launcher_pid=$!
-  audit_launcher_start="$(process_start_ticks "$audit_launcher_pid" 2>/dev/null || true)"
-  audit_pid="$(wait_launch_pid audit "$audit_launcher_pid" "$audit_launcher_start" "$audit_launch_pid_file")"
+  audit_pid="$(wait_launch_pid audit "$audit_launch_pid_file")"
   audit_start="$(process_start_ticks "$audit_pid")"
-  write_pidfile audit "$audit_pid" "$audit_token"
+  write_pidfile audit "$audit_pid" "$audit_token" subreaper-v1
+  finalize_launched_supervisor audit "$audit_pid" "$audit_start" "$audit_token" "$helper_dir/omo_agent_audit.py" "$root" "$state_dir" "audit watcher exited status" "$audit_launch_pid_file" || exit 1
   echo "started audit watcher supervisor pid=$audit_pid log=$state_dir/audit-watch.log"
 else
   echo "skipped agent audit watcher; set OMO_MANAGER_ENABLE_AGENT_AUDIT=true to enable"
 fi
-if ! wait_supervised_child pending "$pending_pid" "$helper_dir/omo_pending_watch.py" "$watcher_health_timeout_s" "$state_dir/pending-watch.log"; then
-  if [ "$start_email" -eq 1 ]; then
-    stop_owned_supervisor email "$email_pid" "$email_start" "$email_token" "$helper_dir/email_idle_watcher.py" "$root" "$state_dir" "email watcher exited status" || true
-    rm -f "$(pid_file email)"
-  fi
-  if [ "$start_guest_hees_email" -eq 1 ]; then
-    stop_owned_supervisor guest-hees-email "$guest_hees_email_pid" "$guest_hees_email_start" "$guest_hees_email_token" "$helper_dir/email_idle_watcher.py" "$root" "$state_dir" "guest-hees email watcher exited status" || true
-    rm -f "$(pid_file guest-hees-email)"
-  fi
-  stop_owned_supervisor pending "$pending_pid" "$pending_start" "$pending_token" "$helper_dir/omo_pending_watch.py" "$root" "" "pending watcher exited status" || true
-  rm -f "$(pid_file pending)"
-  if [ "$start_audit" -eq 1 ]; then
-    stop_owned_supervisor audit "$audit_pid" "$audit_start" "$audit_token" "$helper_dir/omo_agent_audit.py" "$root" "$state_dir" "audit watcher exited status" || true
-    rm -f "$(pid_file audit)"
-  fi
-  exit 1
-fi
 if [ "$start_guest_hees_email" -eq 1 ]; then
   if ! wait_supervised_child guest-hees-email "$guest_hees_email_pid" "$helper_dir/email_idle_watcher.py" "$watcher_health_timeout_s" "$state_dir/guest-hees-email-watch.log"; then
-    stop_owned_supervisor guest-hees-email "$guest_hees_email_pid" "$guest_hees_email_start" "$guest_hees_email_token" "$helper_dir/email_idle_watcher.py" "$root" "$state_dir" "guest-hees email watcher exited status" || true
-    rm -f "$(pid_file guest-hees-email)"
-    stop_owned_supervisor pending "$pending_pid" "$pending_start" "$pending_token" "$helper_dir/omo_pending_watch.py" "$root" "" "pending watcher exited status" || true
-    rm -f "$(pid_file pending)"
+    rollback_launched_supervisor guest-hees-email "$guest_hees_email_pid" "$guest_hees_email_start" "$guest_hees_email_token" "$helper_dir/email_idle_watcher.py" "$root" "$state_dir" "guest-hees email watcher exited status" subreaper-v1 || exit 1
+    rollback_launched_supervisor pending "$pending_pid" "$pending_start" "$pending_token" "$helper_dir/omo_pending_watch.py" "$root" "" "pending watcher exited status" subreaper-v1 || exit 1
     exit 1
   fi
 fi
 if [ "$start_email" -eq 1 ]; then
   sleep "$email_supervisor_startup_grace_s"
   if ! wait_supervised_child email "$email_pid" "$helper_dir/email_idle_watcher.py" "$watcher_health_timeout_s" "$state_dir/email-watch.log"; then
-    stop_owned_supervisor email "$email_pid" "$email_start" "$email_token" "$helper_dir/email_idle_watcher.py" "$root" "$state_dir" "email watcher exited status" || true
+    rollback_launched_supervisor email "$email_pid" "$email_start" "$email_token" "$helper_dir/email_idle_watcher.py" "$root" "$state_dir" "email watcher exited status" subreaper-v1 || exit 1
     if [ "$email_enable" = "auto" ]; then
       echo "email watcher did not stay running in auto mode; continuing without it; see $state_dir/email-watch.log" >&2
-      rm -f "$(pid_file email)"
     else
-      rm -f "$(pid_file email)"
       echo "email watcher failed to stay running; see $state_dir/email-watch.log" >&2
-      stop_owned_supervisor pending "$pending_pid" "$pending_start" "$pending_token" "$helper_dir/omo_pending_watch.py" "$root" "" "pending watcher exited status" || true
-      rm -f "$(pid_file pending)"
+      rollback_launched_supervisor pending "$pending_pid" "$pending_start" "$pending_token" "$helper_dir/omo_pending_watch.py" "$root" "" "pending watcher exited status" subreaper-v1 || exit 1
       if [ "$start_guest_hees_email" -eq 1 ]; then
-        stop_owned_supervisor guest-hees-email "$guest_hees_email_pid" "$guest_hees_email_start" "$guest_hees_email_token" "$helper_dir/email_idle_watcher.py" "$root" "$state_dir" "guest-hees email watcher exited status" || true
-        rm -f "$(pid_file guest-hees-email)"
+        rollback_launched_supervisor guest-hees-email "$guest_hees_email_pid" "$guest_hees_email_start" "$guest_hees_email_token" "$helper_dir/email_idle_watcher.py" "$root" "$state_dir" "guest-hees email watcher exited status" subreaper-v1 || exit 1
       fi
       if [ "$start_audit" -eq 1 ]; then
-        stop_owned_supervisor audit "$audit_pid" "$audit_start" "$audit_token" "$helper_dir/omo_agent_audit.py" "$root" "$state_dir" "audit watcher exited status" || true
-        rm -f "$(pid_file audit)"
+        rollback_launched_supervisor audit "$audit_pid" "$audit_start" "$audit_token" "$helper_dir/omo_agent_audit.py" "$root" "$state_dir" "audit watcher exited status" subreaper-v1 || exit 1
       fi
       exit 1
     fi
@@ -772,9 +1093,8 @@ fi
 if [ "$start_audit" -eq 1 ]; then
   # Audit passes may be deliberately one-shot; the supervisor itself is the
   # health boundary and restarts each bounded invocation.
-  if ! owned_supervisor_process "$audit_pid" "$audit_start" "$audit_token" audit "$helper_dir/omo_agent_audit.py" "$root" "$state_dir" "audit watcher exited status"; then
-    stop_owned_supervisor audit "$audit_pid" "$audit_start" "$audit_token" "$helper_dir/omo_agent_audit.py" "$root" "$state_dir" "audit watcher exited status" || true
-    rm -f "$(pid_file audit)"
+  if ! owned_supervisor_process "$audit_pid" "$audit_start" "$audit_token" audit "$helper_dir/omo_agent_audit.py" "$root" "$state_dir" "audit watcher exited status" 0 subreaper-v1; then
+    rollback_launched_supervisor audit "$audit_pid" "$audit_start" "$audit_token" "$helper_dir/omo_agent_audit.py" "$root" "$state_dir" "audit watcher exited status" subreaper-v1 || exit 1
     echo "agent audit watcher failed to stay running; see $state_dir/audit-watch.log" >&2
     exit 1
   fi

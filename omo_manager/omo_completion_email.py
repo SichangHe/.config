@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Send one owner-authenticated completion email for a new task mutation."""
+
 from __future__ import annotations
 
 import argparse
@@ -109,9 +110,7 @@ SOURCE1970_STATUS = "blocked"
 SOURCE1970_BLOCKED_ON = "config:35 supported Source-1970 completion reconciliation"
 SOURCE1970_SENTENCE = "How exactly do we argue this, basically the eval is sufficient and there is no need for larger datasets?"
 SOURCE1970_MISSING_ITEM = f"🧑 Source-1970: “{SOURCE1970_SENTENCE}”"
-SOURCE1970_MISSING_BODY_LINE = (
-    f"Human Source-1970, verbatim from `manager_mail/85c5dff58359-1970.txt`: “{SOURCE1970_SENTENCE}”"
-)
+SOURCE1970_MISSING_BODY_LINE = f"Human Source-1970, verbatim from `manager_mail/85c5dff58359-1970.txt`: “{SOURCE1970_SENTENCE}”"
 SOURCE1970_LIVE_ITEMS = (
     "🧑 Source-1970: “Why” — explain why the existing evaluation can or cannot support the claim that generating more sites using the same methods would produce materially similar results.",
     "🧑 Source-1970: “What do you mean?” — replace the confusing stored-site/resampling explanation with a direct explanation of the same-method new-site question.",
@@ -253,8 +252,7 @@ SOURCE1994_RESULT_BODY_SHA256 = "2e94395f7f1f0c559fae57d0d7c9109bc51d5f95ffab708
 SOURCE1994_RESULT_REPO = Path("/ssd1/sichangheagent/dw3")
 SOURCE1994_RESULT_COMMIT = "c57ada9c41b91805e8b3c9d0d5e2c72fced24a95"
 SOURCE1994_EVIDENCE = (
-    f"Source-1994 items 1–5 completed by commit {SOURCE1994_RESULT_COMMIT} and reviewed Human result Message-ID "
-    f"{SOURCE1994_RESULT_MESSAGE_ID}; item 6 remains open pending Human approval."
+    f"Source-1994 items 1–5 completed by commit {SOURCE1994_RESULT_COMMIT} and reviewed Human result Message-ID {SOURCE1994_RESULT_MESSAGE_ID}; item 6 remains open pending Human approval."
 )
 SOURCE1994_PURPOSE_SHA256 = "17a4398c14b2c7c69d95411c94b737954bf595fbbe1dafba31476f76f550712a"
 SOURCE1994_STALE_ADD_CLAIM = (
@@ -299,9 +297,7 @@ SOURCE2003_ACK_SUBJECT_SHA256 = "b2439c1be93a90abff001abd6a6c39bfaddb49354dfd172
 SOURCE2003_ACK_BODY_SHA256 = "03d0348b99216242ed3de387276c80b92ee167de21abe56f60128d50a72e4e14"
 SOURCE2003_REPORT_REPLAY_ID = "1bec2f5a79d7e6b70bdf2032dd24fc03d071a70f7ebbb80156744c5650bcadf8"
 SOURCE2003_REPORT_COMMITMENT_ID = "43b7d8aadb78b73a7a6a5a87d666365f8300a7446d8dd01a38db1af7d42c9be8"
-SOURCE2003_REPORT_COMMITMENT_PATH = Path(
-    "/home/sichangheagent/.local/state/omo-manager/report-receipts/1bec2f5a79d7e6b70bdf2032dd24fc03d071a70f7ebbb80156744c5650bcadf8.commitment"
-)
+SOURCE2003_REPORT_COMMITMENT_PATH = Path("/home/sichangheagent/.local/state/omo-manager/report-receipts/1bec2f5a79d7e6b70bdf2032dd24fc03d071a70f7ebbb80156744c5650bcadf8.commitment")
 SOURCE2003_REPORT_COMMITMENT_SHA256 = "dcdf87b5d2de54be25bd17a721f569e7e7251511bf4091145d93d86c3156b345"
 SOURCE2003_REPORT_DRAFT_PATH = Path("/tmp/omo-report-drafts-30033/src1964_pangram.iw7287rx.md")
 SOURCE2003_REPORT_DRAFT_SHA256 = "413d7796a84175651fe648643ea7c992ec17008c9a4a0626590aa26ae3d0e43d"
@@ -376,6 +372,11 @@ MAIL_COMPRESS_EVIDENCE = (
 )
 MAIL_COMPRESS_PURPOSE_SHA256 = "709692ddcdb50a2ac78159578bf26746e025397c2bf5dd310821e4f420fa79f5"
 MAIL_COMPRESS_MESSAGE_ID = "<178986953082.1215897.7976112813418478695@gmail.com>"
+SOURCE2048_RECOVERY_KEY = "803ba79e684265b9d33fc98159bc0c94366cd93206916a36c5ae5825771dda2e"
+SOURCE2048_RECOVERY_TARGET = "DeGenTWeb_writeup:0"
+SOURCE2048_RECOVERY_TASK = "paper_finish.md"
+SOURCE2048_RECOVERY_SUBJECT_SHA256 = "d7f322d6687485a7ee16c7fbccb2ac395b87fb39d9e11c0f1959a2702c6f16f0"
+SOURCE2048_RECOVERY_BODY_SHA256 = "8a49c9552a32908a4f3f36008972f1173877de6e15bfb46bc1ec7292c5f1a453"
 MAIL_COMPRESS_SUBJECT_SHA256 = "0fb049394eeedce00216f51130ca734f5fc4bc185caacb0d727c41ca28dc8de5"
 MAIL_COMPRESS_BODY_SHA256 = "bc58a3d6ac3bec64617d3b914b6881404c731f9719e22ff28d5f3042a72dab83"
 MAIL_COMPRESS_FAILED_CLAIMS = (
@@ -461,9 +462,7 @@ def human_pending_notice_contact_forbidden(text: str) -> bool:
     policy_text = NO_CONTACT_META_RE.sub("", text)
     for match in NO_CONTACT_RE.finditer(policy_text):
         clause_start = max(policy_text.rfind(separator, 0, match.start()) for separator in ("\n", ";", ".")) + 1
-        clause_ends = [
-            position for separator in ("\n", ";", ".") if (position := policy_text.find(separator, match.end())) >= 0
-        ]
+        clause_ends = [position for separator in ("\n", ";", ".") if (position := policy_text.find(separator, match.end())) >= 0]
         clause_end = min(clause_ends, default=len(policy_text))
         clause = policy_text[clause_start:clause_end]
         if AGENT_PENDING_NO_CONTACT_SCOPE_RE.search(clause) is None or HUMAN_PENDING_AUTHOR_SCOPE_RE.search(clause) is not None:
@@ -476,6 +475,15 @@ def pending_item_notice_body(outcome: str, items: tuple[str, ...]) -> str:
     """Render the exact concise body for a Human pending-item notice."""
     event = "created" if outcome == "pending item created" else "deleted"
     return f"pending item {event}:\n" + "".join(f"- {pending_item_without_human_prefix(item)}\n" for item in items)
+
+
+def sent_reconciliation_record(subject: str, items: tuple[str, ...], evidence: str) -> str:
+    """Render the exact machine-checkable binding appended to a combined answer."""
+
+    payload = {"evidence": evidence, "items": list(items), "subject": subject, "version": "v1"}
+    return "Completion record:\n" + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+
+
 SOURCE1241_REF = "manager_mail/85c5dff58359-1241.txt:1-7"
 SOURCE1241_TASK = "hmanager_replace_fix.md"
 SOURCE1241_HUMAN = """Subject: Re: Why recent agent replies were missing
@@ -495,9 +503,7 @@ SOURCE1241_META_LINE = (
     f"{SOURCE1241_META_SPAN} Do not perform production replacement or other task work."
 )
 SOURCE1241_CONTEXT = f"(from manager omo_task_edit delegate-message)\n{SOURCE1241_ENVELOPE}\n\n{SOURCE1241_META_LINE}"
-SOURCE1241_LOCATOR_ENVELOPE_RE = re.compile(
-    rf'(?ms)^<human_instruction[ \t]+authoritative="true"[ \t]+source="{re.escape(SOURCE1241_REF)}">\r?\n(?P<body>.*?)\r?\n</human_instruction>[ \t]*$'
-)
+SOURCE1241_LOCATOR_ENVELOPE_RE = re.compile(rf'(?ms)^<human_instruction[ \t]+authoritative="true"[ \t]+source="{re.escape(SOURCE1241_REF)}">\r?\n(?P<body>.*?)\r?\n</human_instruction>[ \t]*$')
 ROUTING_OPEN_TAG_RE = re.compile(r"<(?P<tag>[A-Za-z][A-Za-z0-9_:-]*)(?:[ \t][^>]*)?>")
 ROUTING_CLOSE_TAG_RE = re.compile(r"</(?P<tag>[A-Za-z][A-Za-z0-9_:-]*)>")
 ROUTING_TAG_TOKEN_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9_:-]*(?:[ \t][^>]*)?>")
@@ -532,6 +538,19 @@ class CompletionEmail:
         if self.outcome == "task done" and self.semantic_key:
             return hashlib.sha256(f"{self.semantic_key}\0task-close".encode()).hexdigest()
         return self.semantic_key
+
+
+def validate_source2048_recovery_plan(plan: CompletionEmail) -> bool:
+    if plan.semantic_key != SOURCE2048_RECOVERY_KEY:
+        return False
+    if (
+        plan.target != SOURCE2048_RECOVERY_TARGET
+        or plan.task.name != SOURCE2048_RECOVERY_TASK
+        or hashlib.sha256(plan.subject.encode()).hexdigest() != SOURCE2048_RECOVERY_SUBJECT_SHA256
+        or hashlib.sha256(plan.body.encode()).hexdigest() != SOURCE2048_RECOVERY_BODY_SHA256
+    ):
+        raise OSError("Source-2048 completion does not match its reviewed recovery bindings")
+    return True
 
 
 @dataclass(frozen=True)
@@ -798,9 +817,7 @@ def validate_manager_churn(
     )
     if not all(bindings) or SHA256_RE.fullmatch(request.churn_diff_sha256) is None:
         raise OSError("manager churn requires exact commit, before/after blobs, and diff digest")
-    if re.fullmatch(r"[0-9a-f]{40,64}", request.churn_commit) is None or any(
-        re.fullmatch(r"[0-9a-f]{40,64}", value) is None for value in bindings[1:3]
-    ):
+    if re.fullmatch(r"[0-9a-f]{40,64}", request.churn_commit) is None or any(re.fullmatch(r"[0-9a-f]{40,64}", value) is None for value in bindings[1:3]):
         raise OSError("manager-churn Git object identity is malformed")
     relative = task.resolve().relative_to(root.resolve()).as_posix()
     parents = git_output(root, "show", "-s", "--format=%P", request.churn_commit).decode().strip().split()
@@ -815,10 +832,7 @@ def validate_manager_churn(
         raise OSError("manager-churn task diff does not match its exact digest")
     before_payload = git_output(root, "cat-file", "blob", before_blob)
     after_payload = git_output(root, "cat-file", "blob", after_blob)
-    if (
-        hashlib.sha256(before_payload).hexdigest() != request.prior_task_sha256
-        or hashlib.sha256(after_payload).hexdigest() != request.expected_task_sha256
-    ):
+    if hashlib.sha256(before_payload).hexdigest() != request.prior_task_sha256 or hashlib.sha256(after_payload).hexdigest() != request.expected_task_sha256:
         raise OSError("manager-churn task blobs do not match the exact task digests")
     try:
         before = parse_task_metadata(before_payload.decode(), root)
@@ -1015,8 +1029,7 @@ def validate_source1990_pangram_authority(
         or request.sent_subject_sha256 != SOURCE1990_PANGRAM_SUBJECT_SHA256
         or request.sent_body_sha256 != SOURCE1990_PANGRAM_BODY_SHA256
         or stale_claim_bindings(request) != (SOURCE1990_PANGRAM_PRIMARY_CLAIM, SOURCE1990_PANGRAM_EXTRA_CLAIM)
-        or (request.churn_commit, request.churn_before_blob, request.churn_after_blob, request.churn_diff_sha256)
-        != SOURCE1990_PANGRAM_CHURN
+        or (request.churn_commit, request.churn_before_blob, request.churn_after_blob, request.churn_diff_sha256) != SOURCE1990_PANGRAM_CHURN
     ):
         raise OSError("Source-1990 authority does not bind this exact Pangram recovery")
     validate_manager_churn(
@@ -1088,10 +1101,7 @@ def validate_watcher_pangram_reviewed_sent_authority(
         or plan.manager_target != WATCHER_PANGRAM_MANAGER
         or plan.task_sha256 != WATCHER_PANGRAM_TASK_SHA256
         or hashlib.sha256(current_text.encode()).hexdigest() != WATCHER_PANGRAM_TASK_SHA256
-        or sum(
-            metadata.pending_task_items[index : index + len(WATCHER_PANGRAM_ITEMS)] == WATCHER_PANGRAM_ITEMS
-            for index in range(len(metadata.pending_task_items))
-        ) != 1
+        or sum(metadata.pending_task_items[index : index + len(WATCHER_PANGRAM_ITEMS)] == WATCHER_PANGRAM_ITEMS for index in range(len(metadata.pending_task_items))) != 1
         or items != WATCHER_PANGRAM_ITEMS
         or evidence != WATCHER_PANGRAM_EVIDENCE
         or plan.outcome != "pending item removed after verification"
@@ -1166,8 +1176,7 @@ def validate_mail_compress_authority(
         or evidence != MAIL_COMPRESS_EVIDENCE
         or request != mail_compress_recovery_request()
         or stale_claim_bindings(request) != MAIL_COMPRESS_FAILED_CLAIMS
-        or tuple(binding[0] for binding in MAIL_COMPRESS_DELIVERED_CLAIMS)
-        != (MAIL_COMPRESS_REMOVED_ITEM, MAIL_COMPRESS_ITEMS[0])
+        or tuple(binding[0] for binding in MAIL_COMPRESS_DELIVERED_CLAIMS) != (MAIL_COMPRESS_REMOVED_ITEM, MAIL_COMPRESS_ITEMS[0])
         or ordinary_pending_purpose(plan.outcome, items, evidence) != MAIL_COMPRESS_PURPOSE_SHA256
         or plan != expected_plan
         or plan.target != MAIL_COMPRESS_OWNER
@@ -1193,10 +1202,7 @@ def validate_source1970_task_lineage(
         len(SOURCE1970_TASK_LINEAGE) != 4
         or SOURCE1970_TASK_LINEAGE[0][5] != SOURCE1970_STALE_REMOVAL_CLAIM[1]
         or SOURCE1970_TASK_LINEAGE[-1][5] != SOURCE1970_TASK_SHA256
-        or any(
-            left[5] != right[4] or left[2] != right[1]
-            for left, right in zip(SOURCE1970_TASK_LINEAGE, SOURCE1970_TASK_LINEAGE[1:])
-        )
+        or any(left[5] != right[4] or left[2] != right[1] for left, right in zip(SOURCE1970_TASK_LINEAGE, SOURCE1970_TASK_LINEAGE[1:]))
     ):
         raise OSError("Source-1970 task lineage constants are not contiguous")
     for commit, before_blob, after_blob, diff_sha256, before_sha256, after_sha256 in SOURCE1970_TASK_LINEAGE:
@@ -1302,10 +1308,7 @@ def validate_source1994_plot_authority(
         raise OSError("Source-1994 authority is missing") from exc
     except (UnicodeDecodeError, TaskFrontmatterError, ValueError) as exc:
         raise OSError("Source-1994 authority or task is malformed") from exc
-    authority_positions = tuple(
-        source_lines.index(line) if source_lines.count(line) == 1 else -1
-        for line in SOURCE1994_AUTHORITY_LINES
-    )
+    authority_positions = tuple(source_lines.index(line) if source_lines.count(line) == 1 else -1 for line in SOURCE1994_AUTHORITY_LINES)
     expected_plan = _build_completion_email(
         root,
         plan.task,
@@ -1354,11 +1357,15 @@ def validate_source1994_plot_authority(
     ):
         raise OSError("Source-1994 acknowledgement lacks exact Sent-Mail evidence")
     try:
-        commit = git_output(
-            SOURCE1994_RESULT_REPO,
-            "rev-parse",
-            f"{SOURCE1994_RESULT_COMMIT}^{{commit}}",
-        ).decode().strip()
+        commit = (
+            git_output(
+                SOURCE1994_RESULT_REPO,
+                "rev-parse",
+                f"{SOURCE1994_RESULT_COMMIT}^{{commit}}",
+            )
+            .decode()
+            .strip()
+        )
         _ = git_output(
             SOURCE1994_RESULT_REPO,
             "merge-base",
@@ -1400,13 +1407,7 @@ def validate_source2003_report_source(root: Path, task: Path) -> None:
     authority = transfer.get("authority")
     queue_item = transfer.get("queue_item")
     routing = transfer.get("routing")
-    if (
-        not isinstance(allocation, dict)
-        or not isinstance(routing_sources, list)
-        or not isinstance(authority, dict)
-        or not isinstance(queue_item, dict)
-        or not isinstance(routing, dict)
-    ):
+    if not isinstance(allocation, dict) or not isinstance(routing_sources, list) or not isinstance(authority, dict) or not isinstance(queue_item, dict) or not isinstance(routing, dict):
         raise OSError("Source-2003 authenticated report replay is malformed")
     source_task = str(task.resolve())
     manager_task = str((root / SOURCE2003_REPORT_MANAGER_TASK).resolve())
@@ -1418,8 +1419,7 @@ def validate_source2003_report_source(root: Path, task: Path) -> None:
         or commitment.get("schema") != "omo-report-transaction-commitment/v2"
         or commitment.get("replay_id") != SOURCE2003_REPORT_REPLAY_ID
         or commitment_id != SOURCE2003_REPORT_COMMITMENT_ID
-        or commitment_id
-        != hashlib.sha256(json.dumps(unsigned, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        or commitment_id != hashlib.sha256(json.dumps(unsigned, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         or canonical != commitment_payload
         or hashlib.sha256(commitment_payload).hexdigest() != SOURCE2003_REPORT_COMMITMENT_SHA256
         or allocation.get("file") != str(SOURCE2003_REPORT_DRAFT_PATH)
@@ -1701,10 +1701,8 @@ def validate_source1970_eval_state(
         if (
             hashlib.sha256(authorization_payload.encode()).hexdigest() != authorization_sha256
             or authorization_values(authorization_payload) != expected_authorization
-            or owned_private_file(used_dir / claim_key, "Source-1970 creation authorization use", 4096).decode()
-            != f"{SOURCE1970_OWNER}\t{SOURCE1970_TASK}\n"
-            or owned_private_file(delivery_dir / claim_key, "Source-1970 creation delivery", 4096).decode()
-            != f"{SOURCE1970_OWNER}\t{SOURCE1970_TASK}\t{task_sha256}\n"
+            or owned_private_file(used_dir / claim_key, "Source-1970 creation authorization use", 4096).decode() != f"{SOURCE1970_OWNER}\t{SOURCE1970_TASK}\n"
+            or owned_private_file(delivery_dir / claim_key, "Source-1970 creation delivery", 4096).decode() != f"{SOURCE1970_OWNER}\t{SOURCE1970_TASK}\t{task_sha256}\n"
             or owned_private_file(
                 notice_delivery_dir / notice_key,
                 "Source-1970 creation notice delivery",
@@ -1749,23 +1747,11 @@ def validate_source1970_eval_state(
         ):
             raise OSError("Source-1970 unused claim evidence changed")
         expected_live_rows = [expected] if selected == [expected] else []
-        if (
-            [row for row in rows if len(row) >= 6 and row[5] == authorization["notice_key"]] != expected_live_rows
-            or [row for row in rows if len(row) == 7 and row[6] == semantic_key] != expected_live_rows
-        ):
+        if [row for row in rows if len(row) >= 6 and row[5] == authorization["notice_key"]] != expected_live_rows or [
+            row for row in rows if len(row) == 7 and row[6] == semantic_key
+        ] != expected_live_rows:
             raise OSError("Source-1970 unused claim is not the sole exact purpose claim")
-    matching_plan_rows = [
-        row
-        for row in rows
-        if row
-        and (
-            row[0] == plan.key
-            or len(row) >= 6
-            and row[5] == plan.notice_key
-            or len(row) == 7
-            and row[6] == plan.notice_semantic_key
-        )
-    ]
+    matching_plan_rows = [row for row in rows if row and (row[0] == plan.key or len(row) >= 6 and row[5] == plan.notice_key or len(row) == 7 and row[6] == plan.notice_semantic_key)]
     current_paths = (
         authorization_dir / plan.key,
         state / "completion-email-authorization-used" / plan.key,
@@ -1857,23 +1843,9 @@ def validate_source2003_pangram_state(
         ):
             raise OSError("Source-2003 unused claim evidence changed")
         expected_live_rows = [expected] if selected == [expected] else []
-        if (
-            [row for row in rows if len(row) >= 6 and row[5] == notice_key] != expected_live_rows
-            or [row for row in rows if len(row) == 7 and row[6] == semantic_key] != expected_live_rows
-        ):
+        if [row for row in rows if len(row) >= 6 and row[5] == notice_key] != expected_live_rows or [row for row in rows if len(row) == 7 and row[6] == semantic_key] != expected_live_rows:
             raise OSError("Source-2003 unused claim is not the sole exact purpose claim")
-    matching_plan_rows = [
-        row
-        for row in rows
-        if row
-        and (
-            row[0] == plan.key
-            or len(row) >= 6
-            and row[5] == plan.notice_key
-            or len(row) == 7
-            and row[6] == plan.notice_semantic_key
-        )
-    ]
+    matching_plan_rows = [row for row in rows if row and (row[0] == plan.key or len(row) >= 6 and row[5] == plan.notice_key or len(row) == 7 and row[6] == plan.notice_semantic_key)]
     current_paths = (
         authorization_dir / plan.key,
         state / "completion-email-authorization-used" / plan.key,
@@ -1945,9 +1917,7 @@ def validate_mail_compress_state(
             "notice_key": notice_key,
             "semantic_key": semantic_key,
             "subject_sha256": hashlib.sha256(b"").hexdigest(),
-            "body_sha256": hashlib.sha256(
-                pending_item_notice_body("pending item removed after verification", (item,)).encode()
-            ).hexdigest(),
+            "body_sha256": hashlib.sha256(pending_item_notice_body("pending item removed after verification", (item,)).encode()).hexdigest(),
         }
         if (
             [row for row in rows if row and row[0] == claim_key] != [expected]
@@ -1955,10 +1925,8 @@ def validate_mail_compress_state(
             or [row for row in rows if len(row) == 7 and row[6] == semantic_key] != [expected]
             or hashlib.sha256(authorization_payload.encode()).hexdigest() != authorization_sha256
             or authorization_values(authorization_payload) != expected_authorization
-            or owned_private_file(used_dir / claim_key, "mail-compression authorization use", 4096).decode()
-            != f"{MAIL_COMPRESS_OWNER}\t{MAIL_COMPRESS_TASK}\n"
-            or owned_private_file(delivery_dir / claim_key, "mail-compression delivery", 4096).decode()
-            != f"{MAIL_COMPRESS_OWNER}\t{MAIL_COMPRESS_TASK}\t{task_sha256}\n"
+            or owned_private_file(used_dir / claim_key, "mail-compression authorization use", 4096).decode() != f"{MAIL_COMPRESS_OWNER}\t{MAIL_COMPRESS_TASK}\n"
+            or owned_private_file(delivery_dir / claim_key, "mail-compression delivery", 4096).decode() != f"{MAIL_COMPRESS_OWNER}\t{MAIL_COMPRESS_TASK}\t{task_sha256}\n"
             or owned_private_file(
                 notice_delivery_dir / notice_key,
                 "mail-compression notice delivery",
@@ -1970,18 +1938,7 @@ def validate_mail_compress_state(
             raise OSError("mail-compression delivered claim evidence changed")
     if stale_claim_bindings(request) != MAIL_COMPRESS_FAILED_CLAIMS:
         raise OSError("mail-compression failed claim bindings changed")
-    matching_plan_rows = [
-        row
-        for row in rows
-        if row
-        and (
-            row[0] == plan.key
-            or len(row) >= 6
-            and row[5] == plan.notice_key
-            or len(row) == 7
-            and row[6] == plan.notice_semantic_key
-        )
-    ]
+    matching_plan_rows = [row for row in rows if row and (row[0] == plan.key or len(row) >= 6 and row[5] == plan.notice_key or len(row) == 7 and row[6] == plan.notice_semantic_key)]
     current_paths = (
         authorization_dir / plan.key,
         state / "completion-email-authorization-used" / plan.key,
@@ -2047,18 +2004,20 @@ def prepare_ordinary_pending_transition(
     purpose = ordinary_pending_purpose(plan.outcome, items, evidence)
     if purpose != request.purpose_sha256:
         raise OSError("ordinary pending recovery purpose digest does not match")
-    if request.mode in {"adopt-add", "source2003-pangram-record-add"} and (
-        plan.outcome != "pending item created" or evidence
-    ):
+    if request.mode in {"adopt-add", "source2003-pangram-record-add"} and (plan.outcome != "pending item created" or evidence):
         raise OSError("claim adoption is supported only for the exact no-evidence add purpose")
-    if request.mode in {
-        "supersede-remove",
-        "source1990-pangram-remove",
-        "source1970-eval-remove",
-        "source1994-plot-record-remove",
-        "watcher-pangram-reviewed-sent-remove",
-        "mail-compress-reviewed-sent-remove",
-    } and plan.outcome != "pending item removed after verification":
+    if (
+        request.mode
+        in {
+            "supersede-remove",
+            "source1990-pangram-remove",
+            "source1970-eval-remove",
+            "source1994-plot-record-remove",
+            "watcher-pangram-reviewed-sent-remove",
+            "mail-compress-reviewed-sent-remove",
+        }
+        and plan.outcome != "pending item removed after verification"
+    ):
         raise OSError("claim supersession is supported only for exact verified removal")
     if request.mode == "adopt-add" and request.extra_claim_key:
         raise OSError("claim adoption cannot retire an unrelated extra claim")
@@ -2080,20 +2039,25 @@ def prepare_ordinary_pending_transition(
             validate_manager_churn(plan.root, plan.task, request, request.prior_manager_target, current_text)
         elif canonical_tmux_target(request.prior_manager_target) != canonical_tmux_target(plan.manager_target):
             raise OSError("manager churn requires exact Git evidence")
-    if not verify_ordinary_completion_in_sent(
+    participant_evidence = verify_ordinary_completion_in_sent(
         request.message_id,
         request.sent_subject_sha256,
         request.sent_body_sha256,
-    ):
+    )
+    if not isinstance(participant_evidence, tuple) or len(participant_evidence) != 2 or any(SHA256_RE.fullmatch(value) is None for value in participant_evidence):
         raise OSError("ordinary pending recovery message is not exact verified Sent-Mail evidence")
-    if request.mode not in {
-        "source1990-pangram-remove",
-        "source1970-eval-remove",
-        "source1994-plot-record-remove",
-        "source2003-pangram-record-add",
-        "watcher-pangram-reviewed-sent-remove",
-        "mail-compress-reviewed-sent-remove",
-    } and request.sent_body_sha256 != hashlib.sha256(plan.body.encode()).hexdigest():
+    if (
+        request.mode
+        not in {
+            "source1990-pangram-remove",
+            "source1970-eval-remove",
+            "source1994-plot-record-remove",
+            "source2003-pangram-record-add",
+            "watcher-pangram-reviewed-sent-remove",
+            "mail-compress-reviewed-sent-remove",
+        }
+        and request.sent_body_sha256 != hashlib.sha256(plan.body.encode()).hexdigest()
+    ):
         raise OSError("ordinary pending recovery Sent-Mail body does not match the canonical recovery notice")
     static = transition_static_values(plan.root, plan.task, plan.outcome, items, evidence, request)
     transition_key = static["transition_key"]
@@ -2116,6 +2080,7 @@ def prepare_ordinary_pending_transition(
         request.message_id,
         request.sent_subject_sha256,
         request.sent_body_sha256,
+        *participant_evidence,
     )
     message_record = f"transition_key={transition_key}\n{ordinary_record}"
     lock_paths = sorted(
@@ -2221,10 +2186,7 @@ def prepare_ordinary_pending_transition(
             if selected not in ([expected_claim], [tombstone]):
                 raise OSError("prior completion claim is missing or ambiguous")
         if request.mode == "adopt-add":
-            same_purpose = (
-                authorization["subject_sha256"] == hashlib.sha256(plan.subject.encode()).hexdigest()
-                and authorization["body_sha256"] == hashlib.sha256(plan.body.encode()).hexdigest()
-            )
+            same_purpose = authorization["subject_sha256"] == hashlib.sha256(plan.subject.encode()).hexdigest() and authorization["body_sha256"] == hashlib.sha256(plan.body.encode()).hexdigest()
             prior_identity = "\0".join(
                 (
                     str(plan.root),
@@ -2239,11 +2201,7 @@ def prepare_ordinary_pending_transition(
                     plan.body,
                 )
             )
-            if (
-                not same_purpose
-                or plan.contact_policy is not None
-                or hashlib.sha256(prior_identity.encode()).hexdigest() != request.prior_claim_key
-            ):
+            if not same_purpose or plan.contact_policy is not None or hashlib.sha256(prior_identity.encode()).hexdigest() != request.prior_claim_key:
                 raise OSError("prior completion claim belongs to a different purpose")
         replacements: dict[tuple[str, ...], list[str]] = {}
         for _old, _retired, expected, retired_claim, prior_authorization, _live in retirements:
@@ -2317,10 +2275,7 @@ def commit_ordinary_pending_transition(transition: OrdinaryPendingTransition, ta
             claim_key: claim_tombstone(transition.key, claim_key, Path(values["task"]).name, manager_target, claim_task_sha256)
             for claim_key, claim_task_sha256, manager_target, _semantic_key, _authorization_sha256 in stale_claim_bindings(request)
         }
-        if recovery_request_sha256_from_values(values) != request_hash or any(
-            [row for row in rows if row and row[0] == claim_key] != [tombstone]
-            for claim_key, tombstone in tombstones.items()
-        ):
+        if recovery_request_sha256_from_values(values) != request_hash or any([row for row in rows if row and row[0] == claim_key] != [tombstone] for claim_key, tombstone in tombstones.items()):
             raise OSError("ordinary pending transition tombstone is missing or ambiguous")
         if owned_private_file(message_path, "ordinary completion message evidence", 16_384).decode() != message_record:
             raise OSError("ordinary pending transition message evidence changed")
@@ -2374,7 +2329,7 @@ def ordinary_completion_record_values(payload: str) -> dict[str, str]:
         values = dict(line.split("=", 1) for line in lines)
     except ValueError as exc:
         raise OSError("ordinary completion record is malformed") from exc
-    expected_names = {
+    v1_names = {
         "version",
         "semantic_key",
         "canonical_key",
@@ -2389,6 +2344,7 @@ def ordinary_completion_record_values(payload: str) -> dict[str, str]:
         "sent_subject_sha256",
         "sent_body_sha256",
     }
+    v2_names = v1_names | {"sender_sha256", "recipient_sha256"}
     sha256_names = (
         "semantic_key",
         "canonical_key",
@@ -2400,9 +2356,10 @@ def ordinary_completion_record_values(payload: str) -> dict[str, str]:
     )
     if (
         len(values) != len(lines)
-        or set(values) != expected_names
-        or values["version"] != "v1"
-        or any(SHA256_RE.fullmatch(values[name]) is None for name in sha256_names)
+        or (values.get("version") == "v1" and set(values) != v1_names)
+        or (values.get("version") == "v2" and set(values) != v2_names)
+        or values.get("version") not in {"v1", "v2"}
+        or any(SHA256_RE.fullmatch(values[name]) is None for name in sha256_names + (("sender_sha256", "recipient_sha256") if values.get("version") == "v2" else ()))
         or re.fullmatch(r"<[^<>\s]+>", values["message_id"]) is None
     ):
         raise OSError("ordinary completion record is malformed")
@@ -2568,12 +2525,16 @@ def ordinary_sent_text(message: Message) -> str:
     return body.get_content() if body is not None else ""
 
 
-def verify_ordinary_completion_in_sent(
+def ordinary_completion_participant_evidence(
     message_id: str,
     subject_sha256: str,
     body_sha256: str,
-) -> bool:
-    """Verify one exact ordinary agent-to-Human message in Sent Mail."""
+    *,
+    required_items: tuple[str, ...] = (),
+    required_evidence: str = "",
+    require_record: bool = False,
+) -> tuple[str, str] | None:
+    """Verify one exact Sent message and its required completion content."""
 
     settings = configured_agent_mail()
     if settings is None:
@@ -2600,16 +2561,23 @@ def verify_ordinary_completion_in_sent(
                     candidate = BytesParser(policy=policy.default).parsebytes(payloads[0])
                     senders = [address.casefold() for _name, address in getaddresses(candidate.get_all("From", []))]
                     recipients = [address.casefold() for _name, address in getaddresses(candidate.get_all("To", []))]
+                    subject = str(candidate.get("Subject", ""))
+                    body = ordinary_sent_text(candidate)
+                    required_record = sent_reconciliation_record(subject, required_items, required_evidence)
                     if (
                         str(candidate.get("Message-ID", "")) == message_id
                         and senders == [settings.agent_address.casefold()]
                         and recipients == [settings.human_address.casefold()]
                         and not candidate.get_all("Cc", [])
                         and not candidate.get_all("Bcc", [])
-                        and hashlib.sha256(str(candidate.get("Subject", "")).encode()).hexdigest() == subject_sha256
-                        and hashlib.sha256(ordinary_sent_text(candidate).encode()).hexdigest() == body_sha256
+                        and hashlib.sha256(subject.encode()).hexdigest() == subject_sha256
+                        and hashlib.sha256(body.encode()).hexdigest() == body_sha256
+                        and (not require_record or body.endswith(f"\n\n{required_record}"))
                     ):
-                        return True
+                        return (
+                            hashlib.sha256(senders[0].encode()).hexdigest(),
+                            hashlib.sha256(recipients[0].encode()).hexdigest(),
+                        )
         except (OSError, ValueError, imaplib.IMAP4.error):
             pass
         finally:
@@ -2619,8 +2587,29 @@ def verify_ordinary_completion_in_sent(
                 except (OSError, imaplib.IMAP4.error):
                     pass
         if time.monotonic() >= deadline_s:
-            return False
+            return None
         time.sleep(min(0.5, max(0, deadline_s - time.monotonic())))
+
+
+def verify_ordinary_completion_in_sent(
+    message_id: str,
+    subject_sha256: str,
+    body_sha256: str,
+    *,
+    required_items: tuple[str, ...] = (),
+    required_evidence: str = "",
+    require_record: bool = False,
+) -> tuple[str, str] | None:
+    """Verify one exact message, required content, and participants."""
+
+    return ordinary_completion_participant_evidence(
+        message_id,
+        subject_sha256,
+        body_sha256,
+        required_items=required_items,
+        required_evidence=required_evidence,
+        require_record=require_record,
+    )
 
 
 def completion_notice_key(
@@ -2819,9 +2808,7 @@ def _build_completion_email(
     task_close = outcome == "task done"
     pending_item_notice = outcome in PENDING_ITEM_NOTICE_OUTCOMES
     human_pending_item_notice = pending_item_notice and bool(items) and human_authored_pending_items(items) == items
-    contact_forbidden = (
-        human_pending_notice_contact_forbidden(policy_text) if human_pending_item_notice else NO_CONTACT_RE.search(policy_text) is not None
-    ) or (
+    contact_forbidden = (human_pending_notice_contact_forbidden(policy_text) if human_pending_item_notice else NO_CONTACT_RE.search(policy_text) is not None) or (
         not human_pending_item_notice and MANAGER_ONLY_RE.search(policy_text) is not None and DIRECT_HUMAN_REPORT_RE.search(policy_text) is None
     )
     if (
@@ -2959,12 +2946,11 @@ def plan_completion_email(
     if human_subject:
         if outcome == "task done":
             raise ValueError("task close cannot override its exact automatic email")
-        if outcome in PENDING_ITEM_NOTICE_OUTCOMES:
-            raise ValueError("pending-item notice cannot override its exact thread or body")
+        # 🧑 "send exactly one final reviewed Human result email and remove exactly the four Source-2048 Human items"
         if human_subject.strip() != human_subject or "\n" in human_subject or "\r" in human_subject:
             raise ValueError("human answer subject must be one non-empty trimmed line")
         subject = human_subject
-        body = f"{human_body.rstrip()}\n\nCompletion record:\n{canonical.body}"
+        body = f"{human_body.rstrip()}\n\n{sent_reconciliation_record(human_subject, items, evidence)}"
     else:
         return canonical
     identity_parts = (
@@ -3021,6 +3007,7 @@ def plan_sent_recovery_completion(
     items: tuple[str, ...],
     evidence: str,
     semantic_key: str,
+    pending_item_owner: bool = True,
 ) -> CompletionEmail | None:
     """Build an exact-owner no-send plan for already-delivered Sent evidence."""
 
@@ -3037,7 +3024,8 @@ def plan_sent_recovery_completion(
     if plan is None:
         return None
     try:
-        owner = current_pending_task(root).resolve()
+        resolve_owner = current_pending_task if pending_item_owner else current_active_task
+        owner = resolve_owner(root).resolve()
     except (OSError, TaskFrontmatterError):
         return None
     return plan if owner == task.resolve() else None
@@ -3116,9 +3104,21 @@ def ordinary_completion_record(
     message_id: str,
     subject_sha256: str,
     body_sha256: str,
+    sender_sha256: str = "",
+    recipient_sha256: str = "",
 ) -> str:
+    if bool(sender_sha256) != bool(recipient_sha256):
+        raise ValueError("ordinary completion participant evidence must include sender and recipient together")
+    participant_values = (
+        (
+            ("sender_sha256", sender_sha256),
+            ("recipient_sha256", recipient_sha256),
+        )
+        if sender_sha256
+        else ()
+    )
     values = (
-        ("version", "v1"),
+        ("version", "v2" if participant_values else "v1"),
         ("semantic_key", plan.notice_semantic_key),
         ("canonical_key", plan.key),
         ("notice_key", plan.notice_key),
@@ -3131,7 +3131,7 @@ def ordinary_completion_record(
         ("message_id", message_id),
         ("sent_subject_sha256", subject_sha256),
         ("sent_body_sha256", body_sha256),
-    )
+    ) + participant_values
     if any(any(character in value for character in "\r\n") for _name, value in values):
         raise ValueError("ordinary completion evidence must be single-line")
     return "".join(f"{name}={value}\n" for name, value in values)
@@ -3148,16 +3148,17 @@ def ordinary_completion_is_reconciled(plan: CompletionEmail) -> bool:
     values = ordinary_completion_record_values(payload)
     if (
         values["semantic_key"] != plan.notice_semantic_key
+        or values["canonical_key"] != plan.key
         or values["notice_key"] != plan.notice_key
         or values["root"] != str(plan.root)
         or values["task"] != plan.task.relative_to(plan.root).as_posix()
         or canonical_tmux_target(values["owner"]) != canonical_tmux_target(plan.target)
         or canonical_tmux_target(values["manager_owner"]) != canonical_tmux_target(plan.manager_target)
+        or values["task_sha256"] != plan.task_sha256
+        or values["outcome_sha256"] != hashlib.sha256(plan.outcome.encode()).hexdigest()
     ):
         raise OSError("ordinary completion reconciliation does not match the current task")
-    message_marker = completion_email_state_dir() / "ordinary-completion-by-message" / hashlib.sha256(
-        values["message_id"].encode()
-    ).hexdigest()
+    message_marker = completion_email_state_dir() / "ordinary-completion-by-message" / hashlib.sha256(values["message_id"].encode()).hexdigest()
     message_payload = owned_private_file(message_marker, "ordinary completion message evidence", 16_384).decode()
     if message_payload != payload:
         transition_line, separator, ordinary_payload = message_payload.partition("\n")
@@ -3171,11 +3172,21 @@ def ordinary_completion_is_reconciled(plan: CompletionEmail) -> bool:
             transition_values,
             transition_payload,
         )
+        ordinary_values = ordinary_completion_record_values(ordinary_payload)
+        participant_evidence = (
+            (
+                ordinary_values["sender_sha256"],
+                ordinary_values["recipient_sha256"],
+            )
+            if ordinary_values["version"] == "v2"
+            else ()
+        )
         expected_ordinary_payload = ordinary_completion_record(
             plan,
             transition_request.message_id,
             transition_request.sent_subject_sha256,
             transition_request.sent_body_sha256,
+            *participant_evidence,
         )
         if (
             transition_values["status"] != "committed"
@@ -3209,11 +3220,14 @@ def reconcile_ordinary_sent_completion(
     items: tuple[str, ...] = (),
     evidence: str = "",
     semantic_key: str,
+    pending_item_owner: bool = False,
 ) -> None:
     """Bind exact Sent-Mail evidence to one owner task without sending mail."""
 
     if outcome == "task done":
         raise ValueError("ordinary Sent-Mail reconciliation cannot satisfy the exact automatic task-close email")
+    if pending_item_owner and not items:
+        raise ValueError("pending-item Sent-Mail reconciliation requires at least one exact item")
     if re.fullmatch(r"<[^<>\s]+>", message_id) is None:
         raise ValueError("ordinary completion Message-ID is invalid")
     if SHA256_RE.fullmatch(subject_sha256) is None or SHA256_RE.fullmatch(body_sha256) is None:
@@ -3222,7 +3236,7 @@ def reconcile_ordinary_sent_completion(
     task = task.resolve()
     with task_file_lock(task):
         text = task.read_text(encoding="utf-8")
-        plan = plan_completion_email(
+        plan = plan_sent_recovery_completion(
             root,
             task,
             text,
@@ -3230,12 +3244,29 @@ def reconcile_ordinary_sent_completion(
             items=items,
             evidence=evidence,
             semantic_key=semantic_key,
+            pending_item_owner=pending_item_owner,
         )
         if plan is None:
-            raise OSError("ordinary completion reconciliation requires the exact active task owner")
-        if not verify_ordinary_completion_in_sent(message_id, subject_sha256, body_sha256):
+            raise OSError("ordinary completion reconciliation requires the exact task owner")
+        participant_evidence = verify_ordinary_completion_in_sent(
+            message_id,
+            subject_sha256,
+            body_sha256,
+            required_items=items,
+            required_evidence=evidence,
+            require_record=True,
+        )
+        if not participant_evidence:
             raise OSError("ordinary completion message is not exact verified Sent-Mail evidence")
-        record = ordinary_completion_record(plan, message_id, subject_sha256, body_sha256)
+        if not isinstance(participant_evidence, tuple) or len(participant_evidence) != 2 or any(SHA256_RE.fullmatch(value) is None for value in participant_evidence):
+            raise OSError("ordinary completion verifier returned invalid participant evidence")
+        record = ordinary_completion_record(
+            plan,
+            message_id,
+            subject_sha256,
+            body_sha256,
+            *participant_evidence,
+        )
         state = completion_email_state_dir()
         state.mkdir(mode=0o700, parents=True, exist_ok=True)
         state.chmod(0o700)
@@ -3266,23 +3297,12 @@ def reconcile_ordinary_sent_completion(
                 state / "completion-email-authorization-used" / plan.key,
             )
             try:
-                claims = owned_private_file(
-                    state / "completion-email-claims.tsv", "completion claims ledger", 8_000_000
-                ).decode().splitlines()
+                claims = owned_private_file(state / "completion-email-claims.tsv", "completion claims ledger", 8_000_000).decode().splitlines()
             except FileNotFoundError:
                 claims = []
             if any(len(line.split("\t")) not in {3, 5, 6, 7} for line in claims):
                 raise OSError("completion claims ledger is malformed")
-            matching_claims = [
-                fields
-                for fields in (line.split("\t") for line in claims)
-                if fields
-                and (
-                    fields[0] == plan.key
-                    or len(fields) >= 6
-                    and fields[5] == plan.notice_key
-                )
-            ]
+            matching_claims = [fields for fields in (line.split("\t") for line in claims) if fields and (fields[0] == plan.key or len(fields) >= 6 and fields[5] == plan.notice_key)]
             authorization_dir = state / "completion-email-authorizations"
             matching_authorizations: list[Path] = []
             authorizations: set[str] = set()
@@ -3308,11 +3328,7 @@ def reconcile_ordinary_sent_completion(
                         "body_sha256",
                     }
                     legacy_fields = current_fields - {"task_sha256", "semantic_key"}
-                    if (
-                        len(values) != len(payload.splitlines())
-                        or frozenset(values) not in {frozenset(current_fields), frozenset(legacy_fields)}
-                        or values["version"] != "1"
-                    ):
+                    if len(values) != len(payload.splitlines()) or frozenset(values) not in {frozenset(current_fields), frozenset(legacy_fields)} or values["version"] != "1":
                         raise OSError("completion email authorization is malformed")
                     authorizations.add(authorization.name)
                     if values["notice_key"] == plan.notice_key and values.get("semantic_key", plan.notice_semantic_key) == plan.notice_semantic_key:
@@ -3374,11 +3390,7 @@ def claimed_completion_receipt(plan: CompletionEmail) -> tuple[str, str] | None:
     if claim is None:
         return None
     key, target, task, manager_target = claim
-    if (
-        canonical_tmux_target(target) != canonical_tmux_target(plan.target)
-        or task != plan.task.name
-        or canonical_tmux_target(manager_target) != canonical_tmux_target(plan.manager_target)
-    ):
+    if canonical_tmux_target(target) != canonical_tmux_target(plan.target) or task != plan.task.name or canonical_tmux_target(manager_target) != canonical_tmux_target(plan.manager_target):
         return None
     return key, target
 
@@ -3393,11 +3405,7 @@ def has_exact_completion_claim(plan: CompletionEmail, key: str, target: str) -> 
         fields = line.split("\t")
         if len(fields) not in {3, 5, 6, 7}:
             raise OSError("completion claims ledger is malformed")
-        if (
-            fields[0] == key
-            and canonical_tmux_target(fields[1]) == canonical_tmux_target(target)
-            and fields[2] == plan.task.name
-        ):
+        if fields[0] == key and canonical_tmux_target(fields[1]) == canonical_tmux_target(target) and fields[2] == plan.task.name:
             matches.append(fields)
     return len(matches) == 1
 
@@ -3416,6 +3424,7 @@ def exact_completion_claim_sha(plan: CompletionEmail, key: str, target: str) -> 
 
 
 def completion_email_is_delivered(plan: CompletionEmail) -> bool:
+    validate_source2048_recovery_plan(plan)
     state_dir = completion_email_state_dir()
     exact_marker = state_dir / "completion-email-delivered" / plan.key
     notice_marker = state_dir / "completion-notice-delivered" / plan.notice_key
@@ -3442,10 +3451,7 @@ def completion_email_is_delivered(plan: CompletionEmail) -> bool:
         ]
         if len(matching_claims) != 1:
             raise OSError("completion notice semantic key has no atomic claim")
-        if (
-            recorded_task != plan.task.name
-            or canonical_tmux_target(recorded_target) != canonical_tmux_target(plan.target)
-        ):
+        if recorded_task != plan.task.name or canonical_tmux_target(recorded_target) != canonical_tmux_target(plan.target):
             raise OSError("completion notice delivery does not match the current task")
         if recorded_task_sha256 != plan.task_sha256:
             # A stable task id in notice_key permits the expected pending-to-done
@@ -3500,12 +3506,7 @@ def validate_completion_notice_delivery(plan: CompletionEmail) -> str:
         key, target, task_name, task_sha256 = notice.rstrip("\n").split("\t")
     except ValueError as exc:
         raise OSError("completion notice delivery is malformed") from exc
-    if (
-        SHA256_RE.fullmatch(key) is None
-        or SHA256_RE.fullmatch(task_sha256) is None
-        or canonical_tmux_target(target) != canonical_tmux_target(plan.target)
-        or task_name != plan.task.name
-    ):
+    if SHA256_RE.fullmatch(key) is None or SHA256_RE.fullmatch(task_sha256) is None or canonical_tmux_target(target) != canonical_tmux_target(plan.target) or task_name != plan.task.name:
         raise OSError("completion notice delivery does not match the recovery task")
     claims = owned_private_file(state / "completion-email-claims.tsv", "completion claims ledger", 8_000_000).decode().splitlines()
     rows = [line.split("\t") for line in claims]
@@ -3743,9 +3744,7 @@ def mark_completion_email_delivered(plan: CompletionEmail, receipt_key: str | No
         if existing_receipt.is_file():
             recorded_receipt = owned_private_file(existing_receipt, "completion delivery", 4096).decode()
             legacy_receipt = f"{receipt_target or plan.target}\t{plan.task.name}\n"
-            if recorded_receipt == legacy_receipt and has_exact_completion_claim(
-                plan, receipt_key, receipt_target or plan.target
-            ):
+            if recorded_receipt == legacy_receipt and has_exact_completion_claim(plan, receipt_key, receipt_target or plan.target):
                 receipt_payload = recorded_receipt
             elif recorded_receipt != receipt_payload:
                 raise OSError("completion delivery does not match the task")
@@ -3807,6 +3806,7 @@ def completion_authorization_payload(plan: CompletionEmail) -> str:
 def refresh_unattempted_completion_claim(plan: CompletionEmail, previous_key: str) -> None:
     """Replace one changed same-owner claim only when it provably never reached SMTP."""
 
+    validate_source2048_recovery_plan(plan)
     if SHA256_RE.fullmatch(previous_key) is None:
         raise ValueError("previous completion claim key must be a lowercase SHA-256 digest")
     if previous_key == plan.key:
@@ -3833,9 +3833,7 @@ def refresh_unattempted_completion_claim(plan: CompletionEmail, previous_key: st
         current_notices = [row for row in rows if len(row) == 7 and row[5] == plan.notice_key]
         current_semantic = [row for row in rows if len(row) == 7 and row[6] == plan.notice_semantic_key]
         same_notice = old[5] == plan.notice_key and old[6] == plan.notice_semantic_key
-        if keyed != old_notices or keyed != old_semantic or (
-            same_notice and (keyed != current_notices or keyed != current_semantic)
-        ) or (not same_notice and (current_notices or current_semantic)):
+        if keyed != old_notices or keyed != old_semantic or (same_notice and (keyed != current_notices or keyed != current_semantic)) or (not same_notice and (current_notices or current_semantic)):
             raise OSError("previous completion claim is missing or ambiguous")
         if (
             canonical_tmux_target(old[1]) != canonical_tmux_target(plan.target)
@@ -3878,11 +3876,21 @@ def refresh_unattempted_completion_claim(plan: CompletionEmail, previous_key: st
             raise OSError("previous completion authorization does not match its claim")
         current_payload = completion_authorization_payload(plan)
         current_values = dict(line.split("=", 1) for line in current_payload.splitlines())
-        if not same_notice and (
-            plan.outcome != "task done"
-            or values["subject_sha256"] != current_values["subject_sha256"]
-            or values["body_sha256"] != current_values["body_sha256"]
-        ):
+        if old[4] == plan.task_sha256:
+            raise OSError("completion claim refresh requires changed task bytes")
+        prior_source2048 = values["semantic_key"] == SOURCE2048_RECOVERY_KEY
+        current_source2048 = plan.semantic_key == SOURCE2048_RECOVERY_KEY
+        if prior_source2048 or current_source2048:
+            if (
+                not prior_source2048
+                or not current_source2048
+                or values["subject_sha256"] != SOURCE2048_RECOVERY_SUBJECT_SHA256
+                or values["body_sha256"] != SOURCE2048_RECOVERY_BODY_SHA256
+                or current_values["subject_sha256"] != SOURCE2048_RECOVERY_SUBJECT_SHA256
+                or current_values["body_sha256"] != SOURCE2048_RECOVERY_BODY_SHA256
+            ):
+                raise OSError("Source-2048 claim refresh changed its reviewed answer")
+        if not same_notice and (plan.outcome != "task done" or values["subject_sha256"] != current_values["subject_sha256"] or values["body_sha256"] != current_values["body_sha256"]):
             raise OSError("previous completion claim belongs to a different semantic notice")
         forbidden = (
             state_dir / "completion-email-authorization-used" / previous_key,
@@ -3927,6 +3935,7 @@ def refresh_unattempted_completion_claim(plan: CompletionEmail, previous_key: st
 def claim_completion_email(plan: CompletionEmail, *, recover_existing: bool = False) -> bool:
     """Prepare the exact capability before reserving its Human notice."""
 
+    validate_source2048_recovery_plan(plan)
     if not plan.send_allowed:
         raise OSError("Sent-Mail recovery plans cannot authorize email")
     state_dir = completion_email_state_dir()
@@ -3978,9 +3987,7 @@ def claim_completion_email(plan: CompletionEmail, *, recover_existing: bool = Fa
         try:
             temporary_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(temporary_fd, "w", encoding="utf-8") as handle:
-                _ = handle.write(
-                    f"{previous}{plan.key}\t{plan.target}\t{plan.task.name}\t{plan.manager_target}\t{plan.task_sha256}\t{plan.notice_key}\t{plan.notice_semantic_key}\n"
-                )
+                _ = handle.write(f"{previous}{plan.key}\t{plan.target}\t{plan.task.name}\t{plan.manager_target}\t{plan.task_sha256}\t{plan.notice_key}\t{plan.notice_semantic_key}\n")
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, ledger)
@@ -3999,6 +4006,7 @@ def send_completion_email(plan: CompletionEmail | None) -> bool:
         raise OSError("Sent-Mail recovery plans cannot send email")
     if not plan.semantic_key:
         raise ValueError("semantic completion key is required before email delivery")
+    source2048_recovery = validate_source2048_recovery_plan(plan)
     if completion_email_is_delivered(plan):
         return False
     try:
@@ -4008,9 +4016,7 @@ def send_completion_email(plan: CompletionEmail | None) -> bool:
             raise OSError("task bytes changed before delivery")
         if plan.contact_policy is not None:
             source_payload = stable_owned_file(plan.contact_policy.source, 8_000_000)
-            if hashlib.sha256(task_payload).hexdigest() != plan.contact_policy.task_sha256 or (
-                hashlib.sha256(source_payload).hexdigest() != plan.contact_policy.source_sha256
-            ):
+            if hashlib.sha256(task_payload).hexdigest() != plan.contact_policy.task_sha256 or (hashlib.sha256(source_payload).hexdigest() != plan.contact_policy.source_sha256):
                 raise OSError("contact-policy authority changed before delivery")
     except OSError as exc:
         print(f"automatic completion email blocked before claim: {exc}", file=sys.stderr)
@@ -4021,6 +4027,8 @@ def send_completion_email(plan: CompletionEmail | None) -> bool:
         body = Path(tmp) / "body.txt"
         body.write_text(plan.body, encoding="utf-8")
         command = [str(EMAIL_HELPER), "--manager-human", "--completion-authorization", plan.key]
+        if source2048_recovery:
+            command.extend(("--preserve-source2048-thread", "--require-human-recipient"))
         if plan.subject:
             subject = Path(tmp) / "subject.txt"
             subject.write_text(plan.subject + "\n", encoding="utf-8")
@@ -4084,11 +4092,7 @@ def require_owner_completion(
         command.extend(("--item", item))
     if evidence:
         command.extend(("--evidence", evidence))
-    message = (
-        "Before this mutation can complete, send its single owner-authenticated completion notice. "
-        "Run this exact command, then report completion to your manager:\n"
-        f"{shlex.join(command)}"
-    )
+    message = f"Before this mutation can complete, send its single owner-authenticated completion notice. Run this exact command, then report completion to your manager:\n{shlex.join(command)}"
     from omo_manager.omo_tmux_send import send_system_to_codex
 
     send_system_to_codex(canonical.target, message)

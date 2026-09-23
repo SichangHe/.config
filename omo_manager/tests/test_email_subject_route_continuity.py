@@ -20,6 +20,33 @@ from omo_manager.omo_email_subject import (
 class EmailSubjectRouteContinuityTests(unittest.TestCase):
     profile = MailRouteProfile("agent@example.test", "human@example.test", "primary")
 
+    def test_exact_recovery_preserves_verified_thread_target(self) -> None:
+        parent = RecentHeader(
+            "human@example.test",
+            "Re: [config:2] Try Pangram for hard data",
+            datetime.now().astimezone(),
+            "<source2048@example.test>",
+            thread_target="dw:15",
+        )
+        with patch("omo_manager.omo_email_subject.verified_recent_thread_header", return_value=parent):
+            with self.assertRaisesRegex(SubjectInputError, "may not retag"):
+                prepare_subject_and_headers("Re: Try Pangram for hard data", "DeGenTWeb_writeup:0", route_profile=self.profile)
+            prepared, headers = prepare_subject_and_headers(
+                "Re: Try Pangram for hard data",
+                "DeGenTWeb_writeup:0",
+                route_profile=self.profile,
+                preserve_verified_thread_target="dw:15",
+            )
+        self.assertEqual("Re: [dw:15] Try Pangram for hard data", prepared)
+        self.assertEqual(parent.message_id, headers["In-Reply-To"])
+        with patch("omo_manager.omo_email_subject.verified_recent_thread_header", return_value=parent), self.assertRaisesRegex(SubjectInputError, "required preserved target"):
+            prepare_subject_and_headers(
+                "Re: Try Pangram for hard data",
+                "DeGenTWeb_writeup:0",
+                route_profile=self.profile,
+                preserve_verified_thread_target="config:2",
+            )
+
     def test_reply_cannot_retag_another_agents_addressed_thread(self) -> None:
         parent = RecentHeader(
             "human@example.test",
@@ -47,9 +74,7 @@ class EmailSubjectRouteContinuityTests(unittest.TestCase):
                     "<parent@example.test>",
                 )
                 with patch("omo_manager.omo_email_subject.verified_recent_thread_header", return_value=parent):
-                    subject, headers = prepare_subject_and_headers(
-                        "Re: Investigate config agent task file problems", "config:24.0", route_profile=self.profile
-                    )
+                    subject, headers = prepare_subject_and_headers("Re: Investigate config agent task file problems", "config:24.0", route_profile=self.profile)
 
                 self.assertEqual("Re: [config:24] Investigate config agent task file problems", subject)
                 self.assertEqual("<parent@example.test>", headers["In-Reply-To"])
@@ -78,9 +103,7 @@ class EmailSubjectRouteContinuityTests(unittest.TestCase):
         self.assertEqual("<wl1@example.test>", selected.message_id)
         self.assertEqual("config:24", selected.thread_target)
         with patch("omo_manager.omo_email_subject.verified_recent_thread_header", return_value=selected):
-            subject, _headers = prepare_subject_and_headers(
-                "Re: Investigate config agent task file problems", "config:24.0", route_profile=self.profile
-            )
+            subject, _headers = prepare_subject_and_headers("Re: Investigate config agent task file problems", "config:24.0", route_profile=self.profile)
         self.assertEqual("Re: [config:24] Investigate config agent task file problems", subject)
 
     def test_lookup_recovers_older_changed_subject_target_through_in_reply_to(self) -> None:
@@ -191,9 +214,7 @@ class EmailSubjectRouteContinuityTests(unittest.TestCase):
             ([RecentHeader(**{**good.__dict__, "recipient": "other@example.test"})], "unavailable"),
         )
         for headers, error in cases:
-            with self.subTest(error=error), patch(
-                "omo_manager.omo_email_subject.fetch_recent_headers", return_value=headers
-            ), self.assertRaisesRegex(SubjectInputError, error):
+            with self.subTest(error=error), patch("omo_manager.omo_email_subject.fetch_recent_headers", return_value=headers), self.assertRaisesRegex(SubjectInputError, error):
                 authenticated_referenced_thread_target(FakeClient(headers), latest, [latest], searches)  # type: ignore[arg-type]
 
     def test_root_without_in_reply_to_remains_valid(self) -> None:
@@ -255,9 +276,7 @@ class EmailSubjectRouteContinuityTests(unittest.TestCase):
             "<wl1@example.test>",
             thread_target="config:24",
         )
-        with patch("omo_manager.omo_email_subject.find_recent_thread_for_tmux_target", return_value=latest), self.assertRaisesRegex(
-            SubjectInputError, "addressed to config:24; wl:1 may not retag it"
-        ):
+        with patch("omo_manager.omo_email_subject.find_recent_thread_for_tmux_target", return_value=latest), self.assertRaisesRegex(SubjectInputError, "addressed to config:24; wl:1 may not retag it"):
             prepare_latest_thread_for_tmux_target("wl:1", route_profile=self.profile)
 
 

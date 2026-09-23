@@ -889,6 +889,23 @@ def has_queued_running_input(lines: list[str]) -> bool:
     return has_queued_message_footer(lines) and current_input_follows_running_indicator(lines)
 
 
+def has_working_turn_queued_input(lines: list[str]) -> bool:
+    # 🧑 “we were still getting input stuck in input box. In this scenario the watcher should have sent “enter” a few times”
+    input_text = current_input_text(lines)
+    if not has_queued_message_footer(lines) or not input_text or is_empty_input_text(lines, input_text):
+        return False
+    body = lines[:-1]
+    input_idx = next((idx for idx in range(len(body) - 1, -1, -1) if INPUT_RE.match(body[idx].lstrip()) is not None), -1)
+    for line in reversed(body[:input_idx]):
+        if SEP_RE.match(line) or WORKED_RE.match(line):
+            return False
+        if WORKING_INTERRUPT_RE.match(line.rstrip()):
+            return True
+        if BUSY_RE.search(line) is not None or BACKGROUND_RUNNING_RE.search(line) is not None or COMPACTING_RE.search(line) is not None:
+            return False
+    return False
+
+
 def has_idle_queued_input(lines: list[str], input_text: str) -> bool:
     return has_queued_message_footer(lines) and bool(input_text) and not current_input_follows_running_indicator(lines)
 
@@ -1045,6 +1062,8 @@ def can_submit_stuck_input(lines: list[str]) -> bool:
     if has_plan_prompt(lines):
         input_text = current_input_text(lines)
         return bool(input_text and not is_empty_input_text(lines, input_text))
+    if has_working_turn_queued_input(lines):
+        return True
     if has_queued_running_input(lines) or has_compacting_indicator(lines):
         return False
     if has_cursor_followups_overlay(lines):
@@ -1076,6 +1095,8 @@ def stuck_input_blocker(lines: list[str], input_text: str) -> str:
         return "no_codex_footer"
     if has_compacting_indicator(lines):
         return "compacting"
+    if has_working_turn_queued_input(lines):
+        return ""
     if has_queued_running_input(lines):
         return "queued_running_input"
     if not input_text:
@@ -1418,6 +1439,8 @@ def status(lines: list[str], block: Block, *, detect_waiting_subagent: bool = Fa
             return "stuck_input"
         if has_plan_prompt(lines):
             return "stuck_input"
+        if has_working_turn_queued_input(lines):
+            return "stuck_input"
         if has_queued_running_input(lines):
             return "running"
         input_text = current_input_text(lines)
@@ -1429,6 +1452,8 @@ def status(lines: list[str], block: Block, *, detect_waiting_subagent: bool = Fa
         if input_text and not is_stock_placeholder_input_text(input_text):
             return "stuck_input"
         return "error"
+    if has_working_turn_queued_input(lines):
+        return "stuck_input"
     if has_queued_running_input(lines):
         return "running"
     input_text = current_input_text(lines)

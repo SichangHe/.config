@@ -102,7 +102,15 @@ class TaskAuditTests(unittest.TestCase):
             "previous:\nretired.md retired\n",
             "previous:\nretired.md\nretired.md\n",
             "previous:\n./retired.md\n",
-            "current:\n",
+            "Previous:\nretired.md\n",
+            "previous\nretired.md\n",
+            "previous::\nretired.md\n",
+            "previous:\nstray:\nretired.md\n",
+            "previous:\nnote retired.md wl:2\n",
+            "previous:\nretired.md\nPrevious:\n",
+            "previous:\nretired.md\nprevious\n",
+            "previous:\nretired.md\nprevious::\n",
+            "previous:\nretired.md\nstray:\n",
         )
         for row in rows:
             with self.subTest(row=row):
@@ -112,6 +120,35 @@ class TaskAuditTests(unittest.TestCase):
                     (root / "retired.md").write_text(task("done", "retired"), encoding="utf-8")
                     findings = audit(root)
                     self.assertIn("retired_todo_invalid", {finding.kind for finding in findings})
+
+    def test_archived_done_retired_without_todo_is_historical(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "202607"
+            archive.mkdir()
+            (root / "TODO.md").write_text("current:\n", encoding="utf-8")
+            (archive / "retired.md").write_text(task("done", "retired"), encoding="utf-8")
+            findings = audit(root)
+            self.assertNotIn("retired_todo_invalid", {finding.kind for finding in findings})
+
+    def test_done_retired_without_todo_is_valid_terminal_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\n", encoding="utf-8")
+            (root / "retired.md").write_text(task("done", "retired"), encoding="utf-8")
+            findings = audit(root)
+            self.assertNotIn("retired_todo_invalid", {finding.kind for finding in findings})
+
+    def test_legacy_annotated_archive_row_allows_root_done_retired_without_todo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "202607"
+            archive.mkdir()
+            (root / "TODO.md").write_text("current:\n", encoding="utf-8")
+            (root / "retired.md").write_text(task("done", "retired"), encoding="utf-8")
+            (archive / "old_todos.md").write_text("retired.md (blocked: historical legacy record)\n", encoding="utf-8")
+            findings = audit(root)
+            self.assertNotIn("retired_todo_invalid", {finding.kind for finding in findings})
 
     def test_reviewed_nineteen_record_manifest_distinguishes_archives(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

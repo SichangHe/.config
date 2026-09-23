@@ -445,6 +445,26 @@ case "${CODEX_HOME:-}" in
     omnigent_identity_output=$(python3 -I -S "$omnigent_identity_path")
     ;;
 esac
+if [ -z "$omnigent_identity_output" ]; then
+  case "${HARNESS_ANTIGRAVITY_NATIVE_BRIDGE_DIR:-}" in
+    */.omnigent/antigravity-native/*)
+      omnigent_identity_output=$(python3 -I -S "$omnigent_identity_path")
+      ;;
+  esac
+fi
+if [ -z "$omnigent_identity_output" ] && [ "${OMNIGENT_RUNNER_LAUNCH_HARNESS:-}" = "antigravity-native" ]; then
+  omnigent_identity_output=$(python3 -I -S "$omnigent_identity_path")
+fi
+if [ -z "$omnigent_identity_output" ]; then
+  case "${HARNESS_CURSOR_NATIVE_BRIDGE_DIR:-}" in
+    */omnigent-*/cursor-native/*)
+      omnigent_identity_output=$(python3 -I -S "$omnigent_identity_path")
+      ;;
+  esac
+fi
+if [ -z "$omnigent_identity_output" ] && [ "${OMNIGENT_RUNNER_LAUNCH_HARNESS:-}" = "cursor-native" ]; then
+  omnigent_identity_output=$(python3 -I -S "$omnigent_identity_path")
+fi
 omnigent_session_id=""
 omnigent_thread_id=""
 omnigent_workspace=""
@@ -1082,7 +1102,7 @@ manager_frontmatter_sha256="${append_fields[8]}"
 case "$append_path_real" in "$task_root_real"/*) ;; *) echo "report route escapes root" >&2; exit 2 ;; esac
 tmux_target="${TMUX_PANE:-}"
 tmux_info=""
-if command -v tmux >/dev/null 2>&1; then
+if [ -z "$omnigent_session_id" ] && command -v tmux >/dev/null 2>&1; then
   if [ -n "$tmux_target" ]; then
     tmux_info=$(tmux display-message -p -t "$tmux_target" '#{session_name}	#{window_index}	#{pane_index}	#{pane_id}	#{window_name}' 2>/dev/null || true)
   elif [ -n "${TMUX:-}" ]; then

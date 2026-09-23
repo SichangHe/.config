@@ -5,7 +5,7 @@
 Goal: managers own task lifecycle and cross-task bookkeeping, while every agent
 maintains its own pending queue through a path-opaque helper.
 
-Workers use only `omo_pending.py list|add|replace|remove|recover-removal-notice`;
+Workers use only `omo_pending.py list|add|replace|remove|reconcile-sent-remove|recover-removal-notice`;
 they never receive a task path or backing-file details. Workers report with
 `omo_report.sh`.
 
@@ -27,6 +27,16 @@ instruction. Legacy `remove --no-email` also suppresses a closure
 notice; it is only for recovery after a separate completion email whose Sent-Mail
 evidence will be reconciled before task closure. Output never includes a task
 filename, `runat`, or `managerat`.
+
+`reconcile-sent-remove` is the no-duplicate path when a direct Human answer was
+already sent but its exact Human-authored legacy queue items remain. It accepts
+the ordered items, evidence, shared completion key, RFC Message-ID, and SHA-256
+digests of the decoded Sent-Mail subject and plain-text body. The queue owner
+verifies the unique message, sender, recipient, and bytes in Sent Mail, binds
+that delivery to the canonical pending-item notice, then removes the items
+through the ordinary verified path. Verification failure leaves the queue
+unchanged and never invokes the sender. The durable record stores hashes of the
+verified sender and recipient; later mail-configuration drift fails closed.
 
 Each Human-item notice reuses the responsible agent's newest verified Human
 email thread. Its body contains only `pending item created:` or `pending item
@@ -123,7 +133,7 @@ unchanged since it was read.
 Use one generated completion key for the whole lifecycle transition:
 
 ```sh
-completion_key=<64-lowercase-hex-digest>
+completion_key=$(python3 -c 'import hashlib, secrets; print(hashlib.sha256(secrets.token_bytes(32)).hexdigest())')
 omo_task_edit.py pending-remove TASK.md --item TEXT --evidence TEXT --completion-key "$completion_key"
 omo_task_status.py --completion-key "$completion_key" TASK.md done
 ```
@@ -131,6 +141,14 @@ omo_task_status.py --completion-key "$completion_key" TASK.md done
 Both normal email-capable commands require that same lowercase SHA-256 value at
 their CLI boundary. Explicit no-mail recovery and index-only reconciliation
 modes do not require it because they do not send completion mail.
+
+Owner-local combined answer:
+- repeat `--item` for each exact Human-authored item completed by one result
+- pass paired `--answer-subject-file` and `--answer-message-file`
+- use one generated completion key for the entire batch
+- the helper sends one owner-authenticated answer before one queue mutation
+- missing, repeated, non-Human, or policy-forbidden items fail without mutation
+- every unlisted pending item remains open
 
 Legacy ordinary-mail reconciliation:
 - use `omo_completion_email.py --reconcile-ordinary-sent` only after a legacy
@@ -201,6 +219,19 @@ Cross-state completion reconciliation:
   worker task file
 - does not send directly to tmux; `omo_pending_watch.py` owns delivery
 - ordinary pending blocks route directly to the task's `runat`
+
+`closed-status-normalize TASK.md --expected-task-sha256 SHA256 (--blocked-on TEXT | --done)`
+- replace one invalid legacy `status: closed` with `blocked` and an explicit blocker, or evidence-bound `done`
+- require unchanged task bytes; blocked preserves a nonempty queue, while done requires an empty queue and exact Human session-closure evidence
+- preserve body, owner, target, session, TODO placement, and runtime
+
+`report-todo-remove REPORT.md --expected-task-sha256 SHA256 --expected-todo-sha256 SHA256`
+- remove one sole targetless `human pending` row for a file without task frontmatter
+- preserve the report bytes and perform no runtime action
+
+`non-codex-session-normalize TASK.md --expected-task-sha256 SHA256`
+- remove one invalid Codex UUID from non-Codex tmux frontmatter
+- append the exact UUID to body history while preserving all other task and runtime state
 
 ## existing helper interaction
 

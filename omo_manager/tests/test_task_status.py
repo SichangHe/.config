@@ -78,11 +78,25 @@ from omo_manager.omo_task_status import validate_source1845_absent_recovery
 from omo_manager.omo_task_status import validate_source1845_todo_custody
 from omo_manager.omo_task_status import validate_source1998_envelope
 from omo_manager.omo_task_status import SOURCE1845_AUDIT_PATH_SHA256
+from omo_manager.omo_task_status import SOURCE2013_CLOSE_RECORDS
+from omo_manager.omo_task_status import SOURCE2013_RECONCILE_RECORDS
+from omo_manager.omo_task_status import SOURCE2013_RID_BYTES
+from omo_manager.omo_task_status import SOURCE2013_RID_ENVELOPE
+from omo_manager.omo_task_status import SOURCE2013_RID_EXCERPT
+from omo_manager.omo_task_status import SOURCE2013_RID_SHA256
+from omo_manager.omo_task_status import SOURCE2028_BLOCKER
+from omo_manager.omo_task_status import SOURCE2028_NEWS_BLOCKER
+from omo_manager.omo_task_status import SOURCE2028_QUEUE_ITEM
+from omo_manager.omo_task_status import SOURCE2028_PB1_BYTES
+from omo_manager.omo_task_status import SOURCE2028_PB1_ENVELOPE
+from omo_manager.omo_task_status import SOURCE2028_PB1_SHA256
+from omo_manager.omo_task_status import SOURCE2028_TARGET
 from omo_manager.omo_task_status import SOURCE1845_PREPARED_AUDIT_SHA256
 from omo_manager.omo_task_status import SOURCE1998_COMPLETION_KEY
 from omo_manager.omo_task_status import SOURCE1998_AUTHORITY_BYTES
 from omo_manager.omo_task_status import SOURCE1998_CLOSE_FAILURE
 from omo_manager.omo_task_status import SOURCE1998_BLOCKER
+from omo_manager.omo_omnigent import SessionSnapshot
 from omo_manager.omo_task_status import SOURCE1998_AUTHORITY
 from omo_manager.omo_task_status import SOURCE1998_TASK
 from omo_manager.omo_task_status import SOURCE1998_TARGET
@@ -1414,6 +1428,359 @@ class TaskStatusTests(unittest.TestCase):
                 with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
                     with self.assertRaises(TaskFrontmatterError):
                         reconcile_missing_target(args, task, task.read_text(), task.stat())
+
+    def bind_source2013(self, root: Path, args: StatusArgs, envelope_text: str) -> StatusArgs:
+        authority = root / "manager_mail" / "85c5dff58359-2013.txt"
+        authority.write_bytes(SOURCE2013_RID_BYTES)
+        authority.chmod(0o600)
+        envelope_path = root / SOURCE2013_RID_ENVELOPE
+        if envelope_path != root / args.task_file:
+            envelope_path.write_text(envelope_text, encoding="utf-8")
+        return replace(
+            args,
+            authority_file=Path("manager_mail/85c5dff58359-2013.txt"),
+            authority_lines=(3, 3),
+            authority_sha256=SOURCE2013_RID_SHA256,
+            authority_envelope=SOURCE2013_RID_ENVELOPE,
+            authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+        )
+
+    def write_source2013_task(
+        self,
+        root: Path,
+        *,
+        task_name: str,
+        target: str,
+        blocker: str,
+        pending_items: tuple[str, ...] = (),
+        is_manager: bool = False,
+        section: str = "human pending",
+    ) -> tuple[Path, str, Path, str, StatusArgs]:
+        excerpt_block = f'<human_instruction authoritative="true" source="manager_mail/85c5dff58359-2013.txt:3-3">\n{SOURCE2013_RID_EXCERPT}\n</human_instruction>\n'
+        text = task_frontmatter(status="blocked", blocked_on=blocker, pending_items=pending_items, runat=target, is_manager=is_manager)
+        text += excerpt_block if task_name == SOURCE2013_RID_ENVELOPE.as_posix() else ""
+        text += "existing evidence\n"
+        task = root / task_name
+        task.parent.mkdir(parents=True, exist_ok=True)
+        task.write_text(text, encoding="utf-8")
+        todo_text = f"current:\n\nlow priority:\nslow.md vl:7\n\nhuman pending:\n{task_name} {target}\n\nprevious:\n"
+        if section == "previous":
+            todo_text = f"current:\n\nlow priority:\nslow.md vl:7\n\nhuman pending:\n\nprevious:\n{task_name} {target}\n"
+        todo = root / "TODO.md"
+        todo.write_text(todo_text, encoding="utf-8")
+        args = StatusArgs(
+            root,
+            Path(task_name),
+            "",
+            "",
+            reconcile_missing_target=section != "previous",
+            close_missing_target=section == "previous",
+            missing_target=target,
+            expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+            expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+        )
+        envelope_text = text if task_name == SOURCE2013_RID_ENVELOPE.as_posix() else excerpt_block
+        args = self.bind_source2013(root, args, envelope_text)
+        if section == "previous":
+            audit_dir = root / "audit"
+            audit_dir.mkdir(mode=0o700)
+            args = replace(args, reconcile_missing_target=False, close_missing_target=True, audit_output=(audit_dir / "close.yaml").resolve())
+        return task, text, todo, todo_text, args
+
+    def test_source2013_close_missing_target_accepts_exact_empty_records(self) -> None:
+        self.assertEqual(SOURCE2013_RID_SHA256, hashlib.sha256(SOURCE2013_RID_BYTES).hexdigest())
+        for task_name, target, blocker in SOURCE2013_CLOSE_RECORDS:
+            with self.subTest(task=task_name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "manager_mail").mkdir(mode=0o700)
+                task, _text, todo, _todo_text, args = self.write_source2013_task(root, task_name=task_name, target=target, blocker=blocker, section="previous")
+                with patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "", "")):
+                    close_missing_target(args, task, task.read_text(), task.stat())
+                metadata = parse_task_metadata(task.read_text(), root)
+                self.assertIsNotNone(metadata)
+                assert metadata is not None
+                self.assertEqual("done", metadata.status)
+                self.assertEqual(target, metadata.runat)
+                self.assertFalse(metadata.pending_task_items)
+                self.assertIn(f"previous:\n{task_name}\n", todo.read_text())
+                self.assertNotIn(f"{task_name} {target}", todo.read_text())
+
+    def test_source2013_close_missing_target_rejects_queued_or_other_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "manager_mail").mkdir(mode=0o700)
+            task, text, todo, todo_text, args = self.write_source2013_task(
+                root,
+                task_name="cfg_cursor_mgr.md",
+                target="config:2",
+                blocker="Human close wording for Rid all the agents I closed",
+                pending_items=("keep this Human item",),
+                is_manager=True,
+                section="previous",
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                with self.assertRaisesRegex(TaskFrontmatterError, "does not explicitly authorize"):
+                    close_missing_target(args, task, text, task.stat())
+            self.assertEqual(text, task.read_text())
+            self.assertEqual(todo_text, todo.read_text())
+
+    def test_source2013_reconcile_missing_target_accepts_queued_records_and_retained_shell(self) -> None:
+        for task_name, target, blocker in SOURCE2013_RECONCILE_RECORDS:
+            with self.subTest(task=task_name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "manager_mail").mkdir(mode=0o700)
+                live_shell = (task_name, target) == ("paper_finish.md", "DeGenTWeb_writeup:0")
+                task, _text, todo, _todo_text, args = self.write_source2013_task(
+                    root,
+                    task_name=task_name,
+                    target=target,
+                    blocker=blocker,
+                    pending_items=("keep Human work",),
+                    is_manager=task_name == "cfg_cursor_mgr.md",
+                )
+                pane_side_effect = ("%42", "%42") if live_shell else ("", "")
+                with (
+                    patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=pane_side_effect),
+                    patch("omo_manager.omo_task_status.source2013_pane_is_retained_shell", return_value=live_shell),
+                ):
+                    reconcile_missing_target(args, task, task.read_text(), task.stat())
+                metadata = parse_task_metadata(task.read_text(), root)
+                self.assertIsNotNone(metadata)
+                assert metadata is not None
+                self.assertEqual("blocked", metadata.status)
+                self.assertEqual("retired", metadata.runat)
+                self.assertEqual(("keep Human work",), metadata.pending_task_items)
+                self.assertIn(f"low priority:\n{task_name}\n", todo.read_text())
+                self.assertNotIn(f"{task_name} {target}", todo.read_text())
+
+    def test_source2013_reconcile_missing_target_rejects_live_codex_shell(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "manager_mail").mkdir(mode=0o700)
+            task, text, todo, todo_text, args = self.write_source2013_task(
+                root,
+                task_name="paper_finish.md",
+                target="DeGenTWeb_writeup:0",
+                blocker="Human closed this agent",
+                pending_items=("keep Human work",),
+            )
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.source2013_pane_is_retained_shell", return_value=False),
+            ):
+                with self.assertRaisesRegex(TaskFrontmatterError, "ordinary shell or an absent pane"):
+                    reconcile_missing_target(args, task, text, task.stat())
+            self.assertEqual(text, task.read_text())
+            self.assertEqual(todo_text, todo.read_text())
+
+    def test_source2013_reconcile_missing_target_rejects_unprovable_live_shell(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "manager_mail").mkdir(mode=0o700)
+            task, text, todo, todo_text, args = self.write_source2013_task(
+                root,
+                task_name="paper_finish.md",
+                target="DeGenTWeb_writeup:0",
+                blocker="Human closed this agent",
+                pending_items=("keep Human work",),
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=None):
+                with self.assertRaisesRegex(TaskFrontmatterError, "could not prove it absent"):
+                    reconcile_missing_target(args, task, text, task.stat())
+            self.assertEqual(text, task.read_text())
+            self.assertEqual(todo_text, todo.read_text())
+
+    def test_source2013_reconcile_missing_target_rejects_empty_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "manager_mail").mkdir(mode=0o700)
+            task, text, todo, todo_text, args = self.write_source2013_task(
+                root,
+                task_name="paper_finish.md",
+                target="DeGenTWeb_writeup:0",
+                blocker="Human closed this agent",
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                with self.assertRaisesRegex(TaskFrontmatterError, "exact Human-closed queued record"):
+                    reconcile_missing_target(args, task, text, task.stat())
+            self.assertEqual(text, task.read_text())
+            self.assertEqual(todo_text, todo.read_text())
+
+    def test_source2028_close_missing_target_preserves_paused_news_service(self) -> None:
+        self.assertEqual(SOURCE2028_PB1_SHA256, hashlib.sha256(SOURCE2028_PB1_BYTES).hexdigest())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "manager_mail").mkdir(mode=0o700)
+            authority = root / "manager_mail" / "85c5dff58359-2028.txt"
+            authority.write_bytes(SOURCE2028_PB1_BYTES)
+            authority.chmod(0o600)
+            excerpt = "yes\n"
+            envelope_text = f'<human_instruction authoritative="true" source="manager_mail/85c5dff58359-2028.txt:3-3">\n{excerpt}</human_instruction>\n'
+            (root / SOURCE2028_PB1_ENVELOPE).write_text(envelope_text, encoding="utf-8")
+            news = root / "news_service.md"
+            news_text = task_frontmatter(status="blocked", blocked_on=SOURCE2028_NEWS_BLOCKER, runat="pb:0", managerat="wl:1") + "paused evidence\n"
+            news.write_text(news_text, encoding="utf-8")
+            text = task_frontmatter(status="blocked", blocked_on=SOURCE2028_BLOCKER, pending_items=(SOURCE2028_QUEUE_ITEM,), runat=SOURCE2028_TARGET, is_manager=True) + "existing evidence\n"
+            task = root / "pb_news_mgr.md"
+            task.write_text(text, encoding="utf-8")
+            todo_text = f"current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\npb_news_mgr.md {SOURCE2028_TARGET}\n"
+            todo = root / "TODO.md"
+            todo.write_text(todo_text, encoding="utf-8")
+            audit_dir = root / "audit"
+            audit_dir.mkdir(mode=0o700)
+            args = StatusArgs(
+                root,
+                Path("pb_news_mgr.md"),
+                "",
+                "",
+                close_missing_target=True,
+                missing_target=SOURCE2028_TARGET,
+                expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                authority_file=Path("manager_mail/85c5dff58359-2028.txt"),
+                authority_lines=(3, 3),
+                authority_sha256=SOURCE2028_PB1_SHA256,
+                authority_envelope=SOURCE2028_PB1_ENVELOPE,
+                authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+                audit_output=(audit_dir / "close.yaml").resolve(),
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "", "")):
+                close_missing_target(args, task, text, task.stat())
+            metadata = parse_task_metadata(task.read_text(), root)
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("done", metadata.status)
+            self.assertEqual(SOURCE2028_TARGET, metadata.runat)
+            self.assertFalse(metadata.pending_task_items)
+            self.assertEqual(news_text, news.read_text())
+            self.assertIn("previous:\npb_news_mgr.md\n", todo.read_text())
+
+    def test_source2028_close_missing_target_rejects_resumed_news_service(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "manager_mail").mkdir(mode=0o700)
+            authority = root / "manager_mail" / "85c5dff58359-2028.txt"
+            authority.write_bytes(SOURCE2028_PB1_BYTES)
+            authority.chmod(0o600)
+            excerpt = "yes\n"
+            envelope_text = f'<human_instruction authoritative="true" source="manager_mail/85c5dff58359-2028.txt:3-3">\n{excerpt}</human_instruction>\n'
+            (root / SOURCE2028_PB1_ENVELOPE).write_text(envelope_text, encoding="utf-8")
+            news = root / "news_service.md"
+            news.write_text(task_frontmatter(status="running", runat="pb:0", managerat="wl:1") + "resumed\n", encoding="utf-8")
+            text = task_frontmatter(status="blocked", blocked_on=SOURCE2028_BLOCKER, runat=SOURCE2028_TARGET, is_manager=True) + "existing evidence\n"
+            task = root / "pb_news_mgr.md"
+            task.write_text(text, encoding="utf-8")
+            todo_text = f"current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\npb_news_mgr.md {SOURCE2028_TARGET}\n"
+            todo = root / "TODO.md"
+            todo.write_text(todo_text, encoding="utf-8")
+            audit_dir = root / "audit"
+            audit_dir.mkdir(mode=0o700)
+            args = StatusArgs(
+                root,
+                Path("pb_news_mgr.md"),
+                "",
+                "",
+                close_missing_target=True,
+                missing_target=SOURCE2028_TARGET,
+                expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                authority_file=Path("manager_mail/85c5dff58359-2028.txt"),
+                authority_lines=(3, 3),
+                authority_sha256=SOURCE2028_PB1_SHA256,
+                authority_envelope=SOURCE2028_PB1_ENVELOPE,
+                authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+                audit_output=(audit_dir / "close.yaml").resolve(),
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                with self.assertRaisesRegex(TaskFrontmatterError, "paused news_service.md"):
+                    close_missing_target(args, task, text, task.stat())
+            self.assertEqual(text, task.read_text())
+            self.assertEqual(todo_text, todo.read_text())
+
+    def test_source2028_close_missing_target_rejects_active_child(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "manager_mail").mkdir(mode=0o700)
+            authority = root / "manager_mail" / "85c5dff58359-2028.txt"
+            authority.write_bytes(SOURCE2028_PB1_BYTES)
+            authority.chmod(0o600)
+            excerpt = "yes\n"
+            envelope_text = f'<human_instruction authoritative="true" source="manager_mail/85c5dff58359-2028.txt:3-3">\n{excerpt}</human_instruction>\n'
+            (root / SOURCE2028_PB1_ENVELOPE).write_text(envelope_text, encoding="utf-8")
+            news = root / "news_service.md"
+            news.write_text(task_frontmatter(status="blocked", blocked_on=SOURCE2028_NEWS_BLOCKER, runat="pb:0", managerat="wl:1") + "paused evidence\n", encoding="utf-8")
+            (root / "202608").mkdir()
+            (root / "202608/main_ops_mgr.md").write_text(task_frontmatter(status="blocked", blocked_on="paused", runat="wl:55", managerat=SOURCE2028_TARGET, is_manager=True) + "paused ops\n", encoding="utf-8")
+            text = task_frontmatter(status="blocked", blocked_on=SOURCE2028_BLOCKER, runat=SOURCE2028_TARGET, is_manager=True) + "existing evidence\n"
+            task = root / "pb_news_mgr.md"
+            task.write_text(text, encoding="utf-8")
+            todo_text = f"current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\npb_news_mgr.md {SOURCE2028_TARGET}\n"
+            todo = root / "TODO.md"
+            todo.write_text(todo_text, encoding="utf-8")
+            audit_dir = root / "audit"
+            audit_dir.mkdir(mode=0o700)
+            args = StatusArgs(
+                root,
+                Path("pb_news_mgr.md"),
+                "",
+                "",
+                close_missing_target=True,
+                missing_target=SOURCE2028_TARGET,
+                expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                authority_file=Path("manager_mail/85c5dff58359-2028.txt"),
+                authority_lines=(3, 3),
+                authority_sha256=SOURCE2028_PB1_SHA256,
+                authority_envelope=SOURCE2028_PB1_ENVELOPE,
+                authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+                audit_output=(audit_dir / "close.yaml").resolve(),
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                with self.assertRaisesRegex(TaskFrontmatterError, "still owns active child"):
+                    close_missing_target(args, task, text, task.stat())
+            self.assertEqual(text, task.read_text())
+            self.assertEqual(todo_text, todo.read_text())
+
+    def test_source2028_close_missing_target_rejects_other_queue_items(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "manager_mail").mkdir(mode=0o700)
+            authority = root / "manager_mail" / "85c5dff58359-2028.txt"
+            authority.write_bytes(SOURCE2028_PB1_BYTES)
+            authority.chmod(0o600)
+            excerpt = "yes\n"
+            envelope_text = f'<human_instruction authoritative="true" source="manager_mail/85c5dff58359-2028.txt:3-3">\n{excerpt}</human_instruction>\n'
+            (root / SOURCE2028_PB1_ENVELOPE).write_text(envelope_text, encoding="utf-8")
+            (root / "news_service.md").write_text(task_frontmatter(status="blocked", blocked_on=SOURCE2028_NEWS_BLOCKER, runat="pb:0", managerat="wl:1") + "paused evidence\n", encoding="utf-8")
+            text = task_frontmatter(status="blocked", blocked_on=SOURCE2028_BLOCKER, pending_items=("other remaining work",), runat=SOURCE2028_TARGET, is_manager=True) + "existing evidence\n"
+            task = root / "pb_news_mgr.md"
+            task.write_text(text, encoding="utf-8")
+            todo_text = f"current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\npb_news_mgr.md {SOURCE2028_TARGET}\n"
+            todo = root / "TODO.md"
+            todo.write_text(todo_text, encoding="utf-8")
+            audit_dir = root / "audit"
+            audit_dir.mkdir(mode=0o700)
+            args = StatusArgs(
+                root,
+                Path("pb_news_mgr.md"),
+                "",
+                "",
+                close_missing_target=True,
+                missing_target=SOURCE2028_TARGET,
+                expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                authority_file=Path("manager_mail/85c5dff58359-2028.txt"),
+                authority_lines=(3, 3),
+                authority_sha256=SOURCE2028_PB1_SHA256,
+                authority_envelope=SOURCE2028_PB1_ENVELOPE,
+                authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+                audit_output=(audit_dir / "close.yaml").resolve(),
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                with self.assertRaisesRegex(TaskFrontmatterError, "does not explicitly authorize"):
+                    close_missing_target(args, task, text, task.stat())
+            self.assertEqual(text, task.read_text())
+            self.assertEqual(todo_text, todo.read_text())
 
     @staticmethod
     def complete_guarded_park_stop(args: StopArgs, session_id: str = "session") -> str:
@@ -2835,7 +3202,8 @@ class TaskStatusTests(unittest.TestCase):
         state = private.parent / "pending-watch-consumed-reports.tsv"
         envelope = Path(worker["envelope"])
         report_sha256 = worker["report_sha256"]
-        key = f"{root}:agent-report:{hashlib.sha256(f'{envelope}\0{envelope}\0[message-sha256: {report_sha256}]'.encode()).hexdigest()}"
+        report_identity = f"{envelope}\0{envelope}\0[message-sha256: {report_sha256}]"
+        key = f"{root}:agent-report:{hashlib.sha256(report_identity.encode()).hexdigest()}"
         authority = {
             "lock_dev": 1,
             "lock_inode": 2,
@@ -8202,7 +8570,7 @@ resolved_task_items: []
             audit = root / "replacement.audit"
             self.assertEqual(0o600, audit.stat().st_mode & 0o777)
             audit_text = audit.read_text(encoding="utf-8")
-            self.assertIn("replacement-pane-id: %3\n", audit_text)
+            self.assertIn("replacement-runtime-id: %3\n", audit_text)
             self.assertIn(f"stopped-evidence-sha256: {hashlib.sha256(args.stopped_evidence.encode()).hexdigest()}\n", audit_text)
             self.assertIn(f"replacement-pane-evidence-sha256: {hashlib.sha256(args.replacement_pane_evidence.encode()).hexdigest()}\n", audit_text)
             self.assertIn("completion: unknown-until-finalized\n", audit_text)
@@ -8570,8 +8938,8 @@ resolved_task_items: []
                 self.assertFalse((root / "replacement.audit").exists())
                 capture_call.assert_not_called()
 
-    def test_finish_replaced_done_refuses_human_or_explicitly_protected_target_before_capture(self) -> None:
-        for case in ("human", "protected"):
+    def test_finish_replaced_done_refuses_human_or_protected_tmux_target_before_capture(self) -> None:
+        for case in ("human", "protected stale", "protected successor"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 stale, _replacement, stale_text, _replacement_text = self.write_replacement_tasks(root)
@@ -8582,6 +8950,8 @@ resolved_task_items: []
                         stale_target="hlegacy:2",
                         stale_sha256=hashlib.sha256(stale.read_bytes()).hexdigest(),
                     )
+                elif case == "protected stale":
+                    args = self.replacement_args(root, protected_targets=("old:2.0",))
                 else:
                     args = self.replacement_args(root, protected_targets=("new:3.0",))
                 with patch("omo_manager.omo_task_status.exact_pane_id") as pane_call, patch("omo_manager.omo_task_status.capture") as capture_call, redirect_stderr(io.StringIO()):
@@ -8589,6 +8959,168 @@ resolved_task_items: []
                 pane_call.assert_not_called()
                 capture_call.assert_not_called()
                 self.assertFalse((root / "replacement.audit").exists())
+
+    def test_finish_replaced_done_accepts_protected_healthy_omnigent_successor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stale_target = "omnigent://stale-session"
+            replacement_target = "omnigent://replacement-session"
+            evidence = "runtime=omnigent"
+            stopped_evidence = "runtime=omnigent session_status=idle harness=antigravity-native runner_online=false host_online=true"
+            stale_text = task_frontmatter(status="running", runat=stale_target, managerat="owner:1").replace("tool: codex", "tool: antigravity")
+            replacement_text = task_frontmatter(status="running", runat=replacement_target, managerat="owner:1").replace("tool: codex", "tool: antigravity")
+            stale = root / "stale.md"
+            replacement = root / "replacement.md"
+            stale.write_text(stale_text, encoding="utf-8")
+            replacement.write_text(replacement_text, encoding="utf-8")
+            todo_text = f"current:\nreplacement.md {replacement_target}\n\nprevious:\nstale.md {stale_target}\n"
+            (root / "TODO.md").write_text(todo_text, encoding="utf-8")
+            args = self.replacement_args(
+                root,
+                stale_target=stale_target,
+                replacement_target=replacement_target,
+                stale_sha256=hashlib.sha256(stale.read_bytes()).hexdigest(),
+                replacement_sha256=hashlib.sha256(replacement.read_bytes()).hexdigest(),
+                protected_targets=(replacement_target,),
+                stopped_evidence=stopped_evidence,
+                replacement_pane_evidence=evidence,
+                replacement_status="running",
+            )
+            healthy = SessionSnapshot("replacement-session", "running", "antigravity-native", True, True)
+            stopped = SessionSnapshot("stale-session", "idle", "antigravity-native", False, True)
+
+            def snapshot(target: str) -> SessionSnapshot:
+                if target == stale_target:
+                    return stopped
+                self.assertEqual(replacement_target, target)
+                return healthy
+
+            with (
+                patch("omo_manager.omo_task_status.omnigent_session_snapshot", side_effect=snapshot),
+                patch("omo_manager.omo_task_status.exact_pane_id") as pane,
+                patch("omo_manager.omo_task_status.capture") as capture_call,
+                patch("omo_manager.omo_task_status.stop_done_agent", side_effect=AssertionError("must not stop either runtime")) as stop_call,
+                patch("omo_manager.omo_task_status.require_owner_completion", side_effect=AssertionError("must not send completion email")) as email_call,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(0, run(args))
+            pane.assert_not_called()
+            capture_call.assert_not_called()
+            stop_call.assert_not_called()
+            email_call.assert_not_called()
+            self.assertEqual(replacement_text, replacement.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, (root / "TODO.md").read_text(encoding="utf-8"))
+            self.assertIn("status: done\n", stale.read_text(encoding="utf-8"))
+            self.assertIn(f"replacement-runtime-id: {replacement_target}\n", (root / "replacement.audit").read_text(encoding="utf-8"))
+
+    def test_finish_replaced_done_rejects_wrong_omnigent_todo_or_protected_stale(self) -> None:
+        for case in (
+            "wrong stale TODO", "missing stale TODO", "duplicate stale TODO", "decorated stale TODO",
+            "wrong successor TODO", "missing successor TODO", "duplicate successor TODO", "decorated successor TODO",
+            "protected stale",
+        ):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                stale_target = "omnigent://stale-session"
+                replacement_target = "omnigent://replacement-session"
+                stopped_evidence = "runtime=omnigent session_status=idle harness=codex-native runner_online=false host_online=true"
+                stale_text = task_frontmatter(status="running", runat=stale_target, managerat="owner:1")
+                replacement_text = task_frontmatter(status="running", runat=replacement_target, managerat="owner:1")
+                stale = root / "stale.md"
+                replacement = root / "replacement.md"
+                stale.write_text(stale_text, encoding="utf-8")
+                replacement.write_text(replacement_text, encoding="utf-8")
+                stale_suffix = {
+                    "wrong stale TODO": " omnigent://wrong-stale",
+                    "missing stale TODO": "",
+                    "duplicate stale TODO": f" {stale_target} {stale_target}",
+                    "decorated stale TODO": f" {stale_target} [omnigent://wrong-stale]",
+                }.get(case, f" {stale_target}")
+                successor_suffix = {
+                    "wrong successor TODO": " omnigent://wrong-successor",
+                    "missing successor TODO": "",
+                    "duplicate successor TODO": f" {replacement_target} {replacement_target}",
+                    "decorated successor TODO": f" {replacement_target} [omnigent://wrong-successor]",
+                }.get(case, f" {replacement_target}")
+                todo_text = f"current:\nreplacement.md{successor_suffix}\n\nprevious:\nstale.md{stale_suffix}\n"
+                (root / "TODO.md").write_text(todo_text, encoding="utf-8")
+                args = self.replacement_args(
+                    root,
+                    stale_target=stale_target,
+                    replacement_target=replacement_target,
+                    stale_sha256=hashlib.sha256(stale.read_bytes()).hexdigest(),
+                    replacement_sha256=hashlib.sha256(replacement.read_bytes()).hexdigest(),
+                    replacement_status="running",
+                    protected_targets=(stale_target,) if case == "protected stale" else (replacement_target,),
+                    stopped_evidence=stopped_evidence,
+                    replacement_pane_evidence="runtime=omnigent",
+                )
+                stopped = SessionSnapshot("stale-session", "idle", "codex-native", False, True)
+                healthy = SessionSnapshot("replacement-session", "running", "codex-native", True, True)
+
+                def snapshot(target: str) -> SessionSnapshot:
+                    return stopped if target == stale_target else healthy
+
+                with (
+                    patch("omo_manager.omo_task_status.omnigent_session_snapshot", side_effect=snapshot),
+                    patch("omo_manager.omo_task_status.stop_done_agent", side_effect=AssertionError("must not stop either runtime")) as stop_call,
+                    patch("omo_manager.omo_task_status.require_owner_completion", side_effect=AssertionError("must not send completion email")) as email_call,
+                    redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(2, run(args))
+                stop_call.assert_not_called()
+                email_call.assert_not_called()
+                self.assertEqual(stale_text, stale.read_text(encoding="utf-8"))
+                self.assertEqual(replacement_text, replacement.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, (root / "TODO.md").read_text(encoding="utf-8"))
+
+    def test_finish_replaced_done_rejects_unhealthy_or_changed_omnigent_successor(self) -> None:
+        for case in ("offline", "wrong harness", "changed"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                stale_target = "omnigent://stale-session"
+                replacement_target = "omnigent://replacement-session"
+                stopped_evidence = "runtime=omnigent session_status=idle harness=codex-native runner_online=false host_online=true"
+                stale_text = task_frontmatter(status="blocked", blocked_on="replaced", runat=stale_target, managerat="owner:1") + "(verified empty stale task: verified stopped legacy target)\n"
+                replacement_text = task_frontmatter(status="long_running", pending_items=("finish authoritative work",), runat=replacement_target, managerat="owner:1")
+                stale = root / "stale.md"
+                replacement = root / "replacement.md"
+                stale.write_text(stale_text, encoding="utf-8")
+                replacement.write_text(replacement_text, encoding="utf-8")
+                (root / "TODO.md").write_text(f"current:\nstale.md {stale_target}\nreplacement.md {replacement_target}\n\nprevious:\n", encoding="utf-8")
+                args = self.replacement_args(
+                    root,
+                    stale_target=stale_target,
+                    replacement_target=replacement_target,
+                    stale_sha256=hashlib.sha256(stale.read_bytes()).hexdigest(),
+                    replacement_sha256=hashlib.sha256(replacement.read_bytes()).hexdigest(),
+                    protected_targets=(replacement_target,),
+                    stopped_evidence=stopped_evidence,
+                    replacement_pane_evidence="runtime=omnigent",
+                )
+                healthy = SessionSnapshot("replacement-session", "running", "codex-native", True, True)
+                stopped = SessionSnapshot("stale-session", "idle", "codex-native", False, True)
+                unhealthy = SessionSnapshot("replacement-session", "running", "codex-native", False, True)
+                wrong = SessionSnapshot("replacement-session", "running", "cursor-native", True, True)
+                calls = 0
+
+                def snapshot(target: str) -> SessionSnapshot:
+                    nonlocal calls
+                    if target == stale_target:
+                        return stopped
+                    calls += 1
+                    if case == "offline":
+                        return unhealthy
+                    if case == "wrong harness":
+                        return wrong
+                    if calls >= 2:
+                        return SessionSnapshot("replacement-session", "failed", "codex-native", False, True)
+                    return healthy
+
+                with patch("omo_manager.omo_task_status.omnigent_session_snapshot", side_effect=snapshot), redirect_stderr(io.StringIO()):
+                    self.assertEqual(2, run(args))
+                self.assertEqual(stale_text, stale.read_text(encoding="utf-8"))
+                self.assertEqual(replacement_text, replacement.read_text(encoding="utf-8"))
 
     def test_finish_replaced_done_leaves_durable_unknown_audit_if_success_finalization_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -8803,8 +9335,13 @@ resolved_task_items: []
     def test_cli_recovers_only_the_cross_bound_interrupted_completion_session(self) -> None:
         session_id = "11111111-2222-3333-4444-555555555555"
         completion_key = "a" * 64
-        for final_task, expected_code in (("task.md", 0), ("other.md", 2)):
-            with self.subTest(final_task=final_task), tempfile.TemporaryDirectory() as tmp:
+        blockers = (
+            DONE_CLOSE_IN_PROGRESS,
+            "done_close_failed: target is not a supported live Codex pane: %42 status=not_codex",
+        )
+        cases = ((blocker, final_task, expected_code) for blocker in blockers for final_task, expected_code in (("task.md", 0), ("other.md", 2)))
+        for blocker, final_task, expected_code in cases:
+            with self.subTest(blocker=blocker, final_task=final_task), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 state = root / "state"
                 codex_home = root / "codex"
@@ -8835,7 +9372,7 @@ body
                     used_marker.write_text(f"{plan.target}\t{path.name}\n", encoding="utf-8")
                     used_marker.chmod(0o600)
                     mark_completion_email_delivered(plan)
-                    blocked = f"""{task_frontmatter(status="blocked", blocked_on=DONE_CLOSE_IN_PROGRESS, runat="cfg:1", session_id=session_id)}Report results directly to the Human.
+                    blocked = f"""{task_frontmatter(status="blocked", blocked_on=blocker, runat="cfg:1", session_id=session_id)}Report results directly to the Human.
 body
 manager note
 """
@@ -8926,6 +9463,8 @@ omo_task_status.py: responsible-owner completion email requested; retry after ow
         mutations = (
             "success",
             "success-default-root",
+            "completed-delivery",
+            "completed-delivery-close-failed",
             "key",
             "task",
             "root",
@@ -8969,7 +9508,12 @@ body
                     mark_completion_email_delivered(plan)
                     if mutation == "delivery-state":
                         (state / "completion-notice-delivered" / plan.notice_key).unlink()
-                    blocked = f"""{task_frontmatter(status="blocked", blocked_on=DONE_CLOSE_IN_PROGRESS, runat="cfg:1", session_id=session_id)}Report results directly to the Human.
+                    blocker = (
+                        "done_close_failed: target is not a supported live Codex pane: %42 status=not_codex"
+                        if mutation == "completed-delivery-close-failed"
+                        else DONE_CLOSE_IN_PROGRESS
+                    )
+                    blocked = f"""{task_frontmatter(status="blocked", blocked_on=blocker, runat="cfg:1", session_id=session_id)}Report results directly to the Human.
 body
 manager note
 """
@@ -9011,6 +9555,21 @@ manager note
                             },
                         },
                     }
+                    if mutation in {"completed-delivery", "completed-delivery-close-failed"}:
+                        workdir = root / "worker"
+                        workdir.mkdir()
+                        delivery_record["payload"]["item"].update(
+                            {
+                                "command": [
+                                    "/usr/bin/zsh",
+                                    "-lc",
+                                    f"{completion_helper} --root {root} --task task.md --outcome 'task done' --semantic-key {completion_key}",
+                                ],
+                                "cwd": workdir.resolve().as_uri(),
+                                "status": "completed",
+                                "exit_code": 0,
+                            }
+                        )
                     final_record = {
                         "type": "event_msg",
                         "payload": {
@@ -9075,9 +9634,9 @@ manager note
                         redirect_stdout(io.StringIO()),
                         redirect_stderr(stderr),
                     ):
-                        expected = 0 if mutation in {"success", "success-default-root"} else 2
+                        expected = 0 if mutation in {"success", "success-default-root", "completed-delivery", "completed-delivery-close-failed"} else 2
                         self.assertEqual(expected, run(args), stderr.getvalue())
-                if mutation in {"success", "success-default-root"}:
+                if mutation in {"success", "success-default-root", "completed-delivery", "completed-delivery-close-failed"}:
                     close.assert_called_once()
                     self.assertIn("status: done\nrunat: cfg:1", path.read_text(encoding="utf-8"))
                     self.assertEqual("current:\n\nprevious:\ntask.md cfg:1\nother.md\n", todo.read_text(encoding="utf-8"))
@@ -10690,6 +11249,8 @@ manager note
                 "long_running",
                 "--protected-target",
                 "protected:8",
+                "--protected-target",
+                "omnigent://replacement-session",
                 "--stopped-evidence",
                 "verified stop",
                 "--replacement-pane-evidence",
@@ -10703,7 +11264,7 @@ manager note
         self.assertTrue(args.finish_replaced_done)
         self.assertEqual(Path("/tmp/replacement.md"), args.replacement_task)
         self.assertEqual(Path("/tmp/custody.json"), args.replacement_custody_audit)
-        self.assertEqual(("protected:8",), args.protected_targets)
+        self.assertEqual(("protected:8", "omnigent://replacement-session"), args.protected_targets)
 
     def test_parse_replacement_custody_rejects_other_modes_and_relative_paths(self) -> None:
         for values in (
@@ -10911,6 +11472,221 @@ manager note
             self.assertEqual(2, exit_code)
             self.assertIn("exactly one active task owner", stderr.getvalue())
             self.assertEqual(before_todo, todo.read_text(encoding="utf-8"))
+
+    def test_reconcile_absent_manager_blocks_on_active_children_and_moves_previous_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = root / "manager.md"
+            child = root / "child.md"
+            todo = root / "TODO.md"
+            manager_text = task_frontmatter(status="long_running", runat="dw:60", managerat="dw:33", is_manager=True, session_id="019f0000-0000-7000-8000-000000000123")
+            child_text = task_frontmatter(status="blocked", blocked_on="human", pending_items=("keep work",), runat="dw:58", managerat="dw:60")
+            todo_text = "current:\nchild.md dw:58\n\nprevious:\nmanager.md dw:60\n"
+            manager.write_text(manager_text, encoding="utf-8")
+            child.write_text(child_text, encoding="utf-8")
+            todo.write_text(todo_text, encoding="utf-8")
+            args = StatusArgs(
+                root,
+                Path("manager.md"),
+                "",
+                "",
+                reconcile_absent_manager=True,
+                expected_task_sha256=hashlib.sha256(manager_text.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+            )
+
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                self.assertEqual(0, run(args))
+
+            updated = manager.read_text(encoding="utf-8")
+            self.assertIn("status: blocked\nblocked_on: child.md\n", updated)
+            self.assertIn("current:\nmanager.md dw:60\nchild.md dw:58", todo.read_text(encoding="utf-8"))
+            self.assertEqual(child_text, child.read_text(encoding="utf-8"))
+
+    def test_reconcile_absent_manager_rejects_live_target_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = root / "manager.md"
+            child = root / "child.md"
+            todo = root / "TODO.md"
+            manager_text = task_frontmatter(status="long_running", runat="dw:60", managerat="dw:33", is_manager=True)
+            child.write_text(task_frontmatter(status="running", runat="dw:58", managerat="dw:60"), encoding="utf-8")
+            todo_text = "current:\nchild.md dw:58\n\nprevious:\nmanager.md dw:60\n"
+            manager.write_text(manager_text, encoding="utf-8")
+            todo.write_text(todo_text, encoding="utf-8")
+            args = StatusArgs(
+                root,
+                Path("manager.md"),
+                "",
+                "",
+                reconcile_absent_manager=True,
+                expected_task_sha256=hashlib.sha256(manager_text.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value="%42"), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertEqual(manager_text, manager.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_reconcile_absent_manager_rejects_overlapping_owner_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = root / "manager.md"
+            overlap = root / "overlap.md"
+            child = root / "child.md"
+            todo = root / "TODO.md"
+            manager_text = task_frontmatter(status="long_running", runat="dw:60", managerat="dw:33", is_manager=True)
+            overlap_text = task_frontmatter(status="blocked", blocked_on="other", runat="dw:60", managerat="dw:33")
+            child.write_text(task_frontmatter(status="running", runat="dw:58", managerat="dw:60"), encoding="utf-8")
+            todo_text = "current:\nchild.md dw:58\n\nprevious:\nmanager.md dw:60\n"
+            manager.write_text(manager_text, encoding="utf-8")
+            overlap.write_text(overlap_text, encoding="utf-8")
+            todo.write_text(todo_text, encoding="utf-8")
+            args = StatusArgs(
+                root,
+                Path("manager.md"),
+                "",
+                "",
+                reconcile_absent_manager=True,
+                expected_task_sha256=hashlib.sha256(manager_text.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertEqual(manager_text, manager.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_reconcile_absent_manager_rejects_unknown_tmux_inventory_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = root / "manager.md"
+            child = root / "child.md"
+            todo = root / "TODO.md"
+            manager_text = task_frontmatter(status="long_running", runat="dw:60", managerat="dw:33", is_manager=True)
+            child.write_text(task_frontmatter(status="running", runat="dw:58", managerat="dw:60"), encoding="utf-8")
+            todo_text = "current:\nchild.md dw:58\n\nprevious:\nmanager.md dw:60\n"
+            manager.write_text(manager_text, encoding="utf-8")
+            todo.write_text(todo_text, encoding="utf-8")
+            args = StatusArgs(root, Path("manager.md"), "", "", reconcile_absent_manager=True, expected_task_sha256=hashlib.sha256(manager_text.encode()).hexdigest(), expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest())
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=None), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertEqual(manager_text, manager.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_reconcile_absent_manager_rejects_tmux_timeout_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = root / "manager.md"
+            child = root / "child.md"
+            todo = root / "TODO.md"
+            manager_text = task_frontmatter(status="long_running", runat="dw:60", managerat="dw:33", is_manager=True)
+            child.write_text(task_frontmatter(status="running", runat="dw:58", managerat="dw:60"), encoding="utf-8")
+            todo_text = "current:\nchild.md dw:58\n\nprevious:\nmanager.md dw:60\n"
+            manager.write_text(manager_text, encoding="utf-8")
+            todo.write_text(todo_text, encoding="utf-8")
+            args = StatusArgs(root, Path("manager.md"), "", "", reconcile_absent_manager=True, expected_task_sha256=hashlib.sha256(manager_text.encode()).hexdigest(), expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest())
+            with patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=subprocess.TimeoutExpired("tmux", 5)), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertEqual(manager_text, manager.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_reconcile_absent_manager_rejects_rebound_target_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = root / "manager.md"
+            child = root / "child.md"
+            todo = root / "TODO.md"
+            manager_text = task_frontmatter(status="long_running", runat="dw:60", managerat="dw:33", is_manager=True)
+            child.write_text(task_frontmatter(status="running", runat="dw:58", managerat="dw:60"), encoding="utf-8")
+            todo_text = "current:\nchild.md dw:58\n\nprevious:\nmanager.md dw:60\n"
+            manager.write_text(manager_text, encoding="utf-8")
+            todo.write_text(todo_text, encoding="utf-8")
+            args = StatusArgs(root, Path("manager.md"), "", "", reconcile_absent_manager=True, expected_task_sha256=hashlib.sha256(manager_text.encode()).hexdigest(), expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest())
+            with patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=["", "", "%99"]), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertEqual(manager_text, manager.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_reconcile_absent_manager_rejects_long_running_current_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = root / "manager.md"
+            child = root / "child.md"
+            todo = root / "TODO.md"
+            manager_text = task_frontmatter(status="long_running", runat="dw:60", managerat="dw:33", is_manager=True)
+            child.write_text(task_frontmatter(status="running", runat="dw:58", managerat="dw:60"), encoding="utf-8")
+            todo_text = "current:\nmanager.md dw:60\nchild.md dw:58\n\nprevious:\n"
+            manager.write_text(manager_text, encoding="utf-8")
+            todo.write_text(todo_text, encoding="utf-8")
+            args = StatusArgs(root, Path("manager.md"), "", "", reconcile_absent_manager=True, expected_task_sha256=hashlib.sha256(manager_text.encode()).hexdigest(), expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest())
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertEqual(manager_text, manager.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_reconcile_absent_manager_rejects_child_with_overlapping_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = root / "manager.md"
+            child = root / "child.md"
+            overlap = root / "overlap.md"
+            todo = root / "TODO.md"
+            manager_text = task_frontmatter(status="long_running", runat="dw:60", managerat="dw:33", is_manager=True)
+            child_text = task_frontmatter(status="running", runat="dw:58", managerat="dw:60")
+            child.write_text(child_text, encoding="utf-8")
+            overlap.write_text(task_frontmatter(status="blocked", blocked_on="other", runat="dw:58", managerat="dw:33"), encoding="utf-8")
+            todo_text = "current:\nchild.md dw:58\n\nprevious:\nmanager.md dw:60\n"
+            manager.write_text(manager_text, encoding="utf-8")
+            todo.write_text(todo_text, encoding="utf-8")
+            args = StatusArgs(root, Path("manager.md"), "", "", reconcile_absent_manager=True, expected_task_sha256=hashlib.sha256(manager_text.encode()).hexdigest(), expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest())
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            self.assertEqual(manager_text, manager.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_reconcile_absent_manager_resumes_after_interruption_between_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = root / "manager.md"
+            child = root / "child.md"
+            todo = root / "TODO.md"
+            manager_text = task_frontmatter(status="long_running", runat="dw:60", managerat="dw:33", is_manager=True)
+            child.write_text(task_frontmatter(status="running", runat="dw:58", managerat="dw:60"), encoding="utf-8")
+            todo_text = "current:\nchild.md dw:58\n\nprevious:\nmanager.md dw:60\n"
+            manager.write_text(manager_text, encoding="utf-8")
+            todo.write_text(todo_text, encoding="utf-8")
+            args = StatusArgs(root, Path("manager.md"), "", "", reconcile_absent_manager=True, expected_task_sha256=hashlib.sha256(manager_text.encode()).hexdigest(), expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest())
+            real_replace = replace_if_unchanged_locked
+
+            def interrupt_todo(target: Path, replacement: str, state: os.stat_result) -> os.stat_result:
+                if target == todo:
+                    raise KeyboardInterrupt
+                return real_replace(target, replacement, state)
+
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""), patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=interrupt_todo), self.assertRaises(KeyboardInterrupt):
+                run(args)
+            blocked_text = manager.read_text(encoding="utf-8")
+            self.assertIn("status: blocked\nblocked_on: child.md\n", blocked_text)
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            resumed = replace(args, expected_task_sha256=hashlib.sha256(blocked_text.encode()).hexdigest())
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                self.assertEqual(0, run(resumed))
+            self.assertIn("current:\nmanager.md dw:60\nchild.md dw:58", todo.read_text(encoding="utf-8"))
+
+    def test_parse_reconcile_absent_manager_requires_digests(self) -> None:
+        args = parse_args(
+            [
+                "--reconcile-absent-manager",
+                "--expected-task-sha256",
+                "a" * 64,
+                "--expected-todo-sha256",
+                "b" * 64,
+                "manager.md",
+            ]
+        )
+        self.assertTrue(args.reconcile_absent_manager)
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args(["--reconcile-absent-manager", "manager.md"])
 
 
 if __name__ == "__main__":

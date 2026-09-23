@@ -18,6 +18,9 @@ TASK_FRONTMATTER_STATUSES = {"running", "long_running", "blocked", "done"}
 RETIRED_RUNAT = "retired"
 TARGET_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 OMNIGENT_RUNAT_RE = re.compile(r"^omnigent://([A-Za-z0-9._-]+)$")
+# 🧑 "Let’s support Antigravity. Do we use Omnigent or just do its CLI?"
+OMNIGENT_TOOLS = frozenset({"antigravity", "codex", "cursor"})
+ANTIGRAVITY_EFFORTS = frozenset({"low", "medium", "high"})
 ID_RE = re.compile(r"^(task|pi|wake)_([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$")
 RFC3339_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
 V1_REQUIRED_FIELDS = {"version", "status", "runat", "tool", "managerat", "is_manager", "pending_task_items"}
@@ -360,7 +363,16 @@ def optional_session_id(values: Mapping[str, object]) -> str:
     if value == "":
         return ""
     if not isinstance(value, str):
-        raise TaskFrontmatterError("`session_id` must be a UUID text value.")
+        raise TaskFrontmatterError("`session_id` must be text.")
+    runat = str(values["runat"])
+    target_kind = runat_kind(runat)
+    if target_kind == "omnigent":
+        match = OMNIGENT_RUNAT_RE.fullmatch(runat)
+        if match is None or value != match.group(1):
+            raise TaskFrontmatterError("OmniGent `session_id` must equal the session ID in `runat`.")
+        return value
+    if (target_kind != "tmux" and runat != RETIRED_RUNAT) or values["tool"] != "codex":
+        raise TaskFrontmatterError("`session_id` requires a Codex tmux or retired target, or an OmniGent target.")
     try:
         UUID(value)
     except ValueError as exc:
@@ -400,10 +412,12 @@ def parse_common(values: Mapping[str, object], allowed: set[str]) -> tuple[str, 
         raise TaskFrontmatterError("`managerat` must be different from `runat`.")
     tool = require_text(values["tool"], "tool")
     # 🧑 "Tool should still be codex or something. Omnigent is just the metaframework, not the actual harness. The runat should be enough for tools to know it’s omnigent"
-    if target_kind == "omnigent" and tool not in {"codex", "cursor"}:
-        raise TaskFrontmatterError("an OmniGent `runat` requires the actual `tool` harness (`codex` or `cursor`).")
-    if "session_id" in values and tool != "codex":
-        raise TaskFrontmatterError("`session_id` is only valid for ordinary Codex tasks.")
+    if target_kind == "omnigent" and tool not in OMNIGENT_TOOLS:
+        raise TaskFrontmatterError(
+            "an OmniGent `runat` requires the actual `tool` harness (`antigravity`, `codex`, or `cursor`)."
+        )
+    if tool == "antigravity" and target_kind == "tmux":
+        raise TaskFrontmatterError("`tool: antigravity` requires an OmniGent `runat`.")
     is_manager = values["is_manager"]
     if not isinstance(is_manager, bool):
         raise TaskFrontmatterError("`is_manager` must be a boolean.")

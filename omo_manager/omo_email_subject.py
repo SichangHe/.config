@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Prepare manager-human email subjects."""
+
 from __future__ import annotations
 
 import argparse
@@ -32,11 +33,15 @@ RE_PREFIX_RE = re.compile(r"^\s*re:\s*", re.IGNORECASE)
 # 🧑 "make sure that in the future replies get sent to the guest also"
 GUEST_REPLY_PREFIX_RE = re.compile(r"^\s*(?:re:|回复：)\s*", re.IGNORECASE)
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
+OMNIGENT_TARGET_RE = re.compile(r"^omnigent://[A-Za-z0-9._-]+$")
+OMNIGENT_SUBJECT_TARGET_RE = re.compile(r"^og:[A-Za-z0-9_.-]+\.md$")
+PRODUCER_TARGET = r"(?:[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?|omnigent://[A-Za-z0-9._-]+|og:[A-Za-z0-9_.-]+\.md)"
 AGENT_SESSION_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z", re.IGNORECASE)
-TMUX_SUBJECT_TAG_RE = re.compile(r"^\s*(?:\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\]|[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?:\s+|$)")
-TMUX_SUBJECT_TARGET_RE = re.compile(r"^\s*(?:\[([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\]|([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?))(?:\s+|$)")
-BRACKETED_TMUX_TAG_RE = re.compile(r"\[([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\]")
-BRACKETED_TMUX_PREFIX_RE = re.compile(r"^\[([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\](?:\s+|$)")
+AGENT_SESSION_ENVS = ("CODEX_SESSION_ID", "CURSOR_CONVERSATION_ID", "CODEX_THREAD_ID")
+TMUX_SUBJECT_TAG_RE = re.compile(rf"^\s*(?:\[{PRODUCER_TARGET}\]|{PRODUCER_TARGET})(?:\s+|$)")
+TMUX_SUBJECT_TARGET_RE = re.compile(rf"^\s*(?:\[({PRODUCER_TARGET})\]|({PRODUCER_TARGET}))(?:\s+|$)")
+BRACKETED_TMUX_TAG_RE = re.compile(rf"\[({PRODUCER_TARGET})\]")
+BRACKETED_TMUX_PREFIX_RE = re.compile(rf"^\[({PRODUCER_TARGET})\](?:\s+|$)")
 PLACEHOLDER_RE = re.compile(r"subject\W*", re.IGNORECASE)
 DEFAULT_THREAD_LOOKUP_WINDOW_S = 3 * 24 * 60 * 60
 DEFAULT_THREAD_LOOKUP_DEADLINE_S = 30.0
@@ -158,11 +163,7 @@ def manager_digest_authorization_path(state_dir: Path, key: str) -> Path:
 def manager_digest_authorization_payload(subject: str, body: str) -> bytes:
     """Bind one queued digest capability to exact outbound bytes."""
 
-    return (
-        "version=1\n"
-        f"subject_sha256={hashlib.sha256(subject.encode()).hexdigest()}\n"
-        f"body_sha256={hashlib.sha256(body.encode()).hexdigest()}\n"
-    ).encode()
+    return (f"version=1\nsubject_sha256={hashlib.sha256(subject.encode()).hexdigest()}\nbody_sha256={hashlib.sha256(body.encode()).hexdigest()}\n").encode()
 
 
 def subject_base(subject: str, *, guest_hees: bool = False) -> str:
@@ -218,14 +219,34 @@ def manager_subject(base: str) -> str:
 
 def canonical_tmux_target(tmux_target: str) -> str:
     clean_target = tmux_target.strip()
+    if OMNIGENT_TARGET_RE.fullmatch(clean_target):
+        return clean_target
     window_target, dot, pane = clean_target.rpartition(".")
     if dot and pane == "0" and ":" in window_target:
         return window_target
     return clean_target
 
 
+def is_producer_target(target: str) -> bool:
+    return TMUX_TARGET_RE.fullmatch(target) is not None or OMNIGENT_TARGET_RE.fullmatch(target) is not None
+
+
+def is_subject_target(target: str) -> bool:
+    return is_producer_target(target) or OMNIGENT_SUBJECT_TARGET_RE.fullmatch(target) is not None
+
+
+def current_agent_session_id() -> str:
+    for key in AGENT_SESSION_ENVS:
+        value = os.environ.get(key, "").strip().lower()
+        if AGENT_SESSION_RE.fullmatch(value):
+            return value
+    return ""
+
+
 def tmux_window_target(tmux_target: str) -> str:
     canonical = canonical_tmux_target(tmux_target)
+    if OMNIGENT_TARGET_RE.fullmatch(canonical):
+        return canonical
     window_target, dot, pane = canonical.rpartition(".")
     return window_target if dot and pane.isdigit() and ":" in window_target else canonical
 
@@ -247,7 +268,7 @@ def manager_subject_w_target(base: str, tmux_target: str = "", reply: bool = Fal
     clean_base = strip_leading_tmux_tags(base.strip())
     clean_target = canonical_tmux_target(tmux_target)
     bracketed_target = f"[{clean_target}]"
-    if clean_target and TMUX_TARGET_RE.fullmatch(clean_target) and not clean_base.startswith(f"{bracketed_target} "):
+    if clean_target and is_subject_target(clean_target) and not clean_base.startswith(f"{bracketed_target} "):
         clean_base = f"{bracketed_target} {clean_base}"
     return manager_reply_subject(clean_base) if reply else manager_subject(clean_base)
 
@@ -303,13 +324,7 @@ def thread_root_message_id(header: RecentHeader) -> str:
 def thread_message_ids(header: RecentHeader) -> list[str]:
     """Return authenticated ancestry order, including valid replies without `References`."""
 
-    return list(
-        dict.fromkeys(
-            value
-            for value in (*header.references.split(), header.in_reply_to.strip(), header.message_id.strip())
-            if value
-        )
-    )
+    return list(dict.fromkeys(value for value in (*header.references.split(), header.in_reply_to.strip(), header.message_id.strip()) if value))
 
 
 def select_recent_thread(candidates: list[RecentHeader], *, reject_ambiguous: bool) -> RecentHeader | None:
@@ -365,11 +380,7 @@ def authenticated_referenced_thread_target(
             if not data[0]:
                 continue
             uids = [raw_uid.decode() if isinstance(raw_uid, bytes) else str(raw_uid) for raw_uid in data[0].split()]
-            matches.extend(
-                header
-                for header in fetch_recent_headers(client, uids)
-                if header.message_id.strip() == message_id and route_matches_header(header, sender, recipient)
-            )
+            matches.extend(header for header in fetch_recent_headers(client, uids) if header.message_id.strip() == message_id and route_matches_header(header, sender, recipient))
         if len(matches) != 1:
             failure = "unavailable" if not matches else "ambiguous"
             raise SubjectInputError(f"verified email thread ancestor is {failure}")
@@ -424,9 +435,7 @@ def find_recent_thread_matching(
         if route_profile is not None:
             raise SubjectInputError("verified email thread lookup requires split email configuration")
         return None
-    if route_profile is not None and (
-        split_settings is None or split_settings.agent_address.casefold() != route_profile.agent_address.casefold()
-    ):
+    if route_profile is not None and (split_settings is None or split_settings.agent_address.casefold() != route_profile.agent_address.casefold()):
         raise SubjectInputError("email thread lookup configuration does not match the selected route profile")
     cutoff = datetime.now().astimezone() - timedelta(seconds=lookup_s)
     timeout_s = float(os.environ.get("OMO_MANAGER_EMAIL_THREAD_LOOKUP_TIMEOUT_S", str(DEFAULT_THREAD_LOOKUP_OPERATION_TIMEOUT_S)))
@@ -483,16 +492,27 @@ def find_recent_thread_matching(
                     continue
                 candidates.append(header)
         if required_agent_session is not None:
-            if route_profile is None:
-                raise SubjectInputError("agent-sent thread lookup requires a verified route profile")
             required_agent_session = required_agent_session.strip().lower()
             if AGENT_SESSION_RE.fullmatch(required_agent_session) is None:
                 raise SubjectInputError("agent-sent thread lookup requires the current agent session identity")
             sent = [
                 header
                 for header in candidates
-                if route_matches_header(header, route_profile.agent_address, route_profile.counterparty_address)
-                and header.agent_session.strip().lower() == required_agent_session
+                if header.agent_session.strip().lower() == required_agent_session
+                and (
+                    route_matches_header(
+                        header,
+                        route_profile.agent_address,
+                        route_profile.counterparty_address,
+                    )
+                    if route_profile is not None
+                    else parseaddr(header.sender)[1].casefold()
+                    == (
+                        split_settings.agent_address
+                        if split_settings is not None
+                        else config["user"]
+                    ).casefold()
+                )
             ]
             sent_dates = [header.date for header in sent if header.date is not None]
             if len(sent_dates) != len(sent):
@@ -524,14 +544,20 @@ def find_recent_thread_matching(
             pass
 
 
-def find_recent_thread(subject_key: str, route_profile: MailRouteProfile | None = None, reject_ambiguous: bool = False) -> RecentHeader | None:
+def find_recent_thread(
+    subject_key: str,
+    route_profile: MailRouteProfile | None = None,
+    reject_ambiguous: bool = False,
+    required_agent_session: str | None = None,
+) -> RecentHeader | None:
     guest_hees = route_profile is not None and route_profile.route_kind == "guest-hees"
-    if route_profile is None and not reject_ambiguous:
+    if route_profile is None and not reject_ambiguous and required_agent_session is None:
         return find_recent_thread_matching(lambda header: normalized_subject_key(header.subject) == subject_key)
     return find_recent_thread_matching(
         lambda header: normalized_subject_key(header.subject, guest_hees=guest_hees) == subject_key,
         route_profile=route_profile,
         reject_ambiguous=reject_ambiguous,
+        required_agent_session=required_agent_session,
     )
 
 
@@ -679,7 +705,18 @@ def verified_recent_thread_header(
         deadline_s = float(os.environ.get("OMO_MANAGER_EMAIL_THREAD_LOOKUP_DEADLINE_S", str(DEFAULT_THREAD_LOOKUP_DEADLINE_S)))
         with recent_thread_lookup_deadline(deadline_s):
             if subject_key is not None:
-                header = find_recent_thread(subject_key, route_profile, reject_ambiguous=True)
+                header = (
+                    find_recent_thread(
+                        subject_key,
+                        route_profile,
+                        reject_ambiguous=True,
+                        required_agent_session=required_agent_session,
+                    )
+                    if required_agent_session is not None
+                    else find_recent_thread(
+                        subject_key, route_profile, reject_ambiguous=True
+                    )
+                )
                 description = f"subject {subject_key!r}"
             else:
                 assert tmux_target is not None
@@ -717,13 +754,21 @@ def reply_headers_from_recent_header(header: RecentHeader | None) -> dict[str, s
 
 
 # 🧑 "Why did wl:1 receive this? I emailed config:24. Is the email routing broken? We must prevent these in the future"
-def require_reply_target_continuity(header: RecentHeader | None, tmux_target: str, route_profile: MailRouteProfile | None) -> None:
+def require_reply_target_continuity(
+    header: RecentHeader | None,
+    tmux_target: str,
+    route_profile: MailRouteProfile | None,
+    legacy_target: str = "",
+) -> None:
     """Prevent one agent from retagging another agent's authenticated thread."""
     if header is None or not tmux_target or route_profile is None or route_profile.route_kind != "primary":
         return
     parent_target = header.thread_target or subject_tmux_target(header.subject)
     current_target = canonical_tmux_target(tmux_target)
-    if parent_target and parent_target != current_target:
+    accepted = {current_target}
+    if legacy_target:
+        accepted.add(canonical_tmux_target(legacy_target))
+    if parent_target and parent_target not in accepted:
         raise SubjectInputError(f"verified email thread is addressed to {parent_target}; {current_target} may not retag it")
 
 
@@ -731,6 +776,10 @@ def prepare_subject_and_headers(
     subject: str,
     tmux_target: str = "",
     route_profile: MailRouteProfile | None = None,
+    *,
+    preserve_verified_thread_target: str = "",
+    legacy_target: str = "",
+    required_agent_session: str | None = None,
 ) -> tuple[str, dict[str, str]]:
     validate_subject(subject)
     stripped = subject.strip()
@@ -738,17 +787,35 @@ def prepare_subject_and_headers(
     base = subject_base(stripped, guest_hees=guest_hees)
     is_reply = starts_w_re(stripped, guest_hees=guest_hees)
     header = (
+        None
+        if required_agent_session is not None and not is_reply
+        else
         verified_recent_thread_header(
             route_profile=route_profile,
             subject_key=normalized_subject_key(stripped, guest_hees=guest_hees),
             required=True,
+            required_agent_session=required_agent_session,
         )
         if route_profile is not None and is_reply
+        else find_recent_thread(
+            normalized_subject_key(stripped, guest_hees=guest_hees),
+            reject_ambiguous=True,
+            required_agent_session=required_agent_session,
+        )
+        if is_reply and required_agent_session is not None
         else recent_thread_header(normalized_subject_key(stripped))
         if route_profile is None
         else None
     )
-    require_reply_target_continuity(header, tmux_target, route_profile)
+    if preserve_verified_thread_target:
+        if header is None or route_profile is None or route_profile.route_kind != "primary":
+            raise SubjectInputError("preserved thread target requires one verified primary-route reply")
+        parent_target = header.thread_target or subject_tmux_target(header.subject)
+        if canonical_tmux_target(parent_target) != canonical_tmux_target(preserve_verified_thread_target):
+            raise SubjectInputError("verified email thread does not match the required preserved target")
+        validate_subject(header.subject)
+        return manager_subject_w_target(subject_base(subject), preserve_verified_thread_target, True), reply_headers_from_recent_header(header)
+    require_reply_target_continuity(header, tmux_target, route_profile, legacy_target)
     if is_reply and has_manager_tag(stripped):
         return manager_subject_w_target(base, tmux_target, True), reply_headers_from_recent_header(header)
     if is_reply or header is not None:
@@ -763,7 +830,15 @@ def prepare_latest_thread_for_tmux_target(
     required_agent_session: str | None = None,
 ) -> tuple[str, dict[str, str]]:
     if route_profile is None:
-        header = recent_thread_header_for_tmux_target(tmux_target)
+        header = (
+            find_recent_thread_for_tmux_target(
+                tmux_target,
+                reject_ambiguous=True,
+                required_agent_session=required_agent_session,
+            )
+            if required_agent_session is not None
+            else recent_thread_header_for_tmux_target(tmux_target)
+        )
     else:
         header = verified_recent_thread_header(
             route_profile=route_profile,

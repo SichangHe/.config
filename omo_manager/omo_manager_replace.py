@@ -174,6 +174,14 @@ SOURCE1611_OLD_QUEUE = (
     "🧑 Replace the manager that took tasks outside its ownership, and require the successor manager to hand off all tasks completely to workers. Source: manager_mail/85c5dff58359-1612.txt.",
 )
 SOURCE1612_FILE = "manager_mail/85c5dff58359-1612.txt"
+SOURCE1928_FILE = "manager_mail/85c5dff58359-1928.txt"
+SOURCE1928_SHA256 = "25f0fe5958736ed18ee6ab16b5437bad0bec13dcee9413ed79a94afec2f56138"
+SOURCE1928_TASK = "dw_cleanup_mgr.md"
+SOURCE1928_OLD_TARGET = "dw:33"
+SOURCE1928_SUCCESSOR_TASK = "dw_cleanup_new.md"
+SOURCE1928_PARENT_TASK = "dw_manager_new.md"
+SOURCE1928_PARENT_TARGET = "dw:59"
+SOURCE1928_GOAL = "Consolidating every /shagent/dw* repo and make everything onto main and all repos clean should be a straightforward simple task and this agent has failed it after hours"
 SOURCE1938_FILE = "manager_mail/85c5dff58359-1938.txt"
 SOURCE1938_SHA256 = "8c80e03642329707a612d6da87b7cd7d50852c2e66bf35b900bdbdb9c23798cc"
 SOURCE1938_LINES = (1, 7)
@@ -450,7 +458,7 @@ class Plan:
     protected_identities: tuple[PaneIdentity, ...]
     descendant_identities: tuple[PaneIdentity, ...] = ()
     empty_tree_authority: Snapshot | None = None
-    source1485_topology: dict[str, object] | None = None
+    registered_parent_topology: dict[str, object] | None = None
     source1601_authority: Snapshot | None = None
     historical: Snapshot | None = None
     historical_after: bytes | None = None
@@ -654,6 +662,28 @@ def is_source1611_semantic_exception(args: Args) -> bool:
     )
 
 
+# 🧑 Source `manager_mail/85c5dff58359-1928.txt:3-4`: "Replace this agent ... Consolidating every /shagent/dw* repo and make everything onto main and all repos clean should be a straightforward simple task and this agent has failed it after hours"
+def is_source1928_semantic_exception(args: Args) -> bool:
+    return (
+        args.old_task == SOURCE1928_TASK
+        and args.successor_task == SOURCE1928_SUCCESSOR_TASK
+        and canonical_target(args.old_target) == canonical_target(SOURCE1928_OLD_TARGET)
+        and target_session(args.new_target) == "dw"
+        and canonical_target(args.new_target) != canonical_target(args.old_target)
+        and canonical_target(args.parent_target) == canonical_target(SOURCE1928_PARENT_TARGET)
+        and args.authority_file == SOURCE1928_FILE
+        and args.authority_sha256 == SOURCE1928_SHA256
+        and args.authority_lines == LineRange(3, 4)
+        and args.successor_item_lines == (LineRange(4, 4),)
+        and args.authority_envelope_task == args.old_task
+        and args.authority_envelope_sha256 == args.old_sha256
+    )
+
+
+def uses_registered_parent_topology(args: Args) -> bool:
+    return is_source1485_replacement(args) or is_source1928_semantic_exception(args)
+
+
 def is_source1938_semantic_exception(args: Args) -> bool:
     return (
         args.old_task == SOURCE1938_TASK
@@ -678,7 +708,7 @@ def is_source1938_semantic_exception(args: Args) -> bool:
 
 
 def is_source_only_semantic_exception(args: Args) -> bool:
-    return is_source1597_semantic_exception(args) or is_source1611_semantic_exception(args) or is_source1938_semantic_exception(args)
+    return is_source1597_semantic_exception(args) or is_source1611_semantic_exception(args) or is_source1928_semantic_exception(args) or is_source1938_semantic_exception(args)
 
 
 def source_only_directive(args: Args) -> str:
@@ -686,6 +716,8 @@ def source_only_directive(args: Args) -> str:
         return SOURCE1597_DIRECTIVE
     if is_source1611_semantic_exception(args):
         return SOURCE1611_DIRECTIVE
+    if is_source1928_semantic_exception(args):
+        return f"Replace this agent\n{SOURCE1928_GOAL}"
     if is_source1938_semantic_exception(args):
         return SOURCE1938_DIRECTIVE
     raise ReplaceError("source-only authority is unavailable outside an exact replacement program")
@@ -710,6 +742,9 @@ def source_only_added_goals(
     queue: tuple[str, ...],
     source1944_disposition: str = "",
 ) -> tuple[str, ...]:
+    if is_source1928_semantic_exception(args):
+        goal = f"🧑 Source {SOURCE1928_FILE}:4-4: {SOURCE1928_GOAL}"
+        return () if goal in queue else (goal,)
     if is_source1938_semantic_exception(args):
         if any(SOURCE1938_FILE in item or "Source-1944" in item for item in queue):
             raise ReplaceError("Source-1938 or Source-1944 successor goal already exists in the old ordered queue")
@@ -1933,12 +1968,12 @@ def validate_targets(args: Args) -> None:
     elif is_source_only_semantic_exception(args):
         if SHA256_RE.fullmatch(args.old_queue_sha256) is None or not args.protected_targets or SHA256_RE.fullmatch(args.protected_targets_sha256) is None:
             raise ReplaceError("source-only replacement requires ordered-queue and protected-inventory SHA-256 bindings")
-        if is_source1938_semantic_exception(args) and any(SHA256_RE.fullmatch(child.queue_sha256) is None for child in args.children):
-            raise ReplaceError("Source-1938 replacement requires an ordered queue SHA-256 for every retained child")
+        if (is_source1928_semantic_exception(args) or is_source1938_semantic_exception(args)) and any(SHA256_RE.fullmatch(child.queue_sha256) is None for child in args.children):
+            raise ReplaceError("source-only retained-tree replacement requires an ordered queue SHA-256 for every retained child")
     elif not is_pcodx_replacement(args) and args.old_queue_sha256:
         raise ReplaceError("ordered queue binding is accepted only for an exact PCODX, Source-1269, Source-1485, or source-only replacement")
-    if not (is_source1485_replacement(args) or is_source1938_semantic_exception(args)) and any(child.queue_sha256 for child in args.children):
-        raise ReplaceError("explicit child queue bindings are accepted only for an exact Source-1485 or Source-1938 replacement")
+    if not (uses_registered_parent_topology(args) or is_source1938_semantic_exception(args)) and any(child.queue_sha256 for child in args.children):
+        raise ReplaceError("explicit child queue bindings are accepted only for an exact Source-1485, Source-1928, or Source-1938 replacement")
     if not uses_protected_inventory(args) and args.protected_targets_sha256:
         raise ReplaceError("protected inventory digest is accepted only for PCODX, exact Source-1485, or an exact source-only replacement")
     if not (is_pcodx_replacement(args) or is_source1485_replacement(args)) and args.authority_envelope_file_sha256:
@@ -1997,6 +2032,8 @@ def validate_targets(args: Args) -> None:
         raise ReplaceError("Source-1597 authority is restricted to its exact manager transition")
     if args.authority_file == SOURCE1611_FILE and not is_source1611_semantic_exception(args):
         raise ReplaceError("Source-1611 authority is restricted to its exact manager transition")
+    if args.authority_file == SOURCE1928_FILE and not is_source1928_semantic_exception(args):
+        raise ReplaceError("Source-1928 authority is restricted to its exact manager transition")
     if args.authority_file == SOURCE1938_FILE and not is_source1938_semantic_exception(args):
         raise ReplaceError("Source-1938 authority is restricted to its exact manager transition")
     if is_source1938_semantic_exception(args):
@@ -2107,11 +2144,11 @@ def active_manager_owner_row(root: Path, target: str) -> ActiveGraphRow | None:
     return owners[0] if owners else None
 
 
-def source1485_topology_binding(args: Args, plan: Plan) -> dict[str, object]:
+def registered_parent_topology_binding(args: Args, plan: Plan) -> dict[str, object]:
     """Build and validate the exact affected post-replacement ownership tree."""
 
-    if not is_source1485_replacement(args):
-        raise ReplaceError("Source-1485 topology binding is unavailable outside its exact replacement program")
+    if not uses_registered_parent_topology(args):
+        raise ReplaceError("registered-parent topology binding is unavailable outside its exact replacement programs")
     direct_data = {pin.task: after for pin, after in zip(args.children, plan.child_after, strict=True)}
     rows: list[ActiveGraphRow] = [active_graph_row(args.root, args.successor_task, plan.successor_data)]
     seen_tasks = {args.successor_task}
@@ -2176,6 +2213,13 @@ def source1485_topology_binding(args: Args, plan: Plan) -> dict[str, object]:
         if current_target in seen_targets or current_target in visited_ancestor_targets:
             raise ReplaceError("Source-1485 post-graph reporting ancestry would retain or create a cycle")
         parent_row = active_manager_owner_row(args.root, current_target)
+        if is_source1928_semantic_exception(args) and current_target == parent_target and (
+            parent_row is None
+            or parent_row.task != SOURCE1928_PARENT_TASK
+            or authoritative_active_target_task_paths(args.root, current_target)
+            != (task_path(args.root, SOURCE1928_PARENT_TASK).resolve(),)
+        ):
+            raise ReplaceError("Source-1928 requires exactly its registered active reporting-parent manager owner")
         if parent_row is None:
             if current_target == parent_target:
                 raise ReplaceError("Source-1485 post-graph requires exactly one active reporting-parent manager owner")
@@ -2478,8 +2522,8 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         or (
             not is_pcodx_replacement(args)
             and (
-                (is_source1938_semantic_exception(args) and old_metadata.session_id.lower() not in {"", args.old_session_id})
-                or (not is_source1938_semantic_exception(args) and old_metadata.session_id.lower() != args.old_session_id)
+                ((is_source1928_semantic_exception(args) or is_source1938_semantic_exception(args)) and old_metadata.session_id.lower() not in {"", args.old_session_id})
+                or (not (is_source1928_semantic_exception(args) or is_source1938_semantic_exception(args)) and old_metadata.session_id.lower() != args.old_session_id)
             )
         )
     ):
@@ -2487,7 +2531,7 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         raise ReplaceError(f"old manager must be the {detail} record bound by the invocation")
     if uses_ordered_queue_binding(args) and json_digest(list(old_metadata.pending_task_items)) != args.old_queue_sha256:
         raise ReplaceError("old manager full ordered queue changed")
-    if is_source_only_semantic_exception(args) and old_metadata.pending_task_items != source_only_expected_old_queue(args):
+    if is_source_only_semantic_exception(args) and not is_source1928_semantic_exception(args) and old_metadata.pending_task_items != source_only_expected_old_queue(args):
         raise ReplaceError("source-only replacement exact Human-provenance queue changed")
     old_owners = authoritative_active_target_task_paths(args.root, args.old_target)
     if old_owners != (old_path.resolve(),):
@@ -2602,7 +2646,7 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         args.old_target,
         args.new_target,
         authority_items,
-        human_goals_only=is_source_only_semantic_exception(args),
+        human_goals_only=is_source_only_semantic_exception(args) and not is_source1928_semantic_exception(args),
         authority_first=is_source1938_semantic_exception(args),
     )
     todo_after = todo_replacement(todo.data, args.root, old_path, successor_path, args.old_target, args.new_target)
@@ -2651,9 +2695,9 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
     )
     if source1601_authority is not None:
         plan = replace(plan, source1601_authority=source1601_authority)
-    if is_source1485_replacement(args):
-        topology = source1485_topology_binding(args, plan)
-        plan = replace(plan, source1485_topology=topology)
+    if uses_registered_parent_topology(args):
+        topology = registered_parent_topology_binding(args, plan)
+        plan = replace(plan, registered_parent_topology=topology)
     if is_source1938_semantic_exception(args):
         topology = source1938_topology_binding(args, plan)
         plan = replace(plan, source1938_topology=topology)
@@ -2824,14 +2868,16 @@ def audit_record(args: Args, plan: Plan, secret: str, commitment: str) -> dict[s
         record["empty_tree_envelope_sha256"] = args.empty_tree_envelope_sha256
     if is_source1292_descendant_tree(args):
         record["descendant_authority_envelope_sha256"] = args.descendant_authority_envelope_sha256
+    if uses_registered_parent_topology(args):
+        if plan.registered_parent_topology is None:
+            raise ReplaceError("registered-parent audit lost its simulated post-topology")
+        topology_key = "source1928_topology" if is_source1928_semantic_exception(args) else "source1485_topology"
+        record[topology_key] = plan.registered_parent_topology
+        record[f"{topology_key}_sha256"] = json_digest(plan.registered_parent_topology)
     if is_source1485_replacement(args):
-        if plan.source1485_topology is None:
-            raise ReplaceError("Source-1485 audit lost its simulated post-topology")
         record["old_queue_sha256"] = args.old_queue_sha256
         record["protected_targets_sha256"] = args.protected_targets_sha256
         record["authority_envelope_file_sha256"] = args.authority_envelope_file_sha256
-        record["source1485_topology"] = plan.source1485_topology
-        record["source1485_topology_sha256"] = json_digest(plan.source1485_topology)
     if is_source_only_semantic_exception(args):
         record.update(source_only_audit_binding(args))
     if is_source1938_semantic_exception(args):
@@ -3142,6 +3188,8 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
         allowed.add("protected_inventory")
     if is_source1485_replacement(args):
         allowed.update({"protected_inventory", "source1485_topology", "source1485_topology_sha256"})
+    if is_source1928_semantic_exception(args):
+        allowed.update({"source1928_topology", "source1928_topology_sha256"})
     if is_source_only_semantic_exception(args):
         allowed.add("protected_inventory")
     if is_source1938_semantic_exception(args):
@@ -3252,11 +3300,12 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
         protected_value = record.get("protected_inventory")
         if not isinstance(protected_value, list) or json_digest(protected_value) != args.protected_targets_sha256:
             raise ReplaceError("private replacement audit protected inventory binding changed")
-    if is_source1485_replacement(args):
-        topology = record.get("source1485_topology")
-        topology_sha256 = record.get("source1485_topology_sha256")
+    if uses_registered_parent_topology(args):
+        topology_key = "source1928_topology" if is_source1928_semantic_exception(args) else "source1485_topology"
+        topology = record.get(topology_key)
+        topology_sha256 = record.get(f"{topology_key}_sha256")
         if not isinstance(topology, dict) or not isinstance(topology_sha256, str) or json_digest(topology) != topology_sha256:
-            raise ReplaceError("private replacement audit Source-1485 topology binding changed")
+            raise ReplaceError("private replacement audit registered-parent topology binding changed")
     if is_source1938_semantic_exception(args):
         topology = record.get("source1938_topology")
         topology_sha256 = record.get("source1938_topology_sha256")
@@ -4812,7 +4861,7 @@ def recovery_plan(
         args.old_target,
         args.new_target,
         authority_items,
-        human_goals_only=is_source_only_semantic_exception(args),
+        human_goals_only=is_source_only_semantic_exception(args) and not is_source1928_semantic_exception(args),
         authority_first=is_source1938_semantic_exception(args),
     )
     child_before: list[Snapshot] = []
@@ -4903,15 +4952,15 @@ def recovery_plan(
         or (
             not is_pcodx_replacement(args)
             and (
-                (is_source1938_semantic_exception(args) and old_metadata.session_id.lower() not in {"", args.old_session_id})
-                or (not is_source1938_semantic_exception(args) and old_metadata.session_id.lower() != args.old_session_id)
+                ((is_source1928_semantic_exception(args) or is_source1938_semantic_exception(args)) and old_metadata.session_id.lower() not in {"", args.old_session_id})
+                or (not (is_source1928_semantic_exception(args) or is_source1938_semantic_exception(args)) and old_metadata.session_id.lower() != args.old_session_id)
             )
         )
     ):
         raise ReplaceError("private replacement audit does not describe the exact failed manager")
     if uses_ordered_queue_binding(args) and json_digest(list(old_metadata.pending_task_items)) != args.old_queue_sha256:
         raise ReplaceError("private replacement audit old manager ordered queue changed")
-    if is_source_only_semantic_exception(args) and old_metadata.pending_task_items != source_only_expected_old_queue(args):
+    if is_source_only_semantic_exception(args) and not is_source1928_semantic_exception(args) and old_metadata.pending_task_items != source_only_expected_old_queue(args):
         raise ReplaceError("private replacement audit source-only Human-provenance queue changed")
     protected: list[PaneIdentity] = []
     protected_value = record.get("protected_inventory", [])
@@ -4968,11 +5017,12 @@ def recovery_plan(
     )
     if source1601_authority is not None:
         plan = replace(plan, source1601_authority=source1601_authority)
-    if is_source1485_replacement(args):
-        topology = source1485_topology_binding(args, plan)
-        if topology != record.get("source1485_topology") or json_digest(topology) != record.get("source1485_topology_sha256"):
-            raise ReplaceError("private replacement audit Source-1485 topology is not canonical")
-        plan = replace(plan, source1485_topology=topology)
+    if uses_registered_parent_topology(args):
+        topology = registered_parent_topology_binding(args, plan)
+        topology_key = "source1928_topology" if is_source1928_semantic_exception(args) else "source1485_topology"
+        if topology != record.get(topology_key) or json_digest(topology) != record.get(f"{topology_key}_sha256"):
+            raise ReplaceError("private replacement audit registered-parent topology is not canonical")
+        plan = replace(plan, registered_parent_topology=topology)
     if is_source1938_semantic_exception(args):
         topology = source1938_topology_binding(args, plan)
         if topology != record.get("source1938_topology") or json_digest(topology) != record.get("source1938_topology_sha256"):
@@ -5497,8 +5547,9 @@ def require_preclose_eligibility(args: Args, plan: Plan) -> None:
             pane_inventory(),
             tuple(metadata(snapshot.data, args.root, f"Source-1485 retained child {snapshot.path.name}") for snapshot in plan.children),
         )
-        if plan.source1485_topology is None or source1485_topology_binding(args, plan) != plan.source1485_topology:
-            raise ReplaceError("Source-1485 simulated post-graph changed before guarded manager close")
+    if uses_registered_parent_topology(args):
+        if plan.registered_parent_topology is None or registered_parent_topology_binding(args, plan) != plan.registered_parent_topology:
+            raise ReplaceError("registered-parent simulated post-graph changed before guarded manager close")
     if is_source1938_semantic_exception(args):
         if plan.source1938_topology is None or source1938_topology_binding(args, plan) != plan.source1938_topology:
             raise ReplaceError("Source-1938 retained ownership graph changed before guarded manager close")
@@ -5719,14 +5770,14 @@ def prove_committed(
         raise ReplaceError("successor does not own the exact migrated active-child set")
     if active_child_task_refs(args.root, plan.old.path, args.old_target):
         raise ReplaceError("old manager retains an active child after replacement")
-    if is_source1485_replacement(args):
+    if uses_registered_parent_topology(args):
         committed_plan = replace(
             plan,
             child_after=tuple(snapshot.data for snapshot in child_after),
             successor_data=successor.data,
         )
-        if plan.source1485_topology is None or source1485_topology_binding(args, committed_plan) != plan.source1485_topology:
-            raise ReplaceError("Source-1485 committed ownership graph differs from its reviewed acyclic simulation")
+        if plan.registered_parent_topology is None or registered_parent_topology_binding(args, committed_plan) != plan.registered_parent_topology:
+            raise ReplaceError("registered-parent committed ownership graph differs from its reviewed acyclic simulation")
     if is_source1938_semantic_exception(args):
         committed_plan = replace(
             plan,

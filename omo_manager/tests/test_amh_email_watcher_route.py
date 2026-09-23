@@ -74,6 +74,10 @@ class AmhEmailWatcherRouteTests(unittest.TestCase):
         require.assert_not_called()
         self.assertEqual({"omnigent://session.1"}, watcher.target_aliases("omnigent://session.1"))
 
+    def test_omnigent_subject_extracts_session_target(self) -> None:
+        self.assertEqual("omnigent://session-1", watcher.subject_manager_target("Re: [omnigent://session-1] Topic"))
+        self.assertEqual("omnigent://session.0", watcher.subject_manager_target("[omnigent://session.0] Topic"))
+
     def test_untagged_email_routes_to_available_default_contact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

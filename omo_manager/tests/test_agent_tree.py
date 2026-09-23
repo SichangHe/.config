@@ -135,6 +135,34 @@ class AgentTreeTests(unittest.TestCase):
         with self.assertRaisesRegex(tree.TreeError, "missing its root TODO.md row"):
             tree.run(self.args())
 
+    def test_default_inventory_includes_blocked_structural_parent(self) -> None:
+        self.add_task("parent.md", task_text("team:1", "top:0", status="blocked", blocked_on="Human closed pane"), indexed_target="team:1", section="previous")
+        self.add_task("worker.md", task_text("team:2", "team:1", status="long_running"), indexed_target="team:2")
+        self.finish()
+
+        output = tree.run(self.args())
+
+        self.assertIn("team:1", output)
+        self.assertIn("task: parent.md [blocked]", output)
+        self.assertIn("team:2", output)
+
+    def test_done_filter_does_not_add_running_structural_parent(self) -> None:
+        self.add_task("parent.md", task_text("team:1", "top:0", status="running"), indexed_target="team:1")
+        self.add_task("worker.md", task_text("team:2", "team:1", status="done"), indexed_target="team:2", section="previous")
+        self.finish()
+
+        with self.assertRaisesRegex(tree.TreeError, "missing parent team:1"):
+            tree.run(self.args(statuses=("done",)))
+
+    def test_unindexed_legacy_yaml_header_is_not_task_frontmatter(self) -> None:
+        legacy = self.root / "legacy-plan.md"
+        legacy.write_text("---\nversion: v1.0.0\nstatus: done\ntask: old_plan\ntmux_target: hvl:1\n---\n", encoding="utf-8")
+        self.basic_tree()
+
+        output = tree.run(self.args(statuses=tree.STATUS_ORDER))
+
+        self.assertNotIn("legacy-plan.md", output)
+
     def test_malformed_indexed_task_records_fail(self) -> None:
         valid = task_text("team:2", "top:0")
         cases = {

@@ -741,6 +741,25 @@ def _path_sessions(path: str) -> set[str]:
     return {_canonical_id(value) for value in re.findall(r"/(?:sessions|conversations)/([^/?]+)", unquote(urlsplit(path).path))}
 
 
+def _require_tunnel_frame(raw: str, *, is_host: bool) -> None:
+    """Reject non-protocol tunnel JSON; host tunnels also carry runner ping/pong."""
+    if is_host:
+        from omnigent.host.frames import decode_host_frame
+        from omnigent.runner.transports.ws_tunnel.frames import PingFrame, PongFrame, decode_frame
+
+        try:
+            decode_host_frame(raw)
+            return
+        except ValueError:
+            keepalive = decode_frame(raw)
+            if isinstance(keepalive, PingFrame | PongFrame):
+                return
+            raise ValueError("host tunnel frame is not a host frame or runner keepalive")
+    from omnigent.runner.transports.ws_tunnel.frames import decode_frame
+
+    decode_frame(raw)
+
+
 class FenceGuard:
     """ASGI guard for HTTP, server tunnels, and terminal attachments.
 
@@ -908,14 +927,7 @@ class FenceGuard:
                 frame = _strict_json(raw)
                 if not isinstance(frame, dict) or not isinstance(frame.get("kind"), str):
                     return False
-                if is_host:
-                    from omnigent.host.frames import decode_host_frame
-
-                    decode_host_frame(raw)
-                else:
-                    from omnigent.runner.transports.ws_tunnel.frames import decode_frame
-
-                    decode_frame(raw)
+                _require_tunnel_frame(raw, is_host=is_host)
                 kind = frame["kind"]
                 current = connection_sessions()
                 work: dict[str, Admission] | None = None

@@ -609,6 +609,30 @@ os._exit(0)
                 self.assertEqual(received[1], result)
         self.assertFalse(self.store.active_admissions(self.spec.new_session_id))
 
+    def test_host_tunnel_admits_runner_keepalive_ping_pong(self) -> None:
+        ping = encode_frame(PingFrame(1))
+        pong = encode_frame(PongFrame(1))
+        probe = HostRunnerStatusFrame("still-connected", "unrelated-runner")
+        received: list[str] = []
+
+        async def endpoint(websocket: WebSocket) -> None:
+            await websocket.accept()
+            await websocket.send_text(ping)
+            received.append(await websocket.receive_text())
+            await websocket.send_text(encode_host_frame(probe))
+            await websocket.receive()
+
+        with self.client(endpoint) as client:
+            with client.websocket_connect("/api/hosts/fixture-host/tunnel") as websocket:
+                self.assertEqual(websocket.receive_text(), ping)
+                websocket.send_text(pong)
+                self.assertEqual(decode_host_frame(websocket.receive_text()), probe)
+        self.assertEqual(received, [pong])
+        with self.client() as client:
+            with client.websocket_connect("/api/hosts/fixture-host/tunnel") as websocket:
+                websocket.send_text(encode_frame(RequestFrame("host-request", "GET", "/v1/sessions")))
+                self.assertEqual(websocket.receive()["type"], "websocket.close")
+
     def test_malformed_and_unbound_incoming_tunnel_frames_close_connection(self) -> None:
         frames = (
             "{not-json",

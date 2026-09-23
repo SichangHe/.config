@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import multiprocessing
 import os
 import re
 import shlex
@@ -58,6 +59,15 @@ def delivery_target(command: list[str]) -> str:
     if "--target" in command:
         return command[command.index("--target") + 1]
     return command[command.index("--manager-target") + 1]
+
+
+def cross_process_input_lock_worker(target: str, acquired: object, release: object, hold: bool) -> None:
+    from omo_manager.omo_tmux_input_lock import tmux_input_lock
+
+    with tmux_input_lock(target):
+        acquired.set()  # type: ignore[attr-defined]
+        if hold:
+            release.wait(5)  # type: ignore[attr-defined]
 
 
 def agent_pointer_paths(text: str) -> list[Path]:
@@ -926,6 +936,89 @@ with exclusive_watcher_root(root):
             self.assertIn("<agent_report>", push.call_args.args[2])
             self.assertNotIn("<human_instruction>", push.call_args.args[2])
             self.assertEqual(2, task.read_text(encoding="utf-8").count("(pending)"))
+
+    def test_agent_report_clear_rejects_replacement_root_identity(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            moved = base / "moved-root"
+            external = base / "external"
+            root.mkdir()
+            external.mkdir()
+            report = valid_agent_report(self, "review passed\n", name="worker_swap_deadbeef")
+            pointer = f"(from agent vl:2 {report})"
+            task = root / "manager.md"
+            task.write_text(f"{task_frontmatter(runat='vl:15', managerat='main:1', is_manager=True)}\n(pending)\n{pointer}\n", encoding="utf-8")
+            (external / "manager.md").write_bytes(task.read_bytes())
+            identity = (root.stat().st_dev, root.stat().st_ino)
+            marker = watcher.find_markers(root, [task], identity)[0]
+            args = Args(root, "", base / "state", 1, 1, 1, Path("/bin/false"), True, False, manager_target="main:1")
+            root.rename(moved)
+            root.symlink_to(external, target_is_directory=True)
+            self.assertFalse(watcher.clear_consumed_report_marker(args, marker, "swap-report"))
+            self.assertEqual(task.read_bytes(), (external / "manager.md").read_bytes())
+
+    def test_agent_report_clear_temp_is_removed_after_replace_failure_and_retry(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            reports = Path("/tmp") / f"omo-agent-messages-{os.getuid()}"
+            reports.mkdir(mode=0o700, parents=True, exist_ok=True)
+            reports.chmod(0o700)
+            body = b"retry report\n"
+            report = reports / f"test_{os.getpid()}_{time.time_ns()}_worker_retry_deadbeef.md"
+            report.write_bytes(
+                (
+                    "(sent from worker via omo_report.sh tmux=vl:2 time=10:00 task-file=worker.md)\n"
+                    f"[message-sha256: {hashlib.sha256(body).hexdigest()}]\n"
+                ).encode()
+                + b"message:\n"
+                + body
+            )
+            report.chmod(0o600)
+            self.addCleanup(report.unlink, missing_ok=True)
+            pointer = f"(from agent vl:2 {report})"
+            task = root / "manager.md"
+            owner = task_frontmatter(runat="vl:15", managerat="main:1", is_manager=True).encode()
+            owner_hash = hashlib.sha256(owner).hexdigest()
+            manager_hash = hashlib.sha256(str(task.resolve()).encode()).hexdigest()
+            owner_line = f"[omo-report-owner-prefix: manager-path-sha256={manager_hash} sha256={owner_hash} size-bytes={len(owner)} separator-bytes=1]"
+            report.write_bytes(report.read_bytes().replace(b"message:\n", (owner_line + "\nmessage:\n").encode()))
+            task.write_bytes(owner + f"(pending)\n{pointer}\n".encode())
+            args = Args(root, "", root / "state", 1, 1, 1, Path("/bin/false"), True, False, manager_target="main:1")
+            marker = watcher.find_markers(root, [task])[0]
+            stale_temp = root / f".{task.name}.omo-watch-stale.tmp"
+            stale_temp.write_bytes(b"stale replacement from an interrupted watcher\n")
+            def temp_glob() -> list[Path]:
+                return [path for path in root.glob(f".{task.name}.omo-watch-*.tmp") if path != stale_temp]
+            with patch.object(watcher, "remember_consumed_report_transition", return_value=True), patch.object(
+                watcher.os, "replace", side_effect=OSError("injected replace failure")
+            ):
+                self.assertFalse(watcher.clear_consumed_report_marker(args, marker, "retry-report"))
+            self.assertEqual([], temp_glob())
+            with patch.object(watcher, "remember_consumed_report_transition", return_value=True):
+                self.assertTrue(watcher.clear_consumed_report_marker(args, marker, "retry-report"))
+            self.assertEqual([], temp_glob())
+            self.assertTrue(stale_temp.exists())
+            self.assertNotIn("(pending)", task.read_text(encoding="utf-8"))
+
+    def test_pending_clear_temp_is_removed_after_replace_failure_and_retry(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "worker.md"
+            task.write_text("(pending)\nretry this\n", encoding="utf-8")
+            marker = watcher.find_markers(root, [task])[0]
+            with patch.object(watcher.os, "replace", side_effect=OSError("injected replace failure")):
+                self.assertFalse(watcher.clear_pending_marker_if_current(root, marker))
+            self.assertEqual([], list(root.glob(f".{task.name}.*")))
+            self.assertTrue(watcher.clear_pending_marker_if_current(root, marker))
+            self.assertEqual([], list(root.glob(f".{task.name}.*")))
+            self.assertNotIn("(pending)", task.read_text(encoding="utf-8"))
 
     def test_agent_report_keeps_only_authenticated_pointer(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -2247,6 +2340,8 @@ with exclusive_watcher_root(root):
     def test_email_subject_prepends_tmux_target_without_manager_tag(self) -> None:
         self.assertEqual("[wl:7] Topic", manager_subject_w_target("Topic", "wl:7"))
         self.assertEqual("Re: [wl:7] Topic", manager_subject_w_target("Topic", "wl:7", True))
+        self.assertEqual("[omnigent://session.0] Topic", manager_subject_w_target("Topic", "omnigent://session.0"))
+        self.assertEqual("Topic", strip_leading_tmux_tags("[omnigent://session.0] Topic"))
         self.assertEqual("Re: [wl:7] Topic", prepare_subject("Re: [a] Topic", "wl:7"))
         self.assertEqual("Re: [wl:7] Topic", prepare_subject("Re: wl:9 wl:6 Topic", "wl:7"))
         self.assertEqual("Re: [wl:7] Topic", prepare_subject("Re: [a] wl:9 pb:1 vl:2 Topic", "wl:7"))
@@ -7074,13 +7169,55 @@ with exclusive_watcher_root(root):
             snapshot = SessionSnapshot("session-1", "idle", "codex", True, True)
             with patch.object(watcher, "omnigent_session_snapshot", return_value=snapshot), patch.object(
                 watcher, "inspect_codex"
-            ) as inspect, patch.object(watcher, "ready_report_context") as report, patch.object(
+            ) as inspect, patch.object(watcher, "ready_report_context", return_value=(None, False)) as report, patch.object(
                 watcher, "try_send_delivery_text", return_value=watcher.DeliveryResult(watcher.ASYNC_DELIVERY_STARTED)
             ) as push:
                 self.assertTrue(watcher.push_agent_pending_item_reminders(args, {}, 1000.0))
 
             inspect.assert_not_called()
-            report.assert_not_called()
+            report.assert_called_once_with(target)
+            self.assertEqual(target, push.call_args.args[2])
+
+    def test_pending_item_reminder_defers_to_omnigent_ready_report(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+        from omo_manager.omo_omnigent import SessionSnapshot
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = "omnigent://session-1"
+            (root / "TODO.md").write_text(f"current:\ncontact.md {target}\n", encoding="utf-8")
+            (root / "contact.md").write_text(
+                task_frontmatter(status="long_running", runat=target, managerat="wl:1", pending_items=("continue review",)),
+                encoding="utf-8",
+            )
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+            snapshot = SessionSnapshot("session-1", "idle", "codex", True, True)
+            turn = watcher.VisibleTurn(("item-9",), "fp")
+            with patch.object(watcher, "omnigent_session_snapshot", return_value=snapshot), patch.object(
+                watcher, "try_send_delivery_text"
+            ) as push, patch.object(watcher, "ready_report_context", return_value=(turn, False)):
+                self.assertFalse(watcher.push_agent_pending_item_reminders(args, {}, 1000.0))
+            push.assert_not_called()
+
+    def test_pending_item_reminder_sends_after_omnigent_report_helper(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+        from omo_manager.omo_omnigent import SessionSnapshot
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = "omnigent://session-1"
+            (root / "TODO.md").write_text(f"current:\ncontact.md {target}\n", encoding="utf-8")
+            (root / "contact.md").write_text(
+                task_frontmatter(status="long_running", runat=target, managerat="wl:1", pending_items=("continue review",)),
+                encoding="utf-8",
+            )
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+            snapshot = SessionSnapshot("session-1", "idle", "codex", True, True)
+            turn = watcher.VisibleTurn(("item-9",), "fp")
+            with patch.object(watcher, "omnigent_session_snapshot", return_value=snapshot), patch.object(
+                watcher, "try_send_delivery_text", return_value=watcher.DeliveryResult(watcher.ASYNC_DELIVERY_STARTED)
+            ) as push, patch.object(watcher, "ready_report_context", return_value=(turn, True)):
+                self.assertTrue(watcher.push_agent_pending_item_reminders(args, {}, 1000.0))
             self.assertEqual(target, push.call_args.args[2])
 
     def test_pending_item_reminder_does_not_send_to_offline_omnigent_runner(self) -> None:
@@ -7103,6 +7240,36 @@ with exclusive_watcher_root(root):
                 self.assertFalse(watcher.push_agent_pending_item_reminders(args, {}, 1000.0))
 
             push.assert_not_called()
+
+    def test_omnigent_targets_keep_dot_zero_session_identity(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        self.assertEqual({"omnigent://session.0"}, watcher.target_aliases("omnigent://session.0"))
+        self.assertEqual("omnigent://session.0", watcher.canonical_target("omnigent://session.0"))
+        self.assertFalse(watcher.tmux_targets_overlap("omnigent://session", "omnigent://session.0"))
+        self.assertTrue(watcher.same_tmux_target("omnigent://session.0", "omnigent://session.0"))
+        self.assertEqual({"wl:7", "wl:7.0"}, watcher.target_aliases("wl:7"))
+
+    def test_ready_report_context_uses_session_items_for_omnigent(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with patch.object(watcher, "codex_tail") as tail, patch.object(
+            watcher, "omnigent_session_ready_report", return_value=("item-9", False)
+        ):
+            turn, nearby = watcher.ready_report_context("omnigent://session-1")
+            self.assertEqual(turn, watcher.ready_report_turn("omnigent://session-1"))
+        tail.assert_not_called()
+        self.assertIsNotNone(turn)
+        self.assertEqual(("item-9",), turn.lines)
+        self.assertFalse(nearby)
+
+    def test_ready_report_context_marks_nearby_omnigent_report_helper(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with patch.object(watcher, "omnigent_session_ready_report", return_value=("item-9", True)):
+            turn, nearby = watcher.ready_report_context("omnigent://session-1")
+        self.assertIsNotNone(turn)
+        self.assertTrue(nearby)
 
     def test_timed_out_problem_scan_still_sends_pending_item_reminder(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -7414,10 +7581,13 @@ with exclusive_watcher_root(root):
             self.assertFalse(watcher.agent_problem_guard_current(watcher.AgentProblemGuard(command, (capacity_line,))))
             self.assertTrue(watcher.agent_problem_guard_current(watcher.AgentProblemGuard(command, (malformed_line,))))
 
-    def test_malformed_task_scan_disables_other_watcher_actions(self) -> None:
+    def test_malformed_task_scan_disables_pane_actions_but_emails_errors(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
-        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_repeat_s=300.0)
+        state_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(state_tmp.cleanup)
+        state_dir = Path(state_tmp.name)
+        args = Args(Path("/tmp"), "", state_dir / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_repeat_s=300.0)
         result = watcher.CommandOutput(
             "agent-problems",
             3,
@@ -7442,8 +7612,12 @@ with exclusive_watcher_root(root):
             watcher, "handle_capacity_problems", side_effect=never
         ), patch.object(watcher, "handle_ready_report_reminders", side_effect=never), patch.object(
             watcher, "maybe_push_manager_compaction_reminder", side_effect=never
-        ), patch.object(watcher, "push_manager_text_to_target", return_value=0) as push, redirect_stdout(StringIO()):
+        ), patch.object(watcher, "log_manager_problem", return_value=True) as email, patch.object(
+            watcher, "push_manager_text_to_target", return_value=0
+        ) as push, redirect_stdout(StringIO()):
             self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+        email.assert_called_once()
+        self.assertIn("error: task=capacity.md", email.call_args.args[1])
         push.assert_called_once()
         self.assertEqual("wl:1", push.call_args.args[2])
         delivered = push.call_args.args[1]
@@ -7454,19 +7628,21 @@ with exclusive_watcher_root(root):
     def test_agent_problem_check_reports_stuck_input_after_three_enter_attempts(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
-        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, agent_problem_repeat_s=300.0)
-        result = watcher.CommandOutput(
-            "agent-problems",
-            3,
-            "agent-problems: stuck_input=1\nstuck_input: task=task.md evidence=target=cfg:1 unstick=sent_enter\nunstuck: target=cfg:1 task=task.md action=sent_enter\n",
-            "",
-        )
-        seen: dict[str, float] = {}
-        out = StringIO()
-        with redirect_stdout(out):
-            self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
-            self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1001.0))
-            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1002.0))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, True, agent_problem_repeat_s=300.0)
+            result = watcher.CommandOutput(
+                "agent-problems",
+                3,
+                "agent-problems: stuck_input=1\nstuck_input: task=task.md evidence=target=cfg:1 unstick=sent_enter\nunstuck: target=cfg:1 task=task.md action=sent_enter\n",
+                "",
+            )
+            seen: dict[str, float] = {}
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
+                self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1001.0))
+                self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1002.0))
         self.assertEqual(1, out.getvalue().count("1 have visible input; refresh status and unstick safely; do not stop a live agent solely for this input:"))
         self.assertNotIn("(from agent omo_pending_watch agent-problem)", out.getvalue())
 
@@ -7693,6 +7869,24 @@ with exclusive_watcher_root(root):
             self.assertFalse(watcher.agent_problem_target_is_ready(args, seen, "wl:1", 1299.0))
             self.assertTrue(watcher.agent_problem_target_is_ready(args, seen, "wl:1", 1300.0))
 
+    def test_agent_problem_target_gate_uses_omnigent_readiness_without_tmux(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+        from omo_manager.omo_omnigent import SessionSnapshot
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+        target = "omnigent://session-1"
+        ready = SessionSnapshot("session-1", "idle", "codex", True, True)
+        busy = SessionSnapshot("session-1", "running", "codex", True, True)
+        with patch.object(watcher, "omnigent_session_snapshot", return_value=ready), patch.object(watcher, "inspect_codex") as inspect:
+            self.assertTrue(watcher.agent_problem_target_is_ready(args, {}, target, 1000.0))
+            inspect.assert_not_called()
+        with patch.object(watcher, "omnigent_session_snapshot", return_value=busy), patch.object(watcher, "inspect_codex") as inspect:
+            self.assertFalse(watcher.agent_problem_target_is_ready(args, {}, target, 1000.0))
+            inspect.assert_not_called()
+        with patch.object(watcher, "omnigent_session_snapshot", side_effect=RuntimeError("OmniGent server unavailable")), patch.object(watcher, "inspect_codex") as inspect:
+            self.assertFalse(watcher.agent_problem_target_is_ready(args, {}, target, 1000.0))
+            inspect.assert_not_called()
+
     def test_agent_problem_check_does_not_queue_notice_for_busy_manager(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -7708,6 +7902,57 @@ with exclusive_watcher_root(root):
         ) as push:
             self.assertFalse(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
             push.assert_not_called()
+
+    def test_agent_problem_check_suppresses_ready_persistent_role_blocked_on_owner(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\npaper_finish.md dw3:0\n", encoding="utf-8")
+            (root / "paper_finish.md").write_text(
+                task_frontmatter(
+                    status="long_running",
+                    runat="dw3:0",
+                    managerat="wl:1",
+                    blocked_on="persistent role: human feedback and dw3:0 final reviewed plot package",
+                ),
+                encoding="utf-8",
+            )
+            output = "agent-problems: ready=1\nready: task=paper_finish.md evidence=target=dw3:0 persistent_role=true task_status=long_running output=idle owner_target=wl:1\n"
+            self.assertEqual("", watcher.filter_blocked_long_running_ready_output(root, output))
+
+    def test_agent_problem_check_keeps_ready_ordinary_blocked_long_running_task(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\nordinary.md dw3:0\n", encoding="utf-8")
+            (root / "ordinary.md").write_text(
+                task_frontmatter(status="long_running", runat="dw3:0", blocked_on="waiting for review"), encoding="utf-8"
+            )
+            output = "agent-problems: ready=1\nready: task=ordinary.md evidence=target=dw3:0 persistent_role=true task_status=long_running output=idle owner_target=wl:1\n"
+            self.assertEqual(output, watcher.filter_blocked_long_running_ready_output(root, output))
+
+    def test_agent_problem_check_filters_mixed_blocked_ready_without_duplicate_actions(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\npaper_finish.md dw3:0\nworker.md dw4:0\n", encoding="utf-8")
+            (root / "paper_finish.md").write_text(
+                task_frontmatter(status="long_running", runat="dw3:0", blocked_on="persistent role: human feedback"), encoding="utf-8"
+            )
+            (root / "worker.md").write_text(task_frontmatter(status="blocked", runat="dw4:0", blocked_on="review"), encoding="utf-8")
+            output = (
+                "agent-problems: blocked_idle=1 ready=1\n"
+                "manager-action: blocked_idle>0 inspect blocked agents, unblock if possible, or route the exact blocker\n"
+                "blocked_idle: task=worker.md evidence=target=dw4:0 task_status=blocked idle_status=ready reason=review owner_target=wl:1\n"
+                "ready: task=paper_finish.md evidence=target=dw3:0 persistent_role=true task_status=long_running output=idle owner_target=wl:1\n"
+            )
+            filtered = watcher.filter_blocked_long_running_ready_output(root, output)
+            self.assertEqual(1, filtered.count("manager-action: blocked_idle>0"))
+            self.assertIn("blocked_idle: task=worker.md", filtered)
+            self.assertNotIn("ready: task=paper_finish.md", filtered)
 
     def test_agent_problem_check_reserves_manager_wide_cooldown_before_async_completion(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -7775,7 +8020,142 @@ with exclusive_watcher_root(root):
             self.assertFalse(watcher.agent_problem_guard_current(guard))
             status_run.assert_called_once()
 
-    def test_busy_recovery_managers_send_one_throttled_human_fallback(self) -> None:
+    def test_agent_problem_guard_rejects_task_that_becomes_persistent_before_paste(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\nworker.md dw3:0\n", encoding="utf-8")
+            task = root / "worker.md"
+            task.write_text(task_frontmatter(status="long_running", runat="dw3:0", blocked_on="waiting for review"), encoding="utf-8")
+            line = "ready: task=worker.md evidence=target=dw3:0 persistent_role=true task_status=long_running output=idle owner_target=wl:1"
+            guard = watcher.AgentProblemGuard(("status",), (line,), root=root)
+            task.write_text(
+                task_frontmatter(
+                    status="long_running",
+                    runat="dw3:0",
+                    blocked_on="persistent role: human feedback",
+                ),
+                encoding="utf-8",
+            )
+            def invoke_guard(*_args: object, before_paste: object = None, **_kwargs: object) -> None:
+                assert callable(before_paste)
+                before_paste()
+
+            with patch.object(watcher, "verified_send_to_codex", side_effect=invoke_guard) as send:
+                with self.assertRaises(watcher.PrePasteRejected):
+                    watcher.run_verified_send("wl:1", "stale ready alert", watcher.CodexSendOptions(1, 0.15, False), problem_guard=guard)
+            send.assert_called_once()
+
+    def test_same_target_verified_sends_are_serialized(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        active = 0
+        maximum = 0
+        state_lock = threading.Lock()
+
+        def send(*_args: object, **_kwargs: object) -> None:
+            nonlocal active, maximum
+            with state_lock:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.03)
+            with state_lock:
+                active -= 1
+
+        options = watcher.CodexSendOptions(1, 0.15, False)
+        with patch.object(watcher, "verified_send_to_codex", side_effect=send):
+            first = threading.Thread(target=watcher.run_verified_send, args=("wl:1", "first", options))
+            second = threading.Thread(target=watcher.run_verified_send, args=("wl:1.0", "second", options))
+            first.start()
+            second.start()
+            first.join(timeout=2)
+            second.join(timeout=2)
+        self.assertFalse(first.is_alive() or second.is_alive())
+        self.assertEqual(1, maximum)
+
+    def test_mixed_ready_and_capacity_routes_share_same_target_lock(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        active = 0
+        maximum = 0
+        state_lock = threading.Lock()
+
+        def enter_transaction(*_args: object, **_kwargs: object) -> bool | None:
+            nonlocal active, maximum
+            with state_lock:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.03)
+            with state_lock:
+                active -= 1
+            return True
+
+        guard = watcher.AgentProblemGuard(("status",), ("capacity",), root=Path("/tmp"))
+        options = watcher.CodexSendOptions(1, 0.15, False)
+        with patch.object(watcher, "verified_send_to_codex", side_effect=enter_transaction), patch.object(
+            watcher, "verified_send_capacity_resume", side_effect=enter_transaction
+        ):
+            ready = threading.Thread(target=watcher.run_verified_send, args=("wl:1", "ready", options))
+            capacity = threading.Thread(target=watcher.run_capacity_resume, args=("wl:1.0", options, guard))
+            ready.start()
+            capacity.start()
+            ready.join(timeout=2)
+            capacity.join(timeout=2)
+        self.assertFalse(ready.is_alive() or capacity.is_alive())
+        self.assertEqual(1, maximum)
+
+    def test_same_target_input_lock_serializes_independent_processes(self) -> None:
+        context = multiprocessing.get_context("fork")
+        first_acquired = context.Event()
+        second_acquired = context.Event()
+        release_first = context.Event()
+        first = context.Process(target=cross_process_input_lock_worker, args=("wl:1", first_acquired, release_first, True))
+        second = context.Process(target=cross_process_input_lock_worker, args=("wl:1.0", second_acquired, release_first, False))
+        first.start()
+        second_started = False
+        try:
+            self.assertTrue(first_acquired.wait(2))
+            second.start()
+            second_started = True
+            self.assertFalse(second_acquired.wait(0.2))
+            release_first.set()
+            self.assertTrue(second_acquired.wait(2))
+        finally:
+            release_first.set()
+            first.join(timeout=2)
+            if second_started:
+                second.join(timeout=2)
+            if first.is_alive():
+                first.terminate()
+                first.join(timeout=2)
+            if second_started and second.is_alive():
+                second.terminate()
+                second.join(timeout=2)
+        self.assertEqual(0, first.exitcode)
+        if second_started:
+            self.assertEqual(0, second.exitcode)
+
+    def test_pending_guard_rejects_replacement_root_identity(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            moved = base / "moved-root"
+            external = base / "external"
+            root.mkdir()
+            external.mkdir()
+            task = root / "task.md"
+            task.write_text("(pending)\ninside\n", encoding="utf-8")
+            (external / "task.md").write_text("(pending)\ninside\n", encoding="utf-8")
+            identity = (root.stat().st_dev, root.stat().st_ino)
+            marker = watcher.find_markers(root, [task], identity)[0]
+            root.rename(moved)
+            root.symlink_to(external, target_is_directory=True)
+            self.assertFalse(watcher.pending_marker_present(root, marker.file, marker.line, marker.digest, marker.block_text, marker.root_identity))
+
+    def test_busy_recovery_managers_throttle_only_unchanged_human_fallback(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_repeat_s=300.0)
@@ -7785,10 +8165,11 @@ with exclusive_watcher_root(root):
             watcher, "inspect_codex", return_value=MagicMock(status="running")
         ), patch.object(watcher, "log_manager_problem", return_value=True) as email:
             self.assertTrue(watcher.route_or_log_manager_problem(args, seen, output, 1000.0))
-            self.assertFalse(watcher.route_or_log_manager_problem(args, seen, output + " changed", 1001.0))
-            self.assertEqual(1, email.call_count)
+            self.assertFalse(watcher.route_or_log_manager_problem(args, seen, output, 1001.0))
+            self.assertTrue(watcher.route_or_log_manager_problem(args, seen, output + " changed", 1001.0))
+            self.assertEqual(2, email.call_count)
 
-    def test_missing_recovery_managers_send_one_throttled_human_fallback(self) -> None:
+    def test_missing_recovery_managers_throttle_only_unchanged_human_fallback(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_repeat_s=300.0)
@@ -7798,17 +8179,97 @@ with exclusive_watcher_root(root):
             watcher, "log_manager_problem", return_value=True
         ) as email:
             self.assertTrue(watcher.route_or_log_manager_problem(args, seen, output, 1000.0))
-            self.assertFalse(watcher.route_or_log_manager_problem(args, seen, output + " changed", 1001.0))
-            self.assertEqual(1, email.call_count)
+            self.assertFalse(watcher.route_or_log_manager_problem(args, seen, output, 1001.0))
+            self.assertTrue(watcher.route_or_log_manager_problem(args, seen, output + " changed", 1001.0))
+            self.assertEqual(2, email.call_count)
 
-    def test_background_manager_problem_does_not_invoke_human_email_helper(self) -> None:
+    def test_background_manager_problem_invokes_human_email_helper(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
-        err = StringIO()
-        with patch("omo_manager.omo_pending_watch.subprocess.Popen", side_effect=AssertionError("unexpected Human email helper")), redirect_stderr(err):
+        launched: dict[str, object] = {}
+
+        def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            launched["command"] = command
+            launched["kwargs"] = kwargs
+            launched["subject"] = Path(command[command.index("--subject-file") + 1]).read_text(encoding="utf-8")
+            launched["body"] = Path(command[command.index("--message-file") + 1]).read_text(encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, "Email sent.\n", "")
+
+        with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
             self.assertTrue(watcher.log_manager_problem(args, "fatal manager state"))
-        self.assertIn("fatal manager state", err.getvalue())
+        command = launched["command"]
+        self.assertIsInstance(command, list)
+        assert isinstance(command, list)
+        self.assertIn(str(watcher.DEFAULT_HUMAN_EMAIL_HELPER), command)
+        self.assertIn("--require-human-recipient", command)
+        self.assertEqual("wl:1", command[command.index("--tmux-target") + 1])
+        self.assertEqual("Watcher detected agent error\n", launched["subject"])
+        body = launched["body"]
+        self.assertIsInstance(body, str)
+        assert isinstance(body, str)
+        self.assertIn("fatal manager state", body)
+        self.assertIn("Manager target: wl:1", body)
+
+    def test_background_omnigent_manager_problem_preserves_target_in_human_email(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        target = "omnigent://session-42"
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target=target)
+        launched: dict[str, object] = {}
+
+        def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            launched["command"] = command
+            launched["body"] = Path(command[command.index("--message-file") + 1]).read_text(encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, "Email sent.\n", "")
+
+        with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+            self.assertTrue(watcher.log_manager_problem(args, "fatal OmniGent state"))
+        command = launched["command"]
+        self.assertIsInstance(command, list)
+        assert isinstance(command, list)
+        self.assertEqual(target, command[command.index("--tmux-target") + 1])
+        body = launched["body"]
+        self.assertIsInstance(body, str)
+        assert isinstance(body, str)
+        self.assertIn("fatal OmniGent state", body)
+        self.assertIn(f"Manager target: {target}", body)
+
+    def test_omnigent_worker_error_emails_human_once_per_unchanged_error(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_repeat_s=300.0)
+        output = watcher.watcher_error_problem_output(
+            "agent-problems: error=1\n"
+            "error: task=worker.md evidence=target=omnigent://session-42 output=fatal owner_target=wl:1"
+        )
+        seen: dict[str, float] = {}
+        with patch.object(watcher, "log_manager_problem", return_value=True) as email:
+            self.assertTrue(watcher.email_human_watcher_error_once(args, seen, output, 1000.0))
+            self.assertFalse(watcher.email_human_watcher_error_once(args, seen, output, 1001.0))
+        email.assert_called_once_with(args, output)
+        self.assertIn("omnigent://session-42", output)
+
+    def test_failed_watcher_error_email_retries_after_ten_minutes(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_repeat_s=watcher.DEFAULT_SEEN_TTL_S * 2)
+        output = "agent-problems: error=1\nerror: task=worker.md evidence=target=cfg:1 output=fatal"
+        seen: dict[str, float] = {}
+        with patch.object(watcher, "log_manager_problem", return_value=False) as email:
+            self.assertFalse(watcher.email_human_watcher_error_once(args, seen, output, 1000.0))
+            self.assertFalse(watcher.email_human_watcher_error_once(args, seen, output, 1599.0))
+            self.assertFalse(watcher.email_human_watcher_error_once(args, seen, output, 1600.0))
+        self.assertEqual(2, email.call_count)
+
+    def test_submanager_non_error_is_not_emailed_as_main_manager_failure(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        output = (
+            "agent-problems: missing=1\n"
+            "missing: task=submanager.md evidence=target=wl:2 role=manager owner_target=wl:1"
+        )
+        self.assertEqual("", watcher.watcher_error_problem_output(output, "wl:1"))
 
     def test_agent_problem_check_formats_untracked_agent_group(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -7885,8 +8346,11 @@ with exclusive_watcher_root(root):
 
         with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch(
             "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
-        ), patch.object(watcher, "log_manager_problem", side_effect=AssertionError("unexpected human email")):
+        ), patch.object(watcher, "log_manager_problem", return_value=True) as email:
             self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+        email.assert_called_once()
+        self.assertIn("error: task=owned.md", email.call_args.args[1])
+        self.assertNotIn("stuck_input: task=other.md", email.call_args.args[1])
         self.assertEqual(1, len(calls))
         self.assertEqual("vl:15", calls[0][calls[0].index("--manager-target") + 1])
         self.assertIn("owned.md wl:16 <output>worker error</output>", calls[0][1])
@@ -8543,6 +9007,24 @@ with exclusive_watcher_root(root):
                 self.assertTrue(watcher.read_blocked_report_ledger(args)["completed.md"].startswith("done:"))
                 self.assertIn("suppressed unchanged blocked dependency report", out.getvalue())
                 push.assert_not_called()
+
+    def test_problem_issue_is_persisted_before_readiness_probe_for_claim_race(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+        from omo_manager.amh_problem_claim import read_issues
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = Args(root, "", root / "state", 1, 1, 30, Path("/status.py"), False, False, manager_target="pb:0")
+            line = "missing: task=pb_news_mgr.md evidence=target=pb:1 task_status=running output=target missing owner_target=pb:0"
+            result = watcher.CommandOutput("agent-problems", 3, f"agent-problems: missing=1\n{line}\n", "")
+            problem_id = watcher.problem_claim_id("pb:0", (line,))
+            with patch.object(watcher, "agent_problem_target_is_ready", return_value=False), patch.object(
+                watcher, "push_manager_text_to_target", side_effect=AssertionError("must not deliver to unavailable target")
+            ):
+                watcher.handle_agent_problem_result(args, {}, result, 1000.0)
+            issue = read_issues(watcher.problem_claim_path(args)).get(problem_id)
+            self.assertIsNotNone(issue)
+            self.assertEqual("pb:0", issue.manager_target if issue is not None else "")
 
     def test_classify_done_ready_command_revalidates_before_writing(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -10025,8 +10507,10 @@ resolved_task_items: []
 
             with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch(
                 "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
-            ), patch.object(watcher, "log_manager_problem", side_effect=AssertionError("unexpected human email")):
+            ), patch.object(watcher, "log_manager_problem", return_value=True) as email:
                 self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+            email.assert_called_once()
+            self.assertIn("error: task=manager", email.call_args.args[1])
             self.assertEqual(1, len(calls))
             self.assertEqual("wl:2", calls[0][calls[0].index("--manager-target") + 1])
             pushed_text = calls[0][1]
@@ -10057,8 +10541,9 @@ resolved_task_items: []
 
             with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch(
                 "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
-            ), patch.object(watcher, "log_manager_problem", side_effect=AssertionError("unexpected human email")):
+            ), patch.object(watcher, "log_manager_problem", return_value=True) as email:
                 self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+            email.assert_called_once()
             self.assertEqual(1, len(calls))
             self.assertEqual("wl:2", calls[0][calls[0].index("--manager-target") + 1])
 
@@ -10115,8 +10600,10 @@ resolved_task_items: []
 
             with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch(
                 "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
-            ), patch.object(watcher, "log_manager_problem", side_effect=AssertionError("unexpected human email")):
+            ), patch.object(watcher, "log_manager_problem", return_value=True) as email:
                 self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+            email.assert_called_once()
+            self.assertIn("error: task=worker.md", email.call_args.args[1])
             self.assertEqual(["wl:2", "wl:3"], [call[call.index("--manager-target") + 1] for call in calls])
             self.assertIn("manager (this is the main manager) wl:1.0 <output>Selected model is at capacity</output>", calls[0][1])
             self.assertIn("worker.md wl:4 <output>worker failed</output>", calls[1][1])
@@ -10135,7 +10622,7 @@ resolved_task_items: []
         with redirect_stdout(out):
             self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
         text = out.getvalue()
-        self.assertIn("manager problem log due: manager watcher detected manager error", text)
+        self.assertIn("manager human email due: Watcher detected agent error", text)
         self.assertIn("agent-problems: stuck_input=1", text)
         self.assertIn("stuck_input: task=manager evidence=target=wl:1.0 role=manager", text)
         self.assertIn("not_safe:plan_prompt", text)
@@ -10244,7 +10731,7 @@ resolved_task_items: []
             self.assertFalse(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
         text = out.getvalue()
         self.assertIn("suppressed manager self-problem report", text)
-        self.assertNotIn("manager problem log due: manager watcher detected manager error", text)
+        self.assertNotIn("manager human email due: Watcher detected agent error", text)
         self.assertNotIn("manager agent problem: running task marker needs attention.", text)
 
     def test_agent_problem_check_routes_worker_alias_prompt_to_manager(self) -> None:
@@ -10263,7 +10750,7 @@ resolved_task_items: []
         text = out.getvalue()
         self.assertIn("Handle ALL omo_pending_watch agent problems below; only email human if you cannot handle them:", text)
         self.assertIn("active.md wl:1 <input>Create a plan? shift + tab use Plan mode esc dismiss</input>", text)
-        self.assertNotIn("manager problem log due: manager watcher detected manager error", text)
+        self.assertNotIn("manager human email due: Watcher detected agent error", text)
         self.assertNotIn("suppressed manager self-problem report", text)
         self.assertNotIn("manager agent problem: running task marker needs attention.", text)
 
@@ -10348,7 +10835,7 @@ resolved_task_items: []
         with redirect_stdout(out):
             self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
         text = out.getvalue()
-        self.assertIn("manager problem log due: manager watcher detected manager error", text)
+        self.assertIn("manager human email due: Watcher detected agent error", text)
         self.assertIn("agent-problems: error=1", text)
         self.assertIn("error: task=manager evidence=target=wl:1.0 role=manager", text)
         self.assertIn("suppressed manager self-problem report", text)
@@ -10385,10 +10872,10 @@ resolved_task_items: []
         with redirect_stdout(out):
             self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
         text = out.getvalue()
-        self.assertIn("manager problem log due: manager watcher detected manager error", text)
+        self.assertIn("manager human email due: Watcher detected agent error", text)
         self.assertIn("not_codex: task=manager evidence=target=wl:1.0 role=manager", text)
 
-    def test_agent_problem_check_logs_without_human_email_helper_for_manager_error(self) -> None:
+    def test_agent_problem_check_invokes_human_email_helper_for_manager_error(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -10400,12 +10887,26 @@ resolved_task_items: []
                 "agent-problems: error=1\nerror: task=manager evidence=target=wl:1.0 role=manager output=Selected model is at capacity\n",
                 "",
             )
-            err = StringIO()
-            with patch("omo_manager.omo_pending_watch.subprocess.Popen", side_effect=AssertionError("unexpected Human email helper")), redirect_stderr(err):
+            launched: dict[str, object] = {}
+
+            def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                launched["command"] = command
+                launched["kwargs"] = kwargs
+                launched["body"] = Path(command[command.index("--message-file") + 1]).read_text(encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, "Email sent.\n", "")
+
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
-            self.assertIn("The manager watcher detected a manager pane problem", err.getvalue())
-            self.assertIn("agent-problems: error=1", err.getvalue())
-            self.assertIn("error: task=manager evidence=target=wl:1.0 role=manager", err.getvalue())
+            command = launched["command"]
+            self.assertIsInstance(command, list)
+            assert isinstance(command, list)
+            self.assertIn(str(watcher.DEFAULT_HUMAN_EMAIL_HELPER), command)
+            self.assertEqual("wl:1.0", command[command.index("--tmux-target") + 1])
+            body = launched["body"]
+            self.assertIsInstance(body, str)
+            assert isinstance(body, str)
+            self.assertIn("agent-problems: error=1", body)
+            self.assertIn("error: task=manager evidence=target=wl:1.0 role=manager", body)
 
     def test_agent_problem_check_reserves_unchanged_manager_error_while_peer_send_runs(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -10537,6 +11038,593 @@ resolved_task_items: []
             self.assertTrue(notified)
             self.assertFalse(full_scan)
             self.assertIn(path, files)
+
+    def test_markdown_inotify_watcher_does_not_follow_directory_symlinks(self) -> None:
+        from omo_manager import omo_pending_watch as pending_watch
+        from omo_manager.omo_pending_watch import MarkdownChangeWatcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "work_logs"
+            external = base / "external"
+            nested = external / "large" / "tree"
+            root.mkdir()
+            nested.mkdir(parents=True)
+            (root / "real").mkdir()
+            (root / "external-link").symlink_to(external, target_is_directory=True)
+            watcher = MarkdownChangeWatcher.open(root)
+            if watcher is None:
+                self.skipTest("inotify unavailable")
+            try:
+                watched = set(watcher.wd_paths.values())
+            finally:
+                watcher.close()
+            self.assertIn(root, watched)
+            self.assertIn(root / "real", watched)
+            self.assertNotIn(root / "external-link", watched)
+            self.assertTrue(all(not path.is_relative_to(external) for path in watched))
+            self.assertNotEqual(0, pending_watch.WATCH_MASK & pending_watch.IN_DONT_FOLLOW)
+
+    def test_markdown_inotify_watcher_retires_moved_directory_before_symlink_replacement(self) -> None:
+        from omo_manager.omo_pending_watch import MarkdownChangeWatcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "work_logs"
+            external = base / "external"
+            root.mkdir()
+            external.mkdir()
+            moved = root / "nested"
+            moved.mkdir()
+            watcher = MarkdownChangeWatcher.open(root)
+            if watcher is None:
+                self.skipTest("inotify unavailable")
+            try:
+                moved.rename(external / "nested")
+                moved.symlink_to(external / "nested", target_is_directory=True)
+                _files, _full_scan, notified = watcher.wait(2.0)
+                self.assertTrue(notified)
+                (external / "nested" / "leak.md").write_text("outside\n", encoding="utf-8")
+                files, _full_scan, _notified = watcher.wait(2.0)
+                self.assertNotIn(root / "nested" / "leak.md", files)
+                self.assertNotIn(root / "nested", watcher.wd_paths.values())
+            finally:
+                watcher.close()
+
+    def test_markdown_inotify_startup_rejects_symlink_race_before_descendant_watch(self) -> None:
+        from omo_manager.omo_pending_watch import MarkdownChangeWatcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "work_logs"
+            external = base / "external"
+            nested = root / "nested"
+            moved = external / "nested"
+            root.mkdir()
+            nested.mkdir()
+            (external / "deep").mkdir(parents=True)
+            (external / "deep" / "outside.md").write_text("outside\n", encoding="utf-8")
+            original_listdir = os.listdir
+            raced = False
+
+            def race(directory_fd: int | str | bytes | os.PathLike[str]) -> list[str] | list[bytes]:
+                nonlocal raced
+                if not raced and isinstance(directory_fd, int):
+                    raced = True
+                    root.rename(moved)
+                    root.symlink_to(external, target_is_directory=True)
+                return original_listdir(directory_fd)
+
+            with patch.object(os, "listdir", race):
+                watcher = MarkdownChangeWatcher.open(root)
+            self.assertTrue(raced)
+            self.assertIsNone(watcher)
+
+    def test_pending_watcher_ready_record_binds_pid_and_root(self) -> None:
+        from omo_manager.omo_pending_watch import publish_ready
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ready = root / "ready"
+            args = Args(root, "", root / "state", 1.0, 1.0, 30.0, Path("/status.py"), False, True, ready_file=ready)
+            publish_ready(args)
+            self.assertEqual(
+                f"version=omo-pending-watch-ready-v1\npid={os.getpid()}\nroot={root}\nroot_dev={root.stat().st_dev}\nroot_ino={root.stat().st_ino}\n",
+                ready.read_text(encoding="utf-8"),
+            )
+            self.assertEqual(0o600, stat.S_IMODE(ready.stat().st_mode))
+            with self.assertRaisesRegex(RuntimeError, "could not publish readiness"):
+                publish_ready(args)
+
+    def test_pending_watcher_inventory_rejects_root_replacement_without_external_enumeration(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            moved = base / "moved-root"
+            external = base / "external"
+            root.mkdir()
+            external.mkdir()
+            (external / "outside.md").write_text("outside\n", encoding="utf-8")
+            identity = (root.stat().st_dev, root.stat().st_ino)
+            original_listdir = os.listdir
+            raced = False
+
+            def race(directory_fd: int | str | bytes | os.PathLike[str]) -> list[str] | list[bytes]:
+                nonlocal raced
+                if not raced and isinstance(directory_fd, int):
+                    raced = True
+                    root.rename(moved)
+                    root.symlink_to(external, target_is_directory=True)
+                return original_listdir(directory_fd)
+
+            with patch.object(os, "listdir", race):
+                with self.assertRaisesRegex(RuntimeError, "root changed"):
+                    watcher.markdown_files(root, identity)
+
+    def test_pending_watcher_inventory_rejects_child_replacement_after_recursive_walk(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            moved = base / "moved-nested"
+            external = base / "external"
+            nested = root / "nested"
+            root.mkdir()
+            nested.mkdir()
+            external.mkdir()
+            (external / "outside.md").write_text("outside\n", encoding="utf-8")
+            original_stat = os.stat
+            nested_stat_calls = 0
+
+            def race_stat(path: object, *args: object, **kwargs: object) -> os.stat_result:
+                nonlocal nested_stat_calls
+                if path == "nested" and isinstance(kwargs.get("dir_fd"), int):
+                    nested_stat_calls += 1
+                    if nested_stat_calls == 2:
+                        nested.rename(moved)
+                        nested.symlink_to(external, target_is_directory=True)
+                return original_stat(path, *args, **kwargs)
+
+            with patch.object(os, "stat", side_effect=race_stat):
+                with self.assertRaisesRegex(RuntimeError, "directory moved"):
+                    watcher.markdown_files(root)
+
+    def test_pending_watcher_parse_rejects_symlink_root_before_canonicalization(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            real_root = base / "real-root"
+            alias = base / "alias"
+            real_root.mkdir()
+            alias.symlink_to(real_root, target_is_directory=True)
+            with self.assertRaises(SystemExit):
+                watcher.parse_args(["--root", str(alias), "--once"])
+
+    def test_pending_watcher_marker_discovery_rejects_root_swap_after_scan_check(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            moved = base / "moved-root"
+            external = base / "external"
+            root.mkdir()
+            external.mkdir()
+            task = root / "task.md"
+            task.write_text("(pending)\ninside\n", encoding="utf-8")
+            (external / "outside.md").write_text("(pending)\noutside\n", encoding="utf-8")
+            identity = (root.stat().st_dev, root.stat().st_ino)
+            files = [task]
+            root.rename(moved)
+            root.symlink_to(external, target_is_directory=True)
+            args = Args(root, "", base / "state", 1.0, 1.0, 30.0, Path("/status.py"), False, True)
+            with self.assertRaisesRegex(RuntimeError, "root changed"):
+                watcher.scan_once(args, {}, files, expected_identity=identity)
+
+    def test_pending_watcher_once_rejects_root_swap_before_inventory(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            moved = base / "moved-root"
+            external = base / "external"
+            root.mkdir()
+            external.mkdir()
+            (external / "outside.md").write_text("outside\n", encoding="utf-8")
+            args = Args(root, "", base / "state", 1, 1, 30, Path("/bin/false"), True, True)
+            real_inventory = watcher.markdown_files
+
+            def replace_before_inventory(path: Path, expected_identity: tuple[int, int] | None = None) -> list[Path]:
+                root.rename(moved)
+                root.symlink_to(external, target_is_directory=True)
+                return real_inventory(path, expected_identity)
+
+            with patch.object(watcher, "markdown_files", side_effect=replace_before_inventory):
+                with self.assertRaisesRegex(RuntimeError, "root (?:changed|is unavailable)"):
+                    watcher.run(args, MagicMock())
+            self.assertNotEqual([], list(external.iterdir()))
+
+    def test_pending_watcher_startup_delays_blocking_actor_until_inventory(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = Args(root, "", root / "state", 1, 1, 30, Path("/bin/false"), True, True)
+            events: list[str] = []
+            controller = MagicMock()
+            controller.ensure.side_effect = lambda *_args: events.append("actor")
+
+            def inventory(_root: Path, _identity: tuple[int, int] | None = None) -> list[Path]:
+                events.append("inventory")
+                return []
+
+            with patch.object(watcher, "markdown_files", side_effect=inventory), patch.object(
+                watcher, "v2_enabled", return_value=True
+            ), patch.object(watcher, "blocking_request", return_value={"changed": []}):
+                self.assertEqual(0, watcher.run(args, controller))
+            self.assertEqual(["inventory", "actor"], events)
+
+    def test_pending_watcher_todo_delivery_rejects_root_swap_before_paste(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            moved = base / "moved-root"
+            external = base / "external"
+            root.mkdir()
+            external.mkdir()
+            identity = (root.stat().st_dev, root.stat().st_ino)
+            def invoke_guard(*_args: object, before_paste: object = None, **_kwargs: object) -> None:
+                assert callable(before_paste)
+                root.rename(moved)
+                root.symlink_to(external, target_is_directory=True)
+                before_paste()
+
+            with patch.object(watcher, "verified_send_to_codex", side_effect=invoke_guard):
+                with self.assertRaises(watcher.PrePasteRejected):
+                    watcher.run_verified_send(
+                        "wl:1",
+                        "TODO length reminder",
+                        watcher.CodexSendOptions(1, 0.15, False),
+                        root=root,
+                        root_identity=identity,
+                    )
+
+    def test_pending_watcher_ready_reminder_rejects_root_swap_before_paste(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            moved = base / "moved-root"
+            external = base / "external"
+            root.mkdir()
+            external.mkdir()
+            identity = (root.stat().st_dev, root.stat().st_ino)
+            args = Args(root, "", base / "state", 1, 1, 30, Path("/bin/false"), False, False, root_identity=identity)
+
+            def invoke_guard(*_args: object, before_paste: object = None, **_kwargs: object) -> None:
+                assert callable(before_paste)
+                root.rename(moved)
+                root.symlink_to(external, target_is_directory=True)
+                before_paste()
+
+            with patch.object(watcher, "ready_report_guard_current", return_value=True), patch.object(
+                watcher, "verified_send_to_codex", side_effect=invoke_guard
+            ):
+                with self.assertRaises(watcher.PrePasteRejected):
+                    watcher.run_ready_report_reminder(args, "vl:2", "turn-fingerprint")
+
+    def test_pending_watcher_todo_length_scan_rejects_root_swap_before_dispatch(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            moved = base / "moved-root"
+            external = base / "external"
+            root.mkdir()
+            external.mkdir()
+            todo = root / "TODO.md"
+            todo.write_text("\n".join(f"line {idx}" for idx in range(201)) + "\n", encoding="utf-8")
+            (external / "TODO.md").write_text("outside\n", encoding="utf-8")
+            identity = (root.stat().st_dev, root.stat().st_ino)
+            args = Args(root, "", base / "state", 1, 1, 30, Path("/bin/false"), False, False)
+
+            def replace_during_length(_path: Path, _root: Path, _identity: tuple[int, int]) -> int:
+                root.rename(moved)
+                root.symlink_to(external, target_is_directory=True)
+                return 201
+
+            with patch.object(watcher, "markdown_line_count", side_effect=replace_during_length), patch.object(
+                watcher, "push_manager_text", side_effect=AssertionError("must not dispatch after root swap")
+            ):
+                with self.assertRaisesRegex(RuntimeError, "root changed"):
+                    watcher.scan_once(args, {}, [todo], expected_identity=identity)
+
+    def test_pending_watcher_consumption_rejects_nested_and_leaf_symlink_replacements(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            external = base / "external"
+            nested = root / "nested"
+            root.mkdir()
+            nested.mkdir()
+            external.mkdir()
+            (nested / "task.md").write_text("(pending)\ninside\n", encoding="utf-8")
+            (external / "task.md").write_text("(pending)\noutside\n", encoding="utf-8")
+            files = watcher.markdown_files(root)
+            nested.rename(base / "moved-nested")
+            nested.symlink_to(external, target_is_directory=True)
+            self.assertEqual([], watcher.find_markers(root, files))
+
+            nested.unlink()
+            nested.mkdir()
+            (nested / "task.md").write_text("(pending)\ninside\n", encoding="utf-8")
+            files = watcher.markdown_files(root)
+            (nested / "task.md").unlink()
+            (nested / "task.md").symlink_to(external / "task.md")
+            self.assertEqual([], watcher.find_markers(root, files))
+
+    def test_pending_watcher_run_captures_root_identity_before_open(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            moved = base / "moved-root"
+            external = base / "external"
+            root.mkdir()
+            external.mkdir()
+            ready = base / "ready"
+            args = Args(root, "", base / "state", 1.0, 1.0, 30.0, Path("/status.py"), False, True, ready_file=ready)
+            real_open = watcher.MarkdownChangeWatcher.open
+
+            def replace_before_open(path: Path) -> object:
+                root.rename(moved)
+                root.symlink_to(external, target_is_directory=True)
+                return real_open(path)
+
+            with patch.object(watcher.MarkdownChangeWatcher, "open", side_effect=replace_before_open):
+                with self.assertRaisesRegex(RuntimeError, "authenticated root watch"):
+                    watcher.run(args, MagicMock())
+            self.assertFalse(ready.exists())
+
+    def test_pending_watcher_readiness_rejects_replaced_root_identity(self) -> None:
+        from omo_manager.omo_pending_watch import publish_ready
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            moved = base / "moved-root"
+            external = base / "external"
+            root.mkdir()
+            external.mkdir()
+            ready = base / "ready"
+            args = Args(root, "", base / "state", 1.0, 1.0, 30.0, Path("/status.py"), False, True, ready_file=ready)
+            identity = (root.stat().st_dev, root.stat().st_ino)
+            root.rename(moved)
+            root.symlink_to(external, target_is_directory=True)
+            with self.assertRaisesRegex(RuntimeError, "root changed"):
+                publish_ready(args, identity)
+            self.assertFalse(ready.exists())
+
+    def test_pending_watcher_readiness_rejects_replacement_during_publication(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            moved = base / "moved-root"
+            external = base / "external"
+            root.mkdir()
+            external.mkdir()
+            ready = base / "ready"
+            args = Args(root, "", base / "state", 1.0, 1.0, 30.0, Path("/status.py"), False, True, ready_file=ready)
+            identity = (root.stat().st_dev, root.stat().st_ino)
+            real_open = watcher.os.open
+            raced = False
+
+            def race_open(path: str | bytes | os.PathLike[str], flags: int, *open_args: object, **kwargs: object) -> int:
+                nonlocal raced
+                fd = real_open(path, flags, *open_args, **kwargs)
+                if path == ready and not raced:
+                    raced = True
+                    root.rename(moved)
+                    root.symlink_to(external, target_is_directory=True)
+                return fd
+
+            with patch.object(watcher.os, "open", side_effect=race_open):
+                with self.assertRaisesRegex(RuntimeError, "root changed"):
+                    watcher.publish_ready(args, identity)
+            self.assertTrue(raced)
+            self.assertFalse(ready.exists())
+
+    def test_pending_watcher_readiness_requires_real_root_watch(self) -> None:
+        from omo_manager.omo_pending_watch import BlockingActorController, MarkdownChangeWatcher, run
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            missing = base / "missing"
+            ready = base / "ready"
+            args = Args(missing, "", base / "state", 1.0, 1.0, 30.0, Path("/status.py"), False, True, ready_file=ready)
+            with self.assertRaisesRegex(RuntimeError, "authenticated root watch"):
+                run(args, BlockingActorController(missing))
+            self.assertFalse(ready.exists())
+
+            external = base / "external"
+            external.mkdir()
+            alias = base / "alias"
+            alias.symlink_to(external, target_is_directory=True)
+            self.assertIsNone(MarkdownChangeWatcher.open(alias))
+
+            root = base / "root"
+            root.mkdir()
+            watcher = MarkdownChangeWatcher.open(root)
+            if watcher is None:
+                self.skipTest("inotify unavailable")
+            try:
+                root.rename(base / "moved-root")
+                root.symlink_to(external, target_is_directory=True)
+                started = time.monotonic()
+                with self.assertRaisesRegex(RuntimeError, "root is unavailable"):
+                    watcher.wait(60.0)
+                self.assertLess(time.monotonic() - started, 1.0)
+            finally:
+                watcher.close()
+
+    def test_pending_watcher_run_rejects_replaced_root_before_external_inventory(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            moved = base / "moved-root"
+            external = base / "external"
+            root.mkdir()
+            external.mkdir()
+            (external / "outside.md").write_text("outside\n", encoding="utf-8")
+            args = Args(
+                root,
+                "",
+                base / "state",
+                60.0,
+                600.0,
+                600.0,
+                base / "status.py",
+                False,
+                True,
+                agent_problem_interval_s=1_000_000_000.0,
+                agent_problem_repeat_s=1_000_000_000.0,
+                digest_idle_after_s=1_000_000_000.0,
+            )
+            dispatched: list[Path] = []
+            controller = MagicMock()
+            real_wait = None
+
+            def replace_root(_timeout_s: float) -> tuple[list[Path], bool, bool]:
+                root.rename(moved)
+                root.symlink_to(external, target_is_directory=True)
+                assert real_wait is not None
+                return real_wait(_timeout_s)
+
+            with patch.object(watcher, "scan_once", side_effect=lambda _args, _seen, files, _controller: dispatched.extend(files)):
+                pending_watcher = watcher.MarkdownChangeWatcher.open(root)
+                self.assertIsNotNone(pending_watcher)
+                assert pending_watcher is not None
+                real_wait = pending_watcher.wait
+                pending_watcher.wait = replace_root  # type: ignore[method-assign]
+                with patch.object(watcher.MarkdownChangeWatcher, "open", return_value=pending_watcher):
+                    started = time.monotonic()
+                    with self.assertRaisesRegex(RuntimeError, "root (?:is unavailable|changed)"):
+                        watcher.run(args, controller)
+                    self.assertLess(time.monotonic() - started, 1.0)
+                pending_watcher.close()
+            self.assertNotIn(external / "outside.md", dispatched)
+
+    def test_pending_watcher_polling_fallback_rejects_replaced_root_before_inventory(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            moved = base / "moved-root"
+            external = base / "external"
+            root.mkdir()
+            external.mkdir()
+            (external / "outside.md").write_text("outside\n", encoding="utf-8")
+            args = Args(
+                root,
+                "",
+                base / "state",
+                60.0,
+                600.0,
+                600.0,
+                base / "status.py",
+                False,
+                True,
+                agent_problem_interval_s=1_000_000_000.0,
+                agent_problem_repeat_s=1_000_000_000.0,
+                digest_idle_after_s=1_000_000_000.0,
+            )
+            markdown_calls: list[Path] = []
+            real_markdown_files = watcher.markdown_files
+
+            def replace_root(_timeout_s: float) -> None:
+                root.rename(moved)
+                root.symlink_to(external, target_is_directory=True)
+
+            def record_markdown_files(path: Path, expected_identity: tuple[int, int] | None = None) -> list[Path]:
+                markdown_calls.append(path)
+                return real_markdown_files(path, expected_identity)
+
+            with patch.object(watcher.MarkdownChangeWatcher, "open", return_value=None), patch.object(
+                watcher, "markdown_files", side_effect=record_markdown_files
+            ), patch.object(watcher.time, "sleep", side_effect=replace_root):
+                with self.assertRaisesRegex(RuntimeError, "root changed"):
+                    watcher.run(args, MagicMock())
+            self.assertEqual(2, len(markdown_calls))
+
+    def test_pending_watcher_inotify_backstop_rejects_replaced_root_before_inventory(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            moved = base / "moved-root"
+            external = base / "external"
+            root.mkdir()
+            external.mkdir()
+            (external / "outside.md").write_text("outside\n", encoding="utf-8")
+            args = Args(
+                root,
+                "",
+                base / "state",
+                60.0,
+                600.0,
+                600.0,
+                base / "status.py",
+                False,
+                True,
+                agent_problem_interval_s=1_000_000_000.0,
+                agent_problem_repeat_s=1_000_000_000.0,
+                poll_backstop_interval_s=0.1,
+                digest_idle_after_s=1_000_000_000.0,
+            )
+            monotonic_calls = 0
+            inventory_calls = 0
+
+            def monotonic() -> float:
+                nonlocal monotonic_calls
+                monotonic_calls += 1
+                if monotonic_calls == 5:
+                    root.rename(moved)
+                    root.symlink_to(external, target_is_directory=True)
+                return float(monotonic_calls)
+
+            def record_inventory(_root: Path, _state: watcher.FileState, _expected_identity: tuple[int, int] | None = None) -> list[Path]:
+                nonlocal inventory_calls
+                inventory_calls += 1
+                return []
+
+            fake_watcher = MagicMock()
+            fake_watcher.root_identity = (root.stat().st_dev, root.stat().st_ino)
+            fake_watcher.root_path_is_current.return_value = True
+            fake_watcher.root_watch_is_current.return_value = True
+            with patch.object(watcher.MarkdownChangeWatcher, "open", return_value=fake_watcher), patch.object(
+                watcher, "mtime_changed_markdown_files", side_effect=record_inventory
+            ), patch.object(watcher.time, "monotonic", side_effect=monotonic):
+                with self.assertRaisesRegex(RuntimeError, "root changed"):
+                    watcher.run(args, MagicMock())
+            self.assertEqual(1, inventory_calls)
 
     def test_manager_mail_inotify_event_forces_full_scan(self) -> None:
         from omo_manager.omo_pending_watch import MarkdownChangeWatcher
