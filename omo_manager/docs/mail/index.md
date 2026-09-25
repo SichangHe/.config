@@ -3,8 +3,9 @@
 - `accounts.md`
   - separate agent communication mail from human mailbox cleanup
 - `cleanup.md`
-  - points all cleanup runs to `compression.md`
+  - redirect to canonical location at https://github.com/SichangHe/personal_browser_setup/blob/main/docs/mail_compression/cleanup.md
 - `compression.md`
+  - redirect to canonical location at https://github.com/SichangHe/personal_browser_setup/blob/main/docs/mail_compression/compression.md
   - canonical task-level compression procedure for every manager-human cleanup run
   - minimizes the whole accepted manager Inbox while preserving protected reports and independent decisions
   - replaces reviewed superseded mail with verified high-level overviews before recoverable Trash
