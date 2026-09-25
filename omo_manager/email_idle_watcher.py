@@ -2130,16 +2130,16 @@ def append_manager_mail_threshold_pending_unlocked(args: Args, kind: str, counts
     pending_line = len(text.splitlines()) + 2
     if kind == "unread-compression":
         summary = f"manager email watcher threshold: unread manager mail {counts.unread} exceeds {args.unread_compression_threshold}"
-        route = "route a worker through `~/.config/omo_manager/docs/mail/compression.md`"
+        route = "route a worker through https://github.com/SichangHe/personal_browser_setup/blob/main/docs/mail_compression/compression.md (Grok Bot 'Mailbox compression')"
         retention = "compress only unread manager-sent mail, retain full-read memos, send replacement summaries first, then move only explicitly superseded source UIDs to Trash"
     elif kind == "total-cleanup":
         summary = f"manager email watcher threshold: retained manager mail {counts.total} exceeds {args.total_cleanup_threshold}"
-        route = "route the existing singular owner through `~/.config/omo_manager/docs/mail/compression.md`"
+        route = "route the existing singular owner through https://github.com/SichangHe/personal_browser_setup/blob/main/docs/mail_compression/compression.md (Grok Bot 'Mailbox compression')"
         retention = "compress task by task regardless of read state; exclude PB digest streams from removal; retain current requests, decisions, results, and status"
     elif kind == "recent-cleanup":
         hours = args.recent_cleanup_window_s / 3600
         summary = f"manager email watcher threshold: manager-human mail within last {hours:g}h is {counts.recent_total}, exceeding {args.recent_cleanup_threshold}"
-        route = "route a worker through `~/.config/omo_manager/docs/mail/cleanup.md` and the compression workflow if replacement summaries are needed"
+        route = "route a worker through https://github.com/SichangHe/personal_browser_setup/blob/main/docs/mail_compression/cleanup.md and the compression workflow if replacement summaries are needed (Grok Bot 'Mailbox compression')"
         retention = "threshold is trigger-only; rerun cleanup classification and retain recent, unread, active, human-pending, long-report, and uncertain threads"
     else:
         raise ValueError(f"unknown manager mail threshold kind: {kind}")

@@ -1,3 +1,7 @@
 # manager-human mail cleanup
 
-Use `compression.md` for every manager-human Inbox cleanup. Its current-view preparation, human-facing consolidation, independent review, replacement verification, recoverable Trash, drift handling, protected reports, count target, and final verification are the complete procedure.
+This document has moved to its canonical location at:
+
+https://github.com/SichangHe/personal_browser_setup/blob/main/docs/mail_compression/cleanup.md
+
+Please refer to that document for the complete mailbox cleanup procedure.
