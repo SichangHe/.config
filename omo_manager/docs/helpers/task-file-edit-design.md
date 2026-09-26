@@ -11,7 +11,7 @@ they never receive a task path or backing-file details. Workers report with
 
 ## agent pending queue
 
-`omo_pending.py` infers the exact current tmux pane and resolves one active queue.
+`omo_pending.py` infers the authenticated OmniGent session when present, otherwise the exact current tmux pane, and resolves one active queue.
 When preserved blocked records share the target, it prefers the sole `running` or
 `long_running` task; multiple runnable tasks remain ambiguous. It locks the target,
 rechecks ownership, and fails closed on missing or unresolved ownership. `list`

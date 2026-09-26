@@ -11,6 +11,8 @@ from unittest.mock import patch
 from omo_manager.omo_agent_status import TaskFrontmatterError
 from omo_manager.omo_blocking import BlockingError
 from omo_manager.omo_blocking_actor import BlockingActor
+from omo_manager.omo_omnigent_identity import NotOmniGentEnvironment
+from omo_manager.omo_omnigent_identity import OmniGentIdentityError
 from omo_manager.omo_task_context import current_active_task
 from omo_manager.omo_task_context import current_pending_task
 
@@ -40,10 +42,7 @@ class TaskContextTests(unittest.TestCase):
             task.write_text(TASK.replace("runat: hcfg:1", f"runat: {target}"), encoding="utf-8")
             (root / "TODO.md").write_text(f"current:\ntask.md {target}\nprevious:\n", encoding="utf-8")
             with (
-                patch(
-                    "omo_manager.omo_task_context.current_tmux_target",
-                    side_effect=TaskFrontmatterError("current tmux pane cannot be identified"),
-                ),
+                patch("omo_manager.omo_task_context.current_tmux_target", return_value="main:0.0") as tmux,
                 patch(
                     "omo_manager.omo_task_context.authenticate_current_omnigent",
                     return_value=SimpleNamespace(target=target),
@@ -51,7 +50,23 @@ class TaskContextTests(unittest.TestCase):
                 patch("omo_manager.omo_blocking_actor.request") as actor,
             ):
                 self.assertEqual(task, current_active_task(root))
+                self.assertEqual(task, current_pending_task(root))
+            tmux.assert_not_called()
             actor.assert_not_called()
+
+    def test_omnigent_identity_error_does_not_fall_back_to_tmux(self) -> None:
+        with (
+            patch("omo_manager.omo_task_context.current_tmux_target") as tmux,
+            patch(
+                "omo_manager.omo_task_context.authenticate_current_omnigent",
+                side_effect=OmniGentIdentityError("cursor identity is not ready"),
+            ),
+            patch("omo_manager.omo_blocking_actor.request") as actor,
+        ):
+            with self.assertRaisesRegex(TaskFrontmatterError, "cannot be authenticated"):
+                current_pending_task(Path("/work"))
+        tmux.assert_not_called()
+        actor.assert_not_called()
 
     def test_actor_recovers_owner_when_direct_tmux_is_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -61,6 +76,9 @@ class TaskContextTests(unittest.TestCase):
             todo = root / "TODO.md"
             todo.write_text("current:\ntask.md hcfg:1\nprevious:\n", encoding="utf-8")
             with patch(
+                "omo_manager.omo_task_context.authenticate_current_omnigent",
+                side_effect=NotOmniGentEnvironment("not omnigent"),
+            ), patch(
                 "omo_manager.omo_task_context.current_tmux_target",
                 side_effect=TaskFrontmatterError("current tmux pane cannot be identified"),
             ), patch(
@@ -81,6 +99,9 @@ class TaskContextTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with patch(
+                "omo_manager.omo_task_context.authenticate_current_omnigent",
+                side_effect=NotOmniGentEnvironment("not omnigent"),
+            ), patch(
                 "omo_manager.omo_task_context.current_tmux_target",
                 side_effect=TaskFrontmatterError("current tmux pane cannot be identified"),
             ), patch("omo_manager.omo_blocking_actor.request", return_value={"ok": True, "task": "../task.md"}):
@@ -97,6 +118,9 @@ class TaskContextTests(unittest.TestCase):
             todo = root / "TODO.md"
             todo.write_text("current:\ntask.md hcfg:1\nprevious:\nblocked.md hcfg:1\n", encoding="utf-8")
             with patch(
+                "omo_manager.omo_task_context.authenticate_current_omnigent",
+                side_effect=NotOmniGentEnvironment("not omnigent"),
+            ), patch(
                 "omo_manager.omo_task_context.current_tmux_target",
                 side_effect=TaskFrontmatterError("current tmux pane cannot be identified"),
             ), patch(
@@ -114,7 +138,10 @@ class TaskContextTests(unittest.TestCase):
         actor.assert_called_once_with(root, {"operation": "pending-task"})
 
     def test_non_tmux_resolution_error_does_not_use_actor(self) -> None:
-        with patch("omo_manager.omo_task_context.current_tmux_target", return_value="hcfg:1.0"), patch(
+        with patch(
+            "omo_manager.omo_task_context.authenticate_current_omnigent",
+            side_effect=NotOmniGentEnvironment("not omnigent"),
+        ), patch("omo_manager.omo_task_context.current_tmux_target", return_value="hcfg:1.0"), patch(
             "omo_manager.omo_task_context.infer_active_task",
             side_effect=TaskFrontmatterError("multiple active work queues match the current agent"),
         ), patch("omo_manager.omo_blocking_actor.request") as actor:

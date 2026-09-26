@@ -78,6 +78,164 @@ class AmhEmailWatcherRouteTests(unittest.TestCase):
         self.assertEqual("omnigent://session-1", watcher.subject_manager_target("Re: [omnigent://session-1] Topic"))
         self.assertEqual("omnigent://session.0", watcher.subject_manager_target("[omnigent://session.0] Topic"))
 
+    def test_og_subject_extracts_task_filename_target(self) -> None:
+        self.assertEqual("og:b12_3x2_plot2.md", watcher.subject_manager_target("Re: [og:b12_3x2_plot2.md] CC 2014 negative baseline update and deprecated sites hidden"))
+        self.assertEqual("og:b12_3x2_plot2", watcher.subject_manager_target("Re: [og:b12_3x2_plot2] CC 2014 negative baseline update and deprecated sites hidden"))
+        self.assertEqual("og:report.0", watcher.subject_manager_target("[og:report.0] Topic"))
+        self.assertEqual({"og:b12_3x2_plot2.md"}, watcher.target_aliases("og:b12_3x2_plot2.md"))
+
+    def test_og_subject_routes_to_named_omnigent_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            state.mkdir()
+            task = root / "b12_3x2_plot2.md"
+            task.write_text(
+                "---\nversion: v1.0.0\nstatus: running\nrunat: omnigent://session-plot\ntool: antigravity\nmanagerat: dw:63\nis_manager: false\npending_task_items: []\n---\n",
+                encoding="utf-8",
+            )
+            (root / "TODO.md").write_text("current:\nb12_3x2_plot2.md omnigent://session-plot\n", encoding="utf-8")
+            args = split_args(
+                root,
+                state,
+                root / "work_manager_today.md",
+                manager_target="dw:63",
+                inbox_identity="agent@example.test\x00999",
+            )
+            route = watcher.email_route(args, "Re: [og:b12_3x2_plot2.md] CC 2014 negative baseline update and deprecated sites hidden")
+            self.assertEqual(task, route.manager_file)
+            self.assertEqual("omnigent://session-plot", route.manager_target)
+            self.assertTrue(route.pending_watcher_delivery)
+            bare = watcher.email_route(args, "Re: [og:b12_3x2_plot2] CC 2014 negative baseline update and deprecated sites hidden")
+            self.assertEqual(task, bare.manager_file)
+
+    def test_og_subject_routes_to_task_file_outside_current_todo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            state.mkdir()
+            task = root / "b12_3x2_plot2.md"
+            task.write_text(
+                "---\nversion: v1.0.0\nstatus: running\nrunat: omnigent://session-plot\ntool: antigravity\nmanagerat: dw:63\nis_manager: false\npending_task_items: []\n---\n",
+                encoding="utf-8",
+            )
+            (root / "TODO.md").write_text("current:\nother.md wl:1\n\nprevious:\nb12_3x2_plot2.md omnigent://session-plot\n", encoding="utf-8")
+            args = split_args(
+                root,
+                state,
+                root / "work_manager_today.md",
+                manager_target="dw:63",
+                inbox_identity="agent@example.test\x00999",
+            )
+            route = watcher.email_route(args, "Re: [og:b12_3x2_plot2.md] CC 2014 negative baseline update and deprecated sites hidden")
+            self.assertEqual(task, route.manager_file)
+            self.assertEqual("omnigent://session-plot", route.manager_target)
+
+    def test_og_subject_without_unique_task_stays_unrouted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            state.mkdir()
+            (root / "TODO.md").write_text("current:\n", encoding="utf-8")
+            args = split_args(
+                root,
+                state,
+                root / "work_manager_today.md",
+                manager_target="dw:63",
+                inbox_identity="agent@example.test\x00999",
+            )
+            with self.assertRaisesRegex(RuntimeError, "unique task file"):
+                watcher.email_route(args, "Re: [og:missing.md] CC 2014")
+
+    def test_og_subject_with_duplicate_task_name_stays_unrouted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            state.mkdir()
+            frontmatter = "---\nversion: v1.0.0\nstatus: running\nrunat: omnigent://session-plot\ntool: antigravity\nmanagerat: dw:63\nis_manager: false\npending_task_items: []\n---\n"
+            (root / "b12_3x2_plot2.md").write_text(frontmatter, encoding="utf-8")
+            archive = root / "archive"
+            archive.mkdir()
+            (archive / "b12_3x2_plot2.md").write_text(frontmatter, encoding="utf-8")
+            (root / "TODO.md").write_text("current:\n", encoding="utf-8")
+            args = split_args(
+                root,
+                state,
+                root / "work_manager_today.md",
+                manager_target="dw:63",
+                inbox_identity="agent@example.test\x00999",
+            )
+            with self.assertRaisesRegex(RuntimeError, "unique task file"):
+                watcher.email_route(args, "Re: [og:b12_3x2_plot2.md] CC 2014")
+
+    def test_og_subject_without_runat_stays_unrouted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            state.mkdir()
+            task = root / "b12_3x2_plot2.md"
+            task.write_text("no frontmatter\n", encoding="utf-8")
+            (root / "TODO.md").write_text("current:\nb12_3x2_plot2.md omnigent://session-plot\n", encoding="utf-8")
+            args = split_args(
+                root,
+                state,
+                root / "work_manager_today.md",
+                manager_target="dw:63",
+                inbox_identity="agent@example.test\x00999",
+            )
+            with self.assertRaisesRegex(RuntimeError, "no usable runat"):
+                watcher.email_route(args, "Re: [og:b12_3x2_plot2.md] CC 2014")
+
+    def test_processed_unseen_uid_is_not_actionable(self) -> None:
+        self.assertEqual(set(), watcher.actionable_sender_uids({b"2086"}, {"2086"}, set()))
+        self.assertEqual({b"2086"}, watcher.actionable_sender_uids({b"2086"}, {"2086"}, {"2086"}))
+        self.assertEqual({b"9"}, watcher.actionable_sender_uids({b"9"}, {"2086"}, set()))
+        self.assertEqual({b"2086"}, watcher.processed_unseen_uids_to_mark_seen({b"2086"}, {"2086"}, set()))
+        self.assertEqual(set(), watcher.processed_unseen_uids_to_mark_seen({b"2086"}, {"2086"}, {"2086"}))
+        self.assertEqual(set(), watcher.processed_unseen_uids_to_mark_seen({b"9"}, {"2086"}, set()))
+
+    def test_processed_unseen_uid_is_marked_seen_without_intake(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            state.mkdir()
+            mail_dir = root / "manager_mail"
+            mail_dir.mkdir()
+            manager_file = root / "work_manager_today.md"
+            manager_file.write_text("manager\n", encoding="utf-8")
+            args = split_args(
+                root,
+                state,
+                manager_file,
+                manager_target="dw:63",
+                inbox_identity="agent@example.test\x00999",
+            )
+            (mail_dir / watcher.mail_artifact_name(args, "2086")).write_text(
+                "Subject: Re: omnigent cursor move main_mgr.md\n\nbody\n",
+                encoding="utf-8",
+            )
+            watcher.save_processed_uids(watcher.processed_uids_path(args), {"2086"})
+            marked: list[str] = []
+
+            class Client:
+                def uid(self, command: str, *_args: object) -> tuple[str, list[object]]:
+                    raise AssertionError(command)
+
+            with (
+                patch.object(watcher, "search_sender_uids", return_value={b"2086"}),
+                patch.object(
+                    watcher,
+                    "mark_seen_after_human_intake",
+                    side_effect=lambda _client, uid, _args, **_kwargs: marked.append(uid) or True,
+                ),
+                patch.object(watcher, "maybe_handle_manager_mail_thresholds", return_value=False),
+                patch.object(watcher, "fetch_message") as fetch,
+            ):
+                self.assertTrue(watcher.handle_unseen(Client(), args))  # type: ignore[arg-type]
+            self.assertEqual(["2086"], marked)
+            fetch.assert_not_called()
+            self.assertEqual("manager\n", manager_file.read_text(encoding="utf-8"))
+
     def test_untagged_email_routes_to_available_default_contact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

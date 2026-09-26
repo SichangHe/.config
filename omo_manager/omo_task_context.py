@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resolve the active task owned by the current tmux pane."""
+"""Resolve the active task owned by the current OmniGent session or tmux pane."""
 from __future__ import annotations
 
 import hashlib
@@ -91,16 +91,18 @@ def _current_task(root: Path, infer: Callable[[Path, str], Path], operation: str
     """Resolve and authenticate the current runtime with one task-selection rule."""
 
     try:
+        omnigent_target = authenticate_current_omnigent().target
+    except NotOmniGentEnvironment:
+        omnigent_target = ""
+    except OmniGentIdentityError as exc:
+        raise TaskFrontmatterError(f"current OmniGent identity cannot be authenticated: {exc}") from exc
+    if omnigent_target:
+        return infer(root, omnigent_target)
+    try:
         return infer(root, current_tmux_target())
     except TaskFrontmatterError as direct_error:
         if str(direct_error) != "current tmux pane cannot be identified":
             raise
-        try:
-            return infer(root, authenticate_current_omnigent().target)
-        except NotOmniGentEnvironment:
-            pass
-        except OmniGentIdentityError as exc:
-            raise TaskFrontmatterError(f"current OmniGent identity cannot be authenticated: {exc}") from exc
         # A sandboxed owner may inherit the correct TMUX_PANE while being unable
         # to open tmux's socket.  The watcher actor authenticates the Unix peer,
         # pane process ancestry, and sole live task using its trusted connection.

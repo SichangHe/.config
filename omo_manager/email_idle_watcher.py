@@ -35,7 +35,7 @@ from urllib.parse import urlparse
 
 try:
     from .omo_email_config import AgentMailSettings, GMAIL_IMAP_HOST, active_guest_hees_owner, ensure_guest_hees_reply_obligation, guest_hees_intake_is_delivered, guest_hees_reply_is_fulfilled, guest_hees_mail, configured_agent_mail, human_config_path
-    from .omo_email_subject import subject_base, worker_lifecycle_report_guard
+    from .omo_email_subject import OMNIGENT_SUBJECT_TARGET_RE, subject_base, subject_tmux_target, worker_lifecycle_report_guard
     from .omo_guest_images import AUTHENTICATION as GUEST_IMAGE_AUTHENTICATION
     from .omo_guest_images import GUEST_HEES_ADDRESS as GUEST_IMAGE_SENDER
     from .omo_guest_images import GuestImageError, store_message_images
@@ -47,7 +47,7 @@ try:
 except ImportError:
     try:
         from omo_email_config import AgentMailSettings, GMAIL_IMAP_HOST, active_guest_hees_owner, ensure_guest_hees_reply_obligation, guest_hees_intake_is_delivered, guest_hees_reply_is_fulfilled, guest_hees_mail, configured_agent_mail, human_config_path
-        from omo_email_subject import subject_base, worker_lifecycle_report_guard
+        from omo_email_subject import OMNIGENT_SUBJECT_TARGET_RE, subject_base, subject_tmux_target, worker_lifecycle_report_guard
         from omo_guest_images import AUTHENTICATION as GUEST_IMAGE_AUTHENTICATION
         from omo_guest_images import GUEST_HEES_ADDRESS as GUEST_IMAGE_SENDER
         from omo_guest_images import GuestImageError, store_message_images
@@ -58,6 +58,8 @@ except ImportError:
         from omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_system_to_codex as send_to_codex
     except ImportError:
         subject_base = None
+        subject_tmux_target = None
+        OMNIGENT_SUBJECT_TARGET_RE = re.compile(r"^og:[A-Za-z0-9_.-]+(?:\.md)?$")
         TaskFrontmatterError = ValueError
 
         def parse_task_metadata(_text: str, _work_log_root: Path | None = None) -> object:
@@ -103,7 +105,7 @@ PB_CLEANUP_EXCLUDED_SUBJECT_RE = re.compile(
 )
 MANAGER_REPLY_SUBJECT_RE = re.compile(r"^re:\s*(?:\[a\]|\[omo_manager\])\s*", re.IGNORECASE)
 MANAGER_TARGET_SUBJECT_RE = re.compile(
-    r"^(?:re:\s*)*(?:(?:\[a\]|\[omo_manager\])\s+)?(?:\[([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?|omnigent://[A-Za-z0-9._-]+)\]|([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?|omnigent://[A-Za-z0-9._-]+))(?:\s+|$)",
+    r"^(?:re:\s*)*(?:(?:\[a\]|\[omo_manager\])\s+)?(?:\[([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?|omnigent://[A-Za-z0-9._-]+|og:[A-Za-z0-9_.-]+(?:\.md)?)\]|([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?|omnigent://[A-Za-z0-9._-]+|og:[A-Za-z0-9_.-]+(?:\.md)?))(?:\s+|$)",
     re.IGNORECASE,
 )
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
@@ -661,6 +663,9 @@ def normalize_human_subject(subject: str) -> str:
 
 
 def subject_manager_target(subject: str) -> str:
+    # 🧑 "it did not get routed to the correct Omnigent agent or even its task file"
+    if subject_tmux_target is not None:
+        return subject_tmux_target(subject)
     match = MANAGER_TARGET_SUBJECT_RE.match(subject.strip())
     return next((group for group in match.groups() if group), "") if match is not None else ""
 
@@ -668,7 +673,7 @@ def subject_manager_target(subject: str) -> str:
 def target_aliases(target: str) -> set[str]:
     if not target:
         return set()
-    if runat_kind(target) == "omnigent":
+    if runat_kind(target) == "omnigent" or omnigent_mail_task_name(target):
         return {target}
     aliases = {target}
     window_target, dot, _pane = target.rpartition(".")
@@ -833,7 +838,30 @@ def default_email_route(args: Args) -> EmailRoute:
     return EmailRoute(current_manager_file(args), args.manager_target, pending_watcher_delivery=True)
 
 
+def unique_named_task_file(task_name: str, candidates: list[Path]) -> Path | None:
+    matches: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        resolved = path.resolve(strict=False)
+        if resolved in seen or not path.is_file() or path.name != task_name:
+            continue
+        seen.add(resolved)
+        matches.append(path)
+    return matches[0] if len(matches) == 1 else None
+
+
+def omnigent_mail_task_name(target: str) -> str:
+    if OMNIGENT_SUBJECT_TARGET_RE.fullmatch(target) is None:
+        return ""
+    name = target.removeprefix("og:")
+    # 🧑 "Also make it s.t. the email subjects do not have .md in the tag"
+    return name if name.endswith(".md") else f"{name}.md"
+
+
 def task_file_for_target_in_candidates(root: Path, tmux_target: str, candidates: list[Path]) -> Path | None:
+    task_name = omnigent_mail_task_name(tmux_target)
+    if task_name:
+        return unique_named_task_file(task_name, candidates)
     aliases = target_aliases(tmux_target)
     seen: set[Path] = set()
     for path in candidates:
@@ -851,12 +879,17 @@ def task_file_for_target_in_candidates(root: Path, tmux_target: str, candidates:
 
 
 def inactive_task_files_for_target(root: Path, tmux_target: str) -> list[Path]:
+    task_name = omnigent_mail_task_name(tmux_target)
     aliases = target_aliases(tmux_target)
     active = {path.resolve(strict=False) for path in current_todo_task_candidates(root)}
     matches: list[Path] = []
     for path in markdown_task_files(root):
         resolved = path.resolve(strict=False)
         if resolved in active or not path.is_file():
+            continue
+        if task_name:
+            if path.name == task_name:
+                matches.append(path)
             continue
         try:
             targets = runat_targets(path.read_text(encoding="utf-8"), root)
@@ -876,7 +909,12 @@ def email_route(args: Args, subject: str, body: str = "") -> EmailRoute:
     if not tmux_target:
         return default_email_route(args)
     manager_file = current_task_file_for_target(args.root, tmux_target)
+    task_name = omnigent_mail_task_name(tmux_target)
+    if manager_file is None and task_name:
+        manager_file = unique_named_task_file(task_name, markdown_task_files(args.root))
     if manager_file is None:
+        if task_name:
+            raise RuntimeError(f"og: mail target did not map to a unique task file: {tmux_target}")
         for inactive_file in inactive_task_files_for_target(args.root, tmux_target):
             try:
                 inactive_owner_target = managerat_target(inactive_file.read_text(encoding="utf-8"), args.root)
@@ -897,6 +935,8 @@ def email_route(args: Args, subject: str, body: str = "") -> EmailRoute:
         metadata = None
     if metadata is not None:
         return EmailRoute(manager_file, metadata.runat, pending_watcher_delivery=True)
+    if task_name:
+        raise RuntimeError(f"og: mail target task has no usable runat: {tmux_target}")
     return EmailRoute(manager_file, fallback_manager_target_for_file(args, manager_file, tmux_target), pending_watcher_delivery=True)
 
 
@@ -2321,16 +2361,22 @@ def search_uids(client: imaplib.IMAP4_SSL, subject: str, self_email: str, proces
     return candidate_uids
 
 
+def actionable_sender_uids(candidate_uids: set[bytes], processed_uids: set[str], unaccepted_pending_uids: set[str]) -> set[bytes]:
+    # 🧑 "Email watcher broken"
+    return {uid for uid in candidate_uids if uid.decode() not in processed_uids or uid.decode() in unaccepted_pending_uids}
+
+
+def processed_unseen_uids_to_mark_seen(unseen_uids: set[bytes], processed_uids: set[str], unaccepted_pending_uids: set[str]) -> set[bytes]:
+    return {uid for uid in unseen_uids if uid.decode() in processed_uids and uid.decode() not in unaccepted_pending_uids}
+
+
 def search_sender_uids(client: imaplib.IMAP4_SSL, sender_email: str, processed_uids: set[str]) -> set[bytes]:
-    """Find new mail from the only authorized human sender, regardless of subject."""
+    """Find UNSEEN mail from the only authorized human sender, regardless of subject."""
+    del processed_uids
     candidate_uids: set[bytes] = set()
     typ, data = client.uid("search", "UNSEEN", "FROM", f'"{sender_email}"')
     if typ == "OK" and data and data[0]:
         candidate_uids.update(data[0].split())
-    if processed_uids:
-        typ, data = client.uid("search", None, "UID", uid_search_range(processed_uids), "FROM", f'"{sender_email}"')
-        if typ == "OK" and data and data[0]:
-            candidate_uids.update(data[0].split())
     return candidate_uids
 
 
@@ -3892,13 +3938,21 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args, trigger: str = "direct"
     unaccepted_changed = False
     handled = False
     manager_file = current_manager_file(args)
+    unseen_uids = search_sender_uids(client, args.self_email, processed_uids)
+    for raw_uid in processed_unseen_uids_to_mark_seen(unseen_uids, processed_uids, unaccepted_pending_uids):
+        uid = raw_uid.decode()
+        txt_path = args.mail_dir / mail_artifact_name(args, uid)
+        if not txt_path.exists():
+            logging.warning("email processed unseen uid has no stored artifact; marking seen: uid=%s path=%s", uid, txt_path)
+        handled = mark_seen_after_human_intake(client, uid, args, txt_path=txt_path) or handled
     candidate_uids: set[bytes] = set()
-    candidate_uids.update(search_sender_uids(client, args.self_email, processed_uids))
+    candidate_uids.update(unseen_uids)
     if unaccepted_pending_uids:
         candidate_uids.update(search_processed_sender_uids(client, args.self_email, sorted(unaccepted_pending_uids, key=lambda value: int(value))))
+    candidate_uids = actionable_sender_uids(candidate_uids, processed_uids, unaccepted_pending_uids)
     if not candidate_uids:
         logging.info("email scan complete: n=0 processed_next=%s manager_file=%s", uid_search_range(processed_uids), manager_file)
-        return maybe_handle_manager_mail_thresholds(client, args)
+        return maybe_handle_manager_mail_thresholds(client, args) or handled
     logging.info("email candidates found: n=%s uids=%s processed_max=%s manager_file=%s", len(candidate_uids), ",".join(uid.decode() for uid in sorted(candidate_uids, key=lambda value: int(value))), uid_search_range(processed_uids), manager_file)
     for raw_uid in sorted(candidate_uids, key=lambda value: int(value)):
         uid = raw_uid.decode()
