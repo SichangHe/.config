@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import subprocess
 import unittest
@@ -7,11 +8,17 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_tmux_input_lock import TmuxRuntimeBinding, capture_tmux_runtime_binding, guarded_tmux_runtime_command, require_same_tmux_runtime, tmux_input_lock, tmux_input_lock_path
+from omo_manager.omo_tmux_input_lock import TmuxRuntimeBinding, capture_tmux_runtime_binding, detach_omnigent_tmux_socket, guarded_tmux_runtime_command, require_same_tmux_runtime, tmux_input_lock, tmux_input_lock_path
 from omo_manager.omo_tmux_send import CodexSendOptions, send_message_file_to_codex
 
 
 class TmuxInputLockTests(unittest.TestCase):
+    def test_omnigent_terminal_socket_is_detached(self) -> None:
+        with patch.dict(os.environ, {"TMUX": "/tmp/omnigent-terminal-abc/tmux.sock,1,0", "TMUX_PANE": "%1"}):
+            detach_omnigent_tmux_socket()
+            self.assertNotIn("TMUX", os.environ)
+            self.assertNotIn("TMUX_PANE", os.environ)
+
     def test_canonical_pane_zero_uses_one_lock(self) -> None:
         self.assertEqual(tmux_input_lock_path("pb-newswatcher-agent:0"), tmux_input_lock_path("pb-newswatcher-agent:0.0"))
         self.assertNotEqual(tmux_input_lock_path("pb-newswatcher-agent:0"), tmux_input_lock_path("pb-newswatcher-agent:1"))

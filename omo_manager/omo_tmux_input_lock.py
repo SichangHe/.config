@@ -20,6 +20,21 @@ except ModuleNotFoundError:
     from omo_task_lock import canonical_target, process_start_ticks, task_file_lock_at_path
 
 
+def detach_omnigent_tmux_socket() -> None:
+    """Use the default tmux server when this process inherited an OmniGent terminal.
+
+    # 🧑 "fix the stale main-manager notification target that still points to missing `wl:1`"
+    """
+    sock = os.environ.get("TMUX", "")
+    if "omnigent-terminal" not in sock:
+        return
+    os.environ.pop("TMUX", None)
+    os.environ.pop("TMUX_PANE", None)
+
+
+detach_omnigent_tmux_socket()
+
+
 class _ThreadLockState(threading.local):
     pid: int
     depths: dict[Path, int]
