@@ -963,7 +963,8 @@ fi
 if [ "$start_email" -eq 1 ]; then
   mkdir -p -m 700 "$mail_dir"
   chmod 700 "$mail_dir"
-  email_args=(--root "$root" --mail-dir "$mail_dir" --state-dir "$state_dir")
+  # 🧑 "Mail compression has been offloaded to Grogbot."
+  email_args=(--root "$root" --mail-dir "$mail_dir" --state-dir "$state_dir" --unread-compression-threshold 0 --total-cleanup-threshold 0 --recent-cleanup-threshold 0)
   [ -n "$manager_url" ] && email_args+=(--manager-url "$manager_url")
   [ -n "$manager_target" ] && email_args+=(--manager-target "$manager_target")
   [ -n "$default_contact_agent" ] && email_args+=(--default-contact-agent "$default_contact_agent")

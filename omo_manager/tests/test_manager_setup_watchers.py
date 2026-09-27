@@ -1125,6 +1125,14 @@ esac
         self.assertIn('guest_hees_email_enable="${OMO_MANAGER_ENABLE_GUEST_HEES_EMAIL_WATCHER:-false}"', text)
         self.assertIn("skipped guest-hees email watcher; approval-gated and disabled by default", text)
 
+    def test_manager_email_watcher_disables_cleanup_thresholds_only(self) -> None:
+        text = SETUP.read_text(encoding="utf-8")
+        manager_args = text.split("email_args=(", 1)[1].split(")", 1)[0]
+        self.assertIn('--unread-compression-threshold 0', manager_args)
+        self.assertIn('--total-cleanup-threshold 0', manager_args)
+        self.assertIn('--recent-cleanup-threshold 0', manager_args)
+        self.assertIn('guest_hees_email_args=(--guest-hees', text)
+
     def test_setup_rejects_invalid_guest_hees_email_mode_before_launching(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
