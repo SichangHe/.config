@@ -208,6 +208,7 @@ export OMO_MANAGER_TMUX_TARGET="$manager_target"
 export DEFAULT_CONTACT_AGENT="$default_contact_agent"
 export OMO_WORK_LOGS_ROOT="$root"
 export OMO_MANAGER_STATE_DIR="$state_dir"
+export OMO_MANAGER_COMPACT_DELIVERY=1
 export OMO_MANAGER_EMAIL_SUPERVISOR_STARTUP_GRACE_S="$email_supervisor_startup_grace_s"
 export OMO_MANAGER_MAIL_DIR="$mail_dir"
 export OMO_AGENT_GMAIL_ADDRESS="$agent_email"
