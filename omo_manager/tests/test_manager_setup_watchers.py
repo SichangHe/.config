@@ -2524,6 +2524,40 @@ while :; do sleep 30; done
                     legacy.wait(timeout=2)
                 self.stop_supervisors(state)
 
+    def test_setup_stops_orphan_email_subreaper_with_same_resolved_root(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root = tmp / "work_logs"
+            state = tmp / "state"
+            root.mkdir()
+            state.mkdir()
+            alias = tmp / "shagent"
+            alias.symlink_to(root, target_is_directory=True)
+            token = "a" * 32
+            launch_file = state / f".email-supervisor.{token}.pid"
+            orphan = subprocess.Popen(
+                [
+                    "python3", "-c", "import time; time.sleep(90)", "omo-watcher-subreaper-v1",
+                    str(launch_file), "bash", "-c", "while :; do sleep 30; done",
+                    "email-watch-supervisor", str(launch_file), token, "uv", "run", "--project",
+                    str(ROOT / "omo_manager"), str(ROOT / "omo_manager" / "email_idle_watcher.py"),
+                    "--root", str(alias), "--mail-dir", str(alias / "manager_mail"),
+                    "--state-dir", str(state),
+                ],
+                start_new_session=True,
+            )
+            try:
+                result = self.run_setup(tmp)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn(f"stopping orphan email watcher supervisor pid={orphan.pid}", result.stdout)
+                orphan.wait(timeout=2)
+                self.assertIsNotNone(orphan.returncode)
+            finally:
+                if orphan.poll() is None:
+                    orphan.terminate()
+                    orphan.wait(timeout=2)
+                self.stop_supervisors(state)
+
     def test_setup_replaces_legacy_email_supervisor_for_same_root_and_mail_dir_with_stale_state(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)

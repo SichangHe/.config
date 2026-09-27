@@ -771,15 +771,49 @@ legacy_supervisor_process() {
   fi
 }
 
+orphan_subreaper_supervisor_process() {
+  local pid="$1" name="$2" script_path="$3" root_arg="$4" state_arg="${5:-}" exe session_id launch_pid_file token
+  local -a argv=()
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  mapfile -d '' -t argv <"/proc/$pid/cmdline" || return 1
+  exe="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+  [[ "${exe##*/}" == python* ]] || return 1
+  session_id="$(process_session_id "$pid")" || return 1
+  [ "$session_id" = "$pid" ] || return 1
+  [ "${argv[1]:-}" = -c ] && [ "${argv[3]:-}" = omo-watcher-subreaper-v1 ] || return 1
+  [ "${argv[5]:-}" = bash ] && [ "${argv[6]:-}" = -c ] && [ "${argv[8]:-}" = "$name-watch-supervisor" ] || return 1
+  token="${argv[10]:-}"
+  [[ "$token" =~ ^[0-9a-f]{32}$ ]] || return 1
+  launch_pid_file="$state_dir/.$name-supervisor.$token.pid"
+  [ "${argv[4]:-}" = "$launch_pid_file" ] && [ "${argv[9]:-}" = "$launch_pid_file" ] || return 1
+  [ ! -e "$launch_pid_file" ] || return 1
+  [ "${argv[11]:-}" = uv ] && [ "${argv[12]:-}" = run ] && [ "${argv[13]:-}" = --project ] || return 1
+  same_resolved_path "${argv[14]:-}" "$helper_dir" || return 1
+  same_resolved_path "${argv[15]:-}" "$script_path" || return 1
+  [ "${argv[16]:-}" = --root ] && same_resolved_path "${argv[17]:-}" "$root_arg" || return 1
+  if [ "$name" = email ]; then
+    cmdline_has_resolved_path_arg_pair "$pid" --mail-dir "$mail_dir" || return 1
+  elif [ -n "$state_arg" ]; then
+    cmdline_has_arg_pair "$pid" --state-dir "$state_arg" || return 1
+  fi
+}
+
 stop_legacy_supervisors() {
-  local name="$1" script_path="$2" root_arg="$3" state_arg="${4:-}" pid
+  local name="$1" script_path="$2" root_arg="$3" state_arg="${4:-}" pid start
   while read -r pid; do
     [ -n "$pid" ] || continue
     if cmdline_has_arg "$pid" "$name-watch-supervisor" \
+      && orphan_subreaper_supervisor_process "$pid" "$name" "$script_path" "$root_arg" "$state_arg"; then
+      require_root_identity
+      start="$(process_start_ticks "$pid")" || return 1
+      orphan_subreaper_supervisor_process "$pid" "$name" "$script_path" "$root_arg" "$state_arg" || return 1
+      echo "stopping orphan $name watcher supervisor pid=$pid"
+      stop_subreaper_supervisor "$pid" "$start" || return 1
+    elif cmdline_has_arg "$pid" "$name-watch-supervisor" \
       && legacy_supervisor_process "$pid" "$name" "$script_path" "$root_arg" "$state_arg"; then
       require_root_identity
       echo "stopping legacy $name watcher supervisor pid=$pid"
-      stop_process_tree "$pid"
+      stop_process_tree "$pid" || return 1
     fi
   done < <(pgrep -f -- "$name-watch-supervisor" 2>/dev/null || true)
 }
