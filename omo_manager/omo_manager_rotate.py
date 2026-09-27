@@ -36,6 +36,7 @@ EFFORT_RE = re.compile(r"^model_reasoning_effort\s*=\s*(['\"]?)([A-Za-z0-9_-]+)\
 EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
 SUCCESS_STATUSES = {"ready", "running"}
 TERMINAL_FAILURE_STATUSES = {"error"}
+STARTUP_SETTLE_S = 5.0
 HANDOFF_TIMEOUT_S = 10.0
 HANDOFF_LOCK_TIMEOUT_S = 10.0
 RESERVATION_NAME = "manager-rotation.handoff.json"
@@ -628,6 +629,15 @@ def wait_for_startup(prepared: Preflight) -> str:
     raise RotationError("timed out waiting for omo_codex_status to classify fresh Codex as running or ready")
 
 
+def verify_settled_startup(prepared: Preflight) -> str:
+    time.sleep(STARTUP_SETTLE_S)
+    verify_same_pane(prepared.pane, prepared.args.target)
+    classification = status_classification(prepared.pane.canonical_target)
+    if classification not in SUCCESS_STATUSES:
+        raise RotationError(f"fresh Codex exited after initial startup: status={classification or 'unknown'}")
+    return classification
+
+
 def audit_payload(prepared: Preflight, prompt_path: Path, command: str, outcome: str, status: str = "", error: str = "") -> dict[str, object]:
     return {
         "recorded_at": datetime.now(timezone.utc).isoformat(),
@@ -800,6 +810,7 @@ def execute_rotation(prepared: Preflight) -> Path:
         verify_same_pane(prepared.pane, prepared.args.target)
         classification = wait_for_startup(prepared)
         verify_same_pane(prepared.pane, prepared.args.target)
+        classification = verify_settled_startup(prepared)
         if not prepared.args.skip_watcher_refresh:
             watcher_env = os.environ.copy()
             watcher_env["OMO_WORK_LOGS_ROOT"] = str(prepared.args.root)
@@ -808,6 +819,7 @@ def execute_rotation(prepared: Preflight) -> Path:
             watcher = run([str(WATCHER_HELPER)], timeout=60, env=watcher_env)
             if watcher.returncode != 0:
                 raise RotationError(f"watcher setup failed after fresh Codex startup: {watcher.stderr.strip()}")
+        classification = verify_settled_startup(prepared)
     except Exception as exc:
         write_audit(audit_path, audit_payload(prepared, prompt_path, command, "failed", error=str(exc)), replace=True)
         raise

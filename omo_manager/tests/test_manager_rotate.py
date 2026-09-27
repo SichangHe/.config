@@ -37,6 +37,7 @@ from omo_manager.omo_manager_rotate import (
     select_launch_metadata,
     spawn_coordinator,
     update_reservation,
+    verify_settled_startup,
     wait_for_startup,
 )
 
@@ -498,10 +499,11 @@ class ManagerRotateTests(unittest.TestCase):
                 patch("omo_manager.omo_manager_rotate.run", side_effect=fake_run),
                 patch("omo_manager.omo_manager_rotate.verify_same_pane", side_effect=lambda *_: events.append("verify")),
                 patch("omo_manager.omo_manager_rotate.wait_for_startup", side_effect=lambda *_: events.append("status") or "running"),
+                patch("omo_manager.omo_manager_rotate.verify_settled_startup", side_effect=lambda *_: events.append("settled") or "running"),
             ):
                 audit_path = execute_rotation(prepared)
 
-            self.assertEqual(["respawn", "verify", "status", "verify", "watcher"], events)
+            self.assertEqual(["respawn", "verify", "status", "verify", "settled", "watcher", "settled"], events)
             respawn, _ = calls[0]
             self.assertEqual(["tmux", "respawn-pane", "-k", "-t", "%42", "-c", str(root)], respawn[:7])
             self.assertNotIn("resume", respawn[-1].casefold())
@@ -525,6 +527,17 @@ class ManagerRotateTests(unittest.TestCase):
                 patch("omo_manager.omo_manager_rotate.status_classification", side_effect=["not_codex", "running"]),
             ):
                 self.assertEqual("running", wait_for_startup(prepared))
+
+    def test_settled_startup_rejects_late_codex_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared = self.prepared(Path(tmp), Path(tmp) / "state")
+            with (
+                patch("omo_manager.omo_manager_rotate.time.sleep"),
+                patch("omo_manager.omo_manager_rotate.verify_same_pane"),
+                patch("omo_manager.omo_manager_rotate.status_classification", return_value="not_codex"),
+            ):
+                with self.assertRaisesRegex(RotationError, "exited after initial startup"):
+                    verify_settled_startup(prepared)
 
     def test_startup_error_fails_immediately(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
