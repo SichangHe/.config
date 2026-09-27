@@ -1843,7 +1843,7 @@ def parse_args(argv: list[str]) -> Args:
         root_stat = None
     if root_stat is not None and stat.S_ISLNK(root_stat.st_mode):
         parser.error("--root must name a real directory, not a symlink")
-    root = Path(os.path.abspath(os.fspath(lexical_root)))
+    root = Path(os.path.abspath(os.fspath(lexical_root))).resolve(strict=False)
     return Args(
         root,
         "",
@@ -4134,7 +4134,6 @@ def push_direct_ref(
     if not target:
         remember_seen(seen, marker_key, now_s - DEFAULT_SEEN_TTL_S + PENDING_DELIVERY_FAILURE_RETRY_S)
         return 1
-
     direct_key = direct_delivery_seen_key(args, marker, target, attachments)
     result = push_marker_delivery(
         args,

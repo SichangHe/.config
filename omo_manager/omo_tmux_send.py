@@ -49,10 +49,12 @@ try:
         is_cursor_agent_capture,
         is_cursor_retained_submitted_composer,
         pane_has_exact_cursor_process,
+        pane_has_exact_codex_process,
         pane_has_exact_managed_agent_process,
         process_terminal_identity,
         report_from_lines,
         status,
+        without_codex_footer_hint,
         tail,
         tail_pane_id,
         visible_error_lines,
@@ -85,10 +87,12 @@ except ModuleNotFoundError:
         is_cursor_agent_capture,
         is_cursor_retained_submitted_composer,
         pane_has_exact_cursor_process,
+        pane_has_exact_codex_process,
         pane_has_exact_managed_agent_process,
         process_terminal_identity,
         report_from_lines,
         status,
+        without_codex_footer_hint,
         tail,
         tail_pane_id,
         visible_error_lines,
@@ -1118,7 +1122,10 @@ def shell_started_codex_binding(runtime: TmuxRuntimeBinding) -> CodexRuntimeBind
         or foreground.session != pane.session
         or foreground.tty != pane.tty
         or foreground.foreground_group != foreground.pid
-        or not exact_codex_launch(runtime.pane_command, list(foreground.argv))
+        or not (
+            exact_codex_launch(runtime.pane_command, list(foreground.argv))
+            or (runtime.pane_command == "node" and pane_has_exact_codex_process(runtime.target, runtime.pane_id))
+        )
         or foreground_process_snapshot(runtime.pane_pid) != pane
         or foreground_process_snapshot(foreground.pid) != foreground
         or capture_tmux_runtime_binding(runtime.target) != runtime
@@ -1141,7 +1148,7 @@ def exact_codex_runtime_binding(target: str, *, allow_shell: bool = False) -> Co
     except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeError("target Codex runtime cannot be authenticated") from exc
     if (
-        runtime.pane_command not in {"codex", "bunx", "npx"}
+        runtime.pane_command not in {"codex", "bunx", "npx", "node"}
         or capture_tmux_runtime_binding(target) != runtime
     ):
         raise RuntimeError("target Codex runtime cannot be authenticated")
@@ -1192,7 +1199,7 @@ def exact_managed_runtime_binding(target: str, lines: list[str]) -> CodexRuntime
 
 
 def require_same_managed_runtime(target: str, expected: CodexRuntimeBinding, phase: str) -> None:
-    if expected.pane_command in {"codex", "bunx", "npx"}:
+    if expected.pane_command in {"codex", "bunx", "npx", "node"}:
         require_same_wrapped_codex_target(target, expected, phase)
         return
     require_same_cursor_target(target, expected.pane_id, phase, expected.pane_pid, expected.pane_command)
@@ -1648,6 +1655,8 @@ def exact_complete_input_text(
     end = len(lines)
     while end and not lines[end - 1].strip():
         end -= 1
+    lines = without_codex_footer_hint(lines[:end])
+    end = len(lines)
     visible = lines[:end]
     normalized = [line.rstrip() for line in visible]
     if not normalized or not (EXACT_CODEX_MODEL_FOOTER_RE.fullmatch(normalized[-1]) or EXACT_CODEX_QUEUE_FOOTER_RE.fullmatch(normalized[-1])):
@@ -2473,7 +2482,7 @@ def normalized_rendered_lines(raw_lines: list[str]) -> list[str]:
     lines = [line.rstrip() for line in raw_lines]
     while lines and not lines[-1]:
         lines.pop()
-    return lines
+    return without_codex_footer_hint(lines)
 
 
 def bottom_anchored_cursor_input(raw_lines: list[str], expected_text: str | None = None) -> tuple[str, str]:

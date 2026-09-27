@@ -42,9 +42,13 @@ class EmailMeTests(unittest.TestCase):
                 "TMUX_PANE": "",
                 "OMO_AGENT_TMUX_TARGET": "",
                 "OMO_MANAGER_TMUX_TARGET": "",
+                "CODEX_CI": "",
+                "CODEX_SESSION_ID": "",
             },
         )
         self.env_patch.start()
+        self.smtp_guard = patch.object(email_me.smtplib, "SMTP_SSL", side_effect=AssertionError("email test must stub SMTP"))
+        self.smtp_guard.start()
         self.non_completion_caller_patch = patch.object(
             email_me, "validate_non_completion_owner", return_value=None
         )
@@ -55,6 +59,7 @@ class EmailMeTests(unittest.TestCase):
         self.completion_caller_patch.start()
 
     def tearDown(self) -> None:
+        self.smtp_guard.stop()
         self.completion_caller_patch.stop()
         self.non_completion_caller_patch.stop()
         self.env_patch.stop()
@@ -73,9 +78,10 @@ class EmailMeTests(unittest.TestCase):
         self.assertEqual(f"body\n\nPWD: {Path(tmp).name}\n", plain.get_content())
 
     def test_tmux_context_still_uses_pwd_footer(self) -> None:
-        result = subprocess.CompletedProcess(["tmux"], 0, stdout="wl:2\n", stderr="")
+        result = subprocess.CompletedProcess(["tmux"], 0, stdout="42\twl:2.0\n", stderr="")
         with (
             patch.dict(os.environ, {"TMUX": "/tmp/tmux-session"}, clear=False),
+            patch.object(email_me, "process_ancestor_pids", return_value={42}),
             patch.object(email_me.subprocess, "run", return_value=result) as run,
         ):
             msg = email_me.build_message("me@example.com", "hi", "body\n")
@@ -83,11 +89,11 @@ class EmailMeTests(unittest.TestCase):
         self.assertIsNotNone(plain)
         self.assertEqual(f"body\n\nPWD: {Path.cwd().name}\n", plain.get_content())
         run.assert_called_once_with(
-            ["tmux", "display-message", "-p", "#S:#I"],
-            check=False,
+            ["tmux", "list-panes", "-a", "-F", "#{pane_pid}\t#{session_name}:#{window_index}.#{pane_index}"],
             capture_output=True,
             text=True,
             timeout=2,
+            check=False,
         )
 
     def test_explicit_tmux_target_overrides_caller_tmux_footer(self) -> None:
@@ -186,20 +192,21 @@ class EmailMeTests(unittest.TestCase):
                 },
                 clear=False,
             ),
-            patch.object(email_me.subprocess, "run") as run,
+            patch.object(email_me.subprocess, "run", return_value=subprocess.CompletedProcess(["tmux"], 0, stdout="", stderr="")) as run,
         ):
             msg = email_me.build_message("me@example.com", "hi", "body\n")
         self.assertEqual("[wl:4] hi", msg["Subject"])
-        run.assert_not_called()
+        run.assert_called_once()
 
     def test_malformed_env_tmux_target_falls_back_to_caller_tmux(self) -> None:
-        result = subprocess.CompletedProcess(["tmux"], 0, stdout="wl:2\n", stderr="")
+        result = subprocess.CompletedProcess(["tmux"], 0, stdout="42\twl:2.0\n", stderr="")
         with (
             patch.dict(
                 os.environ,
                 {"TMUX": "/tmp/tmux-session", "OMO_AGENT_TMUX_TARGET": "wl:bad"},
                 clear=False,
             ),
+            patch.object(email_me, "process_ancestor_pids", return_value={42}),
             patch.object(email_me.subprocess, "run", return_value=result) as run,
         ):
             msg = email_me.build_message("me@example.com", "hi", "body\n")
@@ -307,9 +314,10 @@ class EmailMeTests(unittest.TestCase):
         self.assertEqual("body\n", plain.get_content())
 
     def test_can_omit_footer_inside_tmux_when_explicitly_requested(self) -> None:
-        result = subprocess.CompletedProcess(["tmux"], 0, stdout="wl:2\n", stderr="")
+        result = subprocess.CompletedProcess(["tmux"], 0, stdout="42\twl:2.0\n", stderr="")
         with (
             patch.dict(os.environ, {"TMUX": "/tmp/tmux-session"}, clear=False),
+            patch.object(email_me, "process_ancestor_pids", return_value={42}),
             patch.object(email_me.subprocess, "run", return_value=result) as run,
         ):
             msg = email_me.build_message(
@@ -669,6 +677,42 @@ class EmailMeTests(unittest.TestCase):
             )
         current_tmux.assert_not_called()
 
+    def test_inferred_target_prefers_authenticated_pane_without_tmux_environment(self) -> None:
+        with (
+            patch.dict(os.environ, {"TMUX": "", "TMUX_PANE": "", "OMO_AGENT_TMUX_TARGET": "wl:1"}),
+            patch.object(email_me, "omnigent_inferred_target", return_value=None),
+            patch.object(email_me, "current_tmux_window", return_value="config:1") as current_tmux,
+        ):
+            self.assertEqual("config:1", email_me.inferred_tmux_target(False))
+        current_tmux.assert_called_once_with()
+
+    def test_detached_codex_ignores_unverified_inherited_target(self) -> None:
+        with (
+            patch.dict(os.environ, {"TMUX": "", "TMUX_PANE": "", "OMO_AGENT_TMUX_TARGET": "wl:1", "CODEX_CI": "1", "CODEX_SESSION_ID": "active-session"}),
+            patch.object(email_me, "omnigent_inferred_target", return_value=None),
+            patch.object(email_me, "current_tmux_window", return_value=None),
+        ):
+            self.assertIsNone(email_me.inferred_tmux_target(False))
+
+    def test_completion_owner_accepts_authenticated_omnigent_over_inherited_tmux(self) -> None:
+        with (
+            patch.dict(os.environ, {"TMUX_PANE": "%0"}, clear=False),
+            patch.object(
+                email_me, "omnigent_inferred_target", return_value="omnigent://session-1"
+            ),
+            patch.object(email_me, "current_tmux_window") as current_tmux,
+            patch.object(email_me, "invoking_process_belongs_to_pane") as pane_process,
+        ):
+            email_me.validate_invoking_owner_target(
+                "omnigent://session-1", "completion Human mail"
+            )
+            with self.assertRaisesRegex(ValueError, "invoking OmniGent session"):
+                email_me.validate_invoking_owner_target(
+                    "omnigent://other", "completion Human mail"
+                )
+        current_tmux.assert_not_called()
+        pane_process.assert_not_called()
+
     def test_inferred_target_rejects_broken_omnigent_identity_before_tmux_fallback(self) -> None:
         identity_error = __import__("omo_omnigent_identity").OmniGentIdentityError
         with (
@@ -825,7 +869,7 @@ class EmailMeTests(unittest.TestCase):
                 )
             self.assertTrue(
                 sent.read_text(encoding="utf-8").startswith(
-                    "[og:b12_3x2_plot2.md] Figure update\n"
+                    "[og:b12_3x2_plot2] Figure update\n"
                 )
             )
 
@@ -1071,7 +1115,7 @@ class EmailMeTests(unittest.TestCase):
                 )
             self.assertTrue(
                 sent.read_text(encoding="utf-8").startswith(
-                    "Re: [og:task.md] Topic\n"
+                    "Re: [og:task] Topic\n"
                 )
             )
         self.assertEqual(session, lookup.call_args.kwargs["required_agent_session"])
@@ -1183,6 +1227,18 @@ class EmailMeTests(unittest.TestCase):
             result = email_me.main(["--dry-run", "--subject", "hi"])
         self.assertEqual(0, result)
         self.assertIn("dry-run: email not sent", stdout.getvalue())
+
+    def test_detached_codex_email_refuses_untagged_delivery(self) -> None:
+        with (
+            patch.dict(os.environ, {"CODEX_CI": "1", "CODEX_SESSION_ID": "01a0369c-7895-70f2-ae4b-5f59d920e99a"}),
+            patch.object(email_me, "omnigent_inferred_target", return_value=None),
+            patch.object(email_me.subprocess, "run", return_value=subprocess.CompletedProcess(["tmux"], 1, "", "")),
+            patch.object(sys, "stdin", StringIO("body\n")),
+            patch("sys.stderr", new_callable=StringIO) as stderr,
+        ):
+            self.assertEqual(2, email_me.main(["--subject", "Status update"]))
+        self.assertIn("Codex email requires an authenticated tmux pane", stderr.getvalue())
+
 
     def test_guest_hees_mode_requires_manager_human_and_guest_session(self) -> None:
         for argv in (
@@ -5559,7 +5615,10 @@ class EmailMeTests(unittest.TestCase):
             self.assertEqual(
                 "Re: [vl:15] Topic\nbody\n", send_log.read_text(encoding="utf-8")
             )
-            run.assert_not_called()
+            run.assert_called_once_with(
+                ["tmux", "list-panes", "-a", "-F", "#{pane_pid}\t#{session_name}:#{window_index}.#{pane_index}"],
+                capture_output=True, text=True, timeout=2, check=False,
+            )
 
     def test_no_pwd_footer_still_passes_tmux_target_to_subject_preparation(
         self,

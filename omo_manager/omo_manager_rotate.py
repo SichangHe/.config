@@ -40,8 +40,8 @@ HANDOFF_TIMEOUT_S = 10.0
 HANDOFF_LOCK_TIMEOUT_S = 10.0
 RESERVATION_NAME = "manager-rotation.handoff.json"
 TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
-CODEX_PACKAGE = "@openai/codex@0.155.1"
-SUPPORTED_CODEX_PACKAGES = {"@openai/codex", "@openai/codex@latest", CODEX_PACKAGE}
+CODEX_PACKAGE = "@openai/codex@latest"
+SUPPORTED_CODEX_PACKAGES = {"@openai/codex", "@openai/codex@0.155.1", CODEX_PACKAGE}
 
 
 class RotationError(RuntimeError):
@@ -119,16 +119,22 @@ class HandoffReservation:
 
 
 class ParsedArgs(argparse.Namespace):
-    target: str | None = None
-    root: Path | None = None
-    state_dir: Path | None = None
-    model: str | None = None
-    reasoning_effort: str | None = None
-    startup_timeout_s: float = 45.0
-    poll_interval_s: float = 0.5
-    coordinator_token: str | None = None
-    replacement_email_file: Path | None = None
-    skip_watcher_refresh: bool = False
+    """Rotation CLI namespace.
+
+    Leave attributes unset. argparse skips an option default when the namespace already has that attribute, so class defaults made omitted `--state-dir` stay `None`.
+    """
+
+    # 🧑 "MANAGER_OPERATOR.md:17-29 does not work."
+    target: str | None
+    root: Path | None
+    state_dir: Path | None
+    model: str | None
+    reasoning_effort: str | None
+    startup_timeout_s: float
+    poll_interval_s: float
+    coordinator_token: str | None
+    replacement_email_file: Path | None
+    skip_watcher_refresh: bool
 
 
 def default_state_dir() -> Path:
@@ -583,6 +589,7 @@ def fresh_command(metadata: LaunchMetadata, prompt_path: Path, target: str, root
         "OMO_MANAGER_TMUX_TARGET": target,
         "OMO_MANAGER_STATE_DIR": str(state_dir),
         "OMO_WORK_LOGS_ROOT": str(root),
+        "PATH": f"{Path.home() / '.config/bin'}:{os.environ.get('PATH', '')}",
     }
     export_command = " ".join(f"{name}={shlex.quote(value)}" for name, value in exports.items())
     rendered = f'export {export_command} && exec {shlex.join(command)} "$(cat -- {shlex.quote(str(prompt_path))})"'
@@ -648,7 +655,6 @@ def handoff_channel(token: str, phase: str) -> str:
 
 def coordinator_command(prepared: Preflight, token: str, log_path: Path) -> str:
     command = [
-        sys.executable,
         str(Path(__file__).resolve()),
         "--target",
         prepared.pane.canonical_target,

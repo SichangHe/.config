@@ -21,11 +21,13 @@ from omo_manager.omo_manager_rotate import (
     cleanup_pre_go_handoff,
     coordinator_rotation,
     create_reservation,
+    default_state_dir,
     execute_rotation,
     fresh_command,
     invocation_is_target,
     is_codex_launch_argv,
     option_values,
+    parse_args,
     preflight,
     replacement_context,
     read_reservation,
@@ -48,6 +50,12 @@ def process(pid: int, ppid: int, *argv: str, state: str = "S") -> ProcessInfo:
 
 
 class ManagerRotateTests(unittest.TestCase):
+    def test_bringup_argv_applies_omitted_state_dir_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            parsed = parse_args(["--target", "wl:1.0", "--root", tmp, "--model", "gpt-5.6-sol", "--reasoning-effort", "low"])
+        self.assertEqual(default_state_dir(), parsed.state_dir)
+        self.assertEqual(Path(tmp).resolve(), parsed.root)
+
     def test_replacement_context_preserves_exact_suffix_and_enters_fresh_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -261,13 +269,15 @@ class ManagerRotateTests(unittest.TestCase):
             Path("/home/sichangheagent/work_logs"),
             Path("/private/state"),
         )
-        self.assertIn("bunx @openai/codex@0.155.1 --dangerously-bypass-approvals-and-sandbox", command)
+        self.assertIn("bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox", command)
         self.assertIn("--model gpt-5.6-terra", command)
         self.assertIn('model_reasoning_effort="xhigh"', command)
         self.assertIn("OMO_AGENT_TMUX_TARGET=wl:1.0", command)
         self.assertIn("OMO_MANAGER_TMUX_TARGET=wl:1.0", command)
         self.assertIn("OMO_MANAGER_STATE_DIR=/private/state", command)
         self.assertIn("OMO_WORK_LOGS_ROOT=/home/sichangheagent/work_logs", command)
+        self.assertIn("PATH=", command)
+        self.assertIn(f"{Path.home() / '.config/bin'}:", command)
         self.assertNotIn("resume", command.casefold())
         self.assertNotRegex(command, r"[0-9a-f]{8}-[0-9a-f-]{27,}")
 
@@ -290,6 +300,8 @@ class ManagerRotateTests(unittest.TestCase):
             self.assertEqual("%77", coordinator.pane_id)
             self.assertEqual(["tmux", "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "manager:", "-n", "manager-rotate-coordinator"], calls[0][:-1])
             shell_command = calls[0][-1]
+            self.assertIn("omo_manager_rotate.py --target manager:2.0", shell_command)
+            self.assertNotIn("/builds-v0/", shell_command)
             self.assertIn(f"--_coordinator-token {token}", shell_command)
             self.assertIn("--target manager:2.0", shell_command)
             self.assertIn("--model gpt-5.6-terra", shell_command)

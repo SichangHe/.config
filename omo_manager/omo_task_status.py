@@ -614,7 +614,7 @@ shutdown.""",
     _ = parser.add_argument(
         "--reconcile-blocked-index",
         action="store_true",
-        help="Move one digest-bound v1 blocked worker with an open queue from TODO previous or low priority, or the exact Source-1804 Human-approval worker from current, to human pending without changing task or pane state.",
+        help="Move one digest-bound v1 blocked worker with an open queue from TODO previous or low priority, or a current worker with an exact pending Human-review blocker, to human pending without changing task or pane state.",
     )
     _ = parser.add_argument(
         "--reconcile-dependency-blocked-current",
@@ -5854,9 +5854,16 @@ def reconcile_previous_blocked_index(args: Args, path: Path, text: str, before: 
                 "blocked index reconciliation requires one canonical current, human pending, and previous TODO section, plus one canonical low priority section when it contains the source row."
             )
         current_source = task_sections == ["current"]
-        asserted_human_wait = args.blocked_on == metadata.blocked_on == SOURCE1804_HUMAN_APPROVAL_BLOCKER
+        reason = metadata.blocked_on
+        pending_human_review = (
+            re.fullmatch(r"human review of [^.\n]{1,400}", reason, re.IGNORECASE) is not None
+            and re.search(r"\b(?:already|received|denied|optional|skipp?ed|skippable|unnecessary|no longer|not needed|not required|completed?)\b", reason, re.IGNORECASE) is None
+            and NON_HUMAN_GATE_RE.search(reason) is None
+            and TASK_RE.search(reason) is None
+        )
+        asserted_human_wait = args.blocked_on == reason and (reason == SOURCE1804_HUMAN_APPROVAL_BLOCKER or pending_human_review)
         if current_source and not asserted_human_wait:
-            raise TaskFrontmatterError("blocked current-index reconciliation requires --blocked-on to match the exact Source-1804 Human-approval blocker.")
+            raise TaskFrontmatterError("blocked current-index reconciliation requires --blocked-on to match a pending Human review or the exact Source-1804 Human-approval blocker.")
         if not current_source and args.blocked_on:
             raise TaskFrontmatterError("--blocked-on is valid only when blocked index reconciliation moves a current Human-waiting worker.")
         source_sections = ("current",) if current_source else ("previous", "low priority")

@@ -293,7 +293,7 @@ def invoke_reviewer(
         result = runner(
             [
                 "bunx",
-                "@openai/codex@0.155.1",
+                "@openai/codex@latest",
                 "exec",
                 "--ephemeral",
                 "--sandbox",

@@ -74,8 +74,8 @@ recording the items and removing the marker.
 
 {PENDING_ITEM_PROVENANCE_HELP}
 Quote human-origin requests as closely as possible in --item. Human-authored
-items require --ack-human and --email-file so creation is acknowledged on the
-agent's latest verified Human thread.
+items require --ack-human and --email-file so creation is acknowledged with the
+original subject on the verified Human thread.
 --task-file is only for atomic initial assignment to a new owner; keep task-file
 paths out of worker prompts.""",
     )
@@ -159,6 +159,16 @@ def remove_line_once(text: str, line: str) -> str:
             del lines[idx]
             return "".join(lines)
     return text
+
+
+def contains_sha256_prefix(text: str, expected_sha256: str) -> bool:
+    """Accept only unchanged original lines followed by newly appended work."""
+    digest = hashlib.sha256()
+    for line in text.splitlines(keepends=True):
+        digest.update(line.encode("utf-8"))
+        if digest.hexdigest() == expected_sha256:
+            return True
+    return False
 
 
 def item_lines(items: tuple[str, ...]) -> list[str]:
@@ -330,8 +340,15 @@ def reserve_pending_notice(pending_path: Path, target_path: Path, args: Args, pe
             recorded.get("schema") != "omo-pending-creation-reservation/v1"
             or recorded.get("pending_path") != str(pending_path.resolve())
             or recorded.get("target_path") != str(target_path.resolve())
-            or recorded.get("pending_sha256") != pending_sha256
-            or target_sha256 not in {recorded.get("target_sha256"), recorded.get("updated_target_sha256")}
+            or not (
+                recorded.get("pending_sha256") == pending_sha256
+                or contains_sha256_prefix(base_pending_text, recorded.get("pending_sha256", ""))
+            )
+            or not (
+                target_sha256 in {recorded.get("target_sha256"), recorded.get("updated_target_sha256")}
+                or contains_sha256_prefix(base_target_text, recorded.get("target_sha256", ""))
+                or contains_sha256_prefix(base_target_text, recorded.get("updated_target_sha256", ""))
+            )
         ):
             raise TaskFrontmatterError("pending source changed after its creation notice was reserved")
     fsync_directory(directory)
@@ -371,8 +388,8 @@ def send_human_ack_once(
     base_text = remove_line_once(text, ack_sent_line(args.line, args.items))
     target_text = base_text if pending_path == target_path else target_path.read_text(encoding="utf-8")
     if (
-        hashlib.sha256(base_text.encode()).hexdigest() != expected_pending_sha256
-        or hashlib.sha256(target_text.encode()).hexdigest() != expected_target_sha256
+        not contains_sha256_prefix(base_text, expected_pending_sha256)
+        or not contains_sha256_prefix(target_text, expected_target_sha256)
     ):
         raise TaskFrontmatterError("pending source or target changed before its creation notice delivery")
     marker = ack_sent_line(args.line, args.items)

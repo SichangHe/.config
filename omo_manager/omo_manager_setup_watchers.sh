@@ -294,7 +294,7 @@ cmdline_has_arg() {
   [ -r "/proc/$pid/cmdline" ] || return 1
   while IFS= read -r -d '' arg; do
     [ "$arg" = "$value" ] && return 0
-  done <"/proc/$pid/cmdline"
+  done <"/proc/$pid/cmdline" 2>/dev/null
   return 1
 }
 
@@ -310,7 +310,7 @@ cmdline_has_resolved_path_arg() {
   [ -r "/proc/$pid/cmdline" ] || return 1
   while IFS= read -r -d '' arg; do
     same_resolved_path "$arg" "$value" && return 0
-  done <"/proc/$pid/cmdline"
+  done <"/proc/$pid/cmdline" 2>/dev/null
   return 1
 }
 
@@ -323,7 +323,7 @@ cmdline_has_arg_pair() {
       expect=0
     fi
     [ "$arg" = "$option" ] && expect=1
-  done <"/proc/$pid/cmdline"
+  done <"/proc/$pid/cmdline" 2>/dev/null
   return 1
 }
 
@@ -336,7 +336,7 @@ cmdline_has_option_value() {
       expect=0
     fi
     [ "$arg" = "$option" ] && expect=1
-  done <"/proc/$pid/cmdline"
+  done <"/proc/$pid/cmdline" 2>/dev/null
   return 1
 }
 
@@ -349,7 +349,7 @@ cmdline_has_resolved_path_arg_pair() {
       expect=0
     fi
     [ "$arg" = "$option" ] && expect=1
-  done <"/proc/$pid/cmdline"
+  done <"/proc/$pid/cmdline" 2>/dev/null
   return 1
 }
 
@@ -358,7 +358,7 @@ cmdline_has_fragment() {
   [ -r "/proc/$pid/cmdline" ] || return 1
   while IFS= read -r -d '' arg; do
     [[ "$arg" == *"$fragment"* ]] && return 0
-  done <"/proc/$pid/cmdline"
+  done <"/proc/$pid/cmdline" 2>/dev/null
   return 1
 }
 

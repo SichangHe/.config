@@ -72,7 +72,7 @@ TMUX_WINDOW_RE = re.compile(r"[^:\n]+:\d+(?:\.\d+)?\Z")
 AGENT_SESSION_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z", re.IGNORECASE
 )
-PRODUCER_TARGET = r"(?:[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?|omnigent://[A-Za-z0-9._-]+|og:[A-Za-z0-9_.-]+\.md)"
+PRODUCER_TARGET = r"(?:[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?|omnigent://[A-Za-z0-9._-]+|og:[A-Za-z0-9_.-]+(?:\.md)?)"
 TMUX_SUBJECT_TAG_RE = re.compile(
     rf"^\s*(?:\[{PRODUCER_TARGET}\]|{PRODUCER_TARGET})(?:\s+|$)"
 )
@@ -409,12 +409,26 @@ def current_pwd() -> str:
 
 
 def current_tmux_window() -> str | None:
-    if not os.environ.get("TMUX"):
-        return None
-    command = ["tmux", "display-message", "-p"]
-    if pane_id := os.environ.get("TMUX_PANE", "").strip():
-        command.extend(("-t", pane_id))
-    command.append("#S:#I.#P" if pane_id else "#S:#I")
+    pane_id = os.environ.get("TMUX_PANE", "").strip()
+    if not pane_id:
+        ancestors = process_ancestor_pids(os.getpid())
+        try:
+            result = subprocess.run(
+                ["tmux", "list-panes", "-a", "-F", "#{pane_pid}\t#{session_name}:#{window_index}.#{pane_index}"],
+                capture_output=True, text=True, timeout=2, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        matches = {
+            target for line in result.stdout.splitlines()
+            if (parts := line.split("\t", 1)) and len(parts) == 2
+            for pid, target in [parts]
+            if pid.isdigit() and int(pid) in ancestors and TMUX_WINDOW_RE.fullmatch(target)
+        }
+        return next(iter(matches)) if len(matches) == 1 else None
+    command = ["tmux", "display-message", "-p", "-t", pane_id, "#S:#I.#P"]
     try:
         result = subprocess.run(
             command,
@@ -805,19 +819,18 @@ def inferred_tmux_target(manager_human: bool) -> str | None:
     if omnigent_target is not None:
         return omnigent_target
     agent_target = env_tmux_target()
-    has_pane_id = bool(os.environ.get("TMUX_PANE", "").strip())
-    current_target = current_tmux_window() if has_pane_id else None
+    current_target = current_tmux_window()
     if current_target is not None:
         current_target = canonical_email_tmux_target(current_target)
         return agent_target if agent_target == current_target else current_target
+    if os.environ.get("CODEX_CI") == "1" and os.environ.get("CODEX_SESSION_ID"):
+        return None
     fallback_target = agent_target or (
         env_manager_tmux_target() if manager_human else None
     )
     if fallback_target is not None:
         return fallback_target
-    if has_pane_id:
-        return None
-    return current_tmux_window()
+    return None
 
 
 def omnigent_inferred_target() -> str | None:
@@ -864,7 +877,8 @@ def email_subject_target(authenticated_target: str) -> str:
             same_name.append(candidate)
     if len(set(same_name)) != 1:
         raise ValueError("OmniGent email tag requires a unique active task filename")
-    return f"og:{task.name}"
+    # 🧑 "Also make it s.t. the email subjects do not have .md in the tag"
+    return f"og:{task.name.removesuffix('.md')}"
 
 
 def retag_subject(subject: str, target: str) -> str:
@@ -1423,8 +1437,17 @@ def validate_manager_operational_reply(
 
 
 def validate_invoking_owner_target(producer_target: str, purpose: str) -> None:
-    """Bind a Human-mail route to the exact live pane process presenting it."""
+    """Bind a Human-mail route to the exact live OmniGent session or pane presenting it."""
 
+    if OMNIGENT_TARGET_RE.fullmatch(canonical_email_tmux_target(producer_target)):
+        omnigent_target = omnigent_inferred_target()
+        if omnigent_target is None:
+            raise ValueError(f"{purpose} requires authenticated OmniGent identity")
+        if canonical_email_tmux_target(omnigent_target) != canonical_email_tmux_target(
+            producer_target
+        ):
+            raise ValueError(f"{purpose} target does not match the invoking OmniGent session")
+        return
     if not os.environ.get("TMUX_PANE", "").strip():
         raise ValueError(f"{purpose} requires the exact invoking owner pane")
     actual_target = current_tmux_window()
@@ -2165,6 +2188,13 @@ def main(argv: list[str]) -> int:
     try:
         validate_explicit_omnigent_identity(args.tmux_target)
         subject_tmux_target = footer_tmux_target(args.tmux_target, args.manager_human)
+        if (
+            subject_tmux_target is None
+            and not args.dry_run
+            and os.environ.get("CODEX_CI") == "1"
+            and os.environ.get("CODEX_SESSION_ID")
+        ):
+            raise ValueError("Codex email requires an authenticated tmux pane; use --tmux-target only after verifying the sender's window")
         if args.manager_human and subject_tmux_target is not None:
             validate_manager_route_identity(args.tmux_target, subject_tmux_target)
         if (

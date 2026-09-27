@@ -377,7 +377,7 @@ class RecordPendingTests(unittest.TestCase):
             self.assertIn("--manager-human", commands[0])
             self.assertIn("removed `(pending)`", stdout.getvalue())
 
-    def test_ack_human_retry_rejects_unrelated_later_pending_marker(self) -> None:
+    def test_ack_human_retry_accepts_unrelated_later_pending_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task = root / "task.md"
@@ -396,10 +396,23 @@ class RecordPendingTests(unittest.TestCase):
                 commands.append(command)
 
             with patch("omo_manager.omo_record_pending.subprocess.run", side_effect=send_email):
-                self.assertEqual(2, run(args))
+                self.assertEqual(0, run(args))
 
-            self.assertEqual(0, len(commands))
+            self.assertEqual(1, len(commands))
             self.assertIn("(pending)\nNew unrelated request.\n", task.read_text(encoding="utf-8"))
+
+    def test_ack_human_retry_rejects_changed_original_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            task.write_text(task_frontmatter() + "(pending)\nPlease do it.\n", encoding="utf-8")
+            args = Args(root, Path("task.md"), 10, Path("task.md"), ("🧑 finish review",), True, human_email(root))
+            with patch("omo_manager.omo_record_pending.subprocess.run", side_effect=subprocess.CalledProcessError(1, ["mail"])):
+                self.assertEqual(2, run(args))
+            task.write_text(task.read_text(encoding="utf-8").replace("Please do it.", "Please do that.") + "(pending)\nAnother request.\n", encoding="utf-8")
+            with patch("omo_manager.omo_record_pending.subprocess.run") as send:
+                self.assertEqual(2, run(args))
+            send.assert_not_called()
 
     def test_ack_human_retry_rejects_shifted_live_pending_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

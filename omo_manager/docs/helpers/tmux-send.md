@@ -66,7 +66,7 @@ prompt_file=$(mktemp "${TMPDIR:-/tmp}/omo-worker-prompt.XXXXXX")
 chmod 600 "$subject_file" "$body_file" "$prompt_file"
 email_me.py --manager-human --subject-file "$subject_file" --message-file "$body_file"
 omo_tmux_send.py --target cfg:1.0 --message-file "$prompt_file"
-omo_task.py --task-file x.md --tmux-session cfg --workdir /repo --model cursor-grok-4.6 --reasoning-effort xhigh --prompt-file "$prompt_file"
+omo_task.py --task-file x.md --tmux-session cfg --workdir /repo --model grok-4.7 --reasoning-effort high --prompt-file "$prompt_file"
 ```
 
 For worker prompts, keep task-file paths out of the prompt body. Workers report with `omo_report.sh` from their tmux pane and do not need `--task-file`, `--root`, `--manager-target`, or other manual route flags.

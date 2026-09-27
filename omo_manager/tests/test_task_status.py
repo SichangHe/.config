@@ -7833,10 +7833,53 @@ resolved_task_items: []
                     with patch("omo_manager.omo_task_status.stop") as stop_agent, redirect_stderr(stderr):
                         self.assertEqual(2, run(args))
 
-                    self.assertIn("requires --blocked-on to match the exact Source-1804", stderr.getvalue())
+                    self.assertIn("requires --blocked-on to match a pending Human review or the exact Source-1804", stderr.getvalue())
                     self.assertEqual(task_text, path.read_text(encoding="utf-8"))
                     self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
                     stop_agent.assert_not_called()
+
+    def test_cli_blocked_current_human_review_preserves_task_and_moves_index_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "scorer.md"
+            blocker = "human review of safe placeholder migration scope and clean runtime commit authorization; authenticated dw:2 pending queue binding"
+            task_text = task_frontmatter(status="blocked", blocked_on=blocker, runat="dw:2", pending_items=("restore sole scorer",)) + "body\n"
+            task.write_text(task_text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo.write_text("current:\nscorer.md dw:2\nother.md dw:1\n\nhuman pending:\n\nprevious:\n", encoding="utf-8")
+            args = StatusArgs(root, Path("scorer.md"), "", blocker, reconcile_blocked_index=True, source_sha256=hashlib.sha256(task_text.encode()).hexdigest())
+
+            with patch("omo_manager.omo_task_status.stop") as stop_agent, redirect_stdout(io.StringIO()):
+                self.assertEqual(0, run(args))
+
+            self.assertEqual(task_text, task.read_text(encoding="utf-8"))
+            self.assertIn("current:\nother.md dw:1\n", todo.read_text(encoding="utf-8"))
+            self.assertIn("human pending:\n\nscorer.md dw:2\n", todo.read_text(encoding="utf-8"))
+            stop_agent.assert_not_called()
+
+    def test_cli_blocked_current_human_review_rejects_completed_or_dependency_gate(self) -> None:
+        for blocker in (
+            "human review of migration already completed",
+            "human review of migration was denied",
+            "human review of migration is optional",
+            "human review of migration; dependency.md still running",
+            "scorer_recovery.md",
+        ):
+            with self.subTest(blocker=blocker), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task = root / "scorer.md"
+                text = task_frontmatter(status="blocked", blocked_on=blocker, runat="dw:2", pending_items=("restore sole scorer",))
+                task.write_text(text, encoding="utf-8")
+                todo = root / "TODO.md"
+                todo_text = "current:\nscorer.md dw:2\n\nhuman pending:\n\nprevious:\n"
+                todo.write_text(todo_text, encoding="utf-8")
+                args = StatusArgs(root, Path("scorer.md"), "", blocker, reconcile_blocked_index=True, source_sha256=hashlib.sha256(text.encode()).hexdigest())
+
+                with redirect_stderr(io.StringIO()):
+                    self.assertEqual(2, run(args))
+
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
 
     def test_cli_blocked_reconciliation_hashes_and_preserves_raw_crlf_task_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

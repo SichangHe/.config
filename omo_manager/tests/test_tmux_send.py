@@ -1324,6 +1324,13 @@ class TmuxSendTests(unittest.TestCase):
         self.assertFalse(is_empty_codex_input_text("Use /skills to list available skills "))
         self.assertFalse(is_empty_codex_input_text("Use /skills to list available skills edited"))
 
+    def test_codex_shortcut_hint_does_not_block_existing_input_capture(self) -> None:
+        from omo_manager.omo_tmux_send import exact_complete_input_text, normalized_rendered_lines
+
+        lines = ['› Please retry', '', '  gpt-6-sol medium · ~/.config', '  ← for agents · ? for shortcuts     ⚠ 2 warnings · f2 to view', '']
+        self.assertEqual('Please retry', exact_complete_input_text(lines, allow_codex_footer_spacer=True))
+        self.assertEqual('  gpt-6-sol medium · ~/.config', normalized_rendered_lines(lines)[-1])
+
     def test_verify_submit_retries_enter_for_cursor_collapsed_paste(self) -> None:
         tails = iter(
             [
@@ -3623,6 +3630,20 @@ class TmuxSendTests(unittest.TestCase):
             "omo_manager.omo_tmux_send.shell_started_codex_binding", return_value=runtime
         ):
             self.assertEqual(runtime, exact_codex_runtime_binding("config:16", allow_shell=True))
+
+    def test_exact_codex_runtime_binding_accepts_authenticated_node_foreground(self) -> None:
+        tmux_runtime = self.tmux_runtime("config:1", "%4745", 3831431, "node")
+        runtime = CodexRuntimeBinding("%4745", 3831431, "node", 3850675, 36393988, "d" * 64, tmux_runtime)
+        with patch("omo_manager.omo_tmux_send.capture_tmux_runtime_binding", return_value=tmux_runtime), patch(
+            "omo_manager.omo_tmux_send.exact_pane_process", return_value=("node", [])
+        ), patch("omo_manager.omo_tmux_send.shell_started_codex_binding", return_value=runtime) as bind:
+            self.assertEqual(runtime, exact_codex_runtime_binding("config:1", allow_shell=True))
+            bind.assert_called_once_with(tmux_runtime)
+
+        with patch("omo_manager.omo_tmux_send.capture_tmux_runtime_binding", return_value=tmux_runtime), patch(
+            "omo_manager.omo_tmux_send.exact_pane_process", return_value=("node", [])
+        ), self.assertRaisesRegex(RuntimeError, "not a direct authenticated launch"):
+            exact_codex_runtime_binding("config:1")
 
     def test_full_history_capture_requests_complete_scrollback(self) -> None:
         result = subprocess.CompletedProcess(["tmux"], 0, stdout="screen\n")

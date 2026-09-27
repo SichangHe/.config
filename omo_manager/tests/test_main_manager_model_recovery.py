@@ -238,7 +238,7 @@ class MainManagerModelRecoveryTests(unittest.TestCase):
             probe_model("gpt-5.6-terra", "xhigh", 4.0)
 
         command = calls[0]
-        self.assertEqual(["bunx", "@openai/codex@0.155.1"], command[:2])
+        self.assertEqual(["bunx", "@openai/codex@latest"], command[:2])
         self.assertIn("--ephemeral", command)
         self.assertIn("--ignore-user-config", command)
         self.assertIn("--ignore-rules", command)
@@ -247,7 +247,7 @@ class MainManagerModelRecoveryTests(unittest.TestCase):
 
     def test_resume_command_uses_latest_package(self) -> None:
         command = resume_command(self.binding(Path("/tmp/work logs")), "gpt-5.6-terra", self.SESSION_ID, "[marker]")
-        self.assertIn("exec bunx @openai/codex@0.155.1", command)
+        self.assertIn("exec bunx @openai/codex@latest", command)
 
     def test_reserve_and_finish_handoff_keep_one_private_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

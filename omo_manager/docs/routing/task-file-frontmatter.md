@@ -192,3 +192,5 @@ For each active task file:
 6. Leave the body as is.
 
 - [ ] finish migrating active task files
+
+Blocked index clarification: `--reconcile-blocked-index` can also move an unchanged blocked worker from `current` to `human pending` when `--blocked-on` exactly matches its unresolved `human review of ...` blocker. This supersedes the older Source-1804-only description above. It rejects completed, denied, optional, non-human, and task-file dependency blockers; it changes only the TODO row, never the task or pane.

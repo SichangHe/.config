@@ -245,6 +245,15 @@ def write_report_worker_task(root: Path, name: str = "task.md", *, runat: str = 
 
 
 class PendingMarkerTests(unittest.TestCase):
+    def test_pending_watcher_canonicalizes_symlinked_root_ancestor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            actual = Path(tmp) / "actual" / "work_logs"
+            actual.mkdir(parents=True)
+            alias = Path(tmp) / "alias"
+            alias.symlink_to(actual.parent, target_is_directory=True)
+            args = pending_watcher.parse_args(["--root", str(alias / "work_logs"), "--once", "--dry-run"])
+            self.assertEqual(actual, args.root)
+
     def setUp(self) -> None:
         self._email_tmp = tempfile.TemporaryDirectory(prefix="omo-pending-watch-test-email.")
         self.addCleanup(self._email_tmp.cleanup)
@@ -481,7 +490,11 @@ with exclusive_watcher_root(root):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "worker.md"
-            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\nplease route\n", encoding="utf-8")
+            path.write_text(
+                f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n"
+                "(pending)\n(from manager omo_task_edit delegate-message)\nplease route\n",
+                encoding="utf-8",
+            )
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -1918,6 +1931,25 @@ with exclusive_watcher_root(root):
             consumed = task.read_text(encoding="utf-8")
             self.assertNotIn("(pending)", consumed)
             self.assertIn("(record and delegate manager_mail/42.txt)", consumed)
+
+    def test_config_reply_tag_routes_to_its_exact_active_worker(self) -> None:
+        from omo_manager import email_idle_watcher as email_watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "config_repair.md"
+            task.write_text(task_frontmatter(runat="config:1", managerat="wl:1"), encoding="utf-8")
+            (root / "TODO.md").write_text("current:\nconfig_repair.md config:1\n", encoding="utf-8")
+            args = email_watcher.Args(
+                root, "", root / "manager_mail", root / "state", root / "work_manager_today.md", True,
+                "self@example.test", 900, Path("/bin/false"), manager_target="wl:1",
+            )
+
+            route = email_watcher.email_route(args, "Re: [config:1] Configuration repair status")
+
+            self.assertEqual(task, route.manager_file)
+            self.assertEqual("config:1", route.manager_target)
+            self.assertTrue(route.pending_watcher_delivery)
 
     def test_half_bracketed_submanager_email_subject_uses_default_route(self) -> None:
         from omo_manager import email_idle_watcher as watcher
@@ -11931,6 +11963,52 @@ resolved_task_items: []
                 self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
             self.assertIn("(pending)\nplease route\n", path.read_text(encoding="utf-8"))
             self.assertIn(watcher.marker_seen_key(args, watcher.find_markers(root, [path])[0], []), seen)
+
+    def test_direct_pending_can_deliver_while_agent_is_running(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\nplease route\n", encoding="utf-8")
+            marker = watcher.find_markers(root, [path])[0]
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, manager_target="wl:1")
+            seen: dict[str, float] = {}
+            future: Future[None] = Future()
+            with patch.object(watcher, "inspect_codex", return_value=watcher.CodexReport("running", [])), patch.object(
+                watcher, "send_to_codex", return_value=future
+            ) as send:
+                self.assertEqual(watcher.ASYNC_DELIVERY_STARTED, watcher.push_direct_ref(args, seen, 1000.0, marker, []))
+            send.assert_called_once()
+            self.assertIn("(pending)", path.read_text(encoding="utf-8"))
+
+    def test_manager_pending_can_deliver_while_agent_is_running(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text("(pending)\n(for manager)\nplease route\n", encoding="utf-8")
+            marker = watcher.find_markers(root, [path])[0]
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, manager_target="wl:1")
+            seen: dict[str, float] = {}
+            future: Future[None] = Future()
+            with patch.object(watcher, "inspect_codex", return_value=watcher.CodexReport("running", [])), patch.object(
+                watcher, "send_to_codex", return_value=future
+            ) as send:
+                self.assertEqual(watcher.ASYNC_DELIVERY_STARTED, watcher.push_ref(args, seen, 1000.0, marker, []))
+            send.assert_called_once()
+            self.assertIn("(pending)", path.read_text(encoding="utf-8"))
+
+    def test_pending_sender_can_submit_to_busy_manager(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with patch.object(watcher, "inspect_codex", return_value=watcher.CodexReport("running", [])), patch.object(
+            watcher, "submit_delivery_send", return_value=None
+        ) as send:
+            result = watcher.try_send_delivery_text("agent report", "report", "wl:1", pending_file=Path("task.md"))
+        self.assertEqual(0, result.status)
+        send.assert_called_once()
 
     def test_repeated_direct_failure_never_creates_manager_fallback(self) -> None:
         from omo_manager import omo_pending_watch as watcher

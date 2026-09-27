@@ -23,6 +23,7 @@ FILE_SEARCH_RECOVERY_INTERVAL_S = 0.05
 COMPACTION_WAIT_LINES = 2000
 CODEX_RE = re.compile(r"  gpt-")
 CODEX_FOOTER_RE = re.compile(r"^  gpt-")
+CODEX_FOOTER_HINT_RE = re.compile(r"^  ← for agents · \? for shortcuts(?: +⚠ [0-9]+ warnings? · f2 to view)? *$")
 SUPPORTED_CODEX_PACKAGES = {"@openai/codex", "@openai/codex@latest", "@openai/codex@0.155.1"}
 PROC_ROOT = Path("/proc")
 ERROR_RE = re.compile(r"\b(failed|panic|traceback|exception)\b|\berror\b(?!\s*=\s*\d)", re.IGNORECASE)
@@ -227,6 +228,14 @@ def tail_pane_id(pane_id: str, n_lines: int) -> list[str]:
     lines = [line.rstrip() for line in (out.stdout or "").splitlines()]
     while lines and not lines[-1]:
         lines.pop()
+    return without_codex_footer_hint(lines)
+
+
+def without_codex_footer_hint(lines: list[str]) -> list[str]:
+    if len(lines) >= 2 and QUEUE_MESSAGE_FOOTER_RE.search(lines[-1]) and CODEX_FOOTER_RE.match(lines[-2]):
+        return lines[:-1]
+    if len(lines) >= 2 and CODEX_FOOTER_HINT_RE.fullmatch(lines[-1].rstrip()) and CODEX_FOOTER_RE.match(lines[-2]):
+        return lines[:-1]
     return lines
 
 
@@ -403,6 +412,16 @@ def pane_has_exact_codex_process(target: str, pane_id: str, proc_root: Path | No
     if process is None:
         return False
     current_command, start_tokens = process
+    if current_command == "node":
+        foreground_tokens = exact_shell_started_foreground_argv(target, pane_id, current_command, proc_root)
+        if foreground_tokens is None or len(foreground_tokens) < 2 or Path(foreground_tokens[0]).name != "node":
+            return False
+        try:
+            executable = Path(foreground_tokens[1]).resolve(strict=True)
+            package = Path.home() / ".bun/install/global/node_modules/@openai/codex/bin/codex.js"
+            return executable == package.resolve(strict=True) and exact_pane_id(target) == pane_id
+        except OSError:
+            return False
     if exact_codex_launch(current_command, start_tokens):
         return True
     if current_command not in {"codex", "bunx", "npx"}:
@@ -453,6 +472,7 @@ def pane_has_exact_managed_agent_process(target: str, pane_id: str) -> bool:
 
 
 def has_codex_model_footer(lines: list[str]) -> bool:
+    lines = without_codex_footer_hint(lines)
     return bool(lines and CODEX_RE.search(lines[-1]) is not None)
 
 
@@ -620,6 +640,7 @@ def has_resume_paused_goal_prompt(lines: list[str]) -> bool:
 
 
 def current_block(lines: list[str]) -> Block:
+    lines = without_codex_footer_hint(lines)
     body = lines[:-1] if has_codex_model_footer(lines) else lines[:]
     start = 0
     for idx in range(len(body) - 1, -1, -1):
@@ -796,6 +817,7 @@ def has_cursor_followups_overlay(lines: list[str]) -> bool:
 
 
 def current_input_text(lines: list[str]) -> str:
+    lines = without_codex_footer_hint(lines)
     if is_cursor_agent_capture(lines):
         return cursor_agent_input_text(lines)
     body = lines[:-1] if has_codex_model_footer(lines) or has_queued_message_footer(lines) else lines[:]
@@ -1477,6 +1499,7 @@ def status(lines: list[str], block: Block, *, detect_waiting_subagent: bool = Fa
 
 
 def report_from_lines(lines: list[str], *, detect_waiting_subagent: bool = False) -> Report:
+    lines = without_codex_footer_hint(lines)
     block = current_block(lines)
     input_text = file_search_overlay_input_text(lines) or current_input_text(lines)
     can_submit_input = can_submit_stuck_input(lines)

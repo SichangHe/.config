@@ -107,6 +107,26 @@ class CodexStatusTests(unittest.TestCase):
                 _ = (proc_root / "202" / "cmdline").write_bytes(b"/home/agent/bin/bunx\0example/not-codex\0")
                 self.assertFalse(pane_has_exact_codex_process("cfg:1.0", "%7", proc_root))
 
+    def test_shell_started_node_codex_uses_authenticated_foreground_script(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / ".bun/install/global/node_modules/@openai/codex/bin/codex.js"
+            package.parent.mkdir(parents=True)
+            package.write_text("", encoding="utf-8")
+            with (
+                patch("omo_manager.omo_codex_status.exact_pane_id", return_value="%7"),
+                patch("omo_manager.omo_codex_status.exact_pane_process", return_value=("node", ["/bin/sh"])),
+                patch("omo_manager.omo_codex_status.exact_shell_started_foreground_argv", return_value=["node", str(package)]),
+                patch("omo_manager.omo_codex_status.Path.home", return_value=Path(tmp)),
+            ):
+                self.assertTrue(pane_has_exact_codex_process("cfg:1.0", "%7"))
+            with (
+                patch("omo_manager.omo_codex_status.exact_pane_id", return_value="%7"),
+                patch("omo_manager.omo_codex_status.exact_pane_process", return_value=("node", ["/bin/sh"])),
+                patch("omo_manager.omo_codex_status.exact_shell_started_foreground_argv", return_value=["node", str(Path(tmp) / "other.js")]),
+                patch("omo_manager.omo_codex_status.Path.home", return_value=Path(tmp)),
+            ):
+                self.assertFalse(pane_has_exact_codex_process("cfg:1.0", "%7"))
+
     def test_shell_started_codex_process_rejects_unrelated_terminal_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             proc_root = Path(tmp)
@@ -750,6 +770,12 @@ class CodexStatusTests(unittest.TestCase):
         lines = ['────', 'done', '› Use /skills to list available skills', '  gpt-5.5']
         self.assertEqual('ready', status(lines, current_block(lines)))
 
+    def test_codex_shortcut_hint_after_model_footer_is_not_input(self) -> None:
+        for hint in ('  ← for agents · ? for shortcuts', '  ← for agents · ? for shortcuts     ⚠ 2 warnings · f2 to view'):
+            lines = ['• Working (2s • esc to interrupt)', '', '› Ask Codex to do anything', '', '  gpt-6-sol medium · ~/.config', hint]
+            self.assertEqual('running', report_from_lines(lines).status)
+            self.assertEqual('Ask Codex to do anything', report_from_lines(lines).input_text)
+
     def test_status_running_when_message_is_queued(self) -> None:
         lines = ['• Messages to be submitted after next tool call (press esc to interrupt and send immediately)', '› Use /skills to list available skills', '  gpt-5.5']
         self.assertEqual('running', status(lines, current_block(lines)))
@@ -895,6 +921,32 @@ class CodexStatusTests(unittest.TestCase):
         lines = ['• Working (4m 34s • esc to interrupt)', '', '› Implement {feature}', '  gpt-5.5']
         self.assertEqual('running', status(lines, current_block(lines)))
         self.assertFalse(can_submit_stuck_input(lines))
+
+    def test_status_running_with_queue_hint_after_model_footer_and_empty_composer(self) -> None:
+        lines = [
+            '• Working (3s • esc to interrupt)',
+            '',
+            '› Ask Codex to do anything',
+            '  gpt-6-sol medium · /ssd1/sichangheagent/work_logs · weekly 93% left · 13M used · Context 20% used',
+            '  tab to queue message',
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual('running', report.status)
+        self.assertEqual('Ask Codex to do anything', report.input_text)
+        self.assertFalse(report.can_submit_input)
+
+    def test_status_stuck_with_queue_hint_after_model_footer_and_real_draft(self) -> None:
+        lines = [
+            '• Working (3s • esc to interrupt)',
+            '',
+            '› Please continue the task',
+            '  gpt-6-sol medium · /ssd1/sichangheagent/work_logs · Context 20% used',
+            '  tab to queue message',
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual('stuck_input', report.status)
+        self.assertEqual('Please continue the task', report.input_text)
+        self.assertTrue(report.can_submit_input)
 
     def test_status_stuck_with_queued_input_during_working_turn(self) -> None:
         lines = [
