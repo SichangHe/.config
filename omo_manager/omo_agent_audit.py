@@ -294,6 +294,7 @@ def invoke_reviewer(
             [
                 "bunx",
                 "@openai/codex@latest",
+                "--no-daemon",
                 "exec",
                 "--ephemeral",
                 "--sandbox",

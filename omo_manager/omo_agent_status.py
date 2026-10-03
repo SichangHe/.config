@@ -2060,12 +2060,12 @@ def is_quiet_blocked_active_row(row: StatusRow) -> bool:
 
 # 🧑 "Long running simply means that the agent will not be closed if they have zero pending item."
 def is_quiet_long_running_ready_row(root: Path, row: StatusRow) -> bool:
-    """Keep only an empty, healthy long-running agent quiet."""
+    """Keep an idle long-running agent quiet when its queue is empty or blocked."""
     if row.task_status != "long_running" or row.status != "ready":
         return False
     path = resolve_task_path(root, row.task_file)
     metadata = read_task_metadata(path, root) if path is not None else None
-    return metadata is not None and not metadata.pending_task_items
+    return metadata is not None and (bool(metadata.blocked_on) or not metadata.pending_task_items)
 
 
 def completed_stale_evidence(root: Path, completed_stale: set[str]) -> dict[str, str]:

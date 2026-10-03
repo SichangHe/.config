@@ -55,6 +55,11 @@ class LegacyPurpose:
 # 🧑 "Close all opsmail0802 and agent_managers agents."
 LEGACY_PURPOSES = (
     LegacyPurpose(
+        "202607/acm_quicktakes.md",
+        "b1bd8baae0209c3089605293e5793a1f6328bb3ae6054c653b763c45f56bbda2",
+        "Assess whether the forwarded Summer 2026 Student Quick Takes email has practical value for the human.",
+    ),
+    LegacyPurpose(
         "202608/close_agents_1256.md",
         "58a6169e82ac0add13bab11a643ae09e3f69f1a4f48f2dfe36becd71faa7743f",
         "Execute Human Source-1256 by closing all opsmail0802 and agent_managers agents, consolidating their tasks and status, and replacing mailbox compression with one fresh agent outside those namespaces.",
@@ -143,8 +148,9 @@ def agent_target(value: str) -> str:
 
 
 def main_manager_target(value: str) -> str:
-    if runat_kind(value) != "tmux":
-        raise argparse.ArgumentTypeError("main manager must be a tmux target")
+    # 🧑 "You are a config agent. Fix the managerat mismatch"
+    if runat_kind(value) not in {"tmux", "omnigent"}:
+        raise argparse.ArgumentTypeError("main manager must be a tmux target or an omnigent:// session identifier")
     return canonical_target(value)
 
 
@@ -322,8 +328,8 @@ def configuration(args: Args) -> Config:
     manager = args.main_manager or os.environ.get("OMO_MANAGER_TMUX_TARGET", local.get("OMO_MANAGER_TMUX_TARGET", ""))
     if not manager:
         raise ConfigurationError("OMO_MANAGER_TMUX_TARGET is not configured")
-    if runat_kind(manager) != "tmux":
-        raise ConfigurationError(f"configured main manager is not a tmux target: {manager}")
+    if runat_kind(manager) not in {"tmux", "omnigent"}:
+        raise ConfigurationError(f"configured main manager is not a tmux target or an omnigent:// session: {manager}")
     return Config(root, canonical_target(manager))
 
 
@@ -457,16 +463,26 @@ def root_index(root: Path) -> dict[str, list[TaskLine]]:
 
 def indexed_membership(root: Path, path: str, metadata: TaskMetadata, indexed: dict[str, list[TaskLine]]) -> str | None:
     rows = indexed.get(path, [])
+    archived = not rows
+    if not rows and metadata.status in DEFAULT_STATUSES:
+        for archive in sorted(root.glob("[0-9][0-9][0-9][0-9][0-9][0-9]/old_todos.md")):
+            if archive.is_symlink():
+                raise TreeError(f"archived TODO.md index must not be a symlink: {archive}")
+            try:
+                archived_rows = parse_task_text(archive.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError) as exc:
+                raise TreeError(f"archived TODO.md index is unreadable: {archive}") from exc
+            rows.extend(row for row in archived_rows if relative_index_ref(root, row.task_file) == path)
     if len(rows) > 1:
-        raise TreeError(f"task has duplicate root TODO.md rows: {path}")
+        raise TreeError(f"task has duplicate TODO.md index rows: {path}")
     if metadata.status in DEFAULT_STATUSES and not rows:
-        raise TreeError(f"active task is missing its root TODO.md row: {path}")
+        raise TreeError(f"active task is missing its root TODO.md row or archived previous row: {path}")
     if not rows:
         return None
     row = rows[0]
     if not row.target or canonical_target(row.target) != canonical_target(metadata.runat):
         raise TreeError(f"task root TODO.md target does not match frontmatter runat: {path}")
-    return row.section
+    return "archive:previous" if archived else row.section
 
 
 def task_record(path: str, purpose: str, metadata: TaskMetadata, membership: str | None, *, external: bool = False) -> TaskRecord:

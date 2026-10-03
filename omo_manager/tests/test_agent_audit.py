@@ -8,6 +8,15 @@ from omo_manager.omo_agent_audit import AuditConfig, compact_jsonl_tail, sample_
 
 
 class AgentAuditTests(unittest.TestCase):
+    def test_reviewer_uses_latest_without_daemon(self) -> None:
+        from omo_manager.omo_agent_audit import invoke_reviewer
+
+        runner = Mock(return_value=Mock(stdout='{"verdict":"pass","evidence":"progress","call_ids":[]}'))
+        with tempfile.TemporaryDirectory() as directory:
+            verdict = invoke_reviewer(Path(directory) / "evidence.json", Path(directory) / "schema.json", model="gpt-6.1-sol", effort="medium", runner=runner)
+        self.assertEqual("pass", verdict.verdict)
+        self.assertEqual(["bunx", "@openai/codex@latest", "--no-daemon", "exec"], runner.call_args.args[0][:4])
+
     def test_envelope_filtering_bounds_and_unknowns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "s.jsonl"

@@ -289,13 +289,16 @@ resolved_task_items: []
         assert metadata is not None
         self.assertEqual("", metadata.blocked_on)
 
-    def test_only_empty_long_running_ready_is_quiet(self) -> None:
+    def test_long_running_ready_is_quiet_when_empty_or_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
             registry.write_text('{"sessions":[]}', encoding="utf-8")
             (root / "TODO.md").write_text("current:\ncontact.md cfg:5\n", encoding="utf-8")
-            (root / "contact.md").write_text(task_frontmatter("long_running", runat="cfg:5"), encoding="utf-8")
+            (root / "contact.md").write_text(
+                task_frontmatter("running", runat="cfg:5").replace("status: running", "status: long_running"),
+                encoding="utf-8",
+            )
             ready = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(ready):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -308,13 +311,22 @@ resolved_task_items: []
             self.assertIn("ready: task=contact.md", ordinary.getvalue())
 
             (root / "contact.md").write_text(
-                task_frontmatter("long_running", runat="cfg:5", pending_items=("reconcile completed work",)),
+                task_frontmatter("running", runat="cfg:5", pending_items=("reconcile completed work",)).replace("status: running", "status: long_running"),
                 encoding="utf-8",
             )
             pending = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(pending):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertIn("ready: task=contact.md", pending.getvalue())
+
+            (root / "contact.md").write_text(
+                task_frontmatter("long_running", runat="cfg:5", blocked_on="active ingester needs owner recovery", pending_items=("reconcile completed work",)),
+                encoding="utf-8",
+            )
+            blocked = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(blocked):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", blocked.getvalue())
 
             failed = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("error", ["failed"])), redirect_stdout(failed):

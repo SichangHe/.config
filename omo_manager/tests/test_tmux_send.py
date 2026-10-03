@@ -1,6 +1,5 @@
 import hashlib
 import os
-import re
 import stat
 import subprocess
 import sys
@@ -893,7 +892,86 @@ class TmuxSendTests(unittest.TestCase):
         with patch("omo_manager.omo_tmux_send._run_tmux_payload") as raw:
             send_system_to_codex("cfg:1.0", "system reminder\n", selected)
 
-        raw.assert_called_once_with("cfg:1.0", "system reminder\n", selected, before_paste=None)
+        raw.assert_called_once_with("cfg:1.0", "system reminder\n", selected, before_paste=None, probe_message="system reminder\n")
+
+    def test_long_system_notice_uses_digest_pointer_not_collapsed_paste(self) -> None:
+        message = "(pending watcher delivery)\n" + "human request " * 100
+        captured: list[tuple[str, str, str]] = []
+
+        def capture(_target: str, payload: str, _options: CodexSendOptions, **kwargs: object) -> None:
+            captured.append((payload, str(kwargs["probe_message"]), str(kwargs["dedupe_message"])))
+
+        with patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": self.state_tmp.name}, clear=True), patch("omo_manager.omo_tmux_send._run_tmux_payload", side_effect=capture):
+            send_system_to_codex("cfg:1.0", message, options())
+        self.assertEqual(1, len(captured))
+        pointer, probe, identity = captured[0]
+        self.assertEqual(pointer, probe)
+        self.assertEqual(message, identity)
+        self.assertLess(len(pointer.encode("utf-8")), 700)
+        self.assertNotIn("<agent_message", pointer)
+        self.assertIn("follow that exact message", pointer)
+        path = Path(pointer.partition(" after SHA-256 ")[0].removeprefix("Read "))
+        self.assertEqual(message.encode("utf-8"), path.read_bytes())
+
+    def test_long_system_notice_compacts_even_with_explicit_opt_out(self) -> None:
+        message = "pending watcher delivery " * 60
+        with patch.dict(os.environ, {"OMO_MANAGER_COMPACT_DELIVERY": "0"}), patch("omo_manager.omo_tmux_send._run_tmux_payload") as raw:
+            send_system_to_codex("cfg:1.0", message, options())
+        self.assertEqual(1, raw.call_count)
+        self.assertLess(len(raw.call_args.args[1].encode("utf-8")), 700)
+        self.assertEqual(message, raw.call_args.kwargs["dedupe_message"])
+        pointer = raw.call_args.kwargs["probe_message"]
+        path = Path(pointer.partition(" after SHA-256 ")[0].removeprefix("Read "))
+        self.assertEqual(message.encode(), path.read_bytes())
+
+    def test_long_system_dry_run_rejects_unsafe_state_without_writing(self) -> None:
+        message = "pending watcher delivery " * 60
+        with tempfile.TemporaryDirectory() as root:
+            unsafe = Path(root) / "unsafe"
+            unsafe.mkdir(mode=0o755)
+            with patch("omo_manager.omo_tmux_send.tmux_delivery_state_dir", return_value=unsafe), patch("omo_manager.omo_tmux_send._run_tmux_payload") as paste:
+                with self.assertRaisesRegex(RuntimeError, "state directory is not private"):
+                    send_system_to_codex("cfg:1.0", message, options(dry_run=True))
+            paste.assert_not_called()
+            self.assertFalse((unsafe / "delivery-prompts").exists())
+
+    def test_long_system_dry_run_rejects_oversized_pointer_without_writing(self) -> None:
+        message = "pending watcher delivery " * 60
+        with tempfile.TemporaryDirectory() as root:
+            long_dir = Path(root)
+            for segment in ("d" * 160, "e" * 160, "f" * 160, "g" * 160):
+                long_dir /= segment
+            with patch("omo_manager.omo_tmux_send.tmux_delivery_state_dir", return_value=long_dir), patch("omo_manager.omo_tmux_send._run_tmux_payload") as paste:
+                with self.assertRaisesRegex(RuntimeError, "too long for a visible compact message"):
+                    send_system_to_codex("cfg:1.0", message, options(dry_run=True))
+            paste.assert_not_called()
+            self.assertFalse(long_dir.exists())
+
+    def test_long_system_dry_run_rejects_existing_digest_collision(self) -> None:
+        message = "pending watcher delivery " * 60
+        with tempfile.TemporaryDirectory() as root:
+            state = Path(root) / "state"
+            state.mkdir(mode=0o700)
+            delivery = state / "delivery-prompts"
+            delivery.mkdir(mode=0o700, parents=True)
+            digest_path = delivery / f"{hashlib.sha256(message.encode()).hexdigest()}.txt"
+            digest_path.write_text("different bytes", encoding="utf-8")
+            digest_path.chmod(0o600)
+            with patch("omo_manager.omo_tmux_send.tmux_delivery_state_dir", return_value=state), patch("omo_manager.omo_tmux_send._run_tmux_payload") as paste:
+                with self.assertRaisesRegex(RuntimeError, "changed or is not private"):
+                    send_system_to_codex("cfg:1.0", message, options(dry_run=True))
+            paste.assert_not_called()
+            self.assertEqual("different bytes", digest_path.read_text(encoding="utf-8"))
+
+    def test_forced_long_system_notice_initializes_missing_private_state(self) -> None:
+        message = "pending watcher delivery " * 60
+        with tempfile.TemporaryDirectory() as root:
+            state = Path(root) / "state"
+            with patch("omo_manager.omo_tmux_send.tmux_delivery_state_dir", return_value=state), patch("omo_manager.omo_tmux_send._run_tmux_payload") as paste:
+                send_system_to_codex("cfg:1.0", message, options(dangerously_bypass_all_sender_safety_checks=True))
+            self.assertTrue(state.is_dir())
+            self.assertEqual(message.encode(), next((state / "delivery-prompts").glob("*.txt")).read_bytes())
+            paste.assert_called_once()
 
     def test_concurrent_pending_and_email_public_sends_serialize_one_target(self) -> None:
         first_inside = threading.Event()
@@ -1600,7 +1678,7 @@ class TmuxSendTests(unittest.TestCase):
     def test_compact_delivery_pointer_preserves_exact_private_bytes(self) -> None:
         payload = '<agent_message from="wl:1">\n' + 'work ' * 250 + '</agent_message>\n'
         pointer = compact_delivery_pointer(payload)
-        self.assertRegex(pointer, r'^Read /.+\.txt after SHA-256 [0-9a-f]{64} matches\. Then follow that exact agent message\.$')
+        self.assertRegex(pointer, r'^Read /.+\.txt after SHA-256 [0-9a-f]{64} matches\. Then follow that exact message\.$')
         path = Path(pointer.partition(' after SHA-256 ')[0].removeprefix('Read '))
         self.assertEqual(payload.encode(), path.read_bytes())
         self.assertEqual(0, path.stat().st_mode & 0o077)
@@ -1624,12 +1702,12 @@ class TmuxSendTests(unittest.TestCase):
         self.assertFalse(stale.exists())
         self.assertTrue(unrelated.exists())
 
-    def test_opt_in_compact_delivery_keeps_full_message_dedupe_identity(self) -> None:
+    def test_default_compact_delivery_keeps_full_message_dedupe_identity(self) -> None:
         message = 'Important manager instruction.\n' + 'work ' * 230
         captured: list[tuple[str, str, str]] = []
 
         def capture(_target: str, payload: str, _options: CodexSendOptions, **kwargs: object) -> None:
-            captured.append((payload, str(kwargs['probe_message']), str(kwargs['dedupe_message'])))
+            captured.append((payload, str(kwargs['probe_message']), str(kwargs.get('dedupe_message', ''))))
 
         with patch.dict(os.environ, {'OMO_MANAGER_COMPACT_DELIVERY': '1'}), patch('omo_manager.omo_tmux_send._run_tmux_payload', side_effect=capture):
             run_tmux('cfg:1.0', message, options())
@@ -1643,6 +1721,51 @@ class TmuxSendTests(unittest.TestCase):
         self.assertNotIn('work work', payload)
         full_path = Path(pointer.partition(' after SHA-256 ')[0].removeprefix('Read '))
         self.assertIn(message, full_path.read_text(encoding='utf-8'))
+
+        captured.clear()
+        with patch.dict(os.environ, {'OMO_MANAGER_STATE_DIR': self.state_tmp.name}, clear=True), patch('omo_manager.omo_tmux_send._run_tmux_payload', side_effect=capture):
+            run_tmux('cfg:1.0', message, options())
+        self.assertEqual(1, len(captured))
+        self.assertIn(' after SHA-256 ', captured[0][0])
+        self.assertNotIn('work work', captured[0][0])
+
+        captured.clear()
+        with patch.dict(os.environ, {'OMO_MANAGER_COMPACT_DELIVERY': '0'}), patch('omo_manager.omo_tmux_send.agent_message_source', return_value='helper'), patch('omo_manager.omo_tmux_send.secrets.randbelow', return_value=1), patch('omo_manager.omo_tmux_send._run_tmux_payload', side_effect=capture):
+            run_tmux('cfg:1.0', message, options())
+        self.assertEqual(1, len(captured))
+        self.assertNotIn('work work', captured[0][0])
+        self.assertLess(len(captured[0][0].encode('utf-8')), 700)
+        opt_out_pointer = captured[0][1]
+        opt_out_path = Path(opt_out_pointer.partition(' after SHA-256 ')[0].removeprefix('Read '))
+        opt_out_bytes = opt_out_path.read_bytes()
+        self.assertEqual(wrap_agent_message(message, source_target='helper', include_authority_reminder=False).encode('utf-8'), opt_out_bytes)
+        self.assertIn(hashlib.sha256(opt_out_bytes).hexdigest(), opt_out_pointer)
+
+    def test_auto_compact_boundary_preserves_exact_wrapped_bytes(self) -> None:
+        captured: list[tuple[str, str, str]] = []
+
+        def capture(_target: str, payload: str, _options: CodexSendOptions, **kwargs: object) -> None:
+            captured.append((payload, str(kwargs['probe_message']), str(kwargs.get('dedupe_message', ''))))
+
+        overhead = len(wrap_agent_message('', source_target='helper', include_authority_reminder=False).encode('utf-8'))
+        with patch.dict(os.environ, {'OMO_MANAGER_STATE_DIR': self.state_tmp.name}, clear=True), patch('omo_manager.omo_tmux_send.agent_message_source', return_value='helper'), patch('omo_manager.omo_tmux_send.secrets.randbelow', return_value=1), patch('omo_manager.omo_tmux_send._run_tmux_payload', side_effect=capture):
+            short_message = 'x' * (700 - overhead)
+            run_tmux('cfg:1.0', short_message, options())
+            self.assertEqual(wrap_agent_message(short_message, source_target='helper', include_authority_reminder=False), captured[-1][0])
+            long_message = short_message + 'x'
+            run_tmux('cfg:1.0', long_message, options())
+        self.assertEqual(2, len(captured))
+        compact, pointer, identity = captured[-1]
+        self.assertEqual(long_message, identity)
+        self.assertIn(pointer, compact)
+        path = Path(pointer.partition(' after SHA-256 ')[0].removeprefix('Read '))
+        self.assertEqual(wrap_agent_message(long_message, source_target='helper', include_authority_reminder=False).encode('utf-8'), path.read_bytes())
+
+    def test_invalid_compact_mode_rejects_before_paste(self) -> None:
+        with patch.dict(os.environ, {'OMO_MANAGER_COMPACT_DELIVERY': 'invalid'}), patch('omo_manager.omo_tmux_send._run_tmux_payload') as paste:
+            with self.assertRaisesRegex(RuntimeError, 'compact delivery mode'):
+                run_tmux('cfg:1.0', 'work ' * 230, options())
+        paste.assert_not_called()
 
     def test_duplicate_compact_delivery_never_persists_another_file(self) -> None:
         with patch.dict(os.environ, {'OMO_MANAGER_COMPACT_DELIVERY': '1'}), patch('omo_manager.omo_tmux_send.has_recent_tmux_delivery', return_value=True), patch('omo_manager.omo_tmux_send.compact_delivery_pointer') as persist, patch('omo_manager.omo_tmux_send._run_tmux_payload') as send:

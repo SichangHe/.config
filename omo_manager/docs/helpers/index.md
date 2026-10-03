@@ -1,5 +1,7 @@
 # shared helper reference
 
+(authored by agents unless marked 🧑)
+
 This directory is non-authoritative helper documentation. Manager operating
 instructions come from `getagentsmd`; helpers use `OMO_WORK_LOGS_ROOT` for task
 records and local state.
@@ -12,7 +14,8 @@ records and local state.
 - `amh_problem.py claim ID --action TEXT` claims one unchanged watcher problem for exactly 10 minutes; only the watcher can resolve it
 - `report-routing-human-answers.md` concise answers about report routing, `seen`, watcher restart, unsticking, and digests
 - `omo_record_pending.py` records pending items from a delivered `(pending)` block, removes that marker, and optionally emails the human
-- `omo_task_edit.py` manager-only task-file edits: `summary`, `pending-list`, `pending-add`, `pending-replace`, `pending-remove`, `pending-move`, `pending-marker-clear`, registered source-pointer disposition cleanup, `comment-add`, and `delegate-message`
+- `omo_pending.py list` hides internal source labels and trailing mail references for readability; `list --verbatim` prints exact stored items for matching and provenance checks
+- `omo_task_edit.py` manager-only task-file edits: `summary`, `pending-list`, `pending-add`, `pending-replace`, `pending-remove`, `pending-move`, `pending-marker-clear`, registered source-pointer disposition cleanup, and `comment-add`; `delegate-message` rejects task-body writes
 - `omo_task_status.py` updates task frontmatter `status`; reissuing unchanged `running`, human-blocked, or done state safely reconciles one stale TODO row
 - `done-live-no-mail-close.md` documents canonical no-mail completion closure and the exact source-bound WebConf exited-shell recovery
 - `exited-shell-idle-prompt.md` distinguishes the exact two-line Codex exit prompt from later shell activity
