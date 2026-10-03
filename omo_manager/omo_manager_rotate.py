@@ -26,7 +26,17 @@ try:
 except ModuleNotFoundError:
     from omo_agent_instructions import AgentInstructionsError, launch_instructions  # pyright: ignore[reportImplicitRelativeImport]
 
+try:
+    from omo_manager import omo_omnigent
+    from omo_manager.omo_task_lock import task_file_lock
+    from omo_manager.omo_task_metadata import OMNIGENT_RUNAT_RE, OMNIGENT_TOOLS
+except ModuleNotFoundError:
+    import omo_omnigent  # pyright: ignore[reportImplicitRelativeImport]
+    from omo_task_lock import task_file_lock  # pyright: ignore[reportImplicitRelativeImport]
+    from omo_task_metadata import OMNIGENT_RUNAT_RE, OMNIGENT_TOOLS  # pyright: ignore[reportImplicitRelativeImport]
+
 HELPER_DIR = Path(__file__).resolve().parent
+LOCAL_ENV = Path(os.environ.get("OMO_MANAGER_LOCAL_ENV", HELPER_DIR / "local.env"))
 STATUS_HELPER = HELPER_DIR / "omo_codex_status.py"
 WATCHER_HELPER = HELPER_DIR / "omo_manager_setup_watchers.sh"
 TARGET_RE = re.compile(r"^(?P<session>[A-Za-z][A-Za-z0-9_-]*):(?P<window>0|[1-9][0-9]*)(?:\.(?P<pane>0|[1-9][0-9]*))?$")
@@ -62,6 +72,7 @@ class Args:
     replacement_email_file: Path | None = None
     skip_watcher_refresh: bool = False
     codex_package: str = CODEX_PACKAGE
+    tool: str | None = None
 
 
 @dataclass(frozen=True)
@@ -145,12 +156,13 @@ def default_state_dir() -> Path:
 
 def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    _ = parser.add_argument("--target", default=os.environ.get("OMO_MANAGER_TMUX_TARGET"), help="Exact SESSION:WINDOW[.PANE] target (default: OMO_MANAGER_TMUX_TARGET).")
+    _ = parser.add_argument("--target", default=os.environ.get("OMO_MANAGER_TMUX_TARGET"), help="Exact SESSION:WINDOW[.PANE] or omnigent://SESSION_ID target (default: OMO_MANAGER_TMUX_TARGET).")
     _ = parser.add_argument("--root", type=Path, default=Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs")))
     _ = parser.add_argument("--state-dir", type=Path, default=default_state_dir(), help="Private audit state (default: OMO_MANAGER_STATE_DIR or XDG state).")
     _ = parser.add_argument("--model", help="Required with --reasoning-effort only when live metadata is unavailable.")
     _ = parser.add_argument("--reasoning-effort", choices=sorted(EFFORTS), help="Required with --model only when live metadata is unavailable.")
     _ = parser.add_argument("--codex-package", choices=sorted(SUPPORTED_CODEX_PACKAGES), default=CODEX_PACKAGE, help="Codex package for the fresh session (default: @openai/codex@latest).")
+    _ = parser.add_argument("--tool", choices=sorted(OMNIGENT_TOOLS), help="OmniGent targets only: harness for the successor (default: the old session's harness). Requires --model and --reasoning-effort.")
     _ = parser.add_argument("--startup-timeout-s", type=float, default=45.0)
     _ = parser.add_argument("--poll-interval-s", type=float, default=0.5)
     _ = parser.add_argument("--_coordinator-token", dest="coordinator_token", help=argparse.SUPPRESS)
@@ -161,6 +173,8 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--target is required when OMO_MANAGER_TMUX_TARGET is unset.")
     if (parsed.model is None) != (parsed.reasoning_effort is None):
         parser.error("--model and --reasoning-effort must be supplied together.")
+    if parsed.tool is not None and (parsed.model is None or OMNIGENT_RUNAT_RE.fullmatch(parsed.target) is None):
+        parser.error("--tool requires an omnigent:// target plus --model and --reasoning-effort.")
     if parsed.model is not None and MODEL_RE.fullmatch(parsed.model) is None:
         parser.error("--model contains unsupported characters.")
     if parsed.startup_timeout_s <= 0:
@@ -185,6 +199,7 @@ def parse_args(argv: list[str]) -> Args:
         replacement_email_file,
         parsed.skip_watcher_refresh,
         parsed.codex_package,
+        parsed.tool,
     )
 
 
@@ -833,7 +848,94 @@ def execute_rotation(prepared: Preflight) -> Path:
     return audit_path
 
 
+def repoint_frontmatter(path: Path, old: str, new: str) -> bool:
+    """Rewrite `runat`, `managerat`, and `session_id` frontmatter values naming the old OmniGent session."""
+    old_id, new_id = omo_omnigent.session_id(old), omo_omnigent.session_id(new)
+    replacements = {f"runat: {old}": f"runat: {new}", f"managerat: {old}": f"managerat: {new}", f"session_id: {old_id}": f"session_id: {new_id}"}
+    with task_file_lock(path):
+        text = path.read_text(encoding="utf-8")
+        if not text.startswith("---\n"):
+            return False
+        head, separator, body = text[4:].partition("\n---\n")
+        lines = [replacements.get(line, line) for line in head.split("\n")]
+        if not separator or lines == head.split("\n"):
+            return False
+        _ = path.write_text("---\n" + "\n".join(lines) + separator + body, encoding="utf-8")
+        return True
+
+
+def repoint_lines(path: Path, old: str, new: str) -> bool:
+    """Replace the old OmniGent target in one line-oriented index or env file."""
+    text = path.read_text(encoding="utf-8")
+    if old not in text:
+        return False
+    _ = path.write_text(text.replace(old, new), encoding="utf-8")
+    return True
+
+
+# 🧑 "Make it s.t. rotation works for Omnigent overall"
+def rotate_omnigent(args: Args) -> Path:
+    """Replace one OmniGent manager session with a fresh session of the same harness.
+
+    OmniGent cannot reset a session in place: a cleared session gets a new address.
+    So the successor is launched first, then every task file, `TODO.md` line, and,
+    for the main manager, `local.env` and the watchers are repointed to it.
+    The old session is stopped last because the caller may be that session.
+    The session named in `local.env`, or one with no task file, is the main manager;
+    any other is a submanager.
+    """
+    old = args.target
+    session = omo_omnigent.require_mapping(
+        omo_omnigent.request_json("GET", f"/v1/sessions/{omo_omnigent.session_id(old)}?include_items=false"), "session"
+    )
+    tool = args.tool or omo_omnigent.require_text(session.get("harness"), "session harness").removesuffix("-native")
+    if tool not in OMNIGENT_TOOLS:
+        raise RotationError(f"OmniGent rotation does not support the `{tool}` harness")
+    effort = args.reasoning_effort or omo_omnigent.require_text(session.get("reasoning_effort"), "session reasoning effort")
+    model = args.model or omo_omnigent.require_text(session.get("model_override"), "session model").removesuffix(f"-{effort}" if tool == "cursor" else "")
+    workspace = Path(omo_omnigent.require_text(session.get("workspace"), "session workspace"))
+    task_files = sorted(args.root.glob("*.md"))
+    own_task = next((path for path in task_files if f"\nrunat: {old}\n" in path.read_text(encoding="utf-8", errors="replace")[:2000]), None)
+    is_main = own_task is None or (LOCAL_ENV.is_file() and old in LOCAL_ENV.read_text(encoding="utf-8"))
+    try:
+        prompt = launch_instructions("main_manager" if is_main else "submanager").decode()
+    except (AgentInstructionsError, UnicodeDecodeError) as exc:
+        raise RotationError(f"cannot load manager instructions: {exc}") from exc
+    if own_task is not None:
+        prompt = f"Task tag: {own_task.stem}\nTask file: {own_task.name}\nUse --task-file {shlex.quote(own_task.name)} with task-aware helpers.\n{prompt}"
+    if args.replacement_email_file is not None:
+        prompt = f"{prompt.rstrip()}\n\n<human_request>{replacement_context(args.root, args.replacement_email_file)}</human_request>\n"
+    rotations_dir = args.state_dir / "rotations"
+    ensure_private_directory(rotations_dir)
+    audit_path = rotations_dir / f"manager-rotation-{datetime.now(timezone.utc):%Y%m%dT%H%M%S}.{time.time_ns()}-{os.getpid()}.json"
+    audit: dict[str, object] = {"old_target": old, "tool": tool, "model": model, "reasoning_effort": effort, "workspace": str(workspace), "prompt": prompt, "outcome": "preflight-complete"}
+    write_audit(audit_path, audit)
+    try:
+        title = session.get("title")
+        new = omo_omnigent.launch_session(
+            tool, workspace, model, effort, title=title if isinstance(title, str) else "", codex_flags=(omo_omnigent.FULL_ACCESS_FLAG,) if tool == "codex" else ()
+        )
+        audit["new_target"] = new
+        omo_omnigent.send_message(new, prompt)
+        todo = args.root / "TODO.md"
+        repointed = [path.name for path in task_files if repoint_frontmatter(path, old, new)]
+        audit["repointed"] = [*repointed, todo.name] if todo.is_file() and repoint_lines(todo, old, new) else repointed
+        if is_main and LOCAL_ENV.is_file() and repoint_lines(LOCAL_ENV, old, new) and not args.skip_watcher_refresh:
+            watcher_env = {**os.environ, "OMO_WORK_LOGS_ROOT": str(args.root), "OMO_MANAGER_TMUX_TARGET": new, "OMO_MANAGER_STATE_DIR": str(args.state_dir)}
+            watcher = run([str(WATCHER_HELPER)], timeout=120, env=watcher_env)
+            if watcher.returncode != 0:
+                raise RotationError(f"watcher setup failed after OmniGent successor launch: {watcher.stderr.strip()}")
+        write_audit(audit_path, {**audit, "outcome": "succeeded"}, replace=True)
+        omo_omnigent.stop_session(old)
+    except Exception as exc:
+        write_audit(audit_path, {**audit, "outcome": "failed", "error": str(exc)}, replace=True)
+        raise RotationError(str(exc)) from exc
+    return audit_path
+
+
 def rotate(args: Args) -> RotationResult:
+    if OMNIGENT_RUNAT_RE.fullmatch(args.target):
+        return RotationResult(rotate_omnigent(args), coordinated=False)
     lock_fd = acquire_lock(args.state_dir)
     try:
         prepared = preflight(args)

@@ -467,6 +467,9 @@ fi
 if [ -z "$omnigent_identity_output" ] && [ "${OMNIGENT_RUNNER_LAUNCH_HARNESS:-}" = "cursor-native" ]; then
   omnigent_identity_output=$(python3 -I -S "$omnigent_identity_path")
 fi
+if [ -z "$omnigent_identity_output" ] && [ "${OMNIGENT_RUNNER_LAUNCH_HARNESS:-}" = "claude-native" ]; then
+  omnigent_identity_output=$(python3 -I -S "$omnigent_identity_path")
+fi
 omnigent_session_id=""
 omnigent_thread_id=""
 omnigent_workspace=""
