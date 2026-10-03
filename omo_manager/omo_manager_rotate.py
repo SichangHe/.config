@@ -42,7 +42,7 @@ HANDOFF_LOCK_TIMEOUT_S = 10.0
 RESERVATION_NAME = "manager-rotation.handoff.json"
 TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
 CODEX_PACKAGE = "@openai/codex@latest"
-SUPPORTED_CODEX_PACKAGES = {"@openai/codex", "@openai/codex@0.155.1", CODEX_PACKAGE}
+SUPPORTED_CODEX_PACKAGES = {"@openai/codex", "@openai/codex@latest", "@openai/codex@0.155.1"}
 
 
 class RotationError(RuntimeError):
@@ -61,6 +61,7 @@ class Args:
     coordinator_token: str | None = None
     replacement_email_file: Path | None = None
     skip_watcher_refresh: bool = False
+    codex_package: str = CODEX_PACKAGE
 
 
 @dataclass(frozen=True)
@@ -149,10 +150,11 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--state-dir", type=Path, default=default_state_dir(), help="Private audit state (default: OMO_MANAGER_STATE_DIR or XDG state).")
     _ = parser.add_argument("--model", help="Required with --reasoning-effort only when live metadata is unavailable.")
     _ = parser.add_argument("--reasoning-effort", choices=sorted(EFFORTS), help="Required with --model only when live metadata is unavailable.")
+    _ = parser.add_argument("--codex-package", choices=sorted(SUPPORTED_CODEX_PACKAGES), default=CODEX_PACKAGE, help="Codex package for the fresh session (default: @openai/codex@latest).")
     _ = parser.add_argument("--startup-timeout-s", type=float, default=45.0)
     _ = parser.add_argument("--poll-interval-s", type=float, default=0.5)
     _ = parser.add_argument("--_coordinator-token", dest="coordinator_token", help=argparse.SUPPRESS)
-    _ = parser.add_argument("--replacement-email-file", type=Path, help="Stored lifecycle-command email whose exact post-command text is delivered to the replacement manager.")
+    _ = parser.add_argument("--replacement-email-file", type=Path, help="Stored lifecycle-command email whose exact Human body is delivered to the replacement manager.")
     _ = parser.add_argument("--skip-watcher-refresh", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if not parsed.target:
@@ -182,6 +184,7 @@ def parse_args(argv: list[str]) -> Args:
         parsed.coordinator_token,
         replacement_email_file,
         parsed.skip_watcher_refresh,
+        parsed.codex_package,
     )
 
 
@@ -201,7 +204,7 @@ def replacement_context(root: Path, path: Path | None) -> str:
     match = re.match(r"\A[ \t]*replace[ \t]+this[ \t]+agent\b", body, re.IGNORECASE)
     if match is None:
         raise RotationError("replacement email body does not start with the exact replacement command")
-    return body[match.end() :]
+    return body
 
 
 def run(command: list[str], *, timeout: float = 10, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -421,7 +424,7 @@ def preflight(args: Args) -> Preflight:
         raise RotationError(f"cannot load manager instructions: {exc}") from exc
     if args.replacement_email_file is not None:
         context = replacement_context(args.root, args.replacement_email_file)
-        prompt = f"{prompt.rstrip()}\n\n<replacement_reason>{context}</replacement_reason>\n"
+        prompt = f"{prompt.rstrip()}\n\n<human_request>{context}</human_request>\n"
     pane_output = capture_pane(pane.pane_id)
     if resolve_exact_pane(args.target) != pane:
         raise RotationError("target pane identity or launch context changed during preflight")
@@ -575,10 +578,11 @@ def clear_reservation(state_dir: Path, token: str) -> None:
     reservation_path(state_dir).unlink()
 
 
-def fresh_command(metadata: LaunchMetadata, prompt_path: Path, target: str, root: Path, state_dir: Path) -> str:
+def fresh_command(metadata: LaunchMetadata, prompt_path: Path, target: str, root: Path, state_dir: Path, codex_package: str = CODEX_PACKAGE) -> str:
     command = [
         "bunx",
-        CODEX_PACKAGE,
+        codex_package,
+        *([] if codex_package == "@openai/codex@0.155.1" else ["--no-daemon"]),
         "--dangerously-bypass-approvals-and-sandbox",
         "--model",
         metadata.model,
@@ -687,6 +691,7 @@ def coordinator_command(prepared: Preflight, token: str, log_path: Path) -> str:
         command.extend(("--replacement-email-file", str(prepared.args.replacement_email_file)))
     if prepared.args.skip_watcher_refresh:
         command.append("--skip-watcher-refresh")
+    command.extend(("--codex-package", prepared.args.codex_package))
     helper_command = shlex.join(command)
     return f'{{ tmux set-option -p -t "$TMUX_PANE" remain-on-exit off && {helper_command}; }} >> {shlex.quote(str(log_path))} 2>&1'
 
@@ -797,7 +802,7 @@ def execute_rotation(prepared: Preflight) -> Path:
     prompt_path = rotations_dir / f"manager-prompt-{record_id}.txt"
     audit_path = rotations_dir / f"manager-rotation-{record_id}.json"
     write_private(prompt_path, prepared.prompt)
-    command = fresh_command(prepared.metadata, prompt_path, prepared.pane.canonical_target, prepared.args.root, prepared.args.state_dir)
+    command = fresh_command(prepared.metadata, prompt_path, prepared.pane.canonical_target, prepared.args.root, prepared.args.state_dir, prepared.args.codex_package)
     write_audit(audit_path, audit_payload(prepared, prompt_path, command, "preflight-complete"))
 
     try:
@@ -816,6 +821,7 @@ def execute_rotation(prepared: Preflight) -> Path:
             watcher_env["OMO_WORK_LOGS_ROOT"] = str(prepared.args.root)
             watcher_env["OMO_MANAGER_TMUX_TARGET"] = prepared.pane.canonical_target
             watcher_env["OMO_MANAGER_STATE_DIR"] = str(prepared.args.state_dir)
+            watcher_env.setdefault("OMO_MANAGER_WATCHER_HEALTH_TIMEOUT_S", "30")
             watcher = run([str(WATCHER_HELPER)], timeout=60, env=watcher_env)
             if watcher.returncode != 0:
                 raise RotationError(f"watcher setup failed after fresh Codex startup: {watcher.stderr.strip()}")

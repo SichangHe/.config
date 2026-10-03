@@ -49,6 +49,7 @@ from omo_manager.omo_manager_rotation_contain import TaskBinding
 from omo_manager.omo_manager_rotation_contain import WatcherProof
 from omo_manager.omo_manager_rotation_contain import audit_binding
 from omo_manager.omo_manager_rotation_contain import current_command
+from omo_manager.omo_manager_rotation_contain import fresh_launch_argv_variants
 from omo_manager.omo_manager_rotation_contain import json_no_duplicates
 from omo_manager.omo_manager_rotation_contain import manager_rotation_lock
 from omo_manager.omo_manager_rotation_contain import parse_datetime
@@ -732,17 +733,10 @@ def containment_receipt(args: Args) -> ContainmentReceipt:
         failed_prompt = failed_prompt_bytes.decode("utf-8").rstrip("\n")
     except UnicodeDecodeError as exc:
         raise BridgeError("contained fresh prompt is not UTF-8.") from exc
-    failed_argv = (
-        str(launch_argv0),
-        CODEX_PACKAGE,
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--model",
-        audit.model,
-        "--config",
-        f'model_reasoning_effort="{audit.reasoning_effort}"',
-        failed_prompt,
-    )
-    if sha256("\0".join(failed_argv).encode()) != failed_process.argv_sha256:
+    if not any(
+        sha256("\0".join(failed_argv).encode()) == failed_process.argv_sha256
+        for failed_argv in fresh_launch_argv_variants(failed_prompt, audit, str(launch_argv0))
+    ):
         raise BridgeError("containment receipt failed-successor command does not match its recorded argv identity.")
     containment_args = ContainmentArgs(
         args.root,
@@ -924,6 +918,7 @@ def fresh_launch_command(args: Args, receipt: ContainmentReceipt) -> tuple[str, 
     argv = (
         executable,
         CODEX_PACKAGE,
+        "--no-daemon",
         "--dangerously-bypass-approvals-and-sandbox",
         "--model",
         receipt.audit.model,

@@ -148,7 +148,7 @@ class MainManagerModelRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             args = replace(self.args(root), model="gpt-5.6")
-            with self.assertRaisesRegex(RecoveryError, "use gpt-6-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra"):
+            with self.assertRaisesRegex(RecoveryError, "use gpt-6.1-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra"):
                 recover(args)
 
     def test_parse_args_supports_gpt_6_astra(self) -> None:
@@ -238,16 +238,16 @@ class MainManagerModelRecoveryTests(unittest.TestCase):
             probe_model("gpt-5.6-terra", "xhigh", 4.0)
 
         command = calls[0]
-        self.assertEqual(["bunx", "@openai/codex@latest"], command[:2])
+        self.assertEqual(["bunx", "@openai/codex@latest", "--no-daemon", "exec"], command[:4])
         self.assertIn("--ephemeral", command)
         self.assertIn("--ignore-user-config", command)
         self.assertIn("--ignore-rules", command)
         self.assertEqual("read-only", command[command.index("--sandbox") + 1])
         self.assertEqual("gpt-5.6-terra", command[command.index("--model") + 1])
 
-    def test_resume_command_uses_latest_package(self) -> None:
+    def test_resume_command_uses_latest_package_without_daemon(self) -> None:
         command = resume_command(self.binding(Path("/tmp/work logs")), "gpt-5.6-terra", self.SESSION_ID, "[marker]")
-        self.assertIn("exec bunx @openai/codex@latest", command)
+        self.assertIn("exec bunx @openai/codex@latest --no-daemon", command)
 
     def test_reserve_and_finish_handoff_keep_one_private_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

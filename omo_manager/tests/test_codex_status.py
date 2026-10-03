@@ -64,8 +64,11 @@ class CodexStatusTests(unittest.TestCase):
         self.runtime_capture.start()
         self.managed_process.start()
         self.codex_process.start()
+        self.prompt_guard = patch('omo_manager.omo_codex_status.staged_prompt_guarded', return_value=False)
+        self.prompt_guard.start()
 
     def tearDown(self) -> None:
+        self.prompt_guard.stop()
         self.codex_process.stop()
         self.managed_process.stop()
         self.runtime_capture.stop()
@@ -126,6 +129,20 @@ class CodexStatusTests(unittest.TestCase):
                 patch("omo_manager.omo_codex_status.Path.home", return_value=Path(tmp)),
             ):
                 self.assertFalse(pane_has_exact_codex_process("cfg:1.0", "%7"))
+
+    def test_shell_started_node_codex_accepts_exact_bunx_package_script(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / "bunx-30033-@openai/codex@0.155.1/node_modules/@openai/codex/bin/codex.js"
+            package.parent.mkdir(parents=True)
+            package.write_text("", encoding="utf-8")
+            with patch("omo_manager.omo_codex_status.exact_pane_id", return_value="%7"), patch(
+                "omo_manager.omo_codex_status.exact_pane_process", return_value=("node", ["/bin/sh"])
+            ), patch("omo_manager.omo_codex_status.exact_shell_started_foreground_argv", return_value=["node", str(package)]):
+                self.assertTrue(pane_has_exact_codex_process("cfg:1.0", "%7"))
+                other = package.with_name("not-codex.js")
+                other.write_text("", encoding="utf-8")
+                with patch("omo_manager.omo_codex_status.exact_shell_started_foreground_argv", return_value=["node", str(other)]):
+                    self.assertFalse(pane_has_exact_codex_process("cfg:1.0", "%7"))
 
     def test_shell_started_codex_process_rejects_unrelated_terminal_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -273,6 +290,10 @@ class CodexStatusTests(unittest.TestCase):
     def test_tail_pane_id_returns_empty_when_tmux_capture_times_out(self) -> None:
         with patch("omo_manager.omo_codex_status.subprocess.run", side_effect=subprocess.TimeoutExpired(["tmux"], 5)):
             self.assertEqual([], tail_pane_id("%1", 80))
+
+    def test_exact_pane_id_rejects_missing_tmux_output(self) -> None:
+        with patch("omo_manager.omo_codex_status.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)):
+            self.assertEqual("", exact_pane_id("cfg:1"))
 
     def test_inspect_keeps_active_bunx_codex_running_when_queue_overlay_hides_footer(self) -> None:
         lines = [
@@ -775,6 +796,28 @@ class CodexStatusTests(unittest.TestCase):
             lines = ['• Working (2s • esc to interrupt)', '', '› Ask Codex to do anything', '', '  gpt-6-sol medium · ~/.config', hint]
             self.assertEqual('running', report_from_lines(lines).status)
             self.assertEqual('Ask Codex to do anything', report_from_lines(lines).input_text)
+
+    def test_warning_only_hint_after_model_footer_does_not_hide_composer(self) -> None:
+        footer = '  gpt-6-sol medium · ~/.config · weekly 77% left · Context 0% used'
+        warning = '                                                       ⚠ 1 warning · f2 to view'
+        ready = ['› Ask Codex to do anything', '', footer, warning]
+        self.assertEqual('ready', report_from_lines(ready).status)
+        self.assertEqual('Ask Codex to do anything', report_from_lines(ready).input_text)
+        pasted = ['› Read the exact private pointer', '  __OMO_PROMPT_END_123__', '', footer, warning]
+        self.assertEqual('stuck_input', report_from_lines(pasted).status)
+        self.assertEqual('Read the exact private pointer\n  __OMO_PROMPT_END_123__', report_from_lines(pasted).input_text)
+
+    def test_latest_codex_uppercase_model_footer_and_shortcut_hint(self) -> None:
+        footer = '  GPT-6-Sol max · ~/.config · Context 0% used'
+        hint = '  ? for shortcuts                                     ⚠ 2 warnings · f2 to view'
+        ready = ['  >_ OpenAI Codex (v0.159.2)', '', '› Ask Codex to do anything', '', footer, hint]
+        self.assertEqual('ready', report_from_lines(ready).status)
+        self.assertEqual('Ask Codex to do anything', report_from_lines(ready).input_text)
+        pasted = ['› Read the exact private pointer', '  __OMO_PROMPT_END_123__', '', footer, hint]
+        self.assertEqual('stuck_input', report_from_lines(pasted).status)
+        self.assertEqual('Read the exact private pointer\n  __OMO_PROMPT_END_123__', report_from_lines(pasted).input_text)
+        busy = ['• Working (2s • esc to interrupt)', *ready]
+        self.assertEqual('running', report_from_lines(busy).status)
 
     def test_status_running_when_message_is_queued(self) -> None:
         lines = ['• Messages to be submitted after next tool call (press esc to interrupt and send immediately)', '› Use /skills to list available skills', '  gpt-5.5']
@@ -2138,6 +2181,38 @@ class CodexStatusTests(unittest.TestCase):
         with patch('omo_manager.omo_codex_status.wait_while_compacting', side_effect=TimeoutError), patch('omo_manager.omo_codex_status.subprocess.run') as run:
             self.assertEqual('not_safe:compacting', submit_stuck_input_if_present('cfg:1.0', report))
         run.assert_not_called()
+
+    def test_submit_stuck_input_never_submits_initial_prompt_probe(self) -> None:
+        staged = ['› Read the exact task prompt.__OMO_PROMPT_END_123__', '  gpt-5.5']
+        ordinary = ['› Continue task', '  gpt-5.5']
+        with patch('omo_manager.omo_codex_status.tail', return_value=ordinary), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            self.assertEqual('not_safe:staged_prompt_probe', submit_stuck_input_if_present('cfg:1.0', report_from_lines(staged)))
+        run.assert_not_called()
+        with patch('omo_manager.omo_codex_status.tail', return_value=staged), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
+            self.assertEqual('not_safe:staged_prompt_probe', submit_stuck_input_if_present('cfg:1.0', report_from_lines(ordinary)))
+        self.assertFalse(any('send-keys' in str(call) for call in run.call_args_list))
+
+    def test_submit_stuck_input_refuses_hidden_prompt_probe_in_collapsed_paste(self) -> None:
+        collapsed = Report('stuck_input', ['› [Pasted Content 1102 chars]', '  gpt-5.5'], '[Pasted Content 1102 chars]', True)
+        with patch('omo_manager.omo_codex_status.staged_prompt_guarded', return_value=True), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            self.assertEqual('not_safe:staged_prompt_probe', submit_stuck_input_if_present('cfg:1.0', collapsed))
+        run.assert_not_called()
+
+    def test_submit_stuck_input_refuses_obscured_probe_after_search_overlay(self) -> None:
+        overlay = ['› task @filename', '  no matches', '  enter insert · esc close · ←/→ switch search modes       [All Results] Filesystem Only Plugins']
+        report = report_from_lines(overlay)
+        with patch('omo_manager.omo_codex_status.staged_prompt_guarded', return_value=True), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            self.assertEqual('not_safe:staged_prompt_probe', submit_stuck_input_if_present('cfg:1.0', report))
+        run.assert_not_called()
+
+    def test_prompt_guard_read_failure_is_fail_closed(self) -> None:
+        self.prompt_guard.stop()
+        try:
+            from omo_manager.omo_codex_status import staged_prompt_guarded
+            with patch('omo_manager.omo_codex_status.subprocess.run', side_effect=OSError('tmux unavailable')):
+                self.assertTrue(staged_prompt_guarded(self.runtime))
+        finally:
+            self.prompt_guard.start()
 
     def test_submit_stuck_input_if_present_sends_enter_while_latest_screen_is_busy(self) -> None:
         report = Report('stuck_input', ['› Continue task'], 'Continue task', True)

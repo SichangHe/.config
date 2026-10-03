@@ -1,5 +1,7 @@
 # Codex manager rotation
 
+(authored by agents unless marked 🧑)
+
 `omo_manager_rotate.py` replaces the current main-manager Codex process with a fresh Codex session in the same tmux pane and window. It never resumes the old Codex session. The same command works from an operator pane or from the manager process in the exact target pane.
 
 The target must be numeric `SESSION:WINDOW` or `SESSION:WINDOW.PANE`. Window shorthand is accepted only when the exact window has one pane and that pane is index 0; it is canonicalized to `SESSION:WINDOW.0`. The helper compares tmux's resolved session, window, pane, pane ID, and window ID and rejects prefix or ambiguous resolution. It holds a private nonblocking rotation lock while it:
@@ -9,11 +11,13 @@ The target must be numeric `SESSION:WINDOW` or `SESSION:WINDOW.PANE`. Window sho
 3. captures the command and output from `getagentsmd`, `get agent_manager`, and `get main_manager`;
 4. captures the existing pane output and writes the prompt plus a JSON audit record under the private manager state directory;
 5. runs `tmux respawn-pane -k` against the resolved pane ID with the pane's existing working directory;
-6. starts `bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox` with explicit model, effort, and the composed initial prompt;
+6. starts `bunx @openai/codex@latest --no-daemon --dangerously-bypass-approvals-and-sandbox` with explicit model, effort, and the composed initial prompt;
 7. verifies the same pane/window identity and waits for `omo_codex_status.py` to report `running` or `ready`; and
 8. refreshes watchers with explicit `OMO_WORK_LOGS_ROOT`, `OMO_MANAGER_TMUX_TARGET`, and `OMO_MANAGER_STATE_DIR` values.
 
 The generated respawn command never uses `resume` or a session UUID. The required initial prompt is stored in a mode-`0600` file and read by the fresh launch, because worker instructions themselves may discuss resuming work. State directories are mode `0700`; prompt, lock, and audit files are mode `0600`. The audit preserves the prior pane output, validated launch argv and metadata, exact pane identity, generated command, and final outcome.
+
+For a stored replacement email, the successor receives the complete Human body verbatim, including `Replace this agent`, after the manager role instructions. No part of the Human request is rewritten into a replacement prompt, and no extra role paragraph is synthesized.
 
 When invoked from the target pane, the first helper performs the complete non-mutating preflight and creates an exclusive mode-`0600` token reservation while holding the main rotation lock. Any other rotation rejects an active reservation. It then starts a short-lived detached coordinator window in the same tmux session and passes a canonical target plus fully explicit root, state directory, model, reasoning effort, timeout values, and the private token. Arguments and paths are shell-quoted.
 

@@ -84,7 +84,7 @@ class ManagerContainmentLaunchTests(unittest.TestCase):
     failed_session_id: str = "22222222-2222-7222-8222-222222222222"
     fresh_session_id: str = "33333333-3333-7333-8333-333333333333"
 
-    def fixture(self, base: Path) -> tuple[Args, ContainmentReceipt]:
+    def fixture(self, base: Path, package: str = "@openai/codex@latest", daemon_flags: tuple[str, ...] = ()) -> tuple[Args, ContainmentReceipt]:
         root = base / "work_logs"
         cwd = base / "manager-work"
         state = base / "state"
@@ -213,7 +213,8 @@ manager task
         failed_pane = PaneIdentity("manager:0.0", "%15", "@15", 201, cwd)
         failed_argv = (
             str(executable),
-            "@openai/codex@latest",
+            package,
+            *daemon_flags,
             "--dangerously-bypass-approvals-and-sandbox",
             "--model",
             "gpt-5.6-sol",
@@ -309,6 +310,24 @@ manager task
         self.assertEqual(args.expected_watcher_pid, receipt.watcher.pid)
         self.assertEqual(Path(tmp) / "bin" / "bunx", receipt.launch_argv0)
         self.assertEqual(str((Path(tmp) / "bin" / "bun").resolve()), receipt.launch_executable.path)
+
+    def test_receipt_preserves_exact_current_and_historical_failed_launch_digests(self) -> None:
+        for package, flags in (
+            ("@openai/codex@latest", ("--no-daemon",)),
+            ("@openai/codex@0.155.1", ()),
+            ("@openai/codex", ()),
+        ):
+            with self.subTest(package=package, flags=flags), tempfile.TemporaryDirectory() as tmp:
+                _, receipt = self.fixture(Path(tmp), package, flags)
+                self.assertEqual(201, receipt.failed_successor_process.pid)
+        for package, flags in (
+            ("@openai/codex@next", ()),
+            ("@openai/codex@latest", ("--no-daemon", "--unexpected")),
+            ("@openai/codex@0.155.1", ("--no-daemon",)),
+        ):
+            with self.subTest(package=package, flags=flags), tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaisesRegex(BridgeError, "recorded argv identity"):
+                    self.fixture(Path(tmp), package, flags)
 
     def test_receipt_rejects_semantic_failure_even_with_recomputed_digest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -443,6 +462,7 @@ manager task
             command, argv = fresh_launch_command(args, receipt)
 
         self.assertEqual(str(receipt.launch_argv0), argv[0])
+        self.assertEqual(("@openai/codex@latest", "--no-daemon"), argv[1:3])
         self.assertIn("check_for_update_on_startup=false", argv)
         self.assertNotIn("resume", argv)
         self.assertIn("OMO_WORK_LOGS_ROOT", command)

@@ -1,5 +1,10 @@
 # Codex helpers
 
+(authored by agents unless marked 🧑)
+
+- `local-proxy-start.md`
+  - fresh workers through an unauthenticated loopback Responses proxy
+
 - `cligate-quota-planning.md`
   - quota planning check before large OpenAI/Codex work
 - `live-model-switch.md`

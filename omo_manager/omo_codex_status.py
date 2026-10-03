@@ -21,9 +21,10 @@ DEFAULT_COMPACTION_WAIT_TIMEOUT_S = float(os.environ.get("OMO_CODEX_COMPACTION_W
 COMPACTION_WAIT_INTERVAL_S = 0.5
 FILE_SEARCH_RECOVERY_INTERVAL_S = 0.05
 COMPACTION_WAIT_LINES = 2000
-CODEX_RE = re.compile(r"  gpt-")
-CODEX_FOOTER_RE = re.compile(r"^  gpt-")
-CODEX_FOOTER_HINT_RE = re.compile(r"^  ← for agents · \? for shortcuts(?: +⚠ [0-9]+ warnings? · f2 to view)? *$")
+# 🧑 "Broken things include: ... Codex detection"
+CODEX_RE = re.compile(r"  gpt-", re.IGNORECASE)
+CODEX_FOOTER_RE = re.compile(r"^  gpt-", re.IGNORECASE)
+CODEX_FOOTER_HINT_RE = re.compile(r"^  (?:(?:← for agents · )?\? for shortcuts(?: +⚠ [0-9]+ warnings? · f2 to view)?| +⚠ [0-9]+ warnings? · f2 to view) *$")
 SUPPORTED_CODEX_PACKAGES = {"@openai/codex", "@openai/codex@latest", "@openai/codex@0.155.1"}
 PROC_ROOT = Path("/proc")
 ERROR_RE = re.compile(r"\b(failed|panic|traceback|exception)\b|\berror\b(?!\s*=\s*\d)", re.IGNORECASE)
@@ -210,7 +211,7 @@ def exact_pane_id(target: str) -> str:
         return ""
     if out.returncode != 0:
         return ""
-    resolved, separator, pane_id = out.stdout.strip().partition("\t")
+    resolved, separator, pane_id = (out.stdout or "").strip().partition("\t")
     return pane_id if separator and resolved == canonical and pane_id.startswith("%") else ""
 
 
@@ -419,7 +420,14 @@ def pane_has_exact_codex_process(target: str, pane_id: str, proc_root: Path | No
         try:
             executable = Path(foreground_tokens[1]).resolve(strict=True)
             package = Path.home() / ".bun/install/global/node_modules/@openai/codex/bin/codex.js"
-            return executable == package.resolve(strict=True) and exact_pane_id(target) == pane_id
+            installed = executable == package.resolve(strict=True) if package.exists() else False
+            bunx_package = (
+                len(executable.parts) >= 8
+                and executable.parts[-5:] == ("node_modules", "@openai", "codex", "bin", "codex.js")
+                and re.fullmatch(r"bunx-[0-9]+-@openai", executable.parts[-7]) is not None
+                and re.fullmatch(r"codex@[0-9]+\.[0-9]+\.[0-9]+", executable.parts[-6]) is not None
+            )
+            return (installed or bunx_package) and exact_pane_id(target) == pane_id
         except OSError:
             return False
     if exact_codex_launch(current_command, start_tokens):
@@ -1183,13 +1191,30 @@ def submit_stuck_input_if_present(target: str, report: Report, n_lines: int = CO
         return _submit_stuck_input_if_present(target, report, n_lines, compaction_wait_timeout_s)
 
 
+def staged_prompt_guarded(runtime: TmuxRuntimeBinding) -> bool:
+    """Refuse auto-Enter while an exact pane retains an uncertain initial paste."""
+
+    try:
+        result = subprocess.run(
+            ["tmux", "show-options", "-p", "-qv", "-t", runtime.pane_id, "@omo_initial_prompt_pending"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        return result.returncode != 0 or bool((result.stdout or "").strip())
+    except (OSError, subprocess.SubprocessError):
+        return True
+
+
 def _submit_stuck_input_if_present(target: str, report: Report, n_lines: int, compaction_wait_timeout_s: float) -> str:
     if report.status != "stuck_input":
         return ""
+    if "__OMO_PROMPT_END_" in report.input_text:
+        return "not_safe:staged_prompt_probe"
     try:
         runtime = exact_managed_runtime(target)
     except (OSError, RuntimeError, subprocess.SubprocessError):
         return "failed"
+    if staged_prompt_guarded(runtime):
+        return "not_safe:staged_prompt_probe"
     try:
         latest = wait_while_compacting(target, n_lines, compaction_wait_timeout_s)
     except TimeoutError:
@@ -1201,6 +1226,10 @@ def _submit_stuck_input_if_present(target: str, report: Report, n_lines: int, co
         return "failed"
     if latest.status != "stuck_input":
         return "not_stuck"
+    if staged_prompt_guarded(runtime):
+        return "not_safe:staged_prompt_probe"
+    if "__OMO_PROMPT_END_" in latest.input_text:
+        return "not_safe:staged_prompt_probe"
     if not latest.can_submit_input:
         return f"not_safe:{latest.input_blocker or 'unknown'}"
     if has_file_search_overlay(latest.lines):
@@ -1217,6 +1246,10 @@ def _submit_stuck_input_if_present(target: str, report: Report, n_lines: int, co
             return "failed"
         if after.status in {"running", "waiting_subagent", "ready"}:
             return "sent_enter"
+        if staged_prompt_guarded(runtime):
+            return "not_safe:staged_prompt_probe"
+        if "__OMO_PROMPT_END_" in after.input_text:
+            return "not_safe:staged_prompt_probe"
         if has_plan_prompt(after.lines):
             return "not_safe:plan_prompt"
         if after.status != "stuck_input" or not after.can_submit_input:

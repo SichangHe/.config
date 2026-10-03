@@ -28,6 +28,7 @@ from omo_manager.omo_manager_rotation_contain import WatcherProof
 from omo_manager.omo_manager_rotation_contain import audit_binding
 from omo_manager.omo_manager_rotation_contain import contain
 from omo_manager.omo_manager_rotation_contain import containment_locks
+from omo_manager.omo_manager_rotation_contain import command_line_matches_fresh_launch
 from omo_manager.omo_manager_rotation_contain import guarded_inert_respawn
 from omo_manager.omo_manager_rotation_contain import main
 from omo_manager.omo_manager_rotation_contain import read_regular_file
@@ -206,6 +207,25 @@ class ManagerRotationContainTests(unittest.TestCase):
         self.assertEqual(102, binding.old_launch_pid)
         self.assertEqual(self.old_session_id, old_session.session_id)
         self.assertEqual(args.watcher_failure_log_sha256, binding.watcher_failure_log.sha256)
+
+    def test_fresh_launch_guard_accepts_exact_current_and_historical_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _, binding, _ = self.audit_fixture(Path(tmp))
+        suffix = ("--dangerously-bypass-approvals-and-sandbox", "--model", binding.model, "--config", f'model_reasoning_effort="{binding.reasoning_effort}"', "prompt")
+        for package, flags in (
+            ("@openai/codex@latest", ("--no-daemon",)),
+            ("@openai/codex@latest", ()),
+            ("@openai/codex@0.155.1", ()),
+            ("@openai/codex", ()),
+        ):
+            with self.subTest(package=package, flags=flags):
+                argv = ("/bin/bunx", package, *flags, *suffix)
+                self.assertTrue(command_line_matches_fresh_launch(argv, "prompt\n", binding, "bunx"))
+                self.assertFalse(command_line_matches_fresh_launch((*argv, "extra"), "prompt", binding, "bunx"))
+                self.assertFalse(command_line_matches_fresh_launch(argv, "different prompt", binding, "bunx"))
+                self.assertFalse(command_line_matches_fresh_launch(argv, "prompt", binding, "other"))
+        self.assertFalse(command_line_matches_fresh_launch(("bunx", "@openai/codex@next", *suffix), "prompt", binding, "bunx"))
+        self.assertFalse(command_line_matches_fresh_launch(("bunx", "@openai/codex@0.155.1", "--no-daemon", *suffix), "prompt", binding, "bunx"))
 
     def test_audit_binding_rejects_unpinned_or_non_watcher_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -23,14 +23,14 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from omo_manager.omo_codex_start import UUID_RE, exact_process_tmux_condition, query_exact_status_session_id, record_session_id, resolve_pane, start_ticks_guarded_tmux_action
-from omo_manager.omo_codex_status import Args as StatusArgs, current_input_text, inspect, is_stock_placeholder_input_text
+from omo_manager.omo_codex_status import Args as StatusArgs, current_input_text, inspect, is_stock_placeholder_input_text, pane_has_exact_codex_process
 from omo_manager.omo_tmux_input_lock import tmux_input_lock
 from omo_manager.omo_task_lock import canonical_target, task_file_lock, task_target_lock
 from omo_manager.omo_task_metadata import parse_task_metadata
 from omo_manager.omo_task_status import authoritative_active_target_task_paths, root_membership_lock
 from omo_manager.omo_blocking import task_paths
 
-CODEX_PANE_COMMANDS = {"bun", "bunx", "codex"}
+CODEX_PANE_COMMANDS = {"bun", "bunx", "codex", "node"}
 TARGET_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -139,6 +139,8 @@ def candidates(
         except Exception:
             continue
         if pane.command not in CODEX_PANE_COMMANDS:
+            continue
+        if pane.command == "node" and not pane_has_exact_codex_process(pane.target, pane.pane_id):
             continue
         report = inspect(StatusArgs(pane.target, 80))
         if report.status not in {"ready", "running"}:

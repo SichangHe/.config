@@ -3323,6 +3323,7 @@ $ """
 
     def test_feedback_prompt_names_task_file_and_report_path(self) -> None:
         text = feedback_prompt("task.md")
+        self.assertLessEqual(len(text.encode("utf-8")), 700)
         self.assertIn("REPORT_FILE=$(omo_report.sh --alloc-message-file)", text)
         self.assertIn('omo_report.sh --status done --message-file "$REPORT_FILE"', text)
         self.assertNotIn("--task-file", text)
@@ -3333,6 +3334,18 @@ $ """
         self.assertIn("PCODX ledger path", text)
         self.assertIn("forward it to OPC partial-compaction work", text)
         self.assertIn("at most five short bullets", text)
+
+    def test_feedback_prompt_refuses_oversized_future_copy_before_paste(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.codex_status", return_value="ready"),
+            patch("omo_manager.omo_codex_stop.feedback_prompt", return_value="long feedback " * 100),
+            patch("omo_manager.omo_codex_stop.paste_text") as paste,
+            patch("omo_manager.omo_codex_stop.tmux") as tmux,
+            self.assertRaisesRegex(RuntimeError, "exceeds Codex visible paste bound"),
+        ):
+            maybe_request_feedback(Args("cfg:1.0", 0.0, 10, False, False, task_file="task.md"))
+        paste.assert_not_called()
+        tmux.assert_not_called()
 
     def test_stop_dry_run_refuses_missing_target_before_printing(self) -> None:
         with patch("omo_manager.omo_codex_stop.pane_id", return_value=""):

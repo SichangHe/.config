@@ -910,7 +910,34 @@ class CodexSessionCaptureTests(unittest.TestCase):
             self.assertTrue(exact_status_probe_suffix_at_cursor(pane, probe))
             self.assertFalse(exact_status_probe_suffix_at_cursor(pane, probe))
 
-    def test_exact_status_accepts_visible_bound_process_card(self):
+    def test_exact_status_probe_rendering_binds_wrapped_0157_composer(self) -> None:
+        pane = Pane("w:1.0", "%1", "@1", "node", Path("/tmp"), 42, 7001)
+        probe = "__OMO_0123456789abcdef__"
+        exact = (f"  {probe}".ljust(80), len("  " + probe), "› /status".ljust(80))
+        logical = "/status\n  " + probe
+        with patch("omo_manager.omo_codex_start.raw_status_composer_cursor", return_value=exact), patch(
+            "omo_manager.omo_codex_start.prompt_state", return_value=("ready", [], logical)
+        ):
+            self.assertTrue(exact_status_probe_rendering(pane, probe))
+            self.assertTrue(exact_status_probe_suffix_at_cursor(pane, probe))
+        for changed in (
+            (exact[0], exact[1], "› /other".ljust(80)),
+            (exact[0], exact[1], "› /status extra".ljust(80)),
+            (exact[0], exact[1] - 1, exact[2]),
+            (f"  {probe} extra".ljust(80), exact[1], exact[2]),
+            ("  [Pasted Content 26 chars]".ljust(80), exact[1], exact[2]),
+        ):
+            with self.subTest(changed=changed), patch("omo_manager.omo_codex_start.raw_status_composer_cursor", return_value=changed), patch(
+                "omo_manager.omo_codex_start.prompt_state", return_value=("ready", [], logical)
+            ):
+                self.assertFalse(exact_status_probe_rendering(pane, probe))
+        for unrelated in (probe, "unrelated " + probe, "/status other\n  " + probe, "[Pasted Content 26 chars]"):
+            with self.subTest(unrelated=unrelated), patch("omo_manager.omo_codex_start.raw_status_composer_cursor", return_value=exact), patch(
+                "omo_manager.omo_codex_start.prompt_state", return_value=("ready", [], unrelated)
+            ):
+                self.assertFalse(exact_status_probe_rendering(pane, probe))
+
+    def test_exact_status_accepts_new_visible_bound_process_card(self):
         pane = Pane("w:1.0", "%1", "@1", "bun", Path("/tmp"), 42)
         completed = __import__("subprocess").CompletedProcess([], 0, "", "")
 
@@ -921,8 +948,19 @@ class CodexSessionCaptureTests(unittest.TestCase):
             return completed
 
         status = f"╭────╮\n│ >_ OpenAI Codex (v0.150.1) │\n│ Session: {self.UUID} │\n╰────╯"
-        with patch("omo_manager.omo_codex_start.run", side_effect=fake_run), patch("omo_manager.omo_codex_start.exact_tail", side_effect=((True, [status]), (True, self.READY), (True, [status]))), patch("omo_manager.omo_codex_start.verify_same_process"):
+        with patch("omo_manager.omo_codex_start.run", side_effect=fake_run), patch("omo_manager.omo_codex_start.exact_tail", side_effect=((True, ["before"]), (True, self.READY), (True, [status]))), patch("omo_manager.omo_codex_start.verify_same_process"):
             self.assertEqual(self.UUID, query_exact_status_session_id(pane, 80, 1))
+
+    def test_exact_status_rejects_unchanged_visible_card(self):
+        pane = Pane("w:1.0", "%1", "@1", "bun", Path("/tmp"), 42)
+        status = f"╭────╮\n│ >_ OpenAI Codex (v0.150.1) │\n│ Session: {self.UUID} │\n╰────╯"
+
+        def fake_run(argv):
+            token = accepted_tmux_marker(argv[6]) if argv[:3] == ["tmux", "if-shell", "-F"] else ""
+            return __import__("subprocess").CompletedProcess(argv, 0, token + "\n" if token else "", "")
+
+        with patch("omo_manager.omo_codex_start.run", side_effect=fake_run), patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, [status])), patch("omo_manager.omo_codex_start.verify_same_process"), patch("omo_manager.omo_codex_start.require_prompt_ready"), patch("omo_manager.omo_codex_start.prompt_state", return_value=("ready", self.READY, "")):
+            self.assertEqual("", query_exact_status_session_id(pane, 80, 0.01))
 
     def test_exact_status_ignores_stale_visible_uuid_until_new_response(self):
         pane = Pane("w:1.0", "%1", "@1", "bun", Path("/tmp"), 42)

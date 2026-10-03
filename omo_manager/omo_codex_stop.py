@@ -2600,17 +2600,17 @@ def codex_status(target: str) -> str:
     return status(lines, current_block(lines))
 
 
+# 🧑 "dw:0 has input stuck in input box. ... How to prevent it from ever happening again?"
 def feedback_prompt(task_file: str) -> str:
     return (
-        "Before the manager closes this session, please send concise process feedback if this was a non-trivial task. "
-        "If there is anything worth preserving, first run `REPORT_FILE=$(omo_report.sh --alloc-message-file)`, "
-        "write the report file through an editor, apply_patch, or another non-shell text channel, "
+        "Before close, send concise process feedback if useful. "
+        "Set `REPORT_FILE=$(omo_report.sh --alloc-message-file)`, write it with an editor or apply_patch, "
         'then run `omo_report.sh --status done --message-file "$REPORT_FILE"`. '
         "Do not use cat, heredocs, or shell text injection for report bodies. "
-        "Say whether you had partial-compaction access, whether you used it, why or why not, and any feedback about the PCODX instructions, tools, or compaction triggers. "
-        "Mention unclear instructions, routing/communication gaps, missing tooling/docs, check friction, or whether manager-triggered compaction would have helped you continue. "
-        "If the partial-compaction feedback is substantial, include the relevant evidence paths, such as the task file, tmux target, session id, transcript path, or PCODX ledger path, so the manager can email the human and forward it to OPC partial-compaction work. "
-        "Keep it to at most five short bullets. If there is no useful feedback, say so briefly."
+        "Say whether you had partial-compaction access, whether you used it, and why. "
+        "Mention unclear tools or whether manager-triggered compaction would have helped. "
+        "For substantial feedback, include a PCODX ledger path so the manager can forward it to OPC partial-compaction work. "
+        "Use at most five short bullets; if none, say so."
     )
 
 
@@ -2633,7 +2633,10 @@ def maybe_request_feedback(args: Args) -> None:
         return
     if codex_status(args.target) != "ready":
         return
-    paste_text(args.target, feedback_prompt(args.task_file))
+    prompt = feedback_prompt(args.task_file)
+    if len(prompt.encode("utf-8")) > 700:
+        raise RuntimeError("feedback prompt exceeds Codex visible paste bound")
+    paste_text(args.target, prompt)
     _ = tmux(["send-keys", "-t", args.target, "Enter"], check=True)
     wait_feedback(args.target, args.feedback_wait_s)
 

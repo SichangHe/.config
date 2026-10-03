@@ -25,36 +25,38 @@ import sys
 import tempfile
 import time
 from collections.abc import Mapping
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 try:
     from omo_manager.omo_agent_instructions import AgentInstructionsError, launch_instructions
-    from omo_manager.omo_agent_status import parse_task_text
+    from omo_manager.omo_agent_status import parse_task_text, same_tmux_target
     from omo_manager.omo_codex_status import Args as StatusArgs
-    from omo_manager.omo_codex_status import CODEX_FOOTER_RE, current_block, current_input_text, exact_tail, has_plan_prompt, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
+    from omo_manager.omo_codex_status import CODEX_FOOTER_RE, CONTENT_HIDDEN_RE, SELECTED_MODEL_CAPACITY_RE, current_block, current_input_text, exact_tail, has_plan_prompt, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
     from omo_manager.omo_codex_status import status as classify_status
     from omo_manager.omo_codex_stop import extract_new_status_session_id
     from omo_manager.omo_manager_env import load_local_env
     from omo_manager.omo_task_lock import process_start_ticks, task_file_lock, task_target_lock
     from omo_manager.omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, canonical_target, frontmatter_parts, parse_task_metadata, runat_kind
-    from omo_manager.omo_task_status import active_child_task_refs, authoritative_active_target_task_paths, root_membership_lock
+    from omo_manager.omo_task_status import active_child_task_refs, authoritative_active_target_task_paths, root_membership_lock, wix_rotation_manager_owner_paths
     from omo_manager.omo_tmux_input_lock import TmuxRuntimeBinding, exact_tmux_runtime_condition, start_ticks_guarded_tmux_action as guard_tmux_start_ticks, tmux_input_lock
     from omo_manager.omo_tmux_send import codex_input_matches_source
     from omo_manager.omo_manager_rotation_contain import ContainmentError, ProcessIdentity, process_argv, process_snapshot, process_stat, stable_process_identity
 except ModuleNotFoundError:
     from omo_agent_instructions import AgentInstructionsError, launch_instructions  # pyright: ignore[reportImplicitRelativeImport]
-    from omo_agent_status import parse_task_text  # pyright: ignore[reportImplicitRelativeImport]
+    from omo_agent_status import parse_task_text, same_tmux_target  # pyright: ignore[reportImplicitRelativeImport]
     from omo_codex_status import Args as StatusArgs
-    from omo_codex_status import CODEX_FOOTER_RE, current_block, current_input_text, exact_tail, has_plan_prompt, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
+    from omo_codex_status import CODEX_FOOTER_RE, CONTENT_HIDDEN_RE, SELECTED_MODEL_CAPACITY_RE, current_block, current_input_text, exact_tail, has_plan_prompt, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
     from omo_codex_status import status as classify_status
     from omo_codex_stop import extract_new_status_session_id
     from omo_manager_env import load_local_env  # pyright: ignore[reportImplicitRelativeImport]
     from omo_task_lock import process_start_ticks, task_file_lock, task_target_lock
     from omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, canonical_target, frontmatter_parts, parse_task_metadata, runat_kind
-    from omo_task_status import active_child_task_refs, authoritative_active_target_task_paths, root_membership_lock  # pyright: ignore[reportImplicitRelativeImport]
+    from omo_task_status import active_child_task_refs, authoritative_active_target_task_paths, root_membership_lock, wix_rotation_manager_owner_paths  # pyright: ignore[reportImplicitRelativeImport]
     from omo_tmux_input_lock import TmuxRuntimeBinding, exact_tmux_runtime_condition, start_ticks_guarded_tmux_action as guard_tmux_start_ticks, tmux_input_lock  # pyright: ignore[reportImplicitRelativeImport]
     from omo_tmux_send import codex_input_matches_source  # pyright: ignore[reportImplicitRelativeImport]
     from omo_manager_rotation_contain import ContainmentError, ProcessIdentity, process_argv, process_snapshot, process_stat, stable_process_identity  # pyright: ignore[reportImplicitRelativeImport]
@@ -65,6 +67,10 @@ SUCCESS_STATUSES = {"ready", "running"}
 RESTARTABLE_STATUSES = {"error", "ready", "running", "stuck_input", "waiting_subagent"}
 # 🧑 "preserve long_running semantics before and after replacement"
 ROTATION_TASK_STATUSES = {"blocked", "long_running", "running"}
+OLD_PANE_STATUS_QUERY = ContextVar("old_pane_status_query", default=False)
+WIX_ROTATION_HUMAN_SHA256 = "5494d516965dac97a2366a55ab29cef1dc0c1d4c9aa02a9adf142ab7cc21e220"
+WIX_CURRENT_ROTATION_HUMAN_SHA256 = "34a3c4f7900c5c2125b58fa797498739682785eea6d04653f2fbc558cc7f1c82"
+DW_MANAGER_ROTATION_HUMAN_SHA256 = "43de7dd1207b0f787fa3a3fc0df1a36bd8fa1007159dcf0a5d01f9600e949124"
 EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 MODEL_RE = re.compile(r"^[A-Za-z0-9._:/-]+$")
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$")
@@ -115,10 +121,13 @@ RECOVERY_ISSUANCE_VERSION = "omo-codex-recovery-issuance-v1"
 DELIVERY_EVENT_DIRNAME = RECOVERY_EVENT_DIRNAME
 DELIVERY_EVENT_VERSION = "omo-pending-watch-delivery-event-v1"
 CODEX_LAUNCH_COMMAND = "bunx"
-CODEX_PACKAGE = "@openai/codex@0.155.1"
-SUPPORTED_CODEX_PACKAGES = {"@openai/codex", "@openai/codex@latest", CODEX_PACKAGE}
-SUPPORTED_CODEX_PROCESS_COMMANDS = {"bun", "bunx", "codex"}
+# 🧑 "Change the codex spawning script to use latest codex agent and use --no-daemon"
+CODEX_PACKAGE = "@openai/codex@latest"
+SUPPORTED_CODEX_PACKAGES = {"@openai/codex", "@openai/codex@latest", "@openai/codex@0.155.1"}
+SUPPORTED_CODEX_PROCESS_COMMANDS = {"bun", "bunx", "codex", "node"}
 PROMPT_DELIVERY_TIMEOUT_S = float(os.environ.get("OMO_CODEX_PROMPT_DELIVERY_TIMEOUT_S", "5"))
+PROMPT_VISIBLE_BYTES = 700
+PROMPT_END_PROBE_MAX_BYTES = 128
 PROMPT_CLEAR_CAPTURES = 6
 ROTATION_AUDIT_MAX_BYTES = 64 * 1024
 ROLLOUT_METADATA_MAX_BYTES = 256 * 1024
@@ -254,6 +263,28 @@ class Args:
     resume_cwd_choice: str = ""
     expected_session_directory: Path | None = None
     retire_recovery_evidence: bool = False
+    codex_package: str = CODEX_PACKAGE
+    local_proxy_url: str = ""
+    compact_initial_handoff: bool = False
+    expected_failed_session_id: str = ""
+    assert_fresh_custody: bool = False
+    expected_pane_id: str = ""
+    expected_window_id: str = ""
+    expected_prompt_sha256: str = ""
+    expected_composed_prompt_sha256: str = ""
+    single_old_status_attempt: bool = False
+    expected_old_session_id: str = ""
+    expected_todo_sha256: str = ""
+    expected_old_pane_id: str = ""
+    expected_old_window_id: str = ""
+    expected_old_pane_pid: int = 0
+    expected_old_pane_start_ticks: int = 0
+    expected_manager_sha256: str = ""
+    expected_human_mail_sha256: str = ""
+    expected_old_rollout: Path | None = None
+    expected_old_rollout_meta_sha256: str = ""
+    expected_protected_processes: tuple[tuple[int, int], ...] = ()
+    expected_protected_files: tuple[tuple[Path, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -273,6 +304,10 @@ class PromptHandoffError(StartError):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.stopped_replacement: Pane | None = None
+
+
+class PostSubmitGuardError(PromptHandoffError):
+    """Submission succeeded, but the pane guard could not be verified clear."""
 
 
 @dataclass(frozen=True)
@@ -300,6 +335,7 @@ class RotationSnapshot:
     todo_sha256: str
     sha256: str
     children: tuple["RotationChildBinding", ...] = ()
+    single_old_status_audit_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -421,6 +457,15 @@ def parse_args(argv: list[str]) -> Args:
         help="Codex model id. gpt-6-astra is supported but very expensive and reserved for tricky tasks.",
     )
     _ = parser.add_argument("--reasoning-effort", default="", choices=EFFORTS)
+    _ = parser.add_argument("--codex-package", default=CODEX_PACKAGE, choices=sorted(SUPPORTED_CODEX_PACKAGES), help="Codex package for this launch; default @openai/codex@latest.")
+    _ = parser.add_argument("--local-proxy-url", default="", help="Fresh Codex only: explicitly use an unauthenticated loopback Responses proxy as the model provider, without changing saved login or config.")
+    _ = parser.add_argument("--compact-initial-handoff", action="store_true", help="Fresh Codex only: bind its session before sending a short pointer to its complete private task prompt.")
+    _ = parser.add_argument("--expected-failed-session-id", default="", help="Fresh compact handoff only: replace exactly this failed, non-live session binding.")
+    _ = parser.add_argument("--assert-fresh-custody", action="store_true", help="Require exact task, prompt, pane, and shell process assertions for a fresh launch.")
+    _ = parser.add_argument("--expected-pane-id", default="", help="Exact tmux pane id for --assert-fresh-custody.")
+    _ = parser.add_argument("--expected-window-id", default="", help="Exact tmux window id for --assert-fresh-custody.")
+    _ = parser.add_argument("--expected-prompt-sha256", default="", help="Exact fresh prompt file digest for --assert-fresh-custody.")
+    _ = parser.add_argument("--expected-composed-prompt-sha256", default="", help="SHA-256 of the complete starter prompt, including task tag and launch instructions.")
     _ = parser.add_argument("--session-id", default="", help="Existing Codex session to resume without a new prompt.")
     _ = parser.add_argument("--prompt-file", type=Path, help="Task-local prompt for a fresh Codex session.")
     _ = parser.add_argument("--startup-timeout-s", type=float, default=45.0)
@@ -431,6 +476,19 @@ def parse_args(argv: list[str]) -> Args:
     )
     _ = parser.add_argument("--restart-running", action="store_true", help="Capture the current Codex session and atomically respawn it in this exact pane.")
     _ = parser.add_argument("--rotate-worker", action="store_true", help="Replace one exact live non-manager Codex worker with a fresh context in the same pane.")
+    _ = parser.add_argument("--single-old-status-attempt", action="store_true", help="Reserve a one-use pre-input audit and submit only one source-verified old /status query.")
+    _ = parser.add_argument("--expected-old-session-id", default="", help="Historical old UUID assertion for --single-old-status-attempt; not proof of live custody.")
+    _ = parser.add_argument("--expected-todo-sha256", default="", help="Exact TODO.md digest before a single old-status attempt.")
+    _ = parser.add_argument("--expected-old-pane-id", default="", help="Exact old pane ID for one-status rotation.")
+    _ = parser.add_argument("--expected-old-window-id", default="", help="Exact old window ID for one-status rotation.")
+    _ = parser.add_argument("--expected-old-pane-pid", type=int, default=0, help="Exact old pane process PID.")
+    _ = parser.add_argument("--expected-old-pane-start-ticks", type=int, default=0, help="Exact old pane process start ticks.")
+    _ = parser.add_argument("--expected-manager-sha256", default="", help="Exact manager task digest for one-status rotation.")
+    _ = parser.add_argument("--expected-human-mail-sha256", default="", help="Exact Human replacement mail digest for one-status rotation.")
+    _ = parser.add_argument("--expected-old-rollout", type=Path, help="Historical session rollout for the asserted old UUID; not proof of live ownership.")
+    _ = parser.add_argument("--expected-old-rollout-meta-sha256", default="", help="SHA-256 of the historical rollout's first session_meta line including LF.")
+    _ = parser.add_argument("--expected-protected-process", action="append", default=[], metavar="PID:START_TICKS", help="External process that must remain unchanged across the old-session handoff.")
+    _ = parser.add_argument("--expected-protected-file", action="append", default=[], metavar="PATH=SHA256", help="External checkpoint whose bytes must remain unchanged across the old-session handoff.")
     _ = parser.add_argument("--rotate-submanager", action="store_true", help="Replace one exact live Codex submanager while preserving its complete direct-child set.")
     _ = parser.add_argument("--expected-child-task", action="append", default=[], metavar="TASK=SHA256", help="Exact active direct-child task and byte digest; repeat for the complete set with --rotate-submanager.")
     _ = parser.add_argument("--expect-no-children", action="store_true", help="Assert an empty direct-child set with --rotate-submanager.")
@@ -445,7 +503,7 @@ def parse_args(argv: list[str]) -> Args:
         "--replacement-email-file",
         type=Path,
         help=(
-            "Optional stored Human lifecycle-command email whose exact post-command text is appended to the replacement worker prompt. "
+            "Optional stored Human lifecycle-command email whose exact body is appended to the replacement worker prompt. "
             "Omit this option for a manager-authorized rotation."
         ),
     )
@@ -524,7 +582,7 @@ def parse_args(argv: list[str]) -> Args:
     if parsed.model and MODEL_RE.fullmatch(parsed.model) is None:
         parser.error("--model contains unsupported characters.")
     if parsed.model == "gpt-5.6":
-        parser.error("--model gpt-5.6 is not a supported Codex model id; use gpt-6-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra.")
+        parser.error("--model gpt-5.6 is not a supported Codex model id; use gpt-6.1-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra.")
     if parsed.session_id and UUID_RE.fullmatch(parsed.session_id) is None:
         parser.error("--session-id must be a Codex UUID.")
     modes = (
@@ -540,11 +598,48 @@ def parse_args(argv: list[str]) -> Args:
     )
     if sum(bool(value) for value in modes) > 1:
         parser.error("launch, recovery, rotation, and audit reconciliation modes are mutually exclusive.")
+    if parsed.local_proxy_url and (parsed.session_id or any(modes)):
+        parser.error("--local-proxy-url requires a fresh --prompt-file launch without another mode.")
+    if parsed.compact_initial_handoff and (not parsed.prompt_file or parsed.session_id or any(modes)):
+        parser.error("--compact-initial-handoff requires a fresh --prompt-file launch without another mode.")
+    if parsed.expected_failed_session_id and (not parsed.compact_initial_handoff or UUID_RE.fullmatch(parsed.expected_failed_session_id) is None):
+        parser.error("--expected-failed-session-id requires a fresh compact launch and an exact Codex UUID.")
+    if parsed.assert_fresh_custody:
+        if any(modes) or not parsed.prompt_file or not parsed.compact_initial_handoff:
+            parser.error("--assert-fresh-custody requires a fresh compact --prompt-file launch.")
+        if not all((parsed.expected_task_sha256, parsed.expected_status, parsed.expected_owner_target, parsed.expected_pending_item, parsed.expected_blocker is not None, parsed.expected_pane_id, parsed.expected_window_id, parsed.expected_current_pane_pid, parsed.expected_current_pane_start_ticks, parsed.expected_prompt_sha256, parsed.expected_composed_prompt_sha256)):
+            parser.error("--assert-fresh-custody requires task, blocker, ordered queue, pane, process, and prompt assertions.")
+        if any(SHA256_RE.fullmatch(value) is None for value in (parsed.expected_task_sha256, parsed.expected_prompt_sha256, parsed.expected_composed_prompt_sha256)) or parsed.expected_current_pane_pid <= 0 or parsed.expected_current_pane_start_ticks <= 1 or not parsed.expected_pane_id.startswith("%") or not parsed.expected_window_id.startswith("@"):
+            parser.error("--assert-fresh-custody requires valid SHA-256 digests and positive exact pane process identity.")
+    elif any((parsed.expected_pane_id, parsed.expected_window_id, parsed.expected_prompt_sha256, parsed.expected_composed_prompt_sha256)):
+        parser.error("fresh pane and prompt assertions require --assert-fresh-custody.")
     if not (parsed.reconcile_rotation_audit or parsed.retire_recovery_evidence) and (not parsed.model or not parsed.reasoning_effort):
         parser.error("--model and --reasoning-effort are required for launch and recovery modes.")
     if parsed.restart_running and (parsed.prompt_file or parsed.session_id):
         parser.error("--restart-running captures the live session and does not accept --prompt-file or --session-id.")
     rotating = parsed.rotate_worker or parsed.rotate_submanager
+    single_old_fields = (parsed.expected_old_session_id, parsed.expected_todo_sha256, parsed.expected_old_pane_id, parsed.expected_old_window_id, parsed.expected_old_pane_pid, parsed.expected_old_pane_start_ticks, parsed.expected_manager_sha256, parsed.expected_human_mail_sha256, parsed.expected_old_rollout, parsed.expected_old_rollout_meta_sha256, parsed.expected_protected_process, parsed.expected_protected_file)
+    if parsed.single_old_status_attempt:
+        if not parsed.rotate_worker or parsed.task_file != "wix_dw26.md" or parsed.target not in {"dw-manager-20260926:2", "dw-manager-20260926:2.0"} or parsed.assert_legacy_missing_session_id or parsed.stop_unverified_replacement:
+            parser.error("single old-status attempt is limited to the exact Wix worker rotation")
+        if not all(single_old_fields[:10]) or not parsed.expected_protected_process or not parsed.expected_protected_file or not parsed.audit_output or not parsed.replacement_email_file or any(SHA256_RE.fullmatch(value) is None for value in (parsed.expected_todo_sha256, parsed.expected_manager_sha256, parsed.expected_human_mail_sha256, parsed.expected_old_rollout_meta_sha256)) or UUID_RE.fullmatch(parsed.expected_old_session_id) is None or parsed.expected_old_pane_pid <= 0 or parsed.expected_old_pane_start_ticks <= 1 or not parsed.expected_old_rollout.is_absolute():
+            parser.error("single old-status attempt needs exact session, task, manager, mail, pane, process, checkpoint and audit assertions")
+    elif any(single_old_fields):
+        parser.error("single old-status assertions require --single-old-status-attempt")
+    protected_processes = []
+    for value in parsed.expected_protected_process:
+        pid, sep, ticks = value.partition(":")
+        if not sep or not pid.isdigit() or not ticks.isdigit() or int(pid) <= 1 or int(ticks) <= 1:
+            parser.error("--expected-protected-process requires PID:START_TICKS")
+        protected_processes.append((int(pid), int(ticks)))
+    protected_files = []
+    for value in parsed.expected_protected_file:
+        path, sep, digest = value.rpartition("=")
+        if not sep or not Path(path).is_absolute() or SHA256_RE.fullmatch(digest) is None:
+            parser.error("--expected-protected-file requires absolute PATH=SHA256")
+        protected_files.append((Path(path), digest))
+    if len(set(protected_processes)) != len(protected_processes) or len({path for path, _digest in protected_files}) != len(protected_files):
+        parser.error("single old-status protected assertions must be unique")
     if rotating or parsed.reconcile_rotation_audit:
         if parsed.prompt_file or parsed.session_id:
             parser.error("rotation and reconciliation modes do not accept --prompt-file or --session-id.")
@@ -625,7 +720,32 @@ def parse_args(argv: list[str]) -> Args:
                 parser.error("rotation mutation assertions are invalid with --reconcile-rotation-audit.")
             if parsed.dry_run:
                 parser.error("--dry-run is invalid with --reconcile-rotation-audit.")
-    elif any(
+    elif parsed.assert_fresh_custody and any((
+        parsed.protected_target,
+        parsed.audit_output,
+        parsed.assert_legacy_missing_session_id,
+        parsed.stop_unverified_replacement,
+        parsed.rotation_audit,
+        parsed.expected_rotation_audit_sha256,
+        parsed.reconciliation_receipt,
+        parsed.expected_current_command,
+        parsed.reconciliation_rollout,
+        parsed.session_root,
+        parsed.expected_rollout_device,
+        parsed.expected_rollout_inode,
+        parsed.expected_rollout_holder_pid,
+        parsed.expected_rollout_holder_start_ticks,
+        parsed.expected_rollout_fd is not None,
+        parsed.expected_rollout_session_meta_sha256,
+        parsed.expected_audit_task_sha256,
+        parsed.expected_audit_status,
+        parsed.expected_audit_blocker is not None,
+        parsed.expected_audit_owner_target,
+        parsed.expected_audit_pending_item,
+        parsed.expected_current_queue_empty,
+    )):
+        parser.error("rotation and reconciliation assertions are invalid with --assert-fresh-custody.")
+    elif not parsed.assert_fresh_custody and any(
         (
             parsed.expected_task_sha256,
             parsed.expected_status,
@@ -658,7 +778,7 @@ def parse_args(argv: list[str]) -> Args:
             parsed.expected_current_queue_empty,
         )
     ):
-        parser.error("rotation assertions are only valid with --rotate-worker.")
+        parser.error("rotation assertions are only valid with --rotate-worker or --assert-fresh-custody.")
     if not parsed.rotate_submanager and (parsed.expected_child_task or parsed.expect_no_children):
         parser.error("child assertions require --rotate-submanager.")
     if parsed.rotate_submanager and bool(parsed.expected_child_task) == parsed.expect_no_children:
@@ -729,6 +849,28 @@ def parse_args(argv: list[str]) -> Args:
         target=parsed.target,
         model=parsed.model,
         reasoning_effort=parsed.reasoning_effort,
+        codex_package=parsed.codex_package,
+        local_proxy_url=parsed.local_proxy_url,
+        compact_initial_handoff=parsed.compact_initial_handoff,
+        expected_failed_session_id=parsed.expected_failed_session_id,
+        assert_fresh_custody=parsed.assert_fresh_custody,
+        expected_pane_id=parsed.expected_pane_id,
+        expected_window_id=parsed.expected_window_id,
+        expected_prompt_sha256=parsed.expected_prompt_sha256,
+        expected_composed_prompt_sha256=parsed.expected_composed_prompt_sha256,
+        single_old_status_attempt=parsed.single_old_status_attempt,
+        expected_old_session_id=parsed.expected_old_session_id,
+        expected_todo_sha256=parsed.expected_todo_sha256,
+        expected_old_pane_id=parsed.expected_old_pane_id,
+        expected_old_window_id=parsed.expected_old_window_id,
+        expected_old_pane_pid=parsed.expected_old_pane_pid,
+        expected_old_pane_start_ticks=parsed.expected_old_pane_start_ticks,
+        expected_manager_sha256=parsed.expected_manager_sha256,
+        expected_human_mail_sha256=parsed.expected_human_mail_sha256,
+        expected_old_rollout=parsed.expected_old_rollout,
+        expected_old_rollout_meta_sha256=parsed.expected_old_rollout_meta_sha256,
+        expected_protected_processes=tuple(protected_processes),
+        expected_protected_files=tuple(protected_files),
         session_id=parsed.session_id,
         prompt_file=parsed.prompt_file.expanduser().resolve() if parsed.prompt_file else None,
         startup_timeout_s=parsed.startup_timeout_s,
@@ -1132,6 +1274,38 @@ def verify_task_binding(args: Args, pane: Pane, expected: TaskBinding, *, allow_
         raise StartError("task or pending queue changed after restart preparation.")
 
 
+def verify_fresh_custody(args: Args, pane: Pane, task: TaskBinding) -> None:
+    """Bind a fresh compact launch to the reviewed shell, task, and prompt."""
+
+    if not args.assert_fresh_custody:
+        return
+    current = resolve_pane(pane.target)
+    if (
+        current != pane
+        or current.pane_id != args.expected_pane_id
+        or current.window_id != args.expected_window_id
+        or current.pane_pid != args.expected_current_pane_pid
+        or current.start_ticks != args.expected_current_pane_start_ticks
+        or current.command not in SHELL_COMMANDS
+    ):
+        raise StartError("fresh pane or shell process changed from the reviewed identity")
+    if (
+        task.task_sha256 != args.expected_task_sha256
+        or task.status != args.expected_status
+        or task.managerat != args.expected_owner_target
+        or task.pending_task_items != args.expected_pending_items
+        or task.blocked_on != args.expected_blocker
+        or task.session_id != args.expected_failed_session_id
+    ):
+        raise StartError("fresh task does not match the reviewed status, owner, queue, or blocker")
+    if args.prompt_file is None or hashlib.sha256(args.prompt_file.read_bytes()).hexdigest() != args.expected_prompt_sha256:
+        raise StartError("fresh prompt bytes changed from the reviewed source")
+    verify_task_binding(args, pane, task)
+    expected_path = task_path(args.root, args.task_file).resolve()
+    if authoritative_active_target_task_paths(args.root, pane.target) != (expected_path,):
+        raise StartError("fresh launch requires the sole authoritative active task owner of this pane")
+
+
 def rotation_owner_path(args: Args, pane: Pane) -> Path:
     """Return the exact task only when it is the sole active target owner."""
 
@@ -1143,6 +1317,73 @@ def rotation_owner_path(args: Args, pane: Pane) -> Path:
     if owners != (expected,):
         refs = ", ".join(path.relative_to(args.root.resolve()).as_posix() for path in owners) or "none"
         raise StartError(f"worker rotation requires the task to be the sole authoritative active owner of `{pane.target}`: {refs}.")
+    if args.rotate_submanager and args.task_file == "dw_manager_0926.md" and pane.target == "dw:1.0":
+        human_mail_path = (args.root / "manager_mail/85c5dff58359-2265.txt").resolve()
+        if args.replacement_email_file != human_mail_path:
+            raise StartError("DW manager replacement requires the exact Human email in the successor prompt.")
+        if hashlib.sha256(human_mail_path.read_bytes()).hexdigest() != DW_MANAGER_ROTATION_HUMAN_SHA256:
+            raise StartError("DW manager replacement Human authorization changed.")
+    # 🧑 "Replace this agent ... New agent should focus on getting sites with sufficient number of qualifying pages"
+    if args.rotate_worker and args.task_file == "wix_dw26.md" and pane.target == "dw-manager-20260926:2.0":
+        current_authority = args.replacement_email_file == (args.root / "manager_mail/85c5dff58359-2254.txt").resolve()
+        manager_ref = "dw_submanager_65.md" if current_authority else "dw_manager_0926.md"
+        human_mail_ref = "manager_mail/85c5dff58359-2254.txt" if current_authority else "manager_mail/85c5dff58359-2185.txt"
+        manager_path = task_path(args.root, manager_ref)
+        human_mail_path = (args.root / human_mail_ref).resolve()
+        if args.replacement_email_file != human_mail_path:
+            raise StartError("Wix replacement must include the exact Human email in the successor prompt.")
+        try:
+            human_mail = human_mail_path.read_bytes()
+            approved_sha256 = WIX_CURRENT_ROTATION_HUMAN_SHA256 if current_authority else WIX_ROTATION_HUMAN_SHA256
+            if hashlib.sha256(human_mail).hexdigest() != approved_sha256:
+                raise StartError("Wix rotation Human authorization changed.")
+            worker_text = expected.read_text(encoding="utf-8")
+            required_context = (
+                ("(record and delegate manager_mail/85c5dff58359-2254.txt)", "addressed_task: wix_dw26.md", "responsible_manager_target: dw:65")
+                if current_authority else (
+                    "Replace this agent",
+                    "We just need the sites to be generated completely via LLMs/AI site generators, titles don’t matter.",
+                    "New agent should focus on getting sites with sufficient number of qualifying pages instead of these random nonsense",
+                    "Replacement must FIRST email the Human DIRECTLY in the verified original thread",
+                    "<179052311932.2569744.7670718210462875507@gmail.com>",
+                )
+            )
+            if not all(snippet in worker_text for snippet in required_context):
+                raise StartError("Wix successor prompt lacks the exact Human request or direct original-thread acknowledgment.")
+            worker = parse_task_metadata(worker_text, args.root)
+            managers = authoritative_active_target_task_paths(args.root, args.expected_owner_target) if current_authority else wix_rotation_manager_owner_paths(args.root, args.expected_owner_target)
+            manager = parse_task_metadata(manager_path.read_text(encoding="utf-8"), args.root)
+            todo_rows = parse_task_text((args.root / "TODO.md").read_text(encoding="utf-8"))
+            children = active_child_task_refs(args.root, expected, pane.target)
+            manager_pane = resolve_pane(args.expected_owner_target)
+            manager_status = inspect(StatusArgs(args.expected_owner_target, 80))
+            worker_window = run(["tmux", "list-panes", "-t", pane.target, "-F", "#{pane_id}"])
+            manager_window = run(["tmux", "list-panes", "-t", manager_pane.target, "-F", "#{pane_id}"])
+        except (OSError, UnicodeError, ValueError) as error:
+            raise StartError(f"could not verify Wix rotation manager and worker custody: {error}") from error
+        if (
+            managers != (manager_path,)
+            or worker is None
+            or worker.managerat != args.expected_owner_target
+            or canonical_target(worker.runat) != canonical_target(pane.target)
+            or worker.is_manager
+            or "hwl:3.0" not in args.protected_targets
+            or manager is None
+            or manager.status not in {"running", "long_running"}
+            or not manager.is_manager
+            or manager.runat != args.expected_owner_target
+            or manager.managerat != ("dw:1" if current_authority else "wl:1")
+            or manager_pane.pane_id == pane.pane_id
+            or manager_status.status not in {"ready", "running"}
+            or worker_window.returncode != 0
+            or worker_window.stdout.splitlines() != [pane.pane_id]
+            or manager_window.returncode != 0
+            or manager_window.stdout.splitlines() != [manager_pane.pane_id]
+            or children
+            or [canonical_target(row.target) for row in todo_rows if row.task_file == args.task_file and row.section == "todo:current"] != [canonical_target(pane.target)]
+            or [row.target for row in todo_rows if row.task_file == manager_ref and row.section == "todo:current"] != [args.expected_owner_target]
+        ):
+            raise StartError("Wix rotation lacks one current manager and worker, or worker still owns direct children.")
     return expected
 
 
@@ -1168,7 +1409,7 @@ def rotation_child_bindings(args: Args, pane: Pane) -> tuple[RotationChildBindin
         except (OSError, UnicodeError, ValueError) as exc:
             raise StartError(f"could not bind submanager child `{ref}`: {exc}") from exc
         digest = hashlib.sha256(data).hexdigest()
-        if metadata is None or digest != expected[ref] or canonical_target(metadata.managerat) != canonical_target(pane.target):
+        if metadata is None or digest != expected[ref] or not same_tmux_target(metadata.managerat, pane.target):
             raise StartError(f"submanager child assertion changed or is invalid: {ref}")
         children.append(RotationChildBinding(ref, digest, metadata.runat, metadata.managerat, metadata.is_manager, metadata.tool))
     if args.expect_no_children and children:
@@ -1209,13 +1450,20 @@ def rotation_snapshot_sha256(
     return hashlib.sha256("\0".join(fields).encode()).hexdigest()
 
 
-def capture_rotation_snapshot(args: Args, pane: Pane, task: TaskBinding) -> RotationSnapshot:
+def capture_rotation_snapshot(args: Args, pane: Pane, task: TaskBinding, *, proven_old_session_id: str = "", query_old_status: bool = True) -> RotationSnapshot:
     """Capture the old UUID once and bind it to stable pane and custody state."""
 
     require_restartable_codex(pane)
-    old_session_id, _ = query_status_session_id(pane, 240, min(10.0, args.startup_timeout_s))
-    if not old_session_id:
-        old_session_id = query_exact_status_session_id(pane, 240, min(10.0, args.startup_timeout_s))
+    old_session_id = proven_old_session_id
+    old_query_context = (
+        (args.rotate_worker and args.task_file == "wix_dw26.md")
+        or (getattr(args, "rotate_submanager", False) and args.task_file == "dw_manager_0926.md" and pane.target == "dw:1.0")
+    )
+    with old_pane_status_query() if old_query_context else nullcontext():
+        if not old_session_id and query_old_status:
+            old_session_id, _ = query_status_session_id(pane, 240, min(10.0, args.startup_timeout_s))
+        if not old_session_id and query_old_status and not args.single_old_status_attempt:
+            old_session_id = query_exact_status_session_id(pane, 240, min(10.0, args.startup_timeout_s))
     if args.assert_legacy_missing_session_id:
         if old_session_id:
             raise StartError("legacy missing-session assertion is false because the old worker UUID is recoverable; the pane was not replaced.")
@@ -1244,6 +1492,148 @@ def capture_rotation_snapshot(args: Args, pane: Pane, task: TaskBinding) -> Rota
         rotation_snapshot_sha256(args, current, current_task, old_session_id, owner, todo_sha256, children),
         children,
     )
+
+
+def verify_single_old_status_custody(args: Args, pane: Pane, task: TaskBinding, *, empty_composer: bool) -> None:
+    """Bind the one-use Wix query to frozen ownership, history, and external work."""
+
+    if not args.single_old_status_attempt:
+        return
+    if pane.command == "node":
+        argv = process_argv(pane.pane_pid)
+        if (
+            len(argv) < 3
+            or Path(argv[0]).name != "node"
+            or Path(argv[1]).resolve() != (Path.home() / ".bun/bin/codex").resolve()
+            or "--dangerously-bypass-approvals-and-sandbox" not in argv
+        ):
+            raise StartError("old Node pane is not the exact installed Codex executable")
+    if (
+        args.task_file != "wix_dw26.md"
+        or pane.target != "dw-manager-20260926:2.0"
+        or (pane.pane_id, pane.window_id, pane.pane_pid, pane.start_ticks)
+        != (args.expected_old_pane_id, args.expected_old_window_id, args.expected_old_pane_pid, args.expected_old_pane_start_ticks)
+        or pane.command not in SUPPORTED_CODEX_PROCESS_COMMANDS
+        or process_start_ticks(pane.pane_pid) != pane.start_ticks
+        or task.task_sha256 != args.expected_task_sha256
+        or task.status != args.expected_status
+        or task.managerat != args.expected_owner_target
+        or task.pending_task_items != args.expected_pending_items
+        or task.session_id
+        or hashlib.sha256((args.root / "TODO.md").read_bytes()).hexdigest() != args.expected_todo_sha256
+        or hashlib.sha256((args.root / "dw_manager_0926.md").read_bytes()).hexdigest() != args.expected_manager_sha256
+        or hashlib.sha256((args.root / "manager_mail/85c5dff58359-2185.txt").read_bytes()).hexdigest() != args.expected_human_mail_sha256
+        or rotation_owner_path(args, pane) != task_path(args.root, args.task_file).resolve()
+    ):
+        raise StartError("single old-status custody changed before the one-use handoff")
+    rollout = args.expected_old_rollout
+    if rollout is None or args.expected_old_session_id not in rollout.name:
+        raise StartError("historical old rollout assertion is absent or mismatched")
+    with rollout.open("rb") as source:
+        meta_line = source.readline(1_000_000)
+    try:
+        metadata = json.loads(meta_line)
+    except (UnicodeError, ValueError) as error:
+        raise StartError("historical rollout has no valid first session metadata") from error
+    if (
+        hashlib.sha256(meta_line).hexdigest() != args.expected_old_rollout_meta_sha256
+        or metadata.get("type") != "session_meta"
+        or metadata.get("payload", {}).get("session_id") != args.expected_old_session_id
+        or metadata.get("payload", {}).get("cwd") != str(pane.workdir)
+    ):
+        raise StartError("historical rollout differs from the expected old session; it is not live proof")
+    for pid, ticks in args.expected_protected_processes:
+        if process_start_ticks(pid) != ticks:
+            raise StartError("protected process changed during single old-status custody")
+    for protected_file, expected_sha256 in args.expected_protected_files:
+        if hashlib.sha256(protected_file.read_bytes()).hexdigest() != expected_sha256:
+            raise StartError("protected checkpoint changed during single old-status custody")
+    if empty_composer:
+        require_prompt_ready(pane)
+
+
+def single_old_status_attempt_path(args: Args) -> Path:
+    """Choose one durable user-private receipt per work root and Human Wix request."""
+
+    directory = Path.home() / ".local" / "state" / "omo_manager" / "old-status-attempts"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = directory.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise StartError("one-use old-status receipt directory must be owner-private")
+    identity = f"{args.root.resolve()}\0{args.task_file}\0dw-manager-20260926:2\0manager_mail/85c5dff58359-2185.txt"
+    return directory / hashlib.sha256(identity.encode()).hexdigest()
+
+
+def capture_single_old_status(args: Args, pane: Pane, task: TaskBinding) -> tuple[str, str]:
+    """Reserve durable one-use evidence before exactly one old-pane status submission."""
+
+    verify_single_old_status_custody(args, pane, task, empty_composer=True)
+    audit_path = args.audit_output
+    if audit_path is None:
+        raise StartError("single old-status handoff requires its one-use audit path")
+    attempt_path = single_old_status_attempt_path(args)
+    attempt = "\n".join((
+        "operation: single-old-status-attempt",
+        f"task-file: {args.task_file}",
+        f"task-sha256: {task.task_sha256}",
+        f"todo-sha256: {args.expected_todo_sha256}",
+        f"manager-sha256: {args.expected_manager_sha256}",
+        f"human-mail-sha256: {args.expected_human_mail_sha256}",
+        f"pane-id: {pane.pane_id}",
+        f"window-id: {pane.window_id}",
+        f"pane-pid: {pane.pane_pid}",
+        f"pane-start-ticks: {pane.start_ticks}",
+        f"historical-unverified-session-id: {args.expected_old_session_id}",
+        f"historical-rollout-meta-sha256: {args.expected_old_rollout_meta_sha256}",
+        f"ordered-queue-sha256: {hashlib.sha256(chr(0).join(task.pending_task_items).encode()).hexdigest()}",
+        *(f"protected-process: {pid}:{ticks}" for pid, ticks in args.expected_protected_processes),
+        *(f"protected-file: {path}={digest}" for path, digest in args.expected_protected_files),
+        "result: unknown-do-not-retry",
+        "",
+    ))
+    if audit_path.exists():
+        raise StartError("rotation audit already exists; one-use old-status input is forbidden")
+    reserve_rotation_audit(attempt_path, attempt)
+    verify_single_old_status_custody(args, pane, task, empty_composer=True)
+    evidence: dict[str, str] = {}
+    old_session_id = query_exact_status_session_id(
+        pane, 240, min(10.0, args.startup_timeout_s), args.expected_old_session_id, evidence,
+        require_complete_status_card=True, single_source_bound_attempt=True,
+    )
+    if old_session_id != args.expected_old_session_id:
+        raise StartError("single live old-session card differs from asserted historical UUID; do not retry")
+    verify_single_old_status_custody(args, pane, task, empty_composer=True)
+    if attempt_path.read_text(encoding="utf-8") != attempt:
+        raise StartError("single old-status attempt record changed before rotation")
+    return old_session_id, hashlib.sha256(attempt.encode()).hexdigest()
+
+
+def verify_single_old_status_before_respawn(args: Args, snapshot: RotationSnapshot, pane: Pane, prepared_audit: str) -> None:
+    """Recheck protected work and one-use evidence beside the irreversible respawn."""
+
+    if not args.single_old_status_attempt:
+        return
+    verify_single_old_status_custody(args, pane, snapshot.task, empty_composer=True)
+    audit_path = args.audit_output
+    if audit_path is None:
+        raise StartError("one-use old-status audit path disappeared before respawn")
+    try:
+        descriptor = os.open(audit_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+        try:
+            details = os.fstat(descriptor)
+            if not stat.S_ISREG(details.st_mode) or details.st_uid != os.getuid() or stat.S_IMODE(details.st_mode) != 0o600:
+                raise StartError("prepared rotation audit lost its owner-private regular file before respawn")
+            with os.fdopen(descriptor, "rb", closefd=False) as audit_input:
+                audit_bytes = audit_input.read()
+            if audit_bytes != prepared_audit.encode("utf-8"):
+                raise StartError("prepared rotation audit changed before respawn")
+        finally:
+            os.close(descriptor)
+    except OSError as error:
+        raise StartError(f"prepared rotation audit disappeared before respawn: {error}") from error
+    attempt_path = single_old_status_attempt_path(args)
+    if hashlib.sha256(attempt_path.read_bytes()).hexdigest() != snapshot.single_old_status_audit_sha256:
+        raise StartError("one-use old-status evidence changed before respawn")
 
 
 def verify_rotation_snapshot(args: Args, expected: RotationSnapshot, *, replacement: Pane | None = None) -> Pane:
@@ -1407,7 +1797,9 @@ def instruction_role(args: Args) -> str | None:
     if metadata is None or not metadata.is_manager:
         return None
     configured = load_local_env().get("OMO_MANAGER_TMUX_TARGET", "")
-    if runat_kind(configured) != "tmux":
+    # 🧑 "I want you to make it s.t. the main manager can be an omnigent agent"
+    # 🧑 "My idea was to write their session ID into the .config env file, good?"
+    if runat_kind(configured) not in {"tmux", "omnigent"}:
         raise StartError("cannot select manager role: OMO_MANAGER_TMUX_TARGET is missing or invalid")
     return "main_manager" if canonical_target(metadata.runat) == canonical_target(configured) else "submanager"
 
@@ -1430,15 +1822,117 @@ def prompt_text(args: Args, agent_instructions: str | None = None, source_text: 
     if source_text is not None and len(sources) != 1:
         raise StartError("prompt source override requires exactly one prompt file.")
     source_values = (source_text.rstrip(),) if source_text is not None else tuple(source.read_text(encoding="utf-8").rstrip() for source in sources)
-    text = "\n\n".join((instructions, *source_values)) + "\n"
+    # 🧑 "put task file, without the ‘.md’ in all starter prompts and use that as tags"
+    text = (
+        f"Task tag: {args.task_file.removesuffix('.md')}\n"
+        f"Task file: {args.task_file}\n"
+        f"Use --task-file {shlex.quote(args.task_file)} with task-aware helpers.\n"
+        "Agents must not come up with prompts. Repeat Human requests verbatim unless the Human explicitly instructs otherwise.\n"
+        + "\n\n".join((instructions, *source_values))
+        + "\n"
+    )
     if rotates_task_owner(args) and args.replacement_email_file is not None:
         try:
             from omo_manager.omo_manager_rotate import replacement_context
         except ModuleNotFoundError:
             from omo_manager_rotate import replacement_context
         context = replacement_context(args.root, args.replacement_email_file)
-        text = f"{text.rstrip()}\n\n<replacement_reason>{context}</replacement_reason>\n"
+        text = f"{text.rstrip()}\n\n<human_request>{context}</human_request>\n"
     return text
+
+
+def compact_handoff_text(args: Args, session_id: str, source_path: Path, source_sha256: str) -> str:
+    if source_path.parent != args.root / ".omo-codex-initial-prompts" or source_path.name != f"{session_id}.txt":
+        raise StartError("compact prompt path does not match the bound task session")
+    return f"Read {source_path} after SHA-256 {source_sha256} matches. Then follow it."
+
+
+def planned_compact_handoff(args: Args, session_id: str, source: str) -> str:
+    path = args.root / ".omo-codex-initial-prompts" / f"{session_id}.txt"
+    handoff = compact_handoff_text(args, session_id, path, hashlib.sha256(source.encode("utf-8")).hexdigest())
+    if len(handoff.encode("utf-8")) + PROMPT_END_PROBE_MAX_BYTES > PROMPT_VISIBLE_BYTES:
+        raise StartError("compact handoff and end probe exceed Codex visible paste bound; no prompt was sent")
+    return handoff
+
+
+def send_compact_prompt(args: Args, pane: Pane, session_id: str, source: str, handoff: str) -> None:
+    path, digest = preserve_compact_prompt(args, session_id, source)
+    if compact_handoff_text(args, session_id, path, digest) != handoff:
+        raise StartError("compact handoff source changed before delivery; no prompt was sent")
+    fd, handoff_name = tempfile.mkstemp(prefix="omo-codex-compact-handoff-", suffix=".txt")
+    handoff_path = Path(handoff_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handoff_file:
+            handoff_file.write(handoff)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise StartError("compact prompt source changed before submission")
+        send_prompt(pane, handoff_path)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise PromptHandoffError("compact prompt source changed after submission")
+    finally:
+        handoff_path.unlink(missing_ok=True)
+
+
+def verify_composed_prompt(args: Args, payload: bytes) -> None:
+    if args.assert_fresh_custody and hashlib.sha256(payload).hexdigest() != args.expected_composed_prompt_sha256:
+        raise StartError("complete fresh starter prompt changed from the reviewed payload")
+
+
+def preserve_compact_prompt(args: Args, session_id: str, source: str) -> tuple[Path, str]:
+    if UUID_RE.fullmatch(session_id) is None:
+        raise StartError("compact handoff requires the exact bound Codex session UUID")
+    directory = args.root / ".omo-codex-initial-prompts"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    if directory.is_symlink() or not directory.is_dir() or directory.stat().st_mode & 0o077:
+        raise StartError("compact prompt directory is not private")
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    path = directory / f"{session_id}.txt"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    with os.fdopen(os.open(path, flags, 0o600), "w", encoding="utf-8") as prompt_file:
+        prompt_file.write(source)
+    if path.read_bytes() != source.encode("utf-8"):
+        raise StartError("compact prompt source changed before handoff")
+    return path, digest
+
+
+# 🧑 "Broken things include: Codex agent spawning"
+def local_proxy_config_args(args: Args) -> list[str]:
+    """Use a caller-selected local pool as a provider, not a ChatGPT workspace."""
+    if not args.local_proxy_url:
+        return []
+    try:
+        endpoint = urlsplit(args.local_proxy_url)
+        port = endpoint.port
+    except ValueError as error:
+        raise StartError("--local-proxy-url is not a valid loopback HTTP URL") from error
+    if (
+        endpoint.scheme != "http"
+        or endpoint.hostname not in {"localhost", "127.0.0.1", "::1"}
+        or port is None
+        or not 1 <= port <= 65535
+        or endpoint.username is not None
+        or endpoint.password is not None
+        or endpoint.query
+        or endpoint.fragment
+        or endpoint.path not in {"/backend-api/codex", "/v1"}
+    ):
+        raise StartError("--local-proxy-url requires an unauthenticated loopback HTTP endpoint with an explicit port and /backend-api/codex or /v1 path")
+    if args.session_id or any((
+        args.restart_running, args.rotate_worker, args.rotate_submanager,
+        args.recover_non_codex, args.record_recovery_evidence, args.recover_update_prompt,
+        args.recover_resume_cwd_prompt, args.reconcile_rotation_audit, args.retire_recovery_evidence,
+    )):
+        raise StartError("--local-proxy-url is only supported for a fresh Codex launch, not resume or rotation")
+    return [
+        "--no-alt-screen",
+        "--config", 'model_provider="omo_local_proxy"',
+        "--config", 'model_providers.omo_local_proxy.name="Local proxy"',
+        "--config", f"model_providers.omo_local_proxy.base_url={json.dumps(args.local_proxy_url)}",
+        "--config", 'model_providers.omo_local_proxy.wire_api="responses"',
+        "--config", "model_providers.omo_local_proxy.requires_openai_auth=false",
+    ]
 
 
 def launch_command(
@@ -1452,14 +1946,21 @@ def launch_command(
     pcodx_env: Mapping[str, str] | None = None,
 ) -> str:
     if args.model == "gpt-5.6":
-        raise StartError("--model gpt-5.6 is not a supported Codex model id; use gpt-6-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra.")
+        raise StartError("--model gpt-5.6 is not a supported Codex model id; use gpt-6.1-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra.")
     executable = CODEX_LAUNCH_COMMAND if tool == "codex" else PCODX_LAUNCH_COMMAND
     codex = [executable]
     if tool == "codex":
-        codex.append(CODEX_PACKAGE)
+        if args.codex_package not in SUPPORTED_CODEX_PACKAGES:
+            raise StartError("unsupported Codex package override")
+        codex.append(args.codex_package)
+    if tool == "codex" and args.codex_package != "@openai/codex@0.155.1":
+        codex.append("--no-daemon")
     codex.extend(("--dangerously-bypass-approvals-and-sandbox", "--model", args.model, "--config", f'model_reasoning_effort="{args.reasoning_effort}"'))
     if tool == "codex":
         codex.extend(("--config", "check_for_update_on_startup=false"))
+        codex.extend(local_proxy_config_args(args))
+    elif args.local_proxy_url:
+        raise StartError("--local-proxy-url is only supported for Codex")
     if tool == "pcodx":
         if pcodx_env is None or tuple(pcodx_env) != PCODX_ENV_KEYS or any(not pcodx_env[key] for key in PCODX_ENV_KEYS):
             raise StartError("PCODX launch requires an exact live state binding.")
@@ -1540,21 +2041,48 @@ def require_same_shell(expected: Pane) -> None:
 
 
 def send_shell_command(pane: Pane, command: str) -> None:
+    # 🧑 Source2145: "Replace this agent."
+    probe = f"OMO_SHELL_READY_{os.getpid()}_{time.monotonic_ns()}"
+    probe_buffer = f"omo-codex-shell-probe-{os.getpid()}"
+    rejected = "OMO_SHELL_COMMAND_REJECTED"
+    rejection = f"display-message -p {rejected}"
+    cancel = start_ticks_guarded_tmux_action(pane, f"send-keys -t {shlex.quote(pane.pane_id)} C-c", rejection)
+    canceled = run(["tmux", "if-shell", "-F", "-t", pane.pane_id, exact_process_tmux_condition(pane), cancel, rejection])
+    if canceled.returncode != 0 or canceled.stdout == rejected + "\n":
+        raise StartError("target shell identity changed before clearing its input")
+    loaded_probe = run(["tmux", "set-buffer", "-b", probe_buffer, "--", f"printf '\\n%s\\n' {probe}"])
+    if loaded_probe.returncode != 0:
+        raise StartError("failed to load shell readiness probe")
+    probe_action = " ; ".join((
+        f"paste-buffer -d -b {shlex.quote(probe_buffer)} -t {shlex.quote(pane.pane_id)}",
+        f"send-keys -t {shlex.quote(pane.pane_id)} Enter",
+    ))
+    guarded_probe = start_ticks_guarded_tmux_action(pane, probe_action, rejection)
+    submitted_probe = run(["tmux", "if-shell", "-F", "-t", pane.pane_id, exact_process_tmux_condition(pane), guarded_probe, rejection])
+    if submitted_probe.returncode != 0 or submitted_probe.stdout == rejected + "\n":
+        _ = run(["tmux", "delete-buffer", "-b", probe_buffer])
+        raise StartError("target shell identity changed before its readiness probe")
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        verify_same_process(pane)
+        if any(line.strip() == probe for line in tail(pane.target, 30)):
+            break
+        time.sleep(0.05)
+    else:
+        raise StartError("shell readiness probe was not executed; launch command was not sent")
     buffer_name = f"omo-codex-start-{os.getpid()}"
     loaded = run(["tmux", "set-buffer", "-b", buffer_name, "--", command])
     if loaded.returncode != 0:
         raise StartError(f"failed to load launch command into tmux: {loaded.stderr.strip()}")
     accepted = f"OMO_SHELL_COMMAND_ACCEPTED_{os.getpid()}_{time.monotonic_ns()}"
-    rejected = "OMO_SHELL_COMMAND_REJECTED"
     sequence = " ; ".join(
         (
-            f"send-keys -t {shlex.quote(pane.pane_id)} C-c",
             f"paste-buffer -d -b {shlex.quote(buffer_name)} -t {shlex.quote(pane.pane_id)}",
             f"send-keys -t {shlex.quote(pane.pane_id)} Enter",
             f"display-message -p {accepted}",
         )
     )
-    rejected_command = f"display-message -p {rejected}"
+    rejected_command = rejection
     guarded = start_ticks_guarded_tmux_action(pane, sequence, rejected_command)
     submitted = run(["tmux", "if-shell", "-F", "-t", pane.pane_id, exact_process_tmux_condition(pane), guarded, rejected_command])
     if submitted.returncode != 0 or submitted.stdout != accepted + "\n":
@@ -1586,6 +2114,8 @@ def prepare_prompt(pane: Pane, prompt_path: Path) -> PreparedPrompt:
     nonce = f"{os.getpid()}-{time.monotonic_ns()}"
     buffer_name = f"omo-codex-prompt-{nonce}"
     probe = f"__OMO_PROMPT_END_{nonce}__"
+    if len(probe.encode("utf-8")) > PROMPT_END_PROBE_MAX_BYTES or len(source.encode("utf-8")) + len(probe.encode("utf-8")) > PROMPT_VISIBLE_BYTES:
+        raise StartError("task prompt and end probe exceed Codex visible paste bound; no prompt was sent")
     loaded = run(["tmux", "load-buffer", "-b", buffer_name, str(prompt_path)])
     if loaded.returncode != 0:
         raise StartError("failed to load task prompt; no prompt was sent.")
@@ -1610,6 +2140,124 @@ def discard_prepared_prompt(prepared: PreparedPrompt) -> None:
     _ = run(["tmux", "delete-buffer", "-b", prepared.buffer_name])
 
 
+def stage_prompt_guard(prepared: PreparedPrompt) -> None:
+    pane = prepared.pane
+    option = "@omo_initial_prompt_pending"
+    existing = run(["tmux", "show-options", "-p", "-qv", "-t", pane.pane_id, option])
+    if existing.returncode != 0 or (existing.stdout or "").strip():
+        raise StartError("initial prompt guard is already present or cannot be checked; no prompt was sent.")
+    rejected = "OMO_PROMPT_GUARD_REJECTED"
+    action = start_ticks_guarded_tmux_action(
+        pane,
+        f"set-option -p -t {shlex.quote(pane.pane_id)} {option} {shlex.quote(prepared.probe)}",
+        f"display-message -p {rejected}",
+    )
+    result = run(["tmux", "if-shell", "-F", "-t", pane.target, prepared.condition, action, f"display-message -p {rejected}"])
+    if result.returncode != 0 or result.stdout == rejected + "\n":
+        raise StartError("initial prompt guard could not bind to the exact pane; no prompt was sent.")
+    verify_same_process(pane)
+    recorded = run(["tmux", "show-options", "-p", "-qv", "-t", pane.pane_id, option])
+    if recorded.returncode != 0 or (recorded.stdout or "").strip() != prepared.probe:
+        raise StartError("initial prompt guard was not recorded; no prompt was sent.")
+
+
+def clear_prompt_guard(prepared: PreparedPrompt) -> None:
+    pane = prepared.pane
+    option = "@omo_initial_prompt_pending"
+    try:
+        verify_same_process(pane)
+    except StartError as error:
+        raise PostSubmitGuardError("initial prompt submitted but guard identity changed; do not restart or retry.") from error
+    recorded = run(["tmux", "show-options", "-p", "-qv", "-t", pane.pane_id, option])
+    if recorded.returncode != 0 or (recorded.stdout or "").strip() != prepared.probe:
+        raise PostSubmitGuardError("initial prompt submitted but its guard changed; do not restart or retry.")
+    rejected = "OMO_PROMPT_GUARD_REJECTED"
+    action = start_ticks_guarded_tmux_action(
+        pane, f"set-option -pu -t {shlex.quote(pane.pane_id)} {option}", f"display-message -p {rejected}"
+    )
+    cleared = run(["tmux", "if-shell", "-F", "-t", pane.target, prepared.condition, action, f"display-message -p {rejected}"])
+    readback = run(["tmux", "show-options", "-p", "-qv", "-t", pane.pane_id, option])
+    if cleared.returncode != 0 or cleared.stdout == rejected + "\n" or readback.returncode != 0 or (readback.stdout or "").strip():
+        raise PostSubmitGuardError("initial prompt submitted but guard removal is unverified; do not restart or retry.")
+    try:
+        verify_same_process(pane)
+    except StartError as error:
+        raise PostSubmitGuardError("initial prompt submitted but pane identity changed after guard removal; do not restart or retry.") from error
+
+
+def reconcile_stale_prompt_guard(argv: list[str]) -> str:
+    """Clear a failed launcher's guard only after its pane became an empty shell."""
+
+    parser = argparse.ArgumentParser(allow_abbrev=False)
+    _ = parser.add_argument("--root", type=Path, required=True)
+    _ = parser.add_argument("--task-file", required=True)
+    _ = parser.add_argument("--target", required=True)
+    _ = parser.add_argument("--expected-task-sha256", required=True)
+    _ = parser.add_argument("--expected-todo-sha256", required=True)
+    _ = parser.add_argument("--expected-pane-id", required=True)
+    _ = parser.add_argument("--expected-window-id", required=True)
+    _ = parser.add_argument("--expected-pane-pid", type=int, required=True)
+    _ = parser.add_argument("--expected-pane-start-ticks", type=int, required=True)
+    _ = parser.add_argument("--expected-guard", required=True)
+    args = parser.parse_args(argv)
+    root = args.root.resolve()
+    task = task_path(root, args.task_file)
+    todo = root / "TODO.md"
+    guard_match = re.fullmatch(r"__OMO_PROMPT_END_(\d+)-(\d+)__", args.expected_guard)
+    if (
+        guard_match is None
+        or int(guard_match.group(1)) <= 1
+        or any(SHA256_RE.fullmatch(digest) is None for digest in (args.expected_task_sha256, args.expected_todo_sha256))
+        or not re.fullmatch(r"%[0-9]+", args.expected_pane_id)
+        or not re.fullmatch(r"@[0-9]+", args.expected_window_id)
+        or args.expected_pane_pid <= 1
+        or args.expected_pane_start_ticks <= 1
+    ):
+        raise StartError("stale prompt guard recovery requires exact task, TODO, pane and guard assertions")
+    with tmux_input_lock(args.target), root_membership_lock(root), task_target_lock(root, args.target):
+        with task_file_lock(task), task_file_lock(todo):
+            task_bytes = task.read_bytes()
+            metadata = parse_task_metadata(task_bytes.decode("utf-8"), root)
+            if (
+                hashlib.sha256(task_bytes).hexdigest() != args.expected_task_sha256
+                or hashlib.sha256(todo.read_bytes()).hexdigest() != args.expected_todo_sha256
+                or metadata is None
+                or metadata.status != "blocked"
+                or canonical_target(metadata.runat) != canonical_target(args.target)
+                or authoritative_active_target_task_paths(root, args.target) != (task,)
+            ):
+                raise StartError("stale prompt guard task or TODO custody changed")
+            pane = resolve_pane(args.target)
+            if (
+                pane.pane_id != args.expected_pane_id
+                or pane.window_id != args.expected_window_id
+                or pane.pane_pid != args.expected_pane_pid
+                or pane.start_ticks != args.expected_pane_start_ticks
+                or pane.command not in SHELL_COMMANDS
+                or Path(f"/proc/{guard_match.group(1)}").exists()
+            ):
+                raise StartError("stale prompt guard pane, shell or original launcher changed")
+            option = "@omo_initial_prompt_pending"
+            current = run(["tmux", "show-options", "-p", "-qv", "-t", pane.pane_id, option])
+            if current.returncode != 0 or current.stdout.strip() != args.expected_guard:
+                raise StartError("stale prompt guard changed before reconciliation")
+            rejected = "OMO_STALE_PROMPT_GUARD_REJECTED"
+            action = start_ticks_guarded_tmux_action(
+                pane,
+                f"set-option -pu -t {shlex.quote(pane.pane_id)} {option}",
+                f"display-message -p {rejected}",
+            )
+            condition = f"#{{&&:{exact_process_tmux_condition(pane)},#{{==:#{{{option}}},{args.expected_guard}}}}}"
+            result = run(["tmux", "if-shell", "-F", "-t", pane.pane_id, condition, action, f"display-message -p {rejected}"])
+            if result.returncode != 0 or result.stdout == rejected + "\n":
+                raise StartError("stale prompt guard could not be cleared under the exact pane and value")
+            verify_same_process(pane)
+            after = run(["tmux", "show-options", "-p", "-qv", "-t", pane.pane_id, option])
+            if after.returncode != 0 or after.stdout.strip():
+                raise StartError("stale prompt guard removal is unverified")
+    return "stale initial prompt guard cleared; no task, pane or prompt changed"
+
+
 def submit_prepared_prompt(prepared: PreparedPrompt) -> None:
     """Paste one byte-bound buffer, verify its rendering, then submit."""
 
@@ -1629,6 +2277,7 @@ def submit_prepared_prompt(prepared: PreparedPrompt) -> None:
         )
     )
     try:
+        stage_prompt_guard(prepared)
         rejected_command = f"display-message -p {rejected}"
         guarded = start_ticks_guarded_tmux_action(pane, sequence, rejected_command)
         result = run(["tmux", "if-shell", "-F", "-t", pane.target, prepared.condition, guarded, rejected_command])
@@ -1644,6 +2293,7 @@ def submit_prepared_prompt(prepared: PreparedPrompt) -> None:
         raise
     except Exception as exc:
         raise PromptHandoffError(f"initial prompt handoff became uncertain: {exc}") from exc
+    clear_prompt_guard(prepared)
 
 
 def send_prompt(pane: Pane, prompt_path: Path) -> None:
@@ -1652,6 +2302,8 @@ def send_prompt(pane: Pane, prompt_path: Path) -> None:
     prepared = prepare_prompt(pane, prompt_path)
     try:
         submit_prepared_prompt(prepared)
+    except PostSubmitGuardError:
+        raise
     except PromptHandoffError as error:
         try:
             error.stopped_replacement = stop_unverified_replacement(pane, PROMPT_DELIVERY_TIMEOUT_S)
@@ -1675,8 +2327,8 @@ def guarded_prompt_enter(pane: Pane, condition: str, nonce: str, attempt: int) -
     verify_same_process(pane)
 
 
-def raw_status_composer_cursor(pane: Pane | ReconciliationBinding) -> tuple[str, int] | None:
-    """Capture the unnormalized visible row containing the authenticated cursor."""
+def raw_status_composer_cursor(pane: Pane | ReconciliationBinding) -> tuple[str, int, str] | None:
+    """Capture the unnormalized cursor row and its predecessor for a wrapped composer."""
 
     verify_same_process(pane)
     captured = run(["tmux", "capture-pane", "-p", "-N", "-t", pane.pane_id])
@@ -1687,7 +2339,7 @@ def raw_status_composer_cursor(pane: Pane | ReconciliationBinding) -> tuple[str,
         return None
     cursor_x, cursor_y = map(int, fields)
     rows = captured.stdout.splitlines()
-    return (rows[cursor_y], cursor_x) if cursor_y < len(rows) else None
+    return (rows[cursor_y], cursor_x, rows[cursor_y - 1] if cursor_y else "") if cursor_y < len(rows) else None
 
 
 def exact_status_probe_rendering(pane: Pane | ReconciliationBinding, probe: str) -> bool:
@@ -1696,13 +2348,23 @@ def exact_status_probe_rendering(pane: Pane | ReconciliationBinding, probe: str)
     captured = raw_status_composer_cursor(pane)
     if captured is None:
         return False
-    row, cursor_x = captured
+    row, cursor_x, previous_row = captured
     expected = f"› /status{probe}"
-    return (
+    same_row = (
         cursor_x == len(expected)
         and row[:cursor_x] == expected
         and not row[cursor_x:].strip()
     )
+    wrapped_row = (
+        previous_row.rstrip() == "› /status"
+        and cursor_x == len("  " + probe)
+        and row[:cursor_x] == "  " + probe
+        and not row[cursor_x:].strip()
+    )
+    if not wrapped_row:
+        return same_row
+    _state, _lines, input_text = prompt_state(pane)
+    return codex_input_matches_source(input_text, "/status" + probe)
 
 
 def exact_status_probe_suffix_at_cursor(pane: Pane | ReconciliationBinding, probe: str) -> bool:
@@ -1710,6 +2372,19 @@ def exact_status_probe_suffix_at_cursor(pane: Pane | ReconciliationBinding, prob
 
     captured = raw_status_composer_cursor(pane)
     return captured is not None and captured[0][: captured[1]].endswith(probe)
+
+
+def wait_exact_status_probe_rendering(pane: Pane | ReconciliationBinding, probe: str) -> bool:
+    """Retry read-only cursor captures only while the exact appended probe remains at the cursor."""
+
+    for attempt in range(3):
+        if exact_status_probe_rendering(pane, probe):
+            return True
+        if not exact_status_probe_suffix_at_cursor(pane, probe):
+            return False
+        if attempt < 2:
+            time.sleep(0.05)
+    return False
 
 
 def guarded_status_composer_keys(
@@ -1768,7 +2443,7 @@ def exact_retained_status_action(
             if now_s >= deadline_s:
                 raise PromptHandoffError("/status source probe did not become visible before the delivery deadline.")
             time.sleep(min(0.1, max(0.01, deadline_s - now_s)))
-        if not exact_status_probe_rendering(pane, probe):
+        if not wait_exact_status_probe_rendering(pane, probe):
             if not exact_status_probe_suffix_at_cursor(pane, probe):
                 raise PromptHandoffError("/status composer changed while its source probe was being verified.")
             guarded_status_composer_keys(
@@ -1829,7 +2504,7 @@ def wait_prompt_probe(prepared: PreparedPrompt) -> None:
     last_input = ""
     while True:
         _state, _lines, input_text = prompt_state(prepared.pane)
-        if input_text.endswith(prepared.probe) and prompt_rendering_matches_bound_source(input_text[: -len(prepared.probe)], prepared):
+        if codex_input_matches_source(input_text, prepared.source + prepared.probe):
             return
         last_input = input_text
         now_s = time.monotonic()
@@ -1869,6 +2544,15 @@ def wait_prompt_probe_removed(prepared: PreparedPrompt) -> None:
         time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
 
 
+@contextmanager
+def old_pane_status_query():
+    token = OLD_PANE_STATUS_QUERY.set(True)
+    try:
+        yield
+    finally:
+        OLD_PANE_STATUS_QUERY.reset(token)
+
+
 def prompt_state(pane: Pane | ReconciliationBinding) -> tuple[str, list[str], str]:
     """Capture one Codex state while the fresh pane process stays fixed."""
 
@@ -1877,11 +2561,32 @@ def prompt_state(pane: Pane | ReconciliationBinding) -> tuple[str, list[str], st
     verify_same_process(pane)
     if not exists:
         raise StartError("fresh Codex pane disappeared while handling its initial prompt.")
-    state = classify_status(lines, current_block(lines))
+    block = current_block(lines)
+    state = classify_status(lines, block)
+    old_query = OLD_PANE_STATUS_QUERY.get()
+    if old_query and any(
+        CONTENT_HIDDEN_RE.search(line)
+        or SELECTED_MODEL_CAPACITY_RE.search(line)
+        or "account/read failed during TUI bootstrap" in line
+        for line in lines
+    ):
+        raise StartError("old Codex pane has a fatal TUI warning; the rotation status query was not sent.")
     if state == "not_codex":
+        if any("account/read failed during TUI bootstrap" in line for line in block.lines):
+            raise StartError("fresh Codex account/read bootstrap failed; verify selected workspace routing before retrying.")
         raise StartError("fresh prompt handling no longer sees a Codex interface.")
-    if visible_error_lines(current_block(lines).lines, allow_cursor_quota=False) or state == "error":
+    errors = visible_error_lines(block.lines, allow_cursor_quota=False)
+    old_tool_errors = (
+        old_query
+        and state == "error"
+        and errors
+        and is_stock_placeholder_input_text(current_input_text(lines))
+        and any(CODEX_FOOTER_RE.match(line) for line in lines[-3:])
+    )
+    if (state == "error" and not old_tool_errors) or (errors and not old_query):
         raise StartError("fresh Codex pane showed an error while handling its initial prompt.")
+    if old_tool_errors:
+        state = "ready"
     if has_plan_prompt(lines):
         raise StartError("fresh Codex prompt handling is blocked by an unsafe Plan prompt.")
     return state, lines, current_input_text(lines)
@@ -1950,6 +2655,20 @@ def exact_response_session_id(text: str) -> tuple[str, str]:
     return next(iter(matches)), "present"
 
 
+def fresh_unframed_status_session_id(before: str, after: str) -> str:
+    """Recognize a newly rendered modern status screen without command echo."""
+    pattern = rf"^\s*Session:\s*({UUID_RE.pattern[1:-1]})\s*$"
+    retained = {session_id.lower() for session_id in re.findall(pattern, before, flags=re.MULTILINE)}
+    responses = re.findall(
+        rf"^\s*Model:[^\n]+\n\s*Model provider:[^\n]+\n\s*Directory:[^\n]+\n"
+        rf"\s*Permissions:[^\n]+\n(?:\s*(?:Agents\.md|Account|Collaboration mode):[^\n]*\n){{0,3}}{pattern}",
+        after,
+        flags=re.MULTILINE,
+    )
+    fresh = {session_id.lower() for session_id in responses} - retained
+    return next(iter(fresh)) if len(fresh) == 1 else ""
+
+
 def query_exact_status_session_id(
     pane: Pane,
     n_lines: int,
@@ -1958,6 +2677,7 @@ def query_exact_status_session_id(
     evidence: dict[str, str] | None = None,
     *,
     require_complete_status_card: bool = False,
+    single_source_bound_attempt: bool = False,
 ) -> str:
     """Submit `/status` atomically and optionally require a complete new card."""
     condition = exact_process_tmux_condition(pane)
@@ -1972,29 +2692,41 @@ def query_exact_status_session_id(
     nonce = f"{os.getpid()}-{time.monotonic_ns()}"
     buffer_name = f"omo-codex-status-{nonce}"
     accepted = f"OMO_STATUS_ACCEPTED_{nonce}"
-    loaded = run(["tmux", "set-buffer", "-b", buffer_name, "--", "/status"])
-    if loaded.returncode != 0:
-        raise StartError("failed to load /status query.")
-    sequence = " ; ".join(
-        (
-            f"paste-buffer -d -b {shlex.quote(buffer_name)} -t {shlex.quote(pane.pane_id)}",
-            f"send-keys -t {shlex.quote(pane.pane_id)} Enter",
-            f"display-message -p {accepted}",
-        )
-    )
+    if not single_source_bound_attempt:
+        loaded = run(["tmux", "set-buffer", "-b", buffer_name, "--", "/status"])
+        if loaded.returncode != 0:
+            raise StartError("failed to load /status query.")
+    commands = [f"send-keys -l -t {shlex.quote(pane.pane_id)} -- /status"] if single_source_bound_attempt else [
+        f"paste-buffer -d -b {shlex.quote(buffer_name)} -t {shlex.quote(pane.pane_id)}"
+    ]
+    if not single_source_bound_attempt:
+        commands.append(f"send-keys -t {shlex.quote(pane.pane_id)} Enter")
+    commands.append(f"display-message -p {accepted}")
+    sequence = " ; ".join(commands)
     try:
         require_prompt_ready(pane)
         rejected_command = "display-message -p OMO_STATUS_REJECTED"
         guarded = start_ticks_guarded_tmux_action(pane, sequence, rejected_command)
         result = run(["tmux", "if-shell", "-F", "-t", pane.target, condition, guarded, rejected_command])
     finally:
-        _ = run(["tmux", "delete-buffer", "-b", buffer_name])
+        if not single_source_bound_attempt:
+            _ = run(["tmux", "delete-buffer", "-b", buffer_name])
     if result.returncode != 0 or result.stdout != accepted + "\n":
         raise StartError("pane/window/process identity changed before /status submission.")
     verify_same_process(pane)
+    if single_source_bound_attempt:
+        staged_deadline_s = time.monotonic() + PROMPT_DELIVERY_TIMEOUT_S
+        while True:
+            state, _lines, input_text = prompt_state(pane)
+            if state in {"ready", "running", "waiting_subagent", "stuck_input"} and input_text == "/status":
+                break
+            if not is_stock_placeholder_input_text(input_text) or time.monotonic() >= staged_deadline_s:
+                raise PromptHandoffError("one-status composer is not the exact staged /status; no Enter was sent.")
+            time.sleep(0.05)
+        exact_retained_status_action(pane, condition, nonce, 0, submit=True)
     started_s = time.monotonic()
     deadline_s = started_s + wait_s
-    next_retry_s = started_s + min(0.25, max(0.0, wait_s))
+    next_retry_s = started_s + min(1.0, max(0.0, wait_s))
     retry_attempt = 0
     last_input = ""
     while True:
@@ -2007,6 +2739,7 @@ def query_exact_status_session_id(
         if not exists:
             raise StartError("target disappeared during /status query.")
         after = "\n".join(after_lines)
+        response = ""
         if stale_visible_session_id:
             response = after.rsplit("/status", 1)[-1] if after.count("/status") > before.count("/status") else ""
             session_id, response_state = exact_response_session_id(response)
@@ -2018,20 +2751,36 @@ def query_exact_status_session_id(
                 evidence["response-session-id"] = session_id
                 evidence["response-session-state"] = response_state
         else:
-            session_id = extract_new_status_session_id(before, after) or visible_status_card_session_id(after)
+            session_id = extract_new_status_session_id(before, after)
+            if not session_id:
+                card_session_id = visible_status_card_session_id(after)
+                if card_session_id != visible_status_card_session_id(before):
+                    session_id = card_session_id
+            if not session_id and not require_complete_status_card:
+                session_id = fresh_unframed_status_session_id(before, after)
+        response_input = current_input_text(response.splitlines()) if single_source_bound_attempt else ""
         if session_id:
+            if response_input and not is_stock_placeholder_input_text(response_input):
+                raise PromptHandoffError("/status composer changed to unrelated input during verified handoff.")
             verify_same_process(pane)
             return session_id
-        last_input = current_input_text(after_lines)
-        if last_input == "/status" and now_s >= next_retry_s:
-            retry_attempt += 1
-            exact_retained_status_action(pane, condition, nonce, retry_attempt, submit=True)
-            next_retry_s = now_s + 0.25
+        last_input = response_input if single_source_bound_attempt else current_input_text(after_lines)
+        if last_input == "/status" and single_source_bound_attempt:
+            raise PromptHandoffError("one-status query remained unaccepted; its single Enter will not be replayed.")
+        if last_input == "/status":
+            if now_s >= next_retry_s:
+                retry_attempt += 1
+                exact_retained_status_action(pane, condition, nonce, retry_attempt, submit=True)
+                next_retry_s = now_s + 0.25
         elif last_input and not is_stock_placeholder_input_text(last_input):
             raise PromptHandoffError("/status composer changed to unrelated input during verified handoff.")
         time.sleep(min(0.25, max(0.01, deadline_s - now_s)))
+    if single_source_bound_attempt:
+        raise PromptHandoffError("one-status query had no verified response after its single Enter; do not retry.")
     _final_state, _final_lines, final_input = prompt_state(pane)
     if final_input == "/status":
+        if single_source_bound_attempt:
+            raise PromptHandoffError("one-status query remained unaccepted after its single Enter; do not retry.")
         clear_retained_status_query(pane, condition, nonce)
         raise StartError("/status was not accepted after bounded retries; its exact retained input was cleared.")
     if final_input and not is_stock_placeholder_input_text(final_input):
@@ -2842,12 +3591,17 @@ def process_held_rollouts(tree: tuple[ProcessIdentity, ...], session_root: Path)
                 destination = Path(os.readlink(descriptor_path))
             except ValueError:
                 continue
+            except FileNotFoundError:
+                continue
             except OSError as error:
                 raise StartError(f"could not inspect replacement-tree descriptor {descriptor_path}: {error}") from error
             if not destination.is_absolute() or session_root not in destination.parents or not destination.name.startswith("rollout-") or destination.suffix != ".jsonl":
                 continue
             try:
                 descriptor_info = descriptor_path.stat()
+            except FileNotFoundError:
+                continue
+            try:
                 resolved = destination.resolve(strict=True)
                 path_info = resolved.stat(follow_symlinks=False)
             except OSError as error:
@@ -2980,9 +3734,10 @@ def process_held_reconciliation_rollout(args: Args, binding: ReconciliationBindi
         root_argv = process_argv(binding.pane_pid)
     except ContainmentError as error:
         raise StartError(f"could not bind the replacement launch command: {error}") from error
-    if root_argv != (
+    if (len(root_argv) > 2 and root_argv[1:3] == ("@openai/codex@0.155.1", "--no-daemon")) or root_argv != (
         root_argv[0] if root_argv else "",
-        CODEX_PACKAGE,
+        root_argv[1] if len(root_argv) > 1 else "",
+        *(("--no-daemon",) if "--no-daemon" in root_argv[2:3] else ()),
         "--dangerously-bypass-approvals-and-sandbox",
         "--model",
         args.model,
@@ -2990,7 +3745,7 @@ def process_held_reconciliation_rollout(args: Args, binding: ReconciliationBindi
         f'model_reasoning_effort="{args.reasoning_effort}"',
         "--config",
         "check_for_update_on_startup=false",
-    ) or Path(root_argv[0]).name != CODEX_LAUNCH_COMMAND:
+    ) or Path(root_argv[0]).name != CODEX_LAUNCH_COMMAND or root_argv[1] not in SUPPORTED_CODEX_PACKAGES:
         raise StartError("replacement pane process is not the exact supported fresh Codex launch command.")
     root_argv_sha256 = hashlib.sha256("\0".join(root_argv).encode()).hexdigest()
     audit_start_ticks = binding.audit.fields.get("replacement-pane-start-ticks")
@@ -4069,8 +4824,19 @@ def verify_fresh_rotation(args: Args, snapshot: RotationSnapshot, replacement: P
 
 
 def start(args: Args) -> str:
+    if args.local_proxy_url and args.prompt_file is None:
+        raise StartError("--local-proxy-url requires a fresh prompt-file launch")
+    local_proxy_config_args(args)
     if args.reconcile_rotation_audit:
         raise StartError("rotation audit reconciliation must use its isolated reconciliation path.")
+    if args.compact_initial_handoff and (
+        args.prompt_file is None or args.session_id or any((args.restart_running, args.rotate_worker, args.rotate_submanager, args.recover_non_codex))
+    ):
+        raise StartError("compact initial handoff requires a fresh prompt-file launch")
+    if args.expected_failed_session_id and (
+        not args.compact_initial_handoff or UUID_RE.fullmatch(args.expected_failed_session_id) is None
+    ):
+        raise StartError("failed session assertion requires a fresh compact launch and an exact UUID")
     modes = (
         args.restart_running,
         args.rotate_worker,
@@ -4125,9 +4891,20 @@ def start(args: Args) -> str:
     if not any(modes):
         require_same_shell(pane)
     path = task_path(args.root, args.task_file)
-    membership_lock = root_membership_lock(args.root) if rotating else nullcontext()
+    membership_lock = root_membership_lock(args.root) if rotating or args.assert_fresh_custody else nullcontext()
     with tmux_input_lock(pane.target), membership_lock, task_target_lock(args.root, pane.target), ExitStack() as lifecycle_locks:
-        lock_paths = {path, args.root / "TODO.md", *(task_path(args.root, ref) for ref, _digest in args.expected_child_tasks)} if rotating else {path}
+        lock_paths = {path, args.root / "TODO.md", *(task_path(args.root, ref) for ref, _digest in args.expected_child_tasks)} if rotating or args.assert_fresh_custody else {path}
+        if args.rotate_worker and args.task_file == "wix_dw26.md" and pane.target == "dw-manager-20260926:2.0":
+            if args.replacement_email_file == (args.root / "manager_mail/85c5dff58359-2254.txt").resolve():
+                lock_paths.add(args.root / "dw_submanager_65.md")
+                lock_paths.add(args.root / "manager_mail/85c5dff58359-2254.txt")
+            else:
+                lock_paths.add(args.root / "dw_manager_0926.md")
+                lock_paths.add(args.root / "manager_mail/85c5dff58359-2185.txt")
+                lock_paths.add(args.root / "dw_filter_pop.md")
+                lock_paths.add(args.root / "202608/old_todos.md")
+        if args.rotate_submanager and args.task_file == "dw_manager_0926.md" and pane.target == "dw:1.0":
+            lock_paths.add(args.root / "manager_mail/85c5dff58359-2265.txt")
         for lock_path in sorted(lock_paths, key=str):
             lifecycle_locks.enter_context(task_file_lock(lock_path))
         if not rotating:
@@ -4140,6 +4917,12 @@ def start(args: Args) -> str:
             verify_target=not rotating,
             allow_human_pending=human_restart_authority is not None and human_restart_authority.target == HCFG_RESTART_TARGET,
         )
+        verify_fresh_custody(args, pane, task_binding)
+        if args.compact_initial_handoff and (
+            task_binding.session_id != args.expected_failed_session_id
+            or (args.expected_failed_session_id and task_binding.status != "blocked")
+        ):
+            raise StartError("failed session assertion does not match the task before launch")
         if args.restart_running:
             require_restartable_codex(pane)
         if args.recover_non_codex:
@@ -4199,9 +4982,27 @@ def start(args: Args) -> str:
                     raise StartError("live PCODX state changed during session capture; the pane was not replaced.")
                 effective_args = replace(args, session_id=session_id)
         if rotating:
-            rotation_snapshot = capture_rotation_snapshot(args, pane, task_binding)
+            prospective_session_id = "00000000-0000-0000-0000-000000000000"
+            planned_compact_handoff(args, prospective_session_id, "")
+            proven_old_session_id = ""
+            single_old_status_audit_sha256 = ""
+            if args.single_old_status_attempt:
+                verify_single_old_status_custody(args, pane, task_binding, empty_composer=True)
+                if args.dry_run:
+                    proven_old_session_id = args.expected_old_session_id
+                else:
+                    proven_old_session_id, single_old_status_audit_sha256 = capture_single_old_status(args, pane, task_binding)
+            if args.dry_run and not args.assert_legacy_missing_session_id:
+                proven_old_session_id = proven_old_session_id or task_binding.session_id
+                if not proven_old_session_id:
+                    raise StartError("rotation dry-run has no stored old session id; no /status query was sent")
+            rotation_snapshot = replace(
+                capture_rotation_snapshot(args, pane, task_binding, proven_old_session_id=proven_old_session_id, query_old_status=not args.dry_run),
+                single_old_status_audit_sha256=single_old_status_audit_sha256,
+            )
             effective_args = replace(args, prompt_file=path, session_id="")
         text = "" if rotating else prompt_text(effective_args, agent_instructions)
+        verify_composed_prompt(args, text.encode("utf-8"))
         prompt_path: Path | None = None
         try:
             if text or rotating:
@@ -4221,11 +5022,15 @@ def start(args: Args) -> str:
                 pcodx_env=live_pcodx_state,
             )
             if args.dry_run:
+                if args.single_old_status_attempt:
+                    print("old-session-status: historical assertion only; no live query or audit reserved")
                 print(f"target: {pane.target}")
                 mode = "restart-running" if args.restart_running else "rotate-submanager" if args.rotate_submanager else "rotate-worker" if args.rotate_worker else "recover-non-codex" if args.recover_non_codex else "resume" if args.session_id else "fresh"
                 print(f"mode: {mode}")
                 print(f"command: {command}")
                 return "dry-run"
+            if args.assert_fresh_custody:
+                verify_fresh_custody(args, pane, task_binding)
             if args.restart_running or rotating or args.recover_non_codex:
                 if args.recover_non_codex:
                     verify_task_binding(args, pane, task_binding)
@@ -4245,6 +5050,11 @@ def start(args: Args) -> str:
                     if rotation_snapshot is None:
                         raise StartError("rotation lacks its atomic identity snapshot.")
                     pane = verify_rotation_snapshot(args, rotation_snapshot)
+                    verify_single_old_status_custody(args, pane, task_binding, empty_composer=True)
+                    if args.single_old_status_attempt:
+                        attempt_path = single_old_status_attempt_path(args)
+                        if hashlib.sha256(attempt_path.read_bytes()).hexdigest() != rotation_snapshot.single_old_status_audit_sha256:
+                            raise StartError("one-use old-status evidence changed before respawn")
                     audit_path = args.audit_output
                     if audit_path is None:
                         raise StartError("rotation requires --audit-output.")
@@ -4295,6 +5105,7 @@ def start(args: Args) -> str:
                     try:
                         pane = verify_rotation_snapshot(args, rotation_snapshot)
                         verify_source1206_authority(args, pane, source1206_authority)
+                        verify_single_old_status_before_respawn(args, rotation_snapshot, pane, prepared_audit)
                         respawn_codex(pane, command)
                         active_audit, replacement = checkpoint_rotation_replacement(audit_path, prepared_audit, rotation_snapshot, args)
                         result = wait_started(replacement, marker, args.startup_timeout_s, allow_update_input=False) if args.stop_unverified_replacement else wait_started(replacement, marker, args.startup_timeout_s)
@@ -4304,6 +5115,11 @@ def start(args: Args) -> str:
                             raise StartError("rotation did not prepare its held task prompt.")
                         bound_task_text = task_text_with_session_id(path.read_text(encoding="utf-8"), new_session_id, replace_existing=True)
                         prompt_path.write_text(prompt_text(effective_args, agent_instructions, bound_task_text), encoding="utf-8")
+                        rotation_prompt = prompt_path.read_text(encoding="utf-8")
+                        rotation_handoff = (
+                            planned_compact_handoff(args, new_session_id, rotation_prompt)
+                            if len(rotation_prompt.encode("utf-8")) + PROMPT_END_PROBE_MAX_BYTES > PROMPT_VISIBLE_BYTES else ""
+                        )
                         replacement = verify_rotation_snapshot(args, rotation_snapshot, replacement=replacement)
                         bound_task_sha256 = record_session_id(
                             path,
@@ -4313,7 +5129,10 @@ def start(args: Args) -> str:
                             replace_existing=True,
                         )
                         replacement = verify_bound_rotation_snapshot(args, rotation_snapshot, replacement, new_session_id, bound_task_sha256)
-                        send_prompt(replacement, prompt_path)
+                        if rotation_handoff:
+                            send_compact_prompt(args, replacement, new_session_id, rotation_prompt, rotation_handoff)
+                        else:
+                            send_prompt(replacement, prompt_path)
                         replacement = verify_bound_rotation_snapshot(args, rotation_snapshot, replacement, new_session_id, bound_task_sha256)
                         finish_rotation_audit(
                             audit_path,
@@ -4340,7 +5159,7 @@ def start(args: Args) -> str:
                     except Exception as rotation_error:
                         stopped_replacement = getattr(rotation_error, "stopped_replacement", None)
                         containment_failed = False
-                        if replacement is not None and stopped_replacement is None and (
+                        if replacement is not None and stopped_replacement is None and not isinstance(rotation_error, PostSubmitGuardError) and (
                             bound_task_sha256 or isinstance(rotation_error, PromptHandoffError)
                         ):
                             try:
@@ -4370,6 +5189,7 @@ def start(args: Args) -> str:
                     return result
                 respawn_codex(pane, command)
             else:
+                verify_fresh_custody(args, pane, task_binding)
                 require_same_shell(pane)
                 send_shell_command(pane, command)
             result = wait_started(pane, marker, args.startup_timeout_s)
@@ -4381,22 +5201,48 @@ def start(args: Args) -> str:
                 try:
                     session_id = query_exact_status_session_id(current, 240, min(10.0, args.startup_timeout_s))
                 except PromptHandoffError as handoff_error:
-                    try:
-                        handoff_error.stopped_replacement = stop_unverified_replacement(current, args.startup_timeout_s)
-                    except Exception as containment_error:
-                        handoff_error.add_note(f"fresh session status-handoff containment failed: {containment_error}")
+                    if not args.assert_fresh_custody:
+                        try:
+                            handoff_error.stopped_replacement = stop_unverified_replacement(current, args.startup_timeout_s)
+                        except Exception as containment_error:
+                            handoff_error.add_note(f"fresh session status-handoff containment failed: {containment_error}")
+                    else:
+                        handoff_error.add_note("reviewed fresh launch retained its pane for independent acceptance reconciliation")
                     raise
                 if args.session_id and session_id != args.session_id:
                     raise StartError("captured Codex session UUID differs from --session-id; no prompt was sent.")
                 if not session_id:
                     raise StartError("could not capture the new Codex session id; no prompt was sent.")
-                record_session_id(path, session_id, task_binding.task_sha256, lock_held=True)
+                if args.expected_failed_session_id and (
+                    task_binding.session_id != args.expected_failed_session_id or task_binding.status != "blocked"
+                ):
+                    raise StartError("failed session assertion does not match the blocked task; no prompt was sent")
+                if task_binding.session_id and not args.expected_failed_session_id:
+                    raise StartError("task already binds a Codex session; assert the failed session before fresh launch")
                 if prompt_path is None:
                     raise StartError("task prompt was not prepared; no prompt was sent.")
+                verify_composed_prompt(args, prompt_path.read_bytes())
+                if args.assert_fresh_custody and hashlib.sha256(args.prompt_file.read_bytes()).hexdigest() != args.expected_prompt_sha256:
+                    raise StartError("fresh prompt bytes changed before session-bound submission")
+                # 🧑 "dw:0 has input stuck in input box. ... How to prevent it from ever happening again?"
+                use_compact_handoff = args.compact_initial_handoff or len(text.encode("utf-8")) + PROMPT_END_PROBE_MAX_BYTES > PROMPT_VISIBLE_BYTES
+                handoff = planned_compact_handoff(args, session_id, text) if use_compact_handoff else ""
+                record_session_id(
+                    path,
+                    session_id,
+                    task_binding.task_sha256,
+                    lock_held=True,
+                    replace_existing=bool(args.expected_failed_session_id),
+                )
                 try:
-                    send_prompt(current, prompt_path)
+                    if use_compact_handoff:
+                        send_compact_prompt(args, current, session_id, text, handoff)
+                    else:
+                        send_prompt(current, prompt_path)
                 except Exception as delivery_error:
-                    if getattr(delivery_error, "stopped_replacement", None) is None:
+                    if args.assert_fresh_custody:
+                        delivery_error.add_note("reviewed fresh launch retains its bound session and pane for independent acceptance reconciliation")
+                    elif not isinstance(delivery_error, PostSubmitGuardError) and getattr(delivery_error, "stopped_replacement", None) is None:
                         try:
                             stop_unverified_replacement(current, args.startup_timeout_s)
                         except Exception as containment_error:
@@ -4421,14 +5267,18 @@ def start(args: Args) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     try:
-        args = parse_args(sys.argv[1:] if argv is None else argv)
-        if args.reconcile_rotation_audit:
-            result = reconcile_rotation_audit(args)
-        elif args.retire_recovery_evidence:
-            retire_recovery_receipt(args.root, args.recovery_evidence, require_manifest=True)
-            result = "recovery-evidence-retired"
+        raw_args = sys.argv[1:] if argv is None else argv
+        if raw_args and raw_args[0] == "--reconcile-stale-initial-prompt-guard":
+            result = reconcile_stale_prompt_guard(raw_args[1:])
         else:
-            result = start(args)
+            args = parse_args(raw_args)
+            if args.reconcile_rotation_audit:
+                result = reconcile_rotation_audit(args)
+            elif args.retire_recovery_evidence:
+                retire_recovery_receipt(args.root, args.recovery_evidence, require_manifest=True)
+                result = "recovery-evidence-retired"
+            else:
+                result = start(args)
     except (OSError, StartError, subprocess.TimeoutExpired, ValueError) as error:
         print(f"omo_codex_start: {error}", file=sys.stderr)
         return 1

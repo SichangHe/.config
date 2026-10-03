@@ -164,7 +164,7 @@ def parse_args(argv: list[str]) -> Args:
     if MODEL_RE.fullmatch(parsed.model) is None:
         parser.error("--model contains unsupported characters")
     if parsed.model == "gpt-5.6":
-        parser.error("--model gpt-5.6 is not a supported Codex model id; use gpt-6-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra.")
+        parser.error("--model gpt-5.6 is not a supported Codex model id; use gpt-6.1-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra.")
     if parsed.model == FAILED_MODEL:
         parser.error(f"--model must differ from unavailable {FAILED_MODEL}")
     for name in ("startup_timeout_s", "model_probe_timeout_s"):
@@ -511,6 +511,7 @@ def probe_model(model: str, effort: str, timeout_s: float) -> None:
         command = [
             "bunx",
             CODEX_PACKAGE,
+            "--no-daemon",
             "exec",
             "--ephemeral",
             "--skip-git-repo-check",
@@ -547,6 +548,7 @@ def resume_command(binding: Binding, model: str, session_id: str, marker: str) -
     launch = [
         "bunx",
         CODEX_PACKAGE,
+        "--no-daemon",
         "--dangerously-bypass-approvals-and-sandbox",
         "--model",
         model,
@@ -674,7 +676,7 @@ def verify_continuity(args: Args, expected: Binding, authority: Authority, sessi
 
 def recover(args: Args) -> str:
     if args.model == "gpt-5.6":
-        raise RecoveryError("--model gpt-5.6 is not a supported Codex model id; use gpt-6-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra.")
+        raise RecoveryError("--model gpt-5.6 is not a supported Codex model id; use gpt-6.1-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra.")
     authority = read_authority(args)
     binding = bind(args)
     probe_model(args.model, binding.launch.reasoning_effort, args.model_probe_timeout_s)

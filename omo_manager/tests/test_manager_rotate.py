@@ -56,14 +56,24 @@ class ManagerRotateTests(unittest.TestCase):
             parsed = parse_args(["--target", "wl:1.0", "--root", tmp, "--model", "gpt-5.6-sol", "--reasoning-effort", "low"])
         self.assertEqual(default_state_dir(), parsed.state_dir)
         self.assertEqual(Path(tmp).resolve(), parsed.root)
+        self.assertEqual("@openai/codex@latest", parsed.codex_package)
 
-    def test_replacement_context_preserves_exact_suffix_and_enters_fresh_prompt(self) -> None:
+    def test_pinned_bootstrap_recovery_package_reaches_fresh_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = parse_args(["--target", "wl:1.0", "--root", tmp, "--model", "gpt-6-sol", "--reasoning-effort", "low", "--codex-package", "@openai/codex@0.155.1"])
+            metadata = LaunchMetadata("gpt-6-sol", "low", "override", None, ())
+            command = fresh_command(metadata, Path(tmp) / "prompt", "wl:1.0", Path(tmp), Path(tmp) / "state", args.codex_package)
+            self.assertIn("exec bunx @openai/codex@0.155.1 ", command)
+            self.assertNotIn("exec bunx @openai/codex@latest", command)
+            self.assertNotIn("--no-daemon", command)
+
+    def test_replacement_context_preserves_full_human_request_in_fresh_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             mail = root / "manager_mail" / "1751.txt"
             mail.parent.mkdir()
             mail.write_bytes(b"Subject: Re: test\n\nReplace this agent.\r\nExact reason\r\n-- Human")
-            self.assertEqual(".\r\nExact reason\r\n-- Human", replacement_context(root, mail))
+            self.assertEqual("Replace this agent.\r\nExact reason\r\n-- Human", replacement_context(root, mail))
 
             args = replace(self.args(root, root / "state"), replacement_email_file=mail)
             with (
@@ -78,7 +88,9 @@ class ManagerRotateTests(unittest.TestCase):
                 patch("omo_manager.omo_manager_rotate.capture_pane", return_value="old output\n"),
             ):
                 prepared = preflight(args)
-            self.assertIn("<replacement_reason>.\r\nExact reason\r\n-- Human</replacement_reason>", prepared.prompt)
+            self.assertIn("<human_request>Replace this agent.\r\nExact reason\r\n-- Human</human_request>", prepared.prompt)
+            self.assertIn("$ /test/getagentsmd get main_manager\nmain\n", prepared.prompt)
+            self.assertNotIn("You are the main manager in tmux manager:2.0.", prepared.prompt)
             instructions.assert_called_once_with("main_manager")
 
     def test_self_path_forwards_replacement_email_to_coordinator(self) -> None:
@@ -270,7 +282,7 @@ class ManagerRotateTests(unittest.TestCase):
             Path("/home/sichangheagent/work_logs"),
             Path("/private/state"),
         )
-        self.assertIn("bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox", command)
+        self.assertIn("bunx @openai/codex@latest --no-daemon --dangerously-bypass-approvals-and-sandbox", command)
         self.assertIn("--model gpt-5.6-terra", command)
         self.assertIn('model_reasoning_effort="xhigh"', command)
         self.assertIn("OMO_AGENT_TMUX_TARGET=wl:1.0", command)
@@ -511,6 +523,7 @@ class ManagerRotateTests(unittest.TestCase):
             assert watcher_env is not None
             self.assertEqual(str(root), watcher_env["OMO_WORK_LOGS_ROOT"])
             self.assertEqual("manager:2.0", watcher_env["OMO_MANAGER_TMUX_TARGET"])
+            self.assertEqual("30", watcher_env["OMO_MANAGER_WATCHER_HEALTH_TIMEOUT_S"])
             record = json.loads(audit_path.read_text(encoding="utf-8"))
             self.assertEqual("succeeded", record["outcome"])
             self.assertEqual("old manager output\n", record["prior_pane_output"])

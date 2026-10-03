@@ -16,6 +16,15 @@ EOF
     exit 0
     ;;
 esac
+# 🧑 "Is the email watcher or the pending watcher broken?"
+clear_producer_environment() {
+  unset OMNIGENT_RUNNER_LAUNCH_HARNESS OMNIGENT_RUNNER_PRIMARY_SESSION_ID \
+    HARNESS_ANTIGRAVITY_NATIVE_BRIDGE_DIR HARNESS_ANTIGRAVITY_NATIVE_REQUEST_SESSION_ID \
+    HARNESS_CURSOR_NATIVE_BRIDGE_DIR CODEX_HOME CODEX_SESSION_ID CODEX_THREAD_ID CODEX_CI \
+    CURSOR_CONVERSATION_ID ANTIGRAVITY_CONVERSATION_ID \
+    OMO_AGENT_TMUX_TARGET OMO_AGENT_TASK_FILE TMUX_PANE
+}
+clear_producer_environment
 if [ -n "${TMUX:-}" ] \
   && [ "${OMO_MANAGER_TMUX_REENTRY:-0}" != 1 ] \
   && command -v tmux >/dev/null 2>&1 \
@@ -97,6 +106,7 @@ if [ -f "$local_env" ]; then
   # shellcheck disable=SC1090
   source "$local_env"
 fi
+clear_producer_environment
 configured_root="${OMO_WORK_LOGS_ROOT:-}"
 inherited_root="${env_root#x}"
 # 🧑 "Normalize only trailing slashes for lexical final-component validation, preserving `/` ... and derive identity from that same lexical form."
@@ -186,7 +196,7 @@ agent_password="${OMO_AGENT_GMAIL_APP_PASSWORD:-}"
 human_email="${OMO_HUMAN_EMAIL_ADDRESS:-}"
 mail_dir="${OMO_MANAGER_MAIL_DIR:-$root/manager_mail}"
 email_supervisor_startup_grace_s="${OMO_MANAGER_EMAIL_SUPERVISOR_STARTUP_GRACE_S:-2}"
-watcher_health_timeout_s="${OMO_MANAGER_WATCHER_HEALTH_TIMEOUT_S:-5}"
+watcher_health_timeout_s="${OMO_MANAGER_WATCHER_HEALTH_TIMEOUT_S:-60}"
 case "$email_supervisor_startup_grace_s" in
   ''|*[!0-9]*) echo "OMO_MANAGER_EMAIL_SUPERVISOR_STARTUP_GRACE_S must be a non-negative integer" >&2; exit 2 ;;
 esac

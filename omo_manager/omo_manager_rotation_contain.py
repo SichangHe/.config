@@ -31,7 +31,6 @@ if __package__ in {None, ""}:
 
 from omo_manager.omo_agent_status import TASK_RE
 from omo_manager.omo_agent_status import same_tmux_target
-from omo_manager.omo_manager_rotate import CODEX_PACKAGE
 from omo_manager.omo_manager_rotate import RotationError
 from omo_manager.omo_manager_rotate import SUPPORTED_CODEX_PACKAGES
 from omo_manager.omo_manager_rotate import PaneIdentity
@@ -655,17 +654,25 @@ def stable_process_identity(value: ProcessIdentity) -> tuple[int, int, int, int,
     )
 
 
+def fresh_launch_argv_variants(prompt: str, audit: AuditBinding, executable: str) -> Iterator[tuple[str, ...]]:
+    """Enumerate exact current and historical rotation launches for receipt checks."""
+    for package in sorted(SUPPORTED_CODEX_PACKAGES):
+        for daemon_flags in (((),) if package == "@openai/codex@0.155.1" else (("--no-daemon",), ())):
+            yield (
+                executable,
+                package,
+                *daemon_flags,
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--model",
+                audit.model,
+                "--config",
+                f'model_reasoning_effort="{audit.reasoning_effort}"',
+                prompt.rstrip("\n"),
+            )
+
+
 def command_line_matches_fresh_launch(argv: tuple[str, ...], prompt: str, audit: AuditBinding, expected_command: str) -> bool:
-    return (
-        len(argv) == 8
-        and Path(argv[0]).name == expected_command
-        and argv[1] == CODEX_PACKAGE
-        and argv[2] == "--dangerously-bypass-approvals-and-sandbox"
-        and argv[3:5] == ("--model", audit.model)
-        and argv[5] == "--config"
-        and argv[6] == f'model_reasoning_effort="{audit.reasoning_effort}"'
-        and argv[7] == prompt.rstrip("\n")
-    )
+    return bool(argv) and Path(argv[0]).name == expected_command and argv in fresh_launch_argv_variants(prompt, audit, argv[0])
 
 
 def task_ref(root: Path, task_file: Path) -> str:
