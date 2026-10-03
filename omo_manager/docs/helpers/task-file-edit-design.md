@@ -5,19 +5,42 @@
 Goal: managers own task lifecycle and cross-task bookkeeping, while every agent
 maintains its own pending queue through a path-opaque helper.
 
-Workers use only `omo_pending.py list|add|replace|remove|reconcile-sent-remove|recover-removal-notice`;
-they never receive a task path or backing-file details. Workers report with
-`omo_report.sh`.
+Workers may use `omo_pending.py --task-file TASK.md list|add|replace|remove` to select their task. Queue additions, including Human-authored items, resolve the supplied filename against the unique active TODO owner even from a detached tool; no Codex session ID or pane ancestry is required for persistence. Human-authored additions send the normal creation notice when the caller authenticates as that exact owner, including selection by `OMO_AGENT_TASK_FILE` at launch. Detached or foreign callers persist additions without impersonating the owner or sending its email. Human-item completion and ordinary `reconcile-sent-remove` still require authenticated owner ancestry; incident recoveries have their own origin rules. Workers report with `omo_report.sh --task-file TASK.md` under that helper's separate reporting rules.
+
+For existing `(pending)` blocks, `omo_record_pending.py --pending-file TASK.md --task-file TASK.md --caller-task-file TASK.md --line N --human-authored --ack-human --email-file manager_mail/SOURCE.txt --item 'REQUEST' --sent-message-id '<ID>' --sent-subject-sha256 DIGEST --sent-body-sha256 DIGEST` records a Human item without sending another notice. The caller task must name the marker's unique active TODO queue owner; detached tool processes need no pane ancestry. The helper verifies the existing message's exact Sent Mail subject and body digests, sender and Human recipient, and normalized original thread; writes a durable receipt before removing the marker; and refuses uncertain verification without mutation. Supply the actual Sent digests, not the digest of the local draft. If there is no already-sent reply, omit the three `--sent-*` flags to use the normal creation acknowledgment.
 
 ## agent pending queue
 
-`omo_pending.py` infers the authenticated OmniGent session when present, otherwise the exact current tmux pane, and resolves one active queue.
+`omo_pending.py` binds an explicit task file to exactly one active TODO owner. This is a cooperative same-account task-file boundary, not an isolation boundary between agents sharing that account: callers must supply only their assigned task filename. Human item removal, completion mail, incident-specific recovery, marker reconciliation, and manager lifecycle actions retain separate strict origin and evidence checks; a filename alone does not authorize those actions.
 When preserved blocked records share the target, it prefers the sole `running` or
 `long_running` task; multiple runnable tasks remain ambiguous. It locks the target,
 rechecks ownership, and fails closed on missing or unresolved ownership. `list`
 prints item text. `add` sends one durable creation notice only for items carrying
 the explicit `🧑` Human-authorship marker; a retry after delivery completes the
-queue mutation without replaying the notice. `replace` keeps authorship unchanged.
+queue mutation without replaying the notice. A named task requires exact owner
+authentication independent of filename selection before this mail path is used;
+manager-owned Human items use the same notices, while manager result and whole-task
+close mail remain suppressed. Agent-authored additions remain silent. Detached or foreign named-task additions
+still persist, but do not authorize owner notices.
+New creation markers bind individual item hashes to their canonical group identity
+and semantic key. An exact owner may retry named `add` for already-persisted Human
+items; only members not covered by this history enter the existing claim and receipt
+path. Recovering another unnotified item after a prior notice works without repeating
+the notified group's members. Markers and items persist together; a failed marker
+write retries the delivered receipt without resending. Older group-only markers
+cannot establish membership and explicitly block recovery of unknown members until
+prior delivery is verified. Detached additions atomically store a creation intent
+for newly added Human items, binding their hashes and canonical generation to the
+selected queue owner. An authenticated owner retry uses unresolved intents rather
+than lifetime notice history, so identical text removed and later re-added receives
+its own notice. A later delivered member marker resolves that intent; partial group
+retries leave other members unresolved. Delivery receipts preserve retry identity
+if the resolving marker write fails. A changed queue owner blocks stale intent
+consumption. There is no automatic intent consumer; the responsible owner must retry.
+New items with a leading `Human SourceN (manager_mail/...-N.txt):` label store
+the request first and retain the original mail filename at the end instead.
+Existing item text remains unchanged so exact pending-item identities stay valid.
+`replace` keeps authorship unchanged.
 `remove` requires one-line completion or cancellation evidence and sends one
 durable closure notice only for `🧑` items. Unmarked legacy items are ambiguous
 and remain silent, as do agent-authored items. A blanket no-contact rule suppresses
@@ -37,6 +60,24 @@ that delivery to the canonical pending-item notice, then removes the items
 through the ordinary verified path. Verification failure leaves the queue
 unchanged and never invokes the sender. The durable record stores hashes of the
 verified sender and recipient; later mail-configuration drift fails closed.
+
+The Human Source2288 issue-comment completion predates this canonical notice
+format. `recover-source2288-reviewed-sent` requires exact owner-pane origin,
+the active `cc_dw_new_0928.md` task and fresh task/TODO SHA-256 values. It verifies
+the unchanged Human source against original Inbox MIME and the unique
+original-thread answer against Sent MIME, then removes only that answered item.
+`--dry-run` checks the same evidence without changing the queue. This does not
+reconcile the separate CC repair item in the DW manager's queue.
+
+`recover-source2180-worker-result` is distinct and requires authenticated
+DW-manager pane origin. It verifies the manager's
+original Human Inbox message, the unique worker Sent result (in a different CC
+thread, not falsely labeled an original-thread Source2180 reply), the still-open
+worker four-site queue item, and the
+frozen four-site accepted manifest with four fifteen-page raw/production-score
+groups. Fresh SHA-256 values for the manager task, worker task and TODO bind the
+active owner chain before removing only the manager's four-site item. Its
+`--dry-run` performs every proof check without writing or sending email.
 
 Each Human-item notice reuses the responsible agent's newest verified Human
 email thread. Its body contains only `pending item created:` or `pending item
@@ -147,6 +188,7 @@ Owner-local combined answer:
 - pass paired `--answer-subject-file` and `--answer-message-file`
 - use one generated completion key for the entire batch
 - the helper sends one owner-authenticated answer before one queue mutation
+- a manager task may send an explicit combined answer or the normal notice for its own Human item; automatic manager result and whole-task close notices remain suppressed
 - missing, repeated, non-Human, or policy-forbidden items fail without mutation
 - every unlisted pending item remains open
 
@@ -211,14 +253,12 @@ Cross-state completion reconciliation:
   stays in the original email thread
 
 `delegate-message WORKER.md --message-file FILE`
-- append `(pending)`, a manager source marker, and the message file content to
-  a non-done worker task
-- refuse a worker task that already has a live `(pending)` marker so watcher
-  snapshots cannot combine concurrent manager instructions
-- intended for managers to dispatch new worker work without hand-editing the
-  worker task file
-- does not send directly to tmux; `omo_pending_watch.py` owns delivery
-- ordinary pending blocks route directly to the task's `runat`
+- disabled: agent delegations cannot add task-body `(pending)` blocks
+- send the Human's original request verbatim through the agent delivery channel;
+  task prose is reserved for Human instructions, while agents may update task
+  metadata and parenthesized comments
+- historical `(from manager omo_task_edit delegate-message)` blocks retain their
+  agent-origin classification until consumed
 
 `closed-status-normalize TASK.md --expected-task-sha256 SHA256 (--blocked-on TEXT | --done)`
 - replace one invalid legacy `status: closed` with `blocked` and an explicit blocker, or evidence-bound `done`

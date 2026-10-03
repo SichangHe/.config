@@ -271,6 +271,108 @@ def write_active_task_tree_fixture(root: Path) -> tuple[Path, Path, Path, Status
 
 
 class TaskStatusTests(unittest.TestCase):
+    def test_archived_dw_filter_queue_does_not_claim_current_manager_pane(self) -> None:
+        from omo_manager.omo_task_status import authoritative_active_target_task_paths
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "202608" / "old_todos.md"
+            archive.parent.mkdir()
+            archive.write_text("dw_filter_pop.md dw:1\n", encoding="utf-8")
+            current = root / "dw_manager_0926.md"
+            current.write_text(task_frontmatter(runat="dw:1"), encoding="utf-8")
+            historical = root / "dw_filter_pop.md"
+            historical.write_text(
+                task_frontmatter(status="closed", runat="dw:1", pending_items=("unresolved Human work",))
+                + "\n(manager closed Codex agent 09-21; tmux target `dw:1`.)\n",
+                encoding="utf-8",
+            )
+            todo = root / "TODO.md"
+            todo.write_text("current:\ndw_manager_0926.md dw:1\n", encoding="utf-8")
+            self.assertEqual(authoritative_active_target_task_paths(root, "dw:1"), (current,))
+            self.assertEqual(authoritative_active_target_task_paths(root, "dw:1.0"), (current,))
+            self.assertIn("unresolved Human work", historical.read_text(encoding="utf-8"))
+            todo.write_text("current:\ndw_manager_0926.md dw:1\ndw_filter_pop.md dw:1\n", encoding="utf-8")
+            with self.assertRaisesRegex(TaskFrontmatterError, "cannot verify target ownership"):
+                authoritative_active_target_task_paths(root, "dw:1")
+
+    def test_archived_closed_legacy_owner_does_not_block_current_owner(self) -> None:
+        from omo_manager.omo_task_status import authoritative_active_target_task_paths
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "202608" / "old_todos.md"
+            archive.parent.mkdir()
+            archive.write_text("closed.md wl:2\n", encoding="utf-8")
+            current = root / "current.md"
+            current.write_text(task_frontmatter(), encoding="utf-8")
+            historical = root / "closed.md"
+            historical.write_text(
+                task_frontmatter(status="closed") + "\n(manager closed Codex agent 09-21; tmux target `wl:2`.)\n",
+                encoding="utf-8",
+            )
+            todo = root / "TODO.md"
+            todo.write_text("current:\ncurrent.md wl:2\n", encoding="utf-8")
+            self.assertEqual(authoritative_active_target_task_paths(root, "wl:2"), (current,))
+            for archive_text, todo_text, historical_text in (
+                ("", todo.read_text(), historical.read_text()),
+                ("closed.md wl:2\nclosed.md wl:2\n", todo.read_text(), historical.read_text()),
+                ("archived closed.md wl:2\n", todo.read_text(), historical.read_text()),
+                ("closed.md wl:2 extra\n", todo.read_text(), historical.read_text()),
+                (archive.read_text(), "current:\ncurrent.md wl:2\nclosed.md wl:2\n", historical.read_text()),
+                (archive.read_text(), todo.read_text(), historical.read_text().replace("status: closed", "status: blocked")),
+                (archive.read_text(), todo.read_text(), historical.read_text().replace("pending_task_items: []", "pending_task_items:\n  - unfinished")),
+                (archive.read_text(), todo.read_text(), historical.read_text().replace("(manager closed Codex agent ", "(manager maybe closed Codex agent ")),
+            ):
+                archive.write_text(archive_text, encoding="utf-8")
+                todo.write_text(todo_text, encoding="utf-8")
+                historical.write_text(historical_text, encoding="utf-8")
+                with self.assertRaisesRegex(TaskFrontmatterError, "cannot verify target ownership"):
+                    authoritative_active_target_task_paths(root, "wl:2")
+            archive.write_text("closed.md wl:2\n", encoding="utf-8")
+            todo.write_text("current:\ncurrent.md wl:2\n", encoding="utf-8")
+            historical.write_text(
+                task_frontmatter(status="closed") + "\n(manager closed Codex agent 09-21; tmux target `wl:2`.)\n",
+                encoding="utf-8",
+            )
+            second_archive = root / "202607" / "old_todos.md"
+            second_archive.parent.mkdir()
+            second_archive.write_text("closed.md wl:2\n", encoding="utf-8")
+            with self.assertRaisesRegex(TaskFrontmatterError, "cannot verify target ownership"):
+                authoritative_active_target_task_paths(root, "wl:2")
+
+    def test_archived_stopped_blocked_task_does_not_claim_reused_pane(self) -> None:
+        from omo_manager.omo_task_status import authoritative_active_target_task_paths
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "202608" / "old_todos.md"
+            archive.parent.mkdir()
+            archive.write_text("wrapped_submit.md dw8:0\n", encoding="utf-8")
+            current = root / "gpu_det_2287.md"
+            current.write_text(task_frontmatter(runat="dw8:0"), encoding="utf-8")
+            historical = archive.parent / "wrapped_submit.md"
+            stopped_text = task_frontmatter(
+                status="blocked", blocked_on="previous handoff", runat="dw8:0",
+                pending_items=("preserved Human request",),
+            ) + "\n(manager closed Codex agent 09-12; tmux target `dw8:0`.)\n"
+            historical.write_text(stopped_text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo.write_text("current:\ngpu_det_2287.md dw8:0\n", encoding="utf-8")
+            self.assertEqual(authoritative_active_target_task_paths(root, "dw8:0"), (current,))
+            self.assertIn("preserved Human request", historical.read_text(encoding="utf-8"))
+            for archived_text, current_text, stopped in (
+                ("", todo.read_text(), stopped_text),
+                (archive.read_text(), "current:\ngpu_det_2287.md dw8:0\nwrapped_submit.md dw8:0\n", stopped_text),
+                (archive.read_text(), todo.read_text(), stopped_text.replace("manager closed Codex agent", "manager considered Codex agent")),
+                ("wrapped_submit.md dw8:0\nwrapped_submit.md dw8:0\n", todo.read_text(), stopped_text),
+                (archive.read_text(), todo.read_text(), stopped_text.replace("status: blocked\nblocked_on: previous handoff", "status: running")),
+            ):
+                archive.write_text(archived_text, encoding="utf-8")
+                todo.write_text(current_text, encoding="utf-8")
+                historical.write_text(stopped, encoding="utf-8")
+                self.assertEqual(len(authoritative_active_target_task_paths(root, "dw8:0")), 2)
+
     def setUp(self) -> None:
         delivered = patch("omo_manager.omo_task_status.require_owner_completion", return_value=True)
         _ = delivered.start()
@@ -4195,6 +4297,368 @@ class TaskStatusTests(unittest.TestCase):
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
             parse_args(human_manager)
 
+    def test_pb_picker_blocked_no_mail_completion_requires_exact_sent_result(self) -> None:
+        from omo_manager.omo_task_status import PB_CHAT_PICKER_BLOCKER, PB_CHAT_PICKER_MESSAGE_ID
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            task = root / "pb_chat_picker_0928.md"
+            task_text = task_frontmatter(status="blocked", blocked_on=PB_CHAT_PICKER_BLOCKER, runat="pb:2", managerat="wl:5") + "body\n"
+            task.write_text(task_text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\npb_chat_picker_0928.md pb:2\n\nlow priority:\n\nhuman pending:\n\nprevious:\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            options = [
+                "--root", str(root), "--complete-live-no-mail", "--active-target", "pb:2", "--manager-target", "wl:5",
+                "--blocked-on", PB_CHAT_PICKER_BLOCKER,
+                "--expected-task-sha256", hashlib.sha256(task_text.encode()).hexdigest(),
+                "--expected-todo-sha256", hashlib.sha256(todo_text.encode()).hexdigest(),
+                "--expected-pane-id", "%42", task.name,
+            ]
+            with patch("omo_manager.omo_task_status.verify_ordinary_completion_in_sent", return_value=None) as sent, redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(parse_args(options)))
+                sent.assert_called_once()
+                self.assertEqual(PB_CHAT_PICKER_MESSAGE_ID, sent.call_args.args[0])
+            self.assertEqual(task_text, task.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            with (
+                patch("omo_manager.omo_task_status.verify_ordinary_completion_in_sent", return_value=("sender", "recipient")),
+                patch("omo_manager.omo_task_status.exact_pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.require_owner_completion") as email,
+                patch("omo_manager.omo_task_status.stop_done_agent") as stop,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(0, run(parse_args(options)))
+                email.assert_not_called()
+                stop.assert_not_called()
+            self.assertEqual("done", parse_task_metadata(task.read_text(encoding="utf-8"), root).status)
+            self.assertIn("previous:\npb_chat_picker_0928.md pb:2\n", todo.read_text(encoding="utf-8"))
+            with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                parse_args([*options[:-1], "--blocked-on", "other", options[-1]])
+
+    def test_weekly_memo_no_mail_completion_requires_verified_sent_result(self) -> None:
+        from omo_manager.omo_task_status import WEEKLY_MEMO_BLOCKER, WEEKLY_MEMO_MESSAGE_ID
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            task = root / "weekly_memo_0927.md"
+            task_text = task_frontmatter(status="blocked", blocked_on=WEEKLY_MEMO_BLOCKER, runat="wl:3", managerat="wl:5") + f"(verified removed pending item: Reviewed weekly memo and ChatGPT revision completed; direct original-thread Human email Message-ID {WEEKLY_MEMO_MESSAGE_ID} verified in Sent Mail; no duplicate email sent.)\n"
+            task.write_text(task_text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\n\nlow priority:\n\nhuman pending:\nweekly_memo_0927.md wl:3\n\nprevious:\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            options = [
+                "--root", str(root), "--complete-live-no-mail", "--active-target", "wl:3", "--manager-target", "wl:5",
+                "--blocked-on", WEEKLY_MEMO_BLOCKER,
+                "--expected-task-sha256", hashlib.sha256(task_text.encode()).hexdigest(),
+                "--expected-todo-sha256", hashlib.sha256(todo_text.encode()).hexdigest(),
+                "--expected-pane-id", "%42", task.name,
+            ]
+            with patch("omo_manager.omo_task_status.verify_ordinary_completion_in_sent", return_value=None) as sent, redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(parse_args(options)))
+                self.assertEqual(WEEKLY_MEMO_MESSAGE_ID, sent.call_args.args[0])
+            with (
+                patch("omo_manager.omo_task_status.verify_ordinary_completion_in_sent", return_value=("sender", "recipient")),
+                patch("omo_manager.omo_task_status.exact_pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.require_owner_completion") as email,
+                patch("omo_manager.omo_task_status.stop_done_agent") as stop,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(0, run(parse_args(options)))
+                email.assert_not_called()
+                stop.assert_not_called()
+            self.assertEqual("done", parse_task_metadata(task.read_text(encoding="utf-8"), root).status)
+            self.assertIn("previous:\nweekly_memo_0927.md wl:3\n", todo.read_text(encoding="utf-8"))
+
+    def test_weekly_memo_no_mail_completion_accepts_current_index_after_reviewed_sent(self) -> None:
+        from omo_manager.omo_task_status import WEEKLY_MEMO_BLOCKER, WEEKLY_MEMO_MESSAGE_ID
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            task = root / "weekly_memo_0927.md"
+            task_text = task_frontmatter(status="blocked", blocked_on=WEEKLY_MEMO_BLOCKER, runat="wl:3", managerat="wl:5") + f"(verified removed pending item: Reviewed weekly memo and ChatGPT revision completed; direct original-thread Human email Message-ID {WEEKLY_MEMO_MESSAGE_ID} verified in Sent Mail; no duplicate email sent.)\n"
+            task.write_text(task_text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\nweekly_memo_0927.md wl:3\n\nlow priority:\n\nhuman pending:\n\nprevious:\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            options = [
+                "--root", str(root), "--complete-live-no-mail", "--active-target", "wl:3", "--manager-target", "wl:5",
+                "--blocked-on", WEEKLY_MEMO_BLOCKER,
+                "--expected-task-sha256", hashlib.sha256(task_text.encode()).hexdigest(),
+                "--expected-todo-sha256", hashlib.sha256(todo_text.encode()).hexdigest(),
+                "--expected-pane-id", "%42", task.name,
+            ]
+            with (
+                patch("omo_manager.omo_task_status.verify_ordinary_completion_in_sent", return_value=("sender", "recipient")),
+                patch("omo_manager.omo_task_status.exact_pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.require_owner_completion") as email,
+                patch("omo_manager.omo_task_status.stop_done_agent") as stop,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(0, run(parse_args(options)))
+                email.assert_not_called()
+                stop.assert_not_called()
+            self.assertEqual("done", parse_task_metadata(task.read_text(encoding="utf-8"), root).status)
+            self.assertIn("previous:\nweekly_memo_0927.md wl:3\n", todo.read_text(encoding="utf-8"))
+
+    def test_mail_cleanup_cancel_describe_is_read_only_and_rejects_stale_evidence(self) -> None:
+        from omo_manager.omo_task_status import MAIL_CLEANUP_CANCEL_BLOCKER, MAIL_CLEANUP_CANCEL_MESSAGE_ID, MAIL_CLEANUP_CANCEL_SOURCE, MAIL_CLEANUP_CANCEL_SOURCE_SHA256
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            text = task_frontmatter(status="blocked", blocked_on=MAIL_CLEANUP_CANCEL_BLOCKER, runat="pb:1") + f"{MAIL_CLEANUP_CANCEL_MESSAGE_ID}\n"
+            task = root / "mail_cleanup_0927.md"
+            task.write_text(text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\nmail_cleanup_0927.md pb:1\n\nlow priority:\n\nhuman pending:\n\nprevious:\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            base = [
+                "--root", directory, "--active-target", "pb:1", "--manager-target", "wl:1",
+                "--human-close-authorization-source", MAIL_CLEANUP_CANCEL_SOURCE,
+                "--human-close-authorization-sha256", MAIL_CLEANUP_CANCEL_SOURCE_SHA256,
+                "--expected-task-sha256", hashlib.sha256(text.encode()).hexdigest(),
+                "--expected-todo-sha256", hashlib.sha256(todo_text.encode()).hexdigest(),
+                "--expected-pane-id", "%42", "--expected-pane-pid", "4242",
+                "--expected-pane-start-ticks", "73", "mail_cleanup_0927.md",
+            ]
+            with (
+                patch("omo_manager.omo_task_status.read_human_close_authorization", return_value=b"Subject: cancellation\n\nClose these. Mail compression has been offloaded to Grogbot.") as authority,
+                patch("omo_manager.omo_task_status.verify_ordinary_completion_in_sent", return_value=("agent", "human")) as sent,
+                patch("omo_manager.omo_task_status.bound_guarded_read", side_effect=lambda _target, _pane, command, _pid: "%42\t4242\n" if "#{pane_id}" in command[-1] else "4242\n"),
+                patch("omo_manager.omo_task_status.process_start_ticks", return_value=73),
+                patch("omo_manager.omo_task_status.exact_pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.authoritative_active_target_task_paths", return_value=(task,)),
+                patch("omo_manager.omo_task_status.current_target_task_paths", return_value=(task,)),
+                patch("omo_manager.omo_task_status.finish_done_transaction", wraps=finish_done_transaction) as publication,
+                patch("omo_manager.omo_task_status.stop_done_agent") as stop,
+                patch("omo_manager.omo_task_status.require_owner_completion") as completion,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(0, run(parse_args([*base[:-1], "--describe-mail-cleanup-cancel", base[-1]])))
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+                sent.assert_called_once()
+                publication.assert_not_called()
+                stop.assert_not_called()
+                completion.assert_not_called()
+                authority.return_value = b"Subject: cancellation\n\nDo not close these."
+                self.assertEqual(2, run(parse_args([*base[:-1], "--describe-mail-cleanup-cancel", base[-1]])))
+                authority.return_value = b"Subject: cancellation\n\nClose these. Mail compression has been offloaded to Grogbot."
+                with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                    parse_args([*base[:-1], "--describe-mail-cleanup-cancel", "--cancel-mail-cleanup-no-mail", base[-1]])
+                stale = base.copy()
+                stale[stale.index("--expected-task-sha256") + 1] = "0" * 64
+                self.assertEqual(2, run(parse_args([*stale[:-1], "--describe-mail-cleanup-cancel", stale[-1]])))
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                sent.return_value = None
+                self.assertEqual(2, run(parse_args([*base[:-1], "--cancel-mail-cleanup-no-mail", base[-1]])))
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+                sent.return_value = ("agent", "human")
+                task.write_text(text.replace("pending_task_items: []", "pending_task_items:\n  - still open"), encoding="utf-8")
+                self.assertEqual(2, run(parse_args([*base[:-1], "--cancel-mail-cleanup-no-mail", base[-1]])))
+                task.write_text(text, encoding="utf-8")
+                wrong_start = base.copy()
+                wrong_start[wrong_start.index("--expected-pane-start-ticks") + 1] = "74"
+                self.assertEqual(2, run(parse_args([*wrong_start[:-1], "--cancel-mail-cleanup-no-mail", wrong_start[-1]])))
+                with patch("omo_manager.omo_task_status.blocking_request"):
+                    self.assertEqual(0, run(parse_args([*base[:-1], "--cancel-mail-cleanup-no-mail", base[-1]])))
+                    stop.assert_not_called()
+                    completion.assert_not_called()
+                    publication.assert_called_once()
+                self.assertEqual("done", parse_task_metadata(task.read_text(encoding="utf-8"), root).status)
+                self.assertIn("previous:\nmail_cleanup_0927.md pb:1\n", todo.read_text(encoding="utf-8"))
+
+    def test_mail_cleanup_done_stop_preflight_does_not_probe_or_stop(self) -> None:
+        from omo_manager.omo_codex_status import Report
+        from omo_manager.omo_task_status import MAIL_CLEANUP_CANCEL_MESSAGE_ID, MAIL_CLEANUP_CANCEL_SOURCE, MAIL_CLEANUP_CANCEL_SOURCE_SHA256
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task = root / "mail_cleanup_0927.md"
+            text = task_frontmatter(status="done", runat="pb:1") + f"{MAIL_CLEANUP_CANCEL_MESSAGE_ID}\n"
+            task.write_text(text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\nmail_cleanup_0927.md pb:1\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            base = [
+                "--root", directory, "--active-target", "pb:1", "--manager-target", "wl:1",
+                "--human-close-authorization-source", MAIL_CLEANUP_CANCEL_SOURCE,
+                "--human-close-authorization-sha256", MAIL_CLEANUP_CANCEL_SOURCE_SHA256,
+                "--expected-task-sha256", hashlib.sha256(text.encode()).hexdigest(),
+                "--expected-todo-sha256", hashlib.sha256(todo_text.encode()).hexdigest(),
+                "--expected-pane-id", "%42", "--expected-pane-pid", "4242",
+                "--expected-pane-start-ticks", "73", "--describe-mail-cleanup-stop", "mail_cleanup_0927.md",
+            ]
+            report = Report("ready", [], "", False, "")
+            output = io.StringIO()
+            with (
+                patch("omo_manager.omo_task_status.read_human_close_authorization", return_value=b"Subject: cancellation\n\nClose these. Mail compression has been offloaded to Grobgbot.") as authority,
+                patch("omo_manager.omo_task_status.verify_ordinary_completion_in_sent", return_value=("agent", "human")) as sent,
+                patch("omo_manager.omo_task_status.bound_guarded_read", return_value="%42\t4242\n"),
+                patch("omo_manager.omo_task_status.process_start_ticks", return_value=73),
+                patch("omo_manager.omo_task_status.park_target_pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.guarded_capture", return_value="Codex ready"),
+                patch("omo_manager.omo_task_status.report_from_lines", return_value=report) as status,
+                patch("omo_manager.omo_task_status.query_status_session_id") as probe,
+                patch("omo_manager.omo_task_status.stop") as stop,
+                patch("omo_manager.omo_task_status.close_bound_tmux_target") as close,
+                redirect_stdout(output),
+            ):
+                self.assertEqual(2, run(parse_args(base)))
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+                status.assert_not_called()
+                authority.return_value = b"Subject: cancellation\n\nClose these. Mail compression has been offloaded to Grogbot."
+                self.assertEqual(0, run(parse_args(base)))
+                record = json.loads(output.getvalue().splitlines()[-1])
+                self.assertEqual("%42", record["pane_id"])
+                self.assertIsNone(record["session_id"])
+                self.assertFalse(record["stop_authorized"])
+                sent.return_value = None
+                self.assertEqual(2, run(parse_args(base)))
+                sent.return_value = ("agent", "human")
+                status.return_value = Report("ready", [], "draft", True, "")
+                self.assertEqual(2, run(parse_args(base)))
+                status.return_value = report
+                rival = root / "other.md"
+                rival.write_text(task_frontmatter(status="running", runat="pb:1"), encoding="utf-8")
+                self.assertEqual(2, run(parse_args(base)))
+                rival.unlink()
+                todo.write_text(todo_text + "other.md pb:1\n", encoding="utf-8")
+                self.assertEqual(2, run(parse_args(base)))
+                todo.write_text(todo_text, encoding="utf-8")
+                stale = base.copy()
+                stale[stale.index("--expected-task-sha256") + 1] = "0" * 64
+                self.assertEqual(2, run(parse_args(stale)))
+                probe.assert_not_called()
+                stop.assert_not_called()
+                close.assert_not_called()
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_mail_cleanup_session_probe_is_once_only_and_receipt_bound(self) -> None:
+        from omo_manager.omo_codex_status import Report
+        from omo_manager.omo_task_status import MAIL_CLEANUP_CANCEL_MESSAGE_ID, MAIL_CLEANUP_CANCEL_SOURCE, MAIL_CLEANUP_CANCEL_SOURCE_SHA256
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task = root / "mail_cleanup_0927.md"
+            text = task_frontmatter(status="done", runat="pb:1") + f"{MAIL_CLEANUP_CANCEL_MESSAGE_ID}\n"
+            task.write_text(text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\nmail_cleanup_0927.md pb:1\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            receipt = root.parent / f".{root.name}-omo-mail-cleanup-probe" / "pb1-session.json"
+            receipt.parent.mkdir(mode=0o700)
+            receipt.parent.chmod(0o2700)
+            base = [
+                "--root", directory, "--active-target", "pb:1", "--manager-target", "wl:1",
+                "--human-close-authorization-source", MAIL_CLEANUP_CANCEL_SOURCE,
+                "--human-close-authorization-sha256", MAIL_CLEANUP_CANCEL_SOURCE_SHA256,
+                "--expected-task-sha256", hashlib.sha256(text.encode()).hexdigest(),
+                "--expected-todo-sha256", hashlib.sha256(todo_text.encode()).hexdigest(),
+                "--expected-pane-id", "%42", "--expected-pane-pid", "4242",
+                "--expected-pane-start-ticks", "73", "--audit-output", str(receipt),
+                "--probe-mail-cleanup-session", "mail_cleanup_0927.md",
+            ]
+            output = io.StringIO()
+
+            def status_query(*_args: object, **kwargs: object) -> tuple[str, str]:
+                callback = kwargs["pre_input_check"]
+                assert callable(callback)
+                callback()
+                staged = kwargs["staged_status_check"]
+                assert callable(staged)
+                staged()
+                return "01a0e0eb-71ec-7ce0-b366-846f3d9fadb8", "fresh status card"
+
+            with (
+                patch("omo_manager.omo_task_status.read_human_close_authorization", return_value=b"Subject: cancellation\n\nClose these. Mail compression has been offloaded to Grogbot."),
+                patch("omo_manager.omo_task_status.verify_ordinary_completion_in_sent", return_value=("agent", "human")),
+                patch("omo_manager.omo_task_status.bound_guarded_read", return_value="%42\t4242\n"),
+                patch("omo_manager.omo_task_status.process_start_ticks", return_value=73),
+                patch("omo_manager.omo_task_status.park_target_pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.guarded_capture", return_value="Codex ready"),
+                patch("omo_manager.omo_task_status.report_from_lines", return_value=Report("ready", [], "", False, "")),
+                patch("omo_manager.omo_task_status.query_status_session_id", side_effect=status_query) as query,
+                patch("omo_manager.omo_task_status.stop") as stop,
+                redirect_stdout(output),
+            ):
+                with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                    parse_args([*base[:-1], "--describe-mail-cleanup-stop", base[-1]])
+                self.assertEqual(0, run(parse_args(base)))
+                self.assertEqual(1, query.call_count)
+                self.assertTrue(query.call_args.kwargs["strict_status_response"])
+                self.assertTrue(callable(query.call_args.kwargs["staged_status_check"]))
+                self.assertEqual(("pb:1", "%42"), query.call_args.kwargs["tmux_guard"])
+                record = json.loads(receipt.read_text(encoding="utf-8"))
+                self.assertEqual("confirmed", record["state"])
+                self.assertEqual(hashlib.sha256("fresh status card".encode()).hexdigest(), record["response_sha256"])
+                self.assertEqual("01a0e0eb-71ec-7ce0-b366-846f3d9fadb8", record["session_id"])
+                self.assertFalse(record["stop_authorized"])
+                self.assertEqual(0o600, receipt.stat().st_mode & 0o777)
+                self.assertEqual(0o2700, receipt.parent.stat().st_mode & 0o7777)
+                self.assertEqual(2, run(parse_args(base)))
+                self.assertEqual(1, query.call_count)
+                stop.assert_not_called()
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_mail_cleanup_failed_staged_status_probe_reserves_receipt_without_retry(self) -> None:
+        from omo_manager.omo_codex_status import Report
+        from omo_manager.omo_task_status import MAIL_CLEANUP_CANCEL_MESSAGE_ID, MAIL_CLEANUP_CANCEL_SOURCE, MAIL_CLEANUP_CANCEL_SOURCE_SHA256
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task = root / "mail_cleanup_0927.md"
+            text = task_frontmatter(status="done", runat="pb:1") + f"{MAIL_CLEANUP_CANCEL_MESSAGE_ID}\n"
+            task.write_text(text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\nmail_cleanup_0927.md pb:1\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            receipt = root.parent / f".{root.name}-omo-mail-cleanup-probe" / "pb1-session.json"
+            options = [
+                "--root", directory, "--active-target", "pb:1", "--manager-target", "wl:1",
+                "--human-close-authorization-source", MAIL_CLEANUP_CANCEL_SOURCE,
+                "--human-close-authorization-sha256", MAIL_CLEANUP_CANCEL_SOURCE_SHA256,
+                "--expected-task-sha256", hashlib.sha256(text.encode()).hexdigest(),
+                "--expected-todo-sha256", hashlib.sha256(todo_text.encode()).hexdigest(),
+                "--expected-pane-id", "%42", "--expected-pane-pid", "4242",
+                "--expected-pane-start-ticks", "73", "--audit-output", str(receipt),
+                "--probe-mail-cleanup-session", "mail_cleanup_0927.md",
+            ]
+
+            def reject_staged(*_args: object, **kwargs: object) -> tuple[str, str]:
+                callback = kwargs["staged_status_check"]
+                assert callable(callback)
+                callback()
+                raise RuntimeError("staged /status composer changed")
+
+            with (
+                patch("omo_manager.omo_task_status.read_human_close_authorization", return_value=b"Subject: cancellation\n\nClose these. Mail compression has been offloaded to Grogbot."),
+                patch("omo_manager.omo_task_status.verify_ordinary_completion_in_sent", return_value=("agent", "human")),
+                patch("omo_manager.omo_task_status.bound_guarded_read", return_value="%42\t4242\n"),
+                patch("omo_manager.omo_task_status.process_start_ticks", return_value=73),
+                patch("omo_manager.omo_task_status.park_target_pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.guarded_capture", return_value="Codex ready"),
+                patch("omo_manager.omo_task_status.report_from_lines", return_value=Report("ready", [], "", False, "")),
+                patch("omo_manager.omo_task_status.query_status_session_id", side_effect=reject_staged) as query,
+                patch("omo_manager.omo_task_status.stop") as stop,
+            ):
+                with redirect_stderr(io.StringIO()):
+                    self.assertEqual(2, run(parse_args(options)))
+                    self.assertEqual(2, run(parse_args(options)))
+                self.assertEqual(1, query.call_count)
+                self.assertEqual("reserved", json.loads(receipt.read_text(encoding="utf-8"))["state"])
+                stop.assert_not_called()
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
     def test_live_no_mail_completion_changes_only_task_and_todo_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -7354,6 +7818,23 @@ resolved_task_items: []
                     self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
                 stop_done_agent.assert_not_called()
 
+    def test_blocked_config_repair_reconciliation_keeps_current_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            reason = "Human Source2145 authorized a NEW owner; config repair must diagnose launch verification before retry"
+            task = task_frontmatter(status="blocked", blocked_on=reason, pending_items=("finish prior Human task",)) + "body\n"
+            path.write_text(task, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo.write_text("current:\n\nhuman pending:\ntask.md wl:2\n", encoding="utf-8")
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(0, run(StatusArgs(root, Path("task.md"), "blocked", reason)))
+            self.assertEqual(task, path.read_text(encoding="utf-8"))
+            updated_todo = todo.read_text(encoding="utf-8")
+            self.assertLess(updated_todo.index("current:"), updated_todo.index("task.md wl:2"))
+            self.assertLess(updated_todo.index("task.md wl:2"), updated_todo.index("human pending:"))
+            self.assertEqual(1, updated_todo.count("task.md wl:2"))
+
     def test_cli_blocked_reconciliation_updates_changed_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -7685,6 +8166,22 @@ resolved_task_items: []
 
             self.assertEqual(original, path.read_text(encoding="utf-8"))
             self.assertEqual("current:\ntask.md wl:2\nother.md wl:3\n\nprevious:\n", todo.read_text(encoding="utf-8"))
+
+    def test_cli_long_running_clears_stale_blocker_without_losing_current_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text(task_frontmatter(status="long_running", blocked_on="stale") + "body\n", encoding="utf-8")
+            todo = root / "TODO.md"
+            original_todo = "current:\ntask.md wl:2\n"
+            todo.write_text(original_todo, encoding="utf-8")
+
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(0, run(StatusArgs(root, Path("task.md"), "long_running", "")))
+
+            self.assertNotIn("blocked_on:", path.read_text(encoding="utf-8"))
+            self.assertIn("status: long_running", path.read_text(encoding="utf-8"))
+            self.assertEqual(original_todo, todo.read_text(encoding="utf-8"))
 
     def test_running_index_reconciliation_rechecks_the_task_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

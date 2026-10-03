@@ -14,6 +14,8 @@ from unittest.mock import patch
 import omo_manager.omo_task_edit as task_edit
 from omo_manager.omo_agent_status import parse_task_metadata
 from omo_manager.omo_task_edit import REMOVE_REMINDER
+from omo_manager.omo_task_edit import SCORER_CREATION_COMMIT
+from omo_manager.omo_task_edit import SCORER_ORIGINAL_IMPERATIVE
 from omo_manager.omo_task_edit import SOURCE1503_SHA256
 from omo_manager.omo_task_edit import SOURCE1506_SHA256
 from omo_manager.omo_task_edit import SOURCE1528_DISPOSITION_RECORDS
@@ -432,6 +434,64 @@ class TaskEditTests(unittest.TestCase):
             )
             self.assertEqual(2, run(args))
             self.assertEqual(text, task.read_text(encoding="utf-8"))
+
+    def test_scorer_purpose_envelope_preserves_queue_and_supports_read_only_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "scorer_recovery_0926.md"
+            quote = f'Human instruction (verbatim): "Original prompt. {SCORER_ORIGINAL_IMPERATIVE} Continued original context."'
+            text = task_frontmatter(pending_items=("retain historical owner", "retain restart item")).replace("runat: wl:2", "runat: dw:2") + f"Opening goal.\n\n{quote}\n"
+            original = text.replace("status: running", "status: blocked\nblocked_on: original review")
+            task.write_text(text, encoding="utf-8")
+            (root / "TODO.md").write_text("current:\nscorer_recovery_0926.md dw:2\n", encoding="utf-8")
+            base = ["--root", tmp, "scorer-purpose-envelope", "scorer_recovery_0926.md", "--expected-task-sha256", hashlib.sha256(text.encode()).hexdigest(), "--authority-sha256", hashlib.sha256(original.encode()).hexdigest()]
+            def source(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+                self.assertEqual(["git", "-C", tmp, "show", f"{SCORER_CREATION_COMMIT}:scorer_recovery_0926.md"], command)
+                return subprocess.CompletedProcess(command, 0, original.encode(), b"")
+            with patch.object(task_edit, "SCORER_CREATION_BLOB_SHA256", hashlib.sha256(original.encode()).hexdigest()), patch.object(task_edit.subprocess, "run", side_effect=source), redirect_stdout(io.StringIO()):
+                self.assertEqual(0, run(parse_args([*base, "--dry-run"])))
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(0, run(parse_args(base)))
+            updated = task.read_text(encoding="utf-8")
+            self.assertTrue(updated.startswith(text))
+            self.assertIn(f'<human_instruction authoritative="true" source="task-creation:{SCORER_CREATION_COMMIT}:scorer_recovery_0926.md">\n{SCORER_ORIGINAL_IMPERATIVE}\n</human_instruction>', updated)
+            self.assertEqual(parse_task_metadata(text, root), parse_task_metadata(updated, root))
+            with patch.object(task_edit, "SCORER_CREATION_BLOB_SHA256", hashlib.sha256(original.encode()).hexdigest()), patch.object(task_edit.subprocess, "run", side_effect=source), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(parse_args(base)))
+            self.assertEqual(updated, task.read_text(encoding="utf-8"))
+
+    def test_scorer_purpose_envelope_rejects_wrong_provenance_or_owner_without_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "scorer_recovery_0926.md"
+            original = task_frontmatter().replace("runat: wl:2", "runat: dw:2") + f'Human instruction (verbatim): "{SCORER_ORIGINAL_IMPERATIVE}"\n'
+            (root / "TODO.md").write_text("current:\nscorer_recovery_0926.md dw:2\n", encoding="utf-8")
+            baseline = ["--root", tmp, "scorer-purpose-envelope", "scorer_recovery_0926.md"]
+            for case, text, source_bytes, digest in (
+                ("altered quote", original.replace("one authorized executor", "two executors"), original.encode(), hashlib.sha256(original.encode()).hexdigest()),
+                ("later mail", original, b"Subject: IRM migration reply\n", hashlib.sha256(b"Subject: IRM migration reply\n").hexdigest()),
+                ("wrong manager", original.replace("managerat: wl:1", "managerat: dw:1"), original.encode(), hashlib.sha256(original.encode()).hexdigest()),
+                ("caller-controlled alternate creation blob", original, (original + "altered historical authority\n").encode(), hashlib.sha256((original + "altered historical authority\n").encode()).hexdigest()),
+                ("wrong blob", original, original.encode(), "0" * 64),
+            ):
+                with self.subTest(case=case):
+                    task.write_text(text, encoding="utf-8")
+                    args = parse_args([*baseline, "--expected-task-sha256", hashlib.sha256(text.encode()).hexdigest(), "--authority-sha256", digest])
+                    with patch.object(task_edit, "SCORER_CREATION_BLOB_SHA256", hashlib.sha256(original.encode()).hexdigest()), patch.object(task_edit.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, source_bytes, b"")), redirect_stderr(io.StringIO()):
+                        self.assertEqual(2, run(args))
+                    self.assertEqual(text, task.read_text(encoding="utf-8"))
+            task.write_text(original, encoding="utf-8")
+            valid = [*baseline, "--expected-task-sha256", hashlib.sha256(original.encode()).hexdigest(), "--authority-sha256", hashlib.sha256(original.encode()).hexdigest()]
+            (root / "TODO.md").write_text("current:\nscorer_recovery_0926.md wl:2\n", encoding="utf-8")
+            with patch.object(task_edit, "SCORER_CREATION_BLOB_SHA256", hashlib.sha256(original.encode()).hexdigest()), patch.object(task_edit.subprocess, "run") as git, redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(parse_args(valid)))
+            git.assert_not_called()
+            self.assertEqual(original, task.read_text(encoding="utf-8"))
+            task.write_text(original, encoding="utf-8")
+            args = parse_args([*baseline, "--expected-task-sha256", "f" * 64, "--authority-sha256", hashlib.sha256(original.encode()).hexdigest()])
+            with patch.object(task_edit.subprocess, "run") as git, redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            git.assert_not_called()
 
     def test_human_envelope_record_supports_exact_source1506_stale_mail_record(self) -> None:
         source1506 = base64.b64decode(
@@ -1406,6 +1466,33 @@ class TaskEditTests(unittest.TestCase):
             self.assertEqual(original, task.read_text(encoding="utf-8"))
             self.assertIn("must not create a live `(pending)` marker", stderr.getvalue())
 
+    def test_config_evidence_prune_preserves_human_text_and_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "config_repair_0926.md"
+            original = (
+                task_frontmatter()
+                + "Human request\n(pending)\n(record and delegate manager_mail/123.txt)\n"
+                + "(verified removed pending item: obsolete evidence)\n"
+                + f"(wl:5 reports {'stale agent status ' * 20})\n"
+                + "(manager note: preserve this)\n"
+            )
+            task.write_text(original, encoding="utf-8")
+            digest = hashlib.sha256(original.encode()).hexdigest()
+            self.assertEqual(0, run(Args(root, Path(task.name), "prune-config-evidence-comments", expected_task_sha256=digest)))
+            expected = original.replace("(verified removed pending item: obsolete evidence)\n", "").replace(f"(wl:5 reports {'stale agent status ' * 20})\n", "")
+            self.assertEqual(expected, task.read_text(encoding="utf-8"))
+            self.assertEqual(2, run(Args(root, Path(task.name), "prune-config-evidence-comments", expected_task_sha256=digest)))
+
+    def test_config_pending_remove_rejects_long_comment_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            task = root / "config_repair_0926.md"
+            original = task_frontmatter(pending_items=("test item",))
+            task.write_text(original, encoding="utf-8")
+            self.assertEqual(2, run(Args(root, Path(task.name), "pending-remove", items=("test item",), evidence="x" * 181)))
+            self.assertEqual(original, task.read_text(encoding="utf-8"))
+
     def test_pending_move_removes_from_source_and_adds_to_destination_without_remove_reminder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2028,7 +2115,7 @@ class TaskEditTests(unittest.TestCase):
             self.assertEqual(0, exit_code)
             self.assertEqual("header\nNo new task item here.\n(pending marker cleared line=2: report-only: informational only)\n", task.read_text(encoding="utf-8"))
 
-    def test_delegate_message_appends_direct_pending_block(self) -> None:
+    def test_delegate_message_rejects_agent_authored_task_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task = root / "worker.md"
@@ -2036,13 +2123,13 @@ class TaskEditTests(unittest.TestCase):
             task.write_text(task_frontmatter() + "body", encoding="utf-8")
             message.write_text("Please inspect the failing shard.\n", encoding="utf-8")
 
-            exit_code = run(Args(root, Path("worker.md"), "delegate-message", message_file=message))
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                exit_code = run(Args(root, Path("worker.md"), "delegate-message", message_file=message))
 
-            self.assertEqual(0, exit_code)
-            self.assertEqual(
-                task_frontmatter() + "body\n(pending)\n(from manager omo_task_edit delegate-message)\nPlease inspect the failing shard.\n",
-                task.read_text(encoding="utf-8"),
-            )
+            self.assertEqual(2, exit_code)
+            self.assertEqual(task_frontmatter() + "body", task.read_text(encoding="utf-8"))
+            self.assertIn("cannot be written into task files", stderr.getvalue())
 
     def test_delegate_message_rejects_manager_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2057,7 +2144,7 @@ class TaskEditTests(unittest.TestCase):
                 exit_code = run(Args(root, Path("manager.md"), "delegate-message", message_file=message))
 
             self.assertEqual(2, exit_code)
-            self.assertIn("requires a worker task file", stderr.getvalue())
+            self.assertIn("cannot be written into task files", stderr.getvalue())
 
     def test_delegate_message_rejects_second_live_pending_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2074,7 +2161,7 @@ class TaskEditTests(unittest.TestCase):
 
             self.assertEqual(2, exit_code)
             self.assertEqual(original, task.read_text(encoding="utf-8"))
-            self.assertIn("existing live `(pending)` marker", stderr.getvalue())
+            self.assertIn("cannot be written into task files", stderr.getvalue())
 
     def test_delegate_message_ignores_pending_example_in_markdown_fence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2086,8 +2173,8 @@ class TaskEditTests(unittest.TestCase):
 
             exit_code = run(Args(root, Path("worker.md"), "delegate-message", message_file=message))
 
-            self.assertEqual(0, exit_code)
-            self.assertTrue(task.read_text(encoding="utf-8").endswith("(pending)\n(from manager omo_task_edit delegate-message)\nreal delegation\n"))
+            self.assertEqual(2, exit_code)
+            self.assertEqual(task_frontmatter() + "```md\n(pending)\n```\n", task.read_text(encoding="utf-8"))
 
     def test_delegate_message_ignores_manager_handled_pending_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2099,8 +2186,8 @@ class TaskEditTests(unittest.TestCase):
 
             exit_code = run(Args(root, Path("worker.md"), "delegate-message", message_file=message))
 
-            self.assertEqual(0, exit_code)
-            self.assertTrue(task.read_text(encoding="utf-8").endswith("(pending)\n(from manager omo_task_edit delegate-message)\nreal delegation\n"))
+            self.assertEqual(2, exit_code)
+            self.assertEqual(task_frontmatter() + "(pending)\n(manager handled: prior delegation)\n", task.read_text(encoding="utf-8"))
 
     def test_aliases_parse_to_canonical_commands(self) -> None:
         self.assertEqual("pending-list", parse_args(["list", "task.md"]).command)

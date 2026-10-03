@@ -77,6 +77,7 @@ from omo_manager.omo_agent_status import parse_task_metadata
 from omo_manager.omo_agent_status import parse_task_lines
 from omo_manager.omo_agent_status import parse_task_text
 from omo_manager.omo_codex_status import exact_pane_id
+from omo_manager.omo_codex_status import is_stock_placeholder_input_text
 from omo_manager.omo_task_lock import task_target_lock
 from omo_manager.omo_task_lock import task_file_lock
 from omo_manager.omo_task_lock import process_start_ticks
@@ -89,6 +90,7 @@ from omo_manager.omo_blocking_actor import request as blocking_request
 from omo_manager.omo_completion_email import build_completion_email
 from omo_manager.omo_completion_email import require_owner_completion
 from omo_manager.omo_completion_email import validate_completion_notice_delivery
+from omo_manager.omo_completion_email import verify_ordinary_completion_in_sent
 from omo_manager.omo_omnigent import SessionNotFoundError
 from omo_manager.omo_omnigent import session_id as omnigent_session_id
 from omo_manager.omo_omnigent import session_snapshot as omnigent_session_snapshot
@@ -372,6 +374,33 @@ ACTIVE_TASK_TREE_BLOCKER = "Supported exact closure is unavailable: complete-liv
 ACTIVE_TASK_TREE_AUTHORITY_LOCATOR = "manager_mail/85c5dff58359-1298.txt:3-4"
 ACTIVE_TASK_TREE_AUTHORITY_TEXT = "No idea what this is, but close it\nUse raw tmux command if needed"
 ACTIVE_TASK_TREE_NO_MAIL_INTENT = "close-active-task-tree-without-human-mail"
+# 🧑 "Close these. ... compression has been offloaded to Grogbot."
+MAIL_CLEANUP_CANCEL_TASK = "mail_cleanup_0927.md"
+MAIL_CLEANUP_CANCEL_SOURCE = "manager_mail/85c5dff58359-2150.txt"
+MAIL_CLEANUP_CANCEL_SOURCE_SHA256 = "588d93d036d024ee625f6fdefe8afaf54cb163da00b15b8906d22def4b828262"
+MAIL_CLEANUP_CANCEL_MESSAGE_ID = "<179047670270.2519738.11746469415791408998@gmail.com>"
+MAIL_CLEANUP_CANCEL_SUBJECT_SHA256 = "f3b03beb8941f9b920f58e8c2876f5a836bb551ac6d73645764e8f7922eb1d30"
+MAIL_CLEANUP_CANCEL_BODY_SHA256 = "3b10aed283ff91036e584a8ae3fd28c245c76f0e954ba7fdf4a42b1f76932998"
+MAIL_CLEANUP_PROBE_RECEIPT = "pb1-session.json"
+
+
+def mail_cleanup_probe_receipt(root: Path) -> Path:
+    """Keep the single-use receipt beside, not inside, the tracked work-log root."""
+
+    return root.parent / f".{root.name}-omo-mail-cleanup-probe" / MAIL_CLEANUP_PROBE_RECEIPT
+MAIL_CLEANUP_CANCEL_BLOCKER = "human canceled manager mail cleanup in manager_mail/85c5dff58359-2150.txt; Grokbot owns compression; awaiting supported no-duplicate-mail owner lifecycle closure"
+PB_CHAT_PICKER_BLOCKER = "config_repair_0926.md: PB owner completed model-picker repair and emailed Human directly; queue empty, but supported no-mail completion requires exact live-pane custody flags. Preserve pb:2 and do not resend mail or stop pane."
+PB_CHAT_PICKER_MESSAGE_ID = "<179056893343.2620951.11344647376143354481@gmail.com>"
+PB_CHAT_PICKER_SUBJECT_SHA256 = "42068369cb2c9733437765d5e0ad38361b4787eeb10e92942817ab840089d8d2"
+PB_CHAT_PICKER_BODY_SHA256 = "fb241e08bf93d83490c03542e924f51a7d921a4d112462fe44fbcea986e4ede7"
+WEEKLY_MEMO_BLOCKER = "config_repair_0926.md: weekly memo completed and Human directly emailed; one Human queue item awaits authenticated already-Sent no-email reconciliation after original-thread lookup timeout and uncertain helper paste. Preserve wl:3 and do not resend mail or submit keys."
+WEEKLY_MEMO_MESSAGE_ID = "<179056971836.2844497.11821218111454304940@gmail.com>"
+WEEKLY_MEMO_SUBJECT_SHA256 = "3a4533388e8f5b0722e05117c892225c99c47ea2a445e948779870660d0e14df"
+WEEKLY_MEMO_BODY_SHA256 = "a6373c2f169e17a8ddc31a2a0fa9079f57705961c8440d806df7cad970966a00"
+REVIEWED_SENT_LIVE_COMPLETIONS = (
+    ("pb_chat_picker_0928.md", "pb:2", "wl:5", PB_CHAT_PICKER_BLOCKER, PB_CHAT_PICKER_MESSAGE_ID, PB_CHAT_PICKER_SUBJECT_SHA256, PB_CHAT_PICKER_BODY_SHA256),
+    ("weekly_memo_0927.md", "wl:3", "wl:5", WEEKLY_MEMO_BLOCKER, WEEKLY_MEMO_MESSAGE_ID, WEEKLY_MEMO_SUBJECT_SHA256, WEEKLY_MEMO_BODY_SHA256),
+)
 REPLACEMENT_CUSTODY_AUDIT_SHA256 = "644b3e50fb09fd9c06b8fa4b11636b2e63e531ff6e2b0edbd39af27bc427ce57"
 REPLACEMENT_CUSTODY_COMMIT = "19341d567ea93848fd5573e595310c89bc2c1bfd"
 
@@ -423,6 +452,10 @@ class Args:
     reconcile_missing_target: bool = False
     close_missing_target: bool = False
     complete_live_no_mail: bool = False
+    cancel_mail_cleanup_no_mail: bool = False
+    describe_mail_cleanup_cancel: bool = False
+    describe_mail_cleanup_stop: bool = False
+    probe_mail_cleanup_session: bool = False
     close_active_task_tree_no_mail: bool = False
     shared_target: str = ""
     protected_shared_task: Path | None = None
@@ -509,6 +542,10 @@ class ParsedArgs(argparse.Namespace):
     reconcile_missing_target: bool = False
     close_missing_target: bool = False
     complete_live_no_mail: bool = False
+    cancel_mail_cleanup_no_mail: bool = False
+    describe_mail_cleanup_cancel: bool = False
+    describe_mail_cleanup_stop: bool = False
+    probe_mail_cleanup_session: bool = False
     close_active_task_tree_no_mail: bool = False
     close_done_live_no_mail: bool = False
     describe_done_live_no_mail: bool = False
@@ -600,6 +637,10 @@ shutdown.""",
         "--close-missing-target", action="store_true", help="Atomically close one authority-approved absent blocked record from its sole canonical TODO row; never starts or stops tmux."
     )
     _ = parser.add_argument("--complete-live-no-mail", action="store_true", help="Mark one exact queue-empty live non-manager done without email or pane mutation.")
+    _ = parser.add_argument("--cancel-mail-cleanup-no-mail", action="store_true", help="Close only the canceled mail-cleanup task after verifying its existing Sent receipt; never sends mail or stops the pane.")
+    _ = parser.add_argument("--describe-mail-cleanup-cancel", action="store_true", help="Read-only preflight for --cancel-mail-cleanup-no-mail with the same exact evidence.")
+    _ = parser.add_argument("--describe-mail-cleanup-stop", action="store_true", help="Read-only, task-bound preflight for the canceled DONE mail-cleanup worker; never queries /status or stops its pane.")
+    _ = parser.add_argument("--probe-mail-cleanup-session", action="store_true", help="One-use guarded /status query for the canceled DONE mail-cleanup worker; records a private receipt and never stops its pane.")
     _ = parser.add_argument("--close-active-task-tree-no-mail", action="store_true", help="Close active_task_tree.md metadata/TODO on its shared target without email or pane mutation.")
     _ = parser.add_argument("--close-done-live-no-mail", action="store_true", help="Close one exact live Codex pane left by --complete-live-no-mail without email or task reopening.")
     _ = parser.add_argument(
@@ -756,6 +797,10 @@ shutdown.""",
         parsed.reconcile_missing_target,
         parsed.close_missing_target,
         parsed.complete_live_no_mail,
+        parsed.cancel_mail_cleanup_no_mail,
+        parsed.describe_mail_cleanup_cancel,
+        parsed.describe_mail_cleanup_stop,
+        parsed.probe_mail_cleanup_session,
         parsed.close_active_task_tree_no_mail,
         parsed.close_done_live_no_mail,
         parsed.describe_done_live_no_mail,
@@ -804,16 +849,16 @@ shutdown.""",
         parser.error("--dependency-sha256 requires --reconcile-dependency-blocked-current.")
     if any((parsed.protected_shared_task, parsed.protected_shared_sha256)) and not (parsed.cancel_shared_target or parsed.close_active_task_tree_no_mail):
         parser.error("protected shared-task assertions require --cancel-shared-target or --close-active-task-tree-no-mail.")
-    if parsed.active_target and not (parsed.normalize_low_priority_current or parsed.complete_live_no_mail or parsed.close_done_live_no_mail or parsed.describe_done_live_no_mail):
+    if parsed.active_target and not (parsed.normalize_low_priority_current or parsed.complete_live_no_mail or parsed.close_done_live_no_mail or parsed.describe_done_live_no_mail or parsed.cancel_mail_cleanup_no_mail or parsed.describe_mail_cleanup_cancel or parsed.describe_mail_cleanup_stop or parsed.probe_mail_cleanup_session):
         parser.error("--active-target requires a live no-mail or low-priority normalization mode.")
-    if parsed.manager_target and not (parsed.normalize_low_priority_current or parsed.complete_live_no_mail or parsed.close_done_live_no_mail or parsed.describe_done_live_no_mail):
+    if parsed.manager_target and not (parsed.normalize_low_priority_current or parsed.complete_live_no_mail or parsed.close_done_live_no_mail or parsed.describe_done_live_no_mail or parsed.cancel_mail_cleanup_no_mail or parsed.describe_mail_cleanup_cancel or parsed.describe_mail_cleanup_stop or parsed.probe_mail_cleanup_session):
         parser.error("--manager-target requires a live no-mail or low-priority normalization mode.")
     if parsed.no_mail_intent and not parsed.close_active_task_tree_no_mail:
         parser.error("--no-mail-intent is only valid with --close-active-task-tree-no-mail.")
-    if any((parsed.expected_pane_pid, parsed.expected_pane_start_ticks, parsed.expected_session_id)) and not parsed.close_done_live_no_mail:
+    if any((parsed.expected_pane_pid, parsed.expected_pane_start_ticks, parsed.expected_session_id)) and not (parsed.close_done_live_no_mail or parsed.cancel_mail_cleanup_no_mail or parsed.describe_mail_cleanup_cancel or parsed.describe_mail_cleanup_stop or parsed.probe_mail_cleanup_session):
         parser.error("pane process and expected session assertions require --close-done-live-no-mail.")
     if any(human_close_authority) and (
-        (parsed.status != "done" and not parsed.describe_done_live_no_mail and not parsed.close_done_live_no_mail)
+        (parsed.status != "done" and not parsed.describe_done_live_no_mail and not parsed.close_done_live_no_mail and not parsed.cancel_mail_cleanup_no_mail and not parsed.describe_mail_cleanup_cancel and not parsed.describe_mail_cleanup_stop and not parsed.probe_mail_cleanup_session)
         or any(
             (
                 parsed.finish_closed_done,
@@ -1093,6 +1138,10 @@ shutdown.""",
     ) and not (
         parsed.cancel_shared_target
         or parsed.complete_live_no_mail
+        or parsed.cancel_mail_cleanup_no_mail
+        or parsed.describe_mail_cleanup_cancel
+        or parsed.describe_mail_cleanup_stop
+        or parsed.probe_mail_cleanup_session
         or parsed.close_active_task_tree_no_mail
         or parsed.close_done_live_no_mail
         or parsed.reconcile_source1998_done
@@ -1391,10 +1440,104 @@ shutdown.""",
             human_close_authorization_source=parsed.human_close_authorization_source.strip(),
             human_close_authorization_sha256=parsed.human_close_authorization_sha256.strip(),
         )
+    if parsed.cancel_mail_cleanup_no_mail or parsed.describe_mail_cleanup_cancel or parsed.describe_mail_cleanup_stop or parsed.probe_mail_cleanup_session:
+        unrelated = (
+            parsed.completion_key,
+            parsed.session_id,
+            parsed.finish_closed_done,
+            parsed.finish_replaced_done,
+            parsed.replacement_task,
+            parsed.replacement_custody_audit,
+            parsed.stale_target,
+            parsed.replacement_target,
+            parsed.stale_sha256,
+            parsed.replacement_sha256,
+            parsed.protected_target,
+            parsed.recover_exited_shell_done,
+            parsed.park_unlinked,
+            parsed.reattest_park_unlinked,
+            parsed.close_shared_target,
+            parsed.cancel_shared_target,
+            parsed.close_retired_done,
+            parsed.normalize_retired_todo,
+            parsed.normalize_low_priority_current,
+            parsed.reconcile_blocked_index,
+            parsed.reconcile_long_running_human_index,
+            parsed.reconcile_dependency_blocked_current,
+            parsed.reconcile_source1998_done,
+            parsed.retire_source1998_done,
+            parsed.reconcile_source2002_done,
+            parsed.reconcile_absent_manager,
+            parsed.restore_terminal_target,
+            parsed.reconcile_missing_target,
+            parsed.close_missing_target,
+            parsed.close_active_task_tree_no_mail,
+            parsed.manager_consumed_report_receipt_sha256,
+            parsed.expected_session_id,
+            parsed.authority_file,
+            parsed.authority_lines,
+            parsed.authority_envelope,
+            parsed.no_mail_intent,
+            parsed.closure_repository,
+            parsed.dirty_path_handoff,
+        )
+        if (
+            any(unrelated)
+            or parsed.replacement_status
+            or parsed.stopped_evidence
+            or parsed.replacement_pane_evidence
+            or parsed.source_sha256
+            or parsed.expected_receipt_sha256
+            or parsed.authority_sha256
+            or parsed.authority_envelope_sha256
+            or parsed.dependency_sha256
+            or sum((parsed.cancel_mail_cleanup_no_mail, parsed.describe_mail_cleanup_cancel, parsed.describe_mail_cleanup_stop, parsed.probe_mail_cleanup_session)) != 1
+            or parsed.task_file.as_posix() != MAIL_CLEANUP_CANCEL_TASK
+            or parsed.status
+            or parsed.blocked_on
+            or parsed.complete_live_no_mail
+            or parsed.close_done_live_no_mail
+            or parsed.describe_done_live_no_mail
+            or parsed.manager_consumed_report_receipt is not None
+            or parsed.human_close_authorization_source != MAIL_CLEANUP_CANCEL_SOURCE
+            or parsed.human_close_authorization_sha256 != MAIL_CLEANUP_CANCEL_SOURCE_SHA256
+            or parsed.active_target != "pb:1"
+            or parsed.manager_target != "wl:1"
+            or SHA256_RE.fullmatch(parsed.expected_task_sha256.strip()) is None
+            or SHA256_RE.fullmatch(parsed.expected_todo_sha256.strip()) is None
+            or re.fullmatch(r"%[0-9]+", parsed.expected_pane_id.strip()) is None
+            or parsed.expected_pane_pid <= 1
+            or parsed.expected_pane_start_ticks <= 0
+            or (parsed.audit_output is not None and not parsed.probe_mail_cleanup_session)
+            or (parsed.probe_mail_cleanup_session and (parsed.audit_output is None or parsed.audit_output != mail_cleanup_probe_receipt(parsed.root.resolve())))
+            or parsed.terminal_evidence
+            or parsed.expected_session_id
+            or parsed.dangerously_ignore_checks
+        ):
+            parser.error("mail-cleanup cancellation requires the exact blocked task, Human authority, task/TODO SHA-256, pane/process identity, and one no-mail mode.")
+        return Args(
+            parsed.root.resolve(), parsed.task_file, "done", "",
+            cancel_mail_cleanup_no_mail=parsed.cancel_mail_cleanup_no_mail,
+            describe_mail_cleanup_cancel=parsed.describe_mail_cleanup_cancel,
+            describe_mail_cleanup_stop=parsed.describe_mail_cleanup_stop,
+            probe_mail_cleanup_session=parsed.probe_mail_cleanup_session,
+            active_target="pb:1", manager_target="wl:1",
+            human_close_authorization_source=MAIL_CLEANUP_CANCEL_SOURCE,
+            human_close_authorization_sha256=MAIL_CLEANUP_CANCEL_SOURCE_SHA256,
+            expected_task_sha256=parsed.expected_task_sha256.strip(),
+            expected_todo_sha256=parsed.expected_todo_sha256.strip(),
+            expected_pane_id=parsed.expected_pane_id.strip(),
+            expected_pane_pid=parsed.expected_pane_pid,
+            expected_pane_start_ticks=parsed.expected_pane_start_ticks,
+            audit_output=parsed.audit_output,
+        )
     if parsed.complete_live_no_mail:
+        reviewed_sent_recovery = next((recovery for recovery in REVIEWED_SENT_LIVE_COMPLETIONS if recovery[:4] == (
+            str(parsed.task_file), parsed.active_target, parsed.manager_target, parsed.blocked_on,
+        )), None)
         unrelated = (
             parsed.status,
-            parsed.blocked_on,
+            "" if reviewed_sent_recovery else parsed.blocked_on,
             parsed.session_id,
             parsed.replacement_task,
             parsed.stale_target,
@@ -1442,7 +1585,7 @@ shutdown.""",
             parsed.root.resolve(),
             parsed.task_file,
             "done",
-            "",
+            parsed.blocked_on if reviewed_sent_recovery else "",
             complete_live_no_mail=True,
             active_target=active_target,
             manager_target=manager_target,
@@ -2461,9 +2604,11 @@ def current_target_task_paths(root: Path, target: str, todo_text: str | None = N
 
 
 def authoritative_active_target_task_paths(root: Path, target: str) -> tuple[Path, ...]:
-    """Return every valid active task whose frontmatter owns `target`."""
+    """Return active target owners; exclude uniquely archived, closed legacy records."""
 
     matches: list[Path] = []
+    todo_path = root / "TODO.md"
+    todo_text = todo_path.read_text(encoding="utf-8") if todo_path.is_file() else ""
     for candidate in sorted(root.rglob("*.md")):
         try:
             text = candidate.read_text(encoding="utf-8")
@@ -2474,11 +2619,98 @@ def authoritative_active_target_task_paths(root: Path, target: str) -> tuple[Pat
             metadata = parse_task_metadata(text, root)
         except TaskFrontmatterError as exc:
             if raw_claim:
+                ref = relative_task_ref(root, candidate)
+                frontmatter, separator, remainder = text.partition("\n---\n")
+                legacy_closed = frontmatter.replace("\nstatus: closed\n", "\nstatus: done\n", 1) + separator + remainder
+                try:
+                    normalized = parse_task_metadata(legacy_closed, root)
+                except TaskFrontmatterError:
+                    normalized = None
+                if (
+                    "\nstatus: closed\n" in frontmatter + "\n"
+                    and normalized is not None
+                    and normalized.status == "done"
+                    and same_tmux_target(normalized.runat, target)
+                    and (
+                        not normalized.pending_task_items
+                        or (ref == "dw_filter_pop.md" and same_tmux_target(target, "dw:1") and not normalized.is_manager and normalized.tool == "codex")
+                    )
+                    and "(manager closed Codex agent " in text
+                    and not any(row.task_file == ref for row in parse_task_text(todo_text))
+                    and sum(
+                        row == f"{ref} {normalized.runat}"
+                        for archive in root.glob("[0-9][0-9][0-9][0-9][0-9][0-9]/old_todos.md")
+                        for row in archive.read_text(encoding="utf-8").splitlines()
+                    ) == 1
+                ):
+                    continue
                 raise TaskFrontmatterError(f"cannot verify target ownership because `{relative_task_ref(root, candidate)}` has invalid task frontmatter: {exc}") from exc
             continue
         if metadata is not None and metadata.status != "done" and same_tmux_target(metadata.runat, target):
+            ref = relative_task_ref(root, candidate)
+            if metadata.status == "blocked" and "(manager closed Codex agent " in text and not any(
+                row.task_file in {ref, candidate.name} and same_tmux_target(row.target, metadata.runat)
+                for row in parse_task_text(todo_text)
+            ):
+                archived = sum(
+                    row == f"{ref} {metadata.runat}"
+                    or (index.parent == candidate.parent and row == f"{candidate.name} {metadata.runat}")
+                    for index in root.glob("[0-9][0-9][0-9][0-9][0-9][0-9]/old_todos.md")
+                    for row in index.read_text(encoding="utf-8").splitlines()
+                )
+                if archived == 1:
+                    continue
             matches.append(candidate.resolve())
     return tuple(matches)
+
+
+def wix_rotation_manager_owner_paths(root: Path, target: str) -> tuple[Path, ...]:
+    """Resolve the Wix rotation manager while preserving one archived legacy queue."""
+
+    if target != "dw:1":
+        raise TaskFrontmatterError("Wix rotation manager target changed")
+
+    todo_text = (root / "TODO.md").read_text(encoding="utf-8")
+    indexed = {row.task_file for row in parse_task_text(todo_text)}
+    archive = root / "202608/old_todos.md"
+    if archive.is_symlink() or not archive.resolve().is_relative_to(root.resolve()):
+        raise TaskFrontmatterError("rotation archive index escapes root or is symlinked")
+    archived_rows = archive.read_text(encoding="utf-8").splitlines()
+    owners: list[Path] = []
+    for candidate in sorted(root.rglob("*.md")):
+        text = candidate.read_text(encoding="utf-8")
+        raw_claim = any(key.strip() == "runat" and sep and same_tmux_target(value.strip(), target) for key, sep, value in (line.partition(":") for line in text.splitlines()))
+        if not raw_claim:
+            continue
+        ref = relative_task_ref(root, candidate)
+        if candidate.is_symlink() or not candidate.resolve().is_relative_to(root.resolve()):
+            raise TaskFrontmatterError(f"rotation manager ownership escapes root or is symlinked: `{ref}`")
+        try:
+            metadata = parse_task_metadata(text, root)
+        except TaskFrontmatterError as exc:
+            frontmatter, separator, remainder = text.partition("\n---\n")
+            archived = frontmatter.replace("\nstatus: closed\n", "\nstatus: done\n", 1) + separator + remainder
+            try:
+                historical = parse_task_metadata(archived, root)
+            except TaskFrontmatterError:
+                historical = None
+            if (
+                ref == "dw_filter_pop.md"
+                and "\nstatus: closed\n" in frontmatter + "\n"
+                and historical is not None
+                and historical.status == "done"
+                and same_tmux_target(historical.runat, target)
+                and historical.tool == "codex"
+                and not historical.is_manager
+                and historical.pending_task_items
+                and ref not in indexed
+                and archived_rows.count(f"{ref} {historical.runat}") == 1
+            ):
+                continue
+            raise TaskFrontmatterError(f"cannot verify rotation manager ownership because `{ref}` has invalid task frontmatter: {exc}") from exc
+        if metadata is not None and metadata.status != "done" and same_tmux_target(metadata.runat, target):
+            owners.append(candidate.resolve())
+    return tuple(owners)
 
 
 def worker_self_close_allowed(root: Path, path: Path, metadata: TaskMetadata) -> bool:
@@ -4912,9 +5144,19 @@ def reconcile_running_todo_text(root: Path, path: Path, text: str, runat: str) -
     return reconcile_todo_text(root, path, text, runat, "current", ("current", "human pending", "previous"))
 
 
-def reconcile_blocked_todo_text(root: Path, path: Path, text: str, runat: str) -> str:
-    """Move the sole TODO row for a blocked task into `human pending`, or fail closed."""
-    return reconcile_todo_text(root, path, text, runat, "human pending", ("current", "human pending"))
+def reconcile_blocked_todo_text(root: Path, path: Path, text: str, runat: str, blocked_on: str) -> str:
+    """Keep non-Human blockers in `current` and Human waits in `human pending`."""
+    # 🧑 Source2159: "None of the currently listed as human pending tasks is actually pending on the human."
+    human_wait = blocked_on.casefold() == "human" or (
+        re.search(r"\bhuman (?:reason|review|approval|decision|response|reply)\b", blocked_on, re.IGNORECASE) is not None
+        and NON_HUMAN_GATE_RE.search(blocked_on) is None
+        and TASK_RE.search(blocked_on) is None
+    ) or (
+        re.fullmatch(r"human review of [^.\n]{1,400}", blocked_on, re.IGNORECASE) is not None
+        and NON_HUMAN_GATE_RE.search(blocked_on) is None
+        and TASK_RE.search(blocked_on) is None
+    ) or blocked_on == SOURCE1804_HUMAN_APPROVAL_BLOCKER
+    return reconcile_todo_text(root, path, text, runat, "human pending" if human_wait else "current", ("current", "human pending"))
 
 
 def reconcile_done_todo_text(root: Path, path: Path, text: str, runat: str) -> str:
@@ -4922,9 +5164,170 @@ def reconcile_done_todo_text(root: Path, path: Path, text: str, runat: str) -> s
     return reconcile_todo_text(root, path, text, runat, "previous", ("current", "human pending", "low priority"))
 
 
+def validate_mail_cleanup_cancel(args: Args, path: Path, text: str) -> None:
+    """Verify the one canceled task and its existing original-thread closure without sending mail."""
+
+    if (
+        relative_task_ref(args.root, path) != MAIL_CLEANUP_CANCEL_TASK
+        or args.active_target != "pb:1"
+        or args.manager_target != "wl:1"
+        or args.human_close_authorization_source != MAIL_CLEANUP_CANCEL_SOURCE
+        or args.human_close_authorization_sha256 != MAIL_CLEANUP_CANCEL_SOURCE_SHA256
+        or args.expected_pane_pid <= 1
+        or args.expected_pane_start_ticks <= 0
+        or MAIL_CLEANUP_CANCEL_MESSAGE_ID not in text
+    ):
+        raise TaskFrontmatterError("mail-cleanup cancellation does not match its exact task, owner, Human authority, and prior receipt.")
+    try:
+        authority = read_human_close_authorization(MAIL_CLEANUP_CANCEL_SOURCE, MAIL_CLEANUP_CANCEL_SOURCE_SHA256, args.root)
+    except RuntimeError as exc:
+        raise TaskFrontmatterError(f"mail-cleanup Human cancellation is unavailable: {exc}") from exc
+    directive = authority.decode("utf-8").replace("\r\n", "\n").partition("\nOn Sat,")[0]
+    if "Close these." not in directive or "offloaded to Grogbot." not in directive:
+        raise TaskFrontmatterError("mail-cleanup Human message does not contain the cancellation and reassignment.")
+    process = bound_guarded_read("pb:1", args.expected_pane_id, ["display-message", "-p", "-t", args.expected_pane_id, "#{pane_id}\t#{pane_pid}"], args.expected_pane_pid)
+    pane, separator, raw_pid = process.strip().partition("\t")
+    if (
+        not separator
+        or pane != args.expected_pane_id
+        or raw_pid != str(args.expected_pane_pid)
+        or process_start_ticks(args.expected_pane_pid) != args.expected_pane_start_ticks
+    ):
+        raise TaskFrontmatterError("mail-cleanup pane process changed; no cancellation performed.")
+    if not verify_ordinary_completion_in_sent(
+        MAIL_CLEANUP_CANCEL_MESSAGE_ID, MAIL_CLEANUP_CANCEL_SUBJECT_SHA256, MAIL_CLEANUP_CANCEL_BODY_SHA256
+    ):
+        raise TaskFrontmatterError("mail-cleanup original-thread Sent closure was not verified; no cancellation performed.")
+
+
+def describe_mail_cleanup_stop(args: Args, path: Path, text: str, before: os.stat_result) -> dict[str, object]:
+    """Preflight the canceled DONE worker; optionally probe one guarded session into a private receipt."""
+
+    todo = args.root / "TODO.md"
+    if args.describe_mail_cleanup_stop == args.probe_mail_cleanup_session or not todo.is_file() or path == todo:
+        raise TaskFrontmatterError("mail-cleanup stop preflight requires the exact DONE task and TODO.")
+    with root_membership_lock(args.root), task_target_lock(args.root, args.active_target):
+        with task_file_lock(path), task_file_lock(todo):
+            current_before = path.stat()
+            current_text = path.read_text(encoding="utf-8")
+            todo_before = todo.stat()
+            todo_text = todo.read_text(encoding="utf-8")
+            if (
+                not same_file_state(before, current_before)
+                or current_text != text
+                or hashlib.sha256(current_text.encode()).hexdigest() != args.expected_task_sha256
+                or hashlib.sha256(todo_text.encode()).hexdigest() != args.expected_todo_sha256
+            ):
+                raise TaskFrontmatterError("mail-cleanup stop task or TODO changed; no pane input sent.")
+            metadata = parse_task_metadata(current_text, args.root)
+            if (
+                metadata is None
+                or metadata.version == V2_VERSION
+                or metadata.status != "done"
+                or metadata.tool != "codex"
+                or metadata.is_manager
+                or metadata.pending_task_items
+                or has_pending_marker(current_text)
+                or metadata.runat != args.active_target
+                or metadata.managerat != args.manager_target
+            ):
+                raise TaskFrontmatterError("mail-cleanup stop requires one queue-empty DONE Codex worker.")
+            validate_done_live_todo(args.root, path, todo_text, args.active_target)
+            validate_done_live_ownership(args.root, path, args.active_target)
+            validate_mail_cleanup_cancel(args, path, current_text)
+            if done_live_pane_state(args) != "live":
+                raise TaskFrontmatterError("mail-cleanup stop pane identity changed; no pane input sent.")
+            capture_text = guarded_capture(args.expected_pane_id, 200, (args.active_target, args.expected_pane_id), args.expected_pane_pid)
+            capture_lines = [line.rstrip() for line in capture_text.splitlines()]
+            report = report_from_lines(capture_lines)
+            if report.status != "ready" or (report.input_text and not is_stock_placeholder_input_text(report.input_text)) or report.input_blocker:
+                raise TaskFrontmatterError("mail-cleanup stop requires a ready Codex pane with an empty composer.")
+            if (
+                not same_file_state(current_before, path.stat())
+                or path.read_text(encoding="utf-8") != current_text
+                or not same_file_state(todo_before, todo.stat())
+                or todo.read_text(encoding="utf-8") != todo_text
+                or done_live_pane_state(args) != "live"
+            ):
+                raise TaskFrontmatterError("mail-cleanup stop evidence drifted; no pane input sent.")
+            record = {
+                "task": MAIL_CLEANUP_CANCEL_TASK,
+                "task_sha256": args.expected_task_sha256,
+                "todo_sha256": args.expected_todo_sha256,
+                "target": args.active_target,
+                "pane_id": args.expected_pane_id,
+                "pane_pid": args.expected_pane_pid,
+                "pane_start_ticks": args.expected_pane_start_ticks,
+                "human_authorization_sha256": args.human_close_authorization_sha256,
+                "sent_message_id": MAIL_CLEANUP_CANCEL_MESSAGE_ID,
+                "status": report.status,
+                "session_id": None,
+                "stop_authorized": False,
+            }
+            if not args.probe_mail_cleanup_session:
+                return record
+            receipt = args.audit_output
+            if receipt is None or receipt in {path, todo} or read_private_audit(receipt) is not None:
+                raise TaskFrontmatterError("mail-cleanup session probe requires one unused owner-private receipt path.")
+            try:
+                receipt.parent.mkdir(mode=0o700)
+            except FileExistsError:
+                pass
+            parent_state = receipt.parent.lstat()
+            if not stat.S_ISDIR(parent_state.st_mode) or parent_state.st_uid != os.getuid() or stat.S_IMODE(parent_state.st_mode) & 0o077:
+                raise TaskFrontmatterError("mail-cleanup session probe receipt directory is not owner-private.")
+            reserved = json.dumps({**record, "schema": "omo-mail-cleanup-session-probe/v1", "state": "reserved"}, sort_keys=True, separators=(",", ":")) + "\n"
+            reserve_private_audit(receipt, reserved)
+
+            def evidence_is_current() -> None:
+                if (
+                    not same_file_state(current_before, path.stat())
+                    or path.read_text(encoding="utf-8") != current_text
+                    or not same_file_state(todo_before, todo.stat())
+                    or todo.read_text(encoding="utf-8") != todo_text
+                    or done_live_pane_state(args) != "live"
+                    or read_private_audit(receipt) != reserved
+                ):
+                    raise TaskFrontmatterError("mail-cleanup probe custody changed; receipt remains reserved and retries are forbidden.")
+                validate_done_live_ownership(args.root, path, args.active_target)
+                validate_mail_cleanup_cancel(args, path, current_text)
+
+            try:
+                session_id, response = query_status_session_id(
+                    args.expected_pane_id, 2000, 10.0,
+                    tmux_guard=(args.active_target, args.expected_pane_id),
+                    strict_status_response=True,
+                    expected_pane_pid=args.expected_pane_pid,
+                    pre_input_check=evidence_is_current,
+                    staged_status_check=evidence_is_current,
+                )
+            except RuntimeError as exc:
+                raise TaskFrontmatterError(f"mail-cleanup status probe failed; receipt remains reserved and no replay is allowed: {exc}") from exc
+            if CODEX_SESSION_RE.fullmatch(session_id) is None:
+                raise TaskFrontmatterError("mail-cleanup probe did not verify a fresh Codex session; one-use receipt remains reserved.")
+            evidence_is_current()
+            final_capture = guarded_capture(args.expected_pane_id, 200, (args.active_target, args.expected_pane_id), args.expected_pane_pid)
+            final_report = report_from_lines([line.rstrip() for line in final_capture.splitlines()])
+            if final_report.status != "ready" or (final_report.input_text and not is_stock_placeholder_input_text(final_report.input_text)) or final_report.input_blocker:
+                raise TaskFrontmatterError("mail-cleanup probe left pane occupied; one-use receipt remains reserved.")
+            confirmed = {
+                **record,
+                "schema": "omo-mail-cleanup-session-probe/v1",
+                "state": "confirmed",
+                "session_id": session_id.lower(),
+                "response_sha256": hashlib.sha256(response.encode()).hexdigest(),
+            }
+            replace_private_audit(receipt, reserved, json.dumps(confirmed, sort_keys=True, separators=(",", ":")) + "\n")
+            return {**confirmed, "receipt": str(receipt)}
+
+
 # 🧑 "Tell every agent to commit their changes in work_logs ... Make it clean"
 def complete_live_no_mail(args: Args, path: Path, text: str, before: os.stat_result) -> str:
     """Complete one exact live worker through task/TODO metadata only."""
+
+    reviewed_sent_recovery = next((recovery for recovery in REVIEWED_SENT_LIVE_COMPLETIONS if recovery[:4] == (
+        path.name, args.active_target, args.manager_target, args.blocked_on,
+    )), None)
 
     other_modes = (
         args.finish_closed_done,
@@ -4947,9 +5350,11 @@ def complete_live_no_mail(args: Args, path: Path, text: str, before: os.stat_res
         args.normalize_retired_todo,
         args.normalize_low_priority_current,
     )
+    canceled = args.cancel_mail_cleanup_no_mail or args.describe_mail_cleanup_cancel
     if (
         args.status != "done"
-        or args.blocked_on
+        or (args.blocked_on and not reviewed_sent_recovery)
+        or (canceled and args.cancel_mail_cleanup_no_mail == args.describe_mail_cleanup_cancel)
         or any(other_modes)
         or TARGET_RE.fullmatch(args.active_target) is None
         or TARGET_RE.fullmatch(args.manager_target) is None
@@ -4967,7 +5372,9 @@ def complete_live_no_mail(args: Args, path: Path, text: str, before: os.stat_res
     if (
         metadata is None
         or metadata.version == V2_VERSION
-        or metadata.status != "running"
+        or metadata.status != ("blocked" if canceled or reviewed_sent_recovery else "running")
+        or (canceled and metadata.blocked_on != MAIL_CLEANUP_CANCEL_BLOCKER)
+        or (reviewed_sent_recovery and metadata.blocked_on != args.blocked_on)
         or metadata.is_manager
         or metadata.pending_task_items
         or has_pending_marker(text)
@@ -4975,9 +5382,16 @@ def complete_live_no_mail(args: Args, path: Path, text: str, before: os.stat_res
         or metadata.managerat != args.manager_target
         or metadata.runat.partition(":")[0].startswith("h")
     ):
-        raise TaskFrontmatterError("live no-mail completion requires one v1 running non-human worker with an empty queue and no pending marker.")
+        raise TaskFrontmatterError("live no-mail completion requires one v1 worker in the expected status with an empty queue and no pending marker.")
     if hashlib.sha256(text.encode()).hexdigest() != args.expected_task_sha256:
         raise TaskFrontmatterError("live no-mail completion task bytes do not match --expected-task-sha256.")
+    if reviewed_sent_recovery and path.name == "weekly_memo_0927.md" and text.count(
+        "(verified removed pending item: Reviewed weekly memo and ChatGPT revision completed; direct original-thread Human email Message-ID "
+        f"{WEEKLY_MEMO_MESSAGE_ID} verified in Sent Mail; no duplicate email sent.)"
+    ) != 1:
+        raise TaskFrontmatterError("weekly memo recovery has no exact reviewed-Sent queue reconciliation.")
+    if reviewed_sent_recovery and not verify_ordinary_completion_in_sent(*reviewed_sent_recovery[4:]):
+        raise TaskFrontmatterError("reviewed completion email is not verified in Sent Mail.")
     with root_membership_lock(args.root), task_target_lock(args.root, metadata.runat):
         with ExitStack() as locks:
             for locked_path in sorted({path, todo}, key=str):
@@ -4991,7 +5405,8 @@ def complete_live_no_mail(args: Args, path: Path, text: str, before: os.stat_res
             if owners != (path,):
                 refs = ", ".join(relative_task_ref(args.root, owner) for owner in owners) or "none"
                 raise TaskFrontmatterError(f"live no-mail completion requires the task to be the sole authoritative owner of `{metadata.runat}`: {refs}.")
-            if current_target_task_paths(args.root, metadata.runat) != (path,):
+            weekly_memo_recovery = reviewed_sent_recovery is not None and path.name == "weekly_memo_0927.md"
+            if not weekly_memo_recovery and current_target_task_paths(args.root, metadata.runat) != (path,):
                 raise TaskFrontmatterError("live no-mail completion requires one sole current TODO owner for the target.")
             if exact_pane_id(metadata.runat) != args.expected_pane_id:
                 raise TaskFrontmatterError("live no-mail completion target does not match --expected-pane-id.")
@@ -5012,14 +5427,23 @@ def complete_live_no_mail(args: Args, path: Path, text: str, before: os.stat_res
                 if path in todo_row_task_paths(args.root, line):
                     rows.append((section, line))
             canonical_row = f"{relative_task_ref(args.root, path)} {metadata.runat}"
-            if current_headers != 1 or rows != [("current", canonical_row)]:
-                raise TaskFrontmatterError("live no-mail completion requires one exact canonical current TODO row.")
-            updated_todo = reconcile_todo_text(args.root, path, todo_text, metadata.runat, "previous", ("current",))
+            expected_section = rows[0][0] if weekly_memo_recovery and len(rows) == 1 and rows[0][0] in {"current", "human pending"} else "current"
+            if current_headers != 1 or rows != [(expected_section, canonical_row)]:
+                raise TaskFrontmatterError(f"live no-mail completion requires one exact canonical {expected_section} TODO row.")
+            if canceled:
+                validate_mail_cleanup_cancel(args, path, current_text)
+                if args.describe_mail_cleanup_cancel:
+                    return metadata.runat
+            updated_todo = reconcile_todo_text(args.root, path, todo_text, metadata.runat, "previous", (expected_section,))
             if updated_todo == todo_text:
                 raise TaskFrontmatterError("live no-mail completion requires the canonical TODO row to move from current to previous.")
             updated_task = update_frontmatter_status(current_text, "done", "", args.root)
             if exact_pane_id(metadata.runat) != args.expected_pane_id:
                 raise TaskFrontmatterError("live no-mail completion target changed while the operation was being prepared; retry.")
+            if canceled:
+                process = bound_guarded_read(metadata.runat, args.expected_pane_id, ["display-message", "-p", "-t", args.expected_pane_id, "#{pane_pid}"], args.expected_pane_pid)
+                if process.strip() != str(args.expected_pane_pid) or process_start_ticks(args.expected_pane_pid) != args.expected_pane_start_ticks:
+                    raise TaskFrontmatterError("mail-cleanup pane process changed before task publication.")
             if (
                 path.read_text(encoding="utf-8") != current_text
                 or not same_file_state(current_before, path.stat())
@@ -5690,8 +6114,8 @@ def cancel_shared_target_done(args: Args, path: Path, text: str, before: os.stat
     return args.shared_target
 
 
-def reconcile_working_index(root: Path, path: Path, text: str, before: os.stat_result) -> None:
-    """Move an already-working task's sole inactive TODO row into `current`."""
+def reconcile_working_index(root: Path, path: Path, text: str, before: os.stat_result, updated: str | None = None) -> None:
+    """Reconcile an already-working task's status metadata and TODO row."""
     todo = root / "TODO.md"
     if not todo.is_file():
         raise TaskFrontmatterError("TODO.md is not a regular file.")
@@ -5701,13 +6125,28 @@ def reconcile_working_index(root: Path, path: Path, text: str, before: os.stat_r
         current_before = path.stat()
         current_text = path.read_text(encoding="utf-8")
         current_metadata = parse_task_metadata(current_text, root)
-        if not same_file_state(before, current_before) or current_text != text or current_metadata is None or current_metadata.status not in WORKING_STATUSES:
+        updated_text = text if updated is None else updated
+        updated_metadata = parse_task_metadata(updated_text, root)
+        if not same_file_state(before, current_before) or current_text != text or current_metadata is None or current_metadata.status not in WORKING_STATUSES or updated_metadata is None or (updated_metadata.status, updated_metadata.runat) != (current_metadata.status, current_metadata.runat):
             raise TaskFrontmatterError("task changed while working index reconciliation was being prepared; retry after rereading it.")
         todo_before = todo.stat()
         todo_text = todo.read_text(encoding="utf-8")
         updated_todo = reconcile_running_todo_text(root, path, todo_text, current_metadata.runat)
-        if updated_todo != todo_text:
-            replace_if_unchanged_locked(todo, updated_todo, todo_before)
+        if updated_todo == todo_text:
+            if updated_text != text:
+                replace_if_unchanged_locked(path, updated_text, current_before)
+            return
+        replace_if_unchanged_locked(todo, updated_todo, todo_before)
+        if updated_text != text:
+            moved_todo_before = todo.stat()
+            try:
+                replace_if_unchanged_locked(path, updated_text, current_before)
+            except Exception as exc:
+                try:
+                    replace_if_unchanged_locked(todo, todo_text, moved_todo_before)
+                except Exception as rollback_exc:
+                    raise TaskFrontmatterError(f"working reconciliation failed and TODO rollback also failed: {rollback_exc}") from exc
+                raise
 
 
 def transition_working_index(root: Path, path: Path, text: str, updated: str, before: os.stat_result) -> None:
@@ -5775,13 +6214,13 @@ def reconcile_blocked_index(root: Path, path: Path, text: str, updated: str, bef
         ):
             raise TaskFrontmatterError("task changed or no longer matches the blocked status reconciliation; retry after rereading it.")
         if path == todo:
-            combined = reconcile_blocked_todo_text(root, path, updated, current_metadata.runat)
+            combined = reconcile_blocked_todo_text(root, path, updated, current_metadata.runat, updated_metadata.blocked_on)
             if combined != current_text:
                 replace_if_unchanged_locked(path, combined, current_before)
             return
         todo_before = todo.stat()
         todo_text = todo.read_text(encoding="utf-8")
-        updated_todo = reconcile_blocked_todo_text(root, path, todo_text, current_metadata.runat)
+        updated_todo = reconcile_blocked_todo_text(root, path, todo_text, current_metadata.runat, updated_metadata.blocked_on)
         if updated_todo == todo_text:
             if updated != current_text:
                 replace_if_unchanged_locked(path, updated, current_before)
@@ -9800,6 +10239,10 @@ def automatic_done_email_eligible(args: Args, initial_status: str | None) -> boo
             args.close_retired_done,
             args.close_missing_target,
             args.complete_live_no_mail,
+            args.cancel_mail_cleanup_no_mail,
+            args.describe_mail_cleanup_cancel,
+            args.describe_mail_cleanup_stop,
+            args.probe_mail_cleanup_session,
             args.close_active_task_tree_no_mail,
             args.close_done_live_no_mail,
             args.describe_done_live_no_mail,
@@ -9828,6 +10271,8 @@ def run(args: Args) -> int:
     closed_active_task_tree_no_mail = False
     closed_done_live_no_mail = False
     described_done_live_no_mail = False
+    described_mail_cleanup_cancel = False
+    described_mail_cleanup_stop = False
     source1998_reconciled = False
     source1998_retired = False
     source2002_reconciled = False
@@ -9844,6 +10289,16 @@ def run(args: Args) -> int:
             evidence = describe_done_live_no_mail(args, path, text, before)
             print(json.dumps(evidence, sort_keys=True, separators=(",", ":")))
             described_done_live_no_mail = True
+        elif args.describe_mail_cleanup_stop or args.probe_mail_cleanup_session:
+            print(json.dumps(describe_mail_cleanup_stop(args, path, text, before), sort_keys=True, separators=(",", ":")))
+            described_mail_cleanup_stop = True
+        elif args.describe_mail_cleanup_cancel:
+            target = complete_live_no_mail(args, path, text, before)
+            print(f"Verified mail-cleanup cancellation for {target}; task, TODO, mail, and pane unchanged.")
+            described_mail_cleanup_cancel = True
+        elif args.cancel_mail_cleanup_no_mail:
+            target = complete_live_no_mail(args, path, text, before)
+            completed_live_no_mail = True
         elif args.close_done_live_no_mail:
             target, session_id = close_done_live_no_mail(args, path, text, before)
             closed_done_live_no_mail = True
@@ -9974,7 +10429,7 @@ def run(args: Args) -> int:
                 # 🧑 "You have current tasks in \"previous\" in TODO.md ... Act to prevent that in the future"
                 elif args.status in WORKING_STATUSES and updated_metadata is not None and updated_metadata.status == args.status:
                     if initial_metadata is not None and initial_metadata.status == args.status:
-                        reconcile_working_index(args.root, path, text, before)
+                        reconcile_working_index(args.root, path, text, before, updated)
                     else:
                         transition_working_index(args.root, path, text, updated, before)
                 else:
@@ -9997,7 +10452,7 @@ def run(args: Args) -> int:
     except Exception as exc:
         print(f"omo_task_status.py: failed to close done agent: {exc}", file=sys.stderr)
         return 2
-    if described_done_live_no_mail:
+    if described_done_live_no_mail or described_mail_cleanup_cancel or described_mail_cleanup_stop:
         return 0
     if args.status == "done":
         if closed_done_live_no_mail:

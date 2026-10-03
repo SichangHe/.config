@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Resolve the active task owned by the current OmniGent session or tmux pane."""
+
 from __future__ import annotations
 
 import hashlib
@@ -31,15 +32,32 @@ def current_tmux_target() -> str:
     command = ["tmux", "display-message", "-p"]
     if pane:
         command.extend(("-t", pane))
-    command.append("#{session_name}:#{window_index}.#{pane_index}")
+    command.append("#{session_name}:#{window_index}.#{pane_index}\t#{pane_pid}")
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=5, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise TaskFrontmatterError("current tmux pane cannot be identified") from exc
-    target = result.stdout.strip()
-    if result.returncode != 0 or not target:
+    target, separator, pane_pid = result.stdout.strip().partition("\t")
+    if result.returncode != 0 or not target or not separator or not pane_pid.isdecimal():
         raise TaskFrontmatterError("current tmux pane cannot be identified")
-    return target
+    current_pid = os.getpid()
+    seen: set[int] = set()
+    while current_pid > 1 and current_pid not in seen:
+        if current_pid == int(pane_pid):
+            return target
+        seen.add(current_pid)
+        try:
+            stat = Path(f"/proc/{current_pid}/stat").read_text(encoding="ascii")
+            current_pid = int(stat[stat.rfind(")") + 2 :].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+    if pane:
+        try:
+            if os.getsid(0) == int(pane_pid):
+                return target
+        except OSError:
+            pass
+    raise TaskFrontmatterError("current tmux pane cannot be identified")
 
 
 def _active_task_matches(root: Path, target: str) -> list[tuple[Path, str]]:
@@ -114,14 +132,7 @@ def _current_task(root: Path, infer: Callable[[Path, str], Path], operation: str
             target = result.get("target")
             task_sha256 = result.get("task_sha256")
             todo_sha256 = result.get("todo_sha256")
-            if (
-                not isinstance(relative, str)
-                or not relative
-                or not isinstance(target, str)
-                or not target
-                or not isinstance(task_sha256, str)
-                or not isinstance(todo_sha256, str)
-            ):
+            if not isinstance(relative, str) or not relative or not isinstance(target, str) or not target or not isinstance(task_sha256, str) or not isinstance(todo_sha256, str):
                 raise TaskFrontmatterError("current work queue actor returned an invalid task")
             path = (root / relative).resolve(strict=False)
             try:
@@ -146,13 +157,44 @@ def _current_task(root: Path, infer: Callable[[Path, str], Path], operation: str
             raise direct_error from exc
 
 
-def current_active_task(root: Path) -> Path:
-    """Resolve the current pane to one strictly unambiguous active task."""
+# 🧑 “We need to pass in the task file name at launch and let the agent pass in that when they use any helper command.”
+def _explicit_task(root: Path, task_file: str, infer: Callable[[Path, str], Path], *, require_origin: bool) -> Path:
+    """Select the exact live task file and its unique TODO owner."""
 
+    if task_file:
+        if Path(task_file).is_absolute():
+            raise TaskFrontmatterError("task file must be a relative work-log path")
+        path = resolve_task_path(root, task_file)
+        if path is None or path.resolve() != (root / task_file).resolve():
+            raise TaskFrontmatterError("task file is outside the work logs")
+        metadata = read_task_metadata(path, root)
+        if metadata is None or metadata.status not in ACTIVE_STATUSES or infer(root, metadata.runat) != path:
+            raise TaskFrontmatterError("task file is not the sole active queue owner")
+        if require_origin and _current_task(root, infer, "active-task") != path:
+            raise TaskFrontmatterError("task file does not belong to the current agent")
+        return path
+    raise TaskFrontmatterError("task file must be a relative work-log path")
+
+
+def current_active_task(root: Path, task_file: str | None = None) -> Path:
+    """Resolve an active task by its supplied filename or current pane."""
+
+    task_file = task_file or os.environ.get("OMO_AGENT_TASK_FILE")
+    if task_file:
+        return _explicit_task(root, task_file, infer_active_task, require_origin=True)
     return _current_task(root, infer_active_task, "active-task")
 
 
-def current_pending_task(root: Path) -> Path:
-    """Resolve the current pane to its queue-owning active task."""
+def current_pending_task(root: Path, task_file: str | None = None) -> Path:
+    """Resolve a queue by its supplied filename or current pane."""
+
+    task_file = task_file or os.environ.get("OMO_AGENT_TASK_FILE")
+    if task_file:
+        return _explicit_task(root, task_file, infer_pending_task, require_origin=False)
+    return _current_task(root, infer_pending_task, "pending-task")
+
+
+def authenticated_pending_task(root: Path) -> Path:
+    """Authenticate pane/actor custody without accepting ambient task-file selection."""
 
     return _current_task(root, infer_pending_task, "pending-task")

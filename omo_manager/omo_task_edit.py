@@ -23,6 +23,8 @@ from omo_manager.omo_agent_status import DEFAULT_ROOT
 from omo_manager.omo_agent_status import TaskFrontmatterError
 from omo_manager.omo_agent_status import TaskMetadata
 from omo_manager.omo_agent_status import parse_task_metadata
+from omo_manager.omo_agent_status import parse_task_lines
+from omo_manager.omo_agent_status import resolve_task_path
 from omo_manager.omo_agent_status import same_tmux_target
 from omo_manager.omo_blocking import BlockingError
 from omo_manager.omo_blocking import load_task
@@ -34,6 +36,9 @@ from omo_manager.omo_completion_email import require_owner_completion
 from omo_manager.omo_completion_email import send_completion_email
 from omo_manager.omo_task_context import current_active_task
 from omo_manager.omo_task_lock import task_file_lock
+from omo_manager.omo_task_lock import task_target_lock
+from omo_manager.omo_task_status import authoritative_active_target_task_paths
+from omo_manager.omo_task_status import root_membership_lock
 from omo_manager.omo_task_status import parse_manager_child_metadata
 from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1
 from omo_manager.omo_task_metadata import runat_kind
@@ -63,6 +68,11 @@ SOURCE1503_EXCERPT = "Subject: Re: Close obsolete DeepWiki planner?\n\nClose the
 SOURCE1506_REF = Path("manager_mail/85c5dff58359-1506.txt")
 SOURCE1506_SHA256 = "a9dc947ccaf3be2a05af6b09a6092000b4ae9d7046352f4aa39850a0d96f7bcb"
 SOURCE1506_EXCERPT = "Subject: Re: Wix and B12 current counts and latest site\n\nwl:11\n"
+# 🧑 "Please take ownership of restoring this separately owned scoring lane: reconcile the absent owner through supported task lifecycle, arrange exactly one authorized executor, inspect the placeholder failure, reestablish and review current Bino/socket-bound launch control, then resume only after preflight."
+SCORER_ORIGINAL_IMPERATIVE = "Please take ownership of restoring this separately owned scoring lane: reconcile the absent owner through supported task lifecycle, arrange exactly one authorized executor, inspect the placeholder failure, reestablish and review current Bino/socket-bound launch control, then resume only after preflight."
+SCORER_CREATION_COMMIT = "8c4e44989b60d94d304f28ce0db225ddf216274f"
+SCORER_CREATION_BLOB_SHA256 = "e3f0a9b6359985bf79a6e40ca8de727210579a53207f090018ac551bd55bb161"
+SCORER_TASK_REF = Path("scorer_recovery_0926.md")
 SOURCE1528_REF = Path("manager_mail/85c5dff58359-1528.txt")
 SOURCE1528_SHA256 = "80573dc300f1a9ae1b79c7161463131e3f3367201957a4118afc892d7e7f1db8"
 SOURCE1528_TASK = Path("dw_ops_mgr.md")
@@ -145,6 +155,7 @@ class Args:
     exact_line: str = ""
     blocked_on: str = ""
     expected_todo_sha256: str = ""
+    dry_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -186,6 +197,7 @@ class ParsedArgs(argparse.Namespace):
     done: bool = False
     expected_todo_sha256: str = ""
     item_origin: str
+    dry_run: bool = False
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -300,11 +312,23 @@ def parse_args(argv: list[str]) -> Args:
     _ = envelope_parser.add_argument("--authority-lines", required=True)
     _ = envelope_parser.add_argument("--authority-sha256", required=True)
 
+    scorer_envelope = subparsers.add_parser("scorer-purpose-envelope", help="Verify or append only the original scorer assignment preserved in its creation commit; never changes frontmatter or the queue.")
+    scorer_envelope.set_defaults(command="scorer-purpose-envelope")
+    _ = scorer_envelope.add_argument("task_file", type=Path)
+    _ = scorer_envelope.add_argument("--expected-task-sha256", required=True)
+    _ = scorer_envelope.add_argument("--authority-sha256", required=True, help="SHA-256 of the exact scorer task blob at its registered creation commit.")
+    _ = scorer_envelope.add_argument("--dry-run", action="store_true")
+
     comment_parser = subparsers.add_parser("comment-add", aliases=["comment"], help="Append a parenthesized comment line to a task file.")
     comment_parser.set_defaults(command="comment-add")
     _ = comment_parser.add_argument("task_file", type=Path)
     _ = comment_parser.add_argument("legacy_message", nargs="?", help="Compatibility positional comment text.")
     _ = comment_parser.add_argument("--message", help="One-line comment text to append.")
+
+    prune_parser = subparsers.add_parser("prune-config-evidence-comments", help="Remove only redundant verified-removal comments from the config task.")
+    prune_parser.set_defaults(command="prune-config-evidence-comments")
+    _ = prune_parser.add_argument("task_file", type=Path)
+    _ = prune_parser.add_argument("--expected-task-sha256", required=True)
 
     delegate_parser = subparsers.add_parser(
         "delegate-message",
@@ -537,11 +561,22 @@ def parse_args(argv: list[str]) -> Args:
                 authority_lines=lines,
                 authority_sha256=parsed.authority_sha256,
             )
+        if command == "scorer-purpose-envelope":
+            if re.fullmatch(r"[0-9a-f]{64}", parsed.expected_task_sha256) is None or re.fullmatch(r"[0-9a-f]{64}", parsed.authority_sha256) is None:
+                parser.error("scorer-purpose-envelope requires lowercase task and creation-blob SHA-256 digests.")
+            return Args(root, parsed.task_file, command, expected_task_sha256=parsed.expected_task_sha256, authority_sha256=parsed.authority_sha256, dry_run=parsed.dry_run)
         if command == "comment-add":
             message = parsed.message if parsed.message is not None else parsed.legacy_message
             if message is None:
                 parser.error("comment-add requires --message.")
-            return Args(root, parsed.task_file, command, comment=normalized_comment_message(message))
+            comment = normalized_comment_message(message)
+            if len(comment) > 240:
+                parser.error("comment-add is limited to 240 characters; keep detailed reports outside the task file.")
+            return Args(root, parsed.task_file, command, comment=comment)
+        if command == "prune-config-evidence-comments":
+            if re.fullmatch(r"[0-9a-f]{64}", parsed.expected_task_sha256) is None:
+                parser.error("--expected-task-sha256 must be a lowercase SHA-256 digest.")
+            return Args(root, parsed.task_file, command, expected_task_sha256=parsed.expected_task_sha256)
         if command == "delegate-message":
             return Args(root, parsed.task_file, command, message_file=parsed.message_file)
     except argparse.ArgumentTypeError as exc:
@@ -649,6 +684,39 @@ def human_authority_envelope(args: Args, task_path_value: Path, task_text: str) 
         raise TaskFrontmatterError("registered Human authority excerpt changed.")
     block = f'<human_instruction authoritative="true" source="{locator}">\n{excerpt}</human_instruction>\n'
     return task_text.rstrip("\n") + "\n\n" + block, spec
+
+
+def scorer_purpose_envelope(args: Args, path: Path, text: str) -> str:
+    """Bind one appended original Human imperative to its immutable task-creation blob."""
+
+    if path != args.root / SCORER_TASK_REF or hashlib.sha256(text.encode()).hexdigest() != args.expected_task_sha256 or args.authority_sha256 != SCORER_CREATION_BLOB_SHA256:
+        raise TaskFrontmatterError("scorer envelope requires the exact current task and unchanged bytes.")
+    metadata = parse_task_metadata(text, args.root)
+    if metadata is None or metadata.status != "running" or metadata.runat != "dw:2" or metadata.managerat != "wl:1" or metadata.is_manager:
+        raise TaskFrontmatterError("scorer envelope requires its unchanged sole active worker ownership.")
+    locator = f"task-creation:{SCORER_CREATION_COMMIT}:{SCORER_TASK_REF}"
+    if f'<human_instruction authoritative="true" source="{locator}">' in text:
+        raise TaskFrontmatterError("original scorer Human envelope is already recorded.")
+    source = subprocess.run(
+        ["git", "-C", str(args.root), "show", f"{SCORER_CREATION_COMMIT}:{SCORER_TASK_REF}"],
+        capture_output=True, timeout=10, check=False,
+    )
+    if source.returncode != 0 or hashlib.sha256(source.stdout).hexdigest() != SCORER_CREATION_BLOB_SHA256:
+        raise TaskFrontmatterError("original scorer task-creation blob was unavailable or changed.")
+    try:
+        original = source.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise TaskFrontmatterError("original scorer task-creation blob is not UTF-8.") from exc
+    creation = parse_task_metadata(original, args.root)
+    if creation is None or creation.runat != metadata.runat or creation.managerat != metadata.managerat or creation.is_manager:
+        raise TaskFrontmatterError("original scorer task-creation owner does not match current custody.")
+    prefix = 'Human instruction (verbatim): "'
+    current_lines = [line for line in text.splitlines() if line.startswith(prefix) and SCORER_ORIGINAL_IMPERATIVE in line]
+    original_lines = [line for line in original.splitlines() if line.startswith(prefix) and SCORER_ORIGINAL_IMPERATIVE in line]
+    if len(current_lines) != 1 or current_lines != original_lines or not current_lines[0].endswith('"'):
+        raise TaskFrontmatterError("original verbatim scorer Human assignment changed or is ambiguous.")
+    block = f'<human_instruction authoritative="true" source="{locator}">\n{SCORER_ORIGINAL_IMPERATIVE}\n</human_instruction>\n'
+    return text.rstrip("\n") + "\n\n" + block
 
 
 def normalized_item(item: str) -> str:
@@ -1379,20 +1447,6 @@ def move_pending_item(source_text: str, target_text: str, item: str) -> tuple[st
     return updated_source, updated_target, removed_count, added_count
 
 
-def append_delegate_message(text: str, message: str) -> str:
-    metadata = require_v1_metadata(text)
-    if metadata.status == "done":
-        raise TaskFrontmatterError("task is already done; do not delegate new messages to done tasks.")
-    if metadata.is_manager:
-        raise TaskFrontmatterError("delegate-message requires a worker task file, not a manager task file.")
-    if has_live_pending_marker(text):
-        raise TaskFrontmatterError("delegate-message requires the existing live `(pending)` marker to be consumed first.")
-    newline = preferred_newline(text)
-    separator = "" if not text or text.endswith("\n") else newline
-    message_text = message if message.endswith("\n") else f"{message}{newline}"
-    return f"{text}{separator}{PENDING_MARKER}{newline}(from manager omo_task_edit delegate-message){newline}{message_text}"
-
-
 def has_live_pending_marker(text: str) -> bool:
     """Find a pending marker outside Markdown fences."""
 
@@ -1525,6 +1579,29 @@ def run(args: Args) -> int:
         before = path.stat()
         raw_bytes = path.read_bytes()
         text = raw_bytes.decode("utf-8")
+        if command == "prune-config-evidence-comments":
+            if path != args.root / "config_repair_0926.md" or hashlib.sha256(raw_bytes).hexdigest() != args.expected_task_sha256:
+                raise TaskFrontmatterError("config evidence pruning requires the exact named task and byte digest")
+            obsolete_agent_notes = (
+                "(manager note:", "(Main Sep", "(pending marker cleared", "(Sep 28 routing-",
+                "(Urgent Sep", "(DW incumbent", "(DW7 async", "(wl:5 independent",
+                "(Correction to prior independent", "(New independent paper-owner",
+                "(Slides no-mail intake", "(Source2180 ", "(wl:5 reports",
+                "(Correction to preceding", "(Source2265/2269", "(dw:65 reports",
+            )
+            retained = [
+                line for line in text.splitlines(keepends=True)
+                if not line.startswith(("(verified removed pending item:", "(verified removed pending items:"))
+                and not (line.startswith(obsolete_agent_notes) and line.rstrip().endswith(")") and len(line.rstrip()) > 240)
+            ]
+            updated = "".join(retained)
+            with task_file_lock(path):
+                current_before = path.stat()
+                if not same_file_state(before, current_before) or path.read_bytes() != raw_bytes:
+                    raise TaskFrontmatterError("config task changed before evidence pruning")
+                replace_if_unchanged_locked(path, updated, current_before)
+            print(f"pruned {len(text.splitlines()) - len(retained)} redundant evidence comments; pending queue and other task content unchanged")
+            return 0
         if command == "recover-source2050-pangram-cleanup":
             return recover_source2050_pangram_cleanup(args, path)
         if command == "closed-status-normalize":
@@ -1628,6 +1705,8 @@ def run(args: Args) -> int:
             return 0
         if command == "pending-remove":
             evidence = normalized_comment_message(args.evidence)
+            if path.name == "config_repair_0926.md" and len(evidence) > 180:
+                raise TaskFrontmatterError("configuration task removal evidence must be concise; put detailed reports outside the task file")
             updated, count = remove_pending_items(text, args.items)
             updated = append_comment(updated, pending_remove_evidence_comment(count, evidence))
             notice_items = human_authored_pending_items(args.items)
@@ -1751,19 +1830,33 @@ def run(args: Args) -> int:
                 replace_if_unchanged_locked(path, updated, current_before)
             print(f"recorded exact {spec.source_ref.name} Human envelope in {spec.task_ref}")
             return 0
+        if command == "scorer-purpose-envelope":
+            todo = args.root / "TODO.md"
+            with root_membership_lock(args.root), task_target_lock(args.root, "dw:2"), ExitStack() as locks:
+                for locked_path in sorted({path, todo}, key=str):
+                    locks.enter_context(task_file_lock(locked_path))
+                if authoritative_active_target_task_paths(args.root, "dw:2") != (path,):
+                    raise TaskFrontmatterError("scorer envelope requires exactly one active dw:2 task owner.")
+                rows = [row for row in parse_task_lines(todo) if resolve_task_path(args.root, row.task_file) == path]
+                if len(rows) != 1 or rows[0].section != "todo:current" or not same_tmux_target(rows[0].target, "dw:2"):
+                    raise TaskFrontmatterError("scorer envelope requires its exact sole TODO current row.")
+                current_before = path.stat()
+                current_text = path.read_text(encoding="utf-8")
+                if not same_file_state(before, current_before) or current_text != text:
+                    raise TaskFrontmatterError("scorer task changed before original Human envelope verification.")
+                updated = scorer_purpose_envelope(args, path, current_text)
+                if not args.dry_run:
+                    replace_if_unchanged_locked(path, updated, current_before)
+            print(f"{'verified' if args.dry_run else 'recorded'} original scorer Human envelope; no queue, pane, or archive change.")
+            return 0
         if command == "comment-add":
             updated = append_comment(text, args.comment)
             write_if_changed(path, text, updated, before)
             print(f"appended comment to {path.name}")
             return 0
         if command == "delegate-message":
-            if args.message_file is None:
-                raise TaskFrontmatterError("delegate-message requires --message-file.")
-            message = message_file_text(normalized_message_file(args.message_file))
-            updated = append_delegate_message(text, message)
-            write_if_changed(path, text, updated, before)
-            print(f"appended pending message to {path.name}")
-            return 0
+            # 🧑 "agents also add pending blocks to task files ... task files should only contain human-originated stuff plus comments and metadata"
+            raise TaskFrontmatterError("agent delegations cannot be written into task files; send the original Human request directly to the worker")
         raise TaskFrontmatterError(f"unknown command: {command}")
     except (OSError, TaskFrontmatterError, BlockingError, subprocess.CalledProcessError, argparse.ArgumentTypeError) as exc:
         print(f"omo_task_edit.py: {exc}", file=sys.stderr)
