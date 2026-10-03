@@ -1275,6 +1275,16 @@ def canonical_target(value: str, *, required: bool, field: str) -> str:
     return f"{session}:{window}" if pane == 0 else f"{session}:{window}.{pane}"
 
 
+def canonical_route_target(value: str, *, required: bool, field: str) -> str:
+    if not value:
+        if required:
+            raise ReceiptError(f"{field} must be a tmux target or an omnigent://SESSION_ID target")
+        return ""
+    if OMNIGENT_TARGET_RE.fullmatch(value):
+        return canonical_producer_target(value)
+    return canonical_target(value, required=True, field=field)
+
+
 def canonical_producer_target(value: str) -> str:
     match = OMNIGENT_TARGET_RE.fullmatch(value)
     if match is not None:
@@ -1754,7 +1764,7 @@ def manager_route_selection_matches(
     if status not in ACTIVE_MANAGER_STATUSES:
         return False
     try:
-        runat = canonical_target(metadata.get("runat", ""), required=True, field="manager run target")
+        runat = canonical_route_target(str(metadata.get("runat", "")), required=True, field="manager run target")
     except ReceiptError:
         return False
     if runat != resolved_target:
@@ -2071,8 +2081,8 @@ def _build_plan_from_message(
     if AGENT_RE.fullmatch(args.agent) is None or args.agent in {".", ".."}:
         raise ReceiptError("agent is invalid")
     producer_target = canonical_producer_target(args.producer_target)
-    requested_target = canonical_target(args.requested_manager_target, required=False, field="requested manager target")
-    resolved_target = canonical_target(args.resolved_manager_target, required=False, field="resolved manager target")
+    requested_target = canonical_route_target(args.requested_manager_target, required=False, field="requested manager target")
+    resolved_target = canonical_route_target(args.resolved_manager_target, required=False, field="resolved manager target")
     if ROUTE_KIND_RE.fullmatch(args.route_kind) is None:
         raise ReceiptError("route kind is invalid")
     validate_text_field(args.route_note, "route note", max_length=MAX_ENVELOPE_BYTES)
@@ -3826,17 +3836,12 @@ def validate_committed_route_evidence(
         if manager_transaction_state(manager_payload, plan.owner_prefix, plan.pointer) == "invalid":
             raise ReceiptError("manager bytes differ from the bound report transaction")
         owner = manager_payload[: plan.owner_prefix.size_bytes]
-        suffix = b"\n" * plan.owner_prefix.separator_bytes + b"(pending)\n" + plan.pointer.encode("utf-8") + b"\n"
         allowed_observed = [
             frozen,
             restored_owner_state,
-            {
-                "exists": True,
-                "path": str(plan.manager),
-                "sha256": hashlib.sha256(owner + suffix).hexdigest(),
-                "size_bytes": len(owner + suffix),
-            },
         ]
+        suffix = b"\n" * plan.owner_prefix.separator_bytes + b"(pending)\n" + plan.pointer.encode("utf-8") + b"\n"
+        allowed_observed.append({"exists": True, "path": str(plan.manager), "sha256": hashlib.sha256(owner + suffix).hexdigest(), "size_bytes": len(owner + suffix)})
         if observed not in allowed_observed:
             raise ReceiptError("transaction commitment manager route evidence changed")
     return tuple(committed[path] for path in sorted(committed, key=str))
@@ -4606,9 +4611,9 @@ def archived_task_custody(plan: Plan) -> dict[str, object]:
     expected_references = 1 if terminal_transition else 0
     if (
         metadata.get("status") != "done"
-        or canonical_target(metadata.get("runat", ""), required=True, field="task run target")
+        or canonical_route_target(str(metadata.get("runat", "")), required=True, field="task run target")
         != plan.routing["producer_target"]
-        or canonical_target(metadata.get("managerat", ""), required=True, field="task manager target")
+        or canonical_route_target(str(metadata.get("managerat", "")), required=True, field="task manager target")
         != plan.routing["requested_manager_target"]
         or references != expected_references
     ):
@@ -9001,13 +9006,14 @@ def infer_archived_task_path(
     if len(source_records) != 1 or source_records[0].get("exists") is not True:
         raise ReceiptError("archived task commitment source is missing or ambiguous")
     source_record = source_records[0]
-    todo_records = [item for item in route_evidence if Path(str(item.get("path", ""))).name == "TODO.md"]
+    todo_records = [item for item in route_evidence if item.get("path") == str(root / "TODO.md")]
     source_sha256 = source_record.get("sha256")
     source_size = source_record.get("size_bytes")
     if (
         HASH_RE.fullmatch(str(source_sha256)) is None
         or not isinstance(source_size, int)
         or len(todo_records) != 1
+        or todo_records[0].get("exists") is not True
         or HASH_RE.fullmatch(str(todo_records[0].get("sha256", ""))) is None
     ):
         raise ReceiptError("archived task commitment source is invalid")

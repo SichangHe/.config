@@ -5401,6 +5401,22 @@ return 75
             self.assertEqual("omo-report-terminal-task-custody/v1", custody["schema"])
             self.assertEqual(provenance, custody["git_provenance"])
 
+    def test_archived_commitment_ignores_absent_todo_in_other_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            task, _current, route_evidence, registration = registered_cleanup_fixture(root, replay_id="a" * 64)
+            absent_other_root = {"path": str(root.parent / "other-logs" / "TODO.md"), "exists": False}
+            with patch.object(omo_report_receipt, "REGISTERED_ROOT_RETAINED_CLEANUPS", (registration,)):
+                inferred, _provenance = omo_report_receipt.infer_archived_task_path(
+                    root, task, (*route_evidence, absent_other_root), "a" * 64, "vl:2",
+                )
+                self.assertEqual(task, inferred)
+                with self.assertRaisesRegex(ReceiptError, "archived task commitment source is invalid"):
+                    omo_report_receipt.infer_archived_task_path(
+                        root, task, (*route_evidence, route_evidence[-1]), "a" * 64, "vl:2",
+                    )
+
     def test_registered_root_retained_cleanup_rejects_dirty_or_mismatched_custody(self) -> None:
         defects = ("dirty task", "wrong manager", "wrong TODO section", "changed transcript")
         for defect in defects:

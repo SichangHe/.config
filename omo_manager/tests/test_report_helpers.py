@@ -1102,6 +1102,60 @@ raise SystemExit(submitted.returncode)
             self.assertNotIn("pass --task-file explicitly", result.stderr)
             self.assertNotIn("--task-file", result.stderr)
 
+    def test_omo_report_named_task_without_codex_session_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "logs"
+            root.mkdir()
+            local_env = tmp_path / "local.env"
+            local_env.write_text(f"OMO_WORK_LOGS_ROOT={root}\n", encoding="utf-8")
+            (root / "TODO.md").write_text("current:\ntask.md cfg:7\n", encoding="utf-8")
+            (root / "task.md").write_text(task_frontmatter(), encoding="utf-8")
+            environment = {
+                **os.environ,
+                "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                "TMUX": "",
+                "TMUX_PANE": "",
+                "CODEX_THREAD_ID": "",
+                "CODEX_SESSION_ID": "",
+            }
+
+            def allocate() -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [str(OMO_DIR / "omo_report.sh"), "--alloc-message-file", "--task-file", "task.md"],
+                    cwd=tmp,
+                    env=environment,
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+
+            selected = allocate()
+            self.assertEqual(0, selected.returncode, selected.stderr)
+            self.assertTrue(Path(selected.stdout.strip()).is_file())
+
+            (root / "other.md").write_text(task_frontmatter(), encoding="utf-8")
+            (root / "TODO.md").write_text("current:\ntask.md cfg:7\nother.md cfg:7\n", encoding="utf-8")
+            ambiguous = allocate()
+            self.assertEqual(2, ambiguous.returncode)
+            self.assertIn("exactly one active TODO owner", ambiguous.stderr)
+
+            (root / "TODO.md").write_text("current:\ntask.md cfg:8\n", encoding="utf-8")
+            mismatched = allocate()
+            self.assertEqual(2, mismatched.returncode)
+            self.assertIn("exactly one active TODO owner", mismatched.stderr)
+
+            (root / "TODO.md").write_text("current:\ntask.md cfg:7\n", encoding="utf-8")
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            write_fake_tmux(bin_dir, window="8")
+            environment["PATH"] = f"{bin_dir}:{os.environ['PATH']}"
+            environment["TMUX_PANE"] = "%1701"
+            conflicting_pane = allocate()
+            self.assertEqual(2, conflicting_pane.returncode)
+            self.assertIn("current pane when available", conflicting_pane.stderr)
+
     def test_omo_report_does_not_infer_different_explicit_pane_in_same_window(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

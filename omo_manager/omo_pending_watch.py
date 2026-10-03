@@ -66,6 +66,8 @@ from omo_manager.omo_codex_status import Args as CodexStatusArgs
 from omo_manager.omo_codex_status import Report as CodexReport
 from omo_manager.omo_codex_status import SELECTED_MODEL_CAPACITY_RE
 from omo_manager.omo_codex_status import exact_pane_id
+from omo_manager.omo_codex_status import exact_shell_started_foreground_argv
+from omo_manager.omo_codex_status import process_terminal_identity
 from omo_manager.omo_codex_status import has_active_usage_limit_menu
 from omo_manager.omo_codex_status import inspect as inspect_codex
 from omo_manager.omo_codex_status import exact_tail as exact_codex_tail
@@ -1802,7 +1804,7 @@ def parse_args(argv: list[str]) -> Args:
         "--classify-done-ready",
         metavar="TASK_FILE",
         default="",
-        help="Durably suppress one reverified done/previous/empty-queue ready pane without changing task or tmux state.",
+        help="Durably suppress one reverified done/previous/empty-queue ready Codex pane or completed idle fish shell without changing task or tmux state.",
     )
     _ = parser.add_argument(
         "--classify-blocked-ready",
@@ -2402,8 +2404,9 @@ def marker_origin_source(block_lines: list[str], *, task_record: bool = False) -
         return "agent", "agent"
     if source_line.startswith(EMAIL_SOURCE_PREFIXES):
         return "human", "email"
-    if task_record:
-        return "agent", "task"
+    if source_line.startswith(AGENT_SOURCE_PREFIXES):
+        return "agent", "untrusted"
+    # 🧑 "task files should only contain human-originated stuff plus comments and metadata and agents would trust it just like they trust emails"
     return "human", "manual"
 
 
@@ -3630,18 +3633,23 @@ def direct_message_text(marker: Marker, attachments: Sequence[SourceAttachment])
         attachment_text = direct_attachment_text(attachment)
         if attachment_text:
             parts.append(attachment_text)
-    excerpt = truncate_content("\n\n".join(parts), PENDING_CONTENT_CHAR_LIMIT)
+    # 🧑 "human requests should be sent verbatim"
+    excerpt = "\n\n".join(parts) if marker.origin == "human" else truncate_content("\n\n".join(parts), PENDING_CONTENT_CHAR_LIMIT)
     pointers: list[str] = []
     for attachment in attachments:
         if attachment.error in REJECTED_SOURCE_ERRORS:
             continue
-        pointer = next(
-            (
-                display_pending_tail(line.strip())
-                for line in marker.block_text.splitlines()
-                if line_points_to_source(line, attachment.source)
-            ),
-            attachment.source,
+        pointer = (
+            attachment.source
+            if marker.origin == "human" and attachment.source.startswith("manager_mail/")
+            else next(
+                (
+                    display_pending_tail(line.strip())
+                    for line in marker.block_text.splitlines()
+                    if line_points_to_source(line, attachment.source)
+                ),
+                attachment.source,
+            )
         )
         if pointer not in pointers:
             pointers.append(pointer)
@@ -3676,6 +3684,16 @@ def marker_direct_text(marker: Marker, attachments: Sequence[SourceAttachment]) 
             ),
         )
     )
+
+
+def pending_delivery_text(args: Args, marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
+    # 🧑 "Pending blocks in task files should not be `manager_delegation`, they should be dispatched naked, randomly followed by a reminder to add to pending task items"
+    if marker.task_metadata is None or marker.origin != "human":
+        return marker_direct_text(marker, attachments)
+    text = direct_message_text(marker, attachments)
+    if args.reminder_random is not None and args.reminder_random() < MANAGER_POLICY_REMINDER_RATE:
+        return f"{text}\n\nReminder: add all open requests to `pending_task_items` with `omo_pending.py`."
+    return text
 
 
 def marker_agent_report_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
@@ -4127,7 +4145,7 @@ def push_direct_ref(
     marker: Marker,
     attachments: Sequence[SourceAttachment],
 ) -> int:
-    """Deliver ordinary pending content directly and clear it after success."""
+    """Deliver ordinary pending content directly and clear the delivered marker."""
 
     target = marker_direct_target(args, marker)
     marker_key = marker_seen_key(args, marker, attachments)
@@ -4135,19 +4153,27 @@ def push_direct_ref(
         remember_seen(seen, marker_key, now_s - DEFAULT_SEEN_TTL_S + PENDING_DELIVERY_FAILURE_RETRY_S)
         return 1
     direct_key = direct_delivery_seen_key(args, marker, target, attachments)
+    retain_human_marker = marker.origin == "human"
+    delivery_receipt_key = f"human-direct:{direct_key}"
+    delivery_receipt = locked_consumed_report_entries(args.state, now_s).get(delivery_receipt_key) if retain_human_marker and not args.dry_run else None
+    if delivery_receipt is not None:
+        remember_seen(seen, marker_key, now_s)
+        return 0 if clear_pending_marker_if_current(args.root, marker) else 1
     result = push_marker_delivery(
         args,
         marker,
         manager_delegation_delivery_text(args, marker, attachments)
         if marker.origin == "agent"
-        else marker_direct_text(marker, attachments),
+        else pending_delivery_text(args, marker, attachments),
         target,
         DeliverySuccessEvent(
-            seen_keys=(direct_key,),
+            seen_keys=(direct_key, marker_key) if retain_human_marker else (direct_key,),
             seen_after_clear_keys=(marker_key,),
             seen_at_s=now_s,
             clear_root=args.root,
             clear_marker=marker,
+            durable_report_keys=(delivery_receipt_key,) if retain_human_marker and not args.dry_run else (),
+            durable_report_state=args.state if retain_human_marker and not args.dry_run else None,
             failure_seen_delays_s=((marker_key, PENDING_DELIVERY_FAILURE_RETRY_S),),
         ),
     )
@@ -4158,6 +4184,10 @@ def push_direct_ref(
         remember_seen(seen, marker_key, now_s - DEFAULT_SEEN_TTL_S + PENDING_DELIVERY_FAILURE_RETRY_S)
         return result.status
     remember_seen(seen, direct_key, now_s)
+    if retain_human_marker:
+        if not args.dry_run and not remember_consumed_report(args.state, delivery_receipt_key):
+            return 1
+        return 0 if args.dry_run or clear_pending_marker_if_current(args.root, marker) else 1
     if args.dry_run or clear_pending_marker_if_current(args.root, marker):
         return 0
     return 1
@@ -4525,12 +4555,12 @@ def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, a
         text = (
             manager_delegation_delivery_text(args, marker, attachments)
             if marker.origin == "agent"
-            else marker_delivery_text(marker, attachments, manager_only=for_manager)
+            else pending_delivery_text(args, marker, attachments) if marker.task_metadata is not None else marker_delivery_text(marker, attachments, manager_only=for_manager)
         )
         status = push_marker_text_or_escalate(
             args,
             marker,
-            text if for_manager else with_manager_policy_reminder(args, text, reminders),
+            text if for_manager or marker.task_metadata is not None else with_manager_policy_reminder(args, text, reminders),
             manager_target,
             manager_pending_delivery_event(error_key, now_s),
         )
@@ -4542,14 +4572,14 @@ def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, a
     text = (
         manager_delegation_delivery_text(args, marker, attachments)
         if marker.origin == "agent"
-        else marker_delivery_text(marker, attachments, manager_only=for_manager)
+        else pending_delivery_text(args, marker, attachments) if marker.task_metadata is not None else marker_delivery_text(marker, attachments, manager_only=for_manager)
     )
     if repeated_manager_delivery_is_busy(args, seen, marker_key, manager_target, now_s):
         return 1
     status = push_lifecycle_manager_text(
         args,
         marker,
-        text if for_manager else with_manager_policy_reminder(args, text, reminders),
+        text if for_manager or marker.task_metadata is not None else with_manager_policy_reminder(args, text, reminders),
         manager_target,
         marker_key,
         now_s,
@@ -6036,7 +6066,8 @@ def problem_section(status: str, rows: list[ProblemRow]) -> list[str]:
         "malformed_task": f"{len(rows)} active tasks have malformed metadata; repair their task frontmatter before relying on lifecycle status:",
         "missing": f"{len(rows)} tmux targets do not exist; correct stale routing or relaunch the tracked agents:",
         "not_codex": f"{len(rows)} not codex; check if agent failed to launch:",
-        "blocked_idle": f"{len(rows)} blocked agents are ready; if they are not actually blocked, correct their status, otherwise make sure whatever is blocking them is being resolved:",
+        # 🧑 "Maybe just make it clear what the unblocking condition would be. Or maybe let a manager periodically checks what the workers are blocked on"
+        "blocked_idle": f"{len(rows)} blocked agents are ready; check each unblocking condition, correct stale blocked status, or state what must happen before work resumes:",
         "error": f"{len(rows)} have visible errors; inspect the pane, fix the error, or restart them:",
         "manager_compaction": f"{len(rows)} are compacting; rerun getagentsmd manager and role commands after compaction unless the summary already included them:",
         "manager_waiting_subagent": f"{len(rows)} managers are waiting on a subagent and could not be interrupted automatically; inspect or interrupt them:",
@@ -6292,7 +6323,7 @@ def manager_self_problem_line(line: str, manager_target: str = "") -> bool:
 
 def manager_human_email_problem_line(line: str, manager_target: str = "") -> bool:
     if line.startswith("stuck_input: "):
-        unstick_match = re.search(r"\bunstick=(\S+)$", line)
+        unstick_match = re.search(r"\bunstick=(\S+)(?=\s+route_owner_target=\S+$|$)", line)
         if unstick_match is not None and not unstick_match.group(1).startswith("not_safe:"):
             return False
     return manager_role_problem_line_for_target(line, MANAGER_HUMAN_EMAIL_PROBLEM_STATUSES, manager_target)
@@ -6518,6 +6549,33 @@ def recorded_done_usage_overlay_snapshot(
     stable_identity = "\0".join((*durable_done_ready_task_identity(task), state.status, state.target, owner_target, runtime_identity)).encode("utf-8")
     stable_digest = hashlib.sha256(stable_identity + bytes(1) + task_evidence).hexdigest()
     return f"done-overlay:{stable_digest}"
+
+
+# 🧑 "Try to rid the watcher warning about the previous CC agent stuff."
+def completed_fish_shell_evidence(target: str, report: CodexReport) -> str:
+    """Bind a finished fish prompt to its exact idle foreground process."""
+    if report.status != "not_codex":
+        return ""
+    runtime = blocked_custody_runtime_identity(target)
+    fields = runtime.split("\t")
+    if len(fields) != 3 or not fields[1].isdigit():
+        return ""
+    argv = exact_shell_started_foreground_argv(target, fields[0], "fish")
+    if not argv or Path(argv[0]).name != "fish" or any(argument not in {"-l", "--login", "-i", "--interactive"} for argument in argv[1:]):
+        return ""
+    identity = process_terminal_identity(Path("/proc") / fields[1])
+    if identity is None:
+        return ""
+    shell = Path("/proc") / str(identity.foreground_group)
+    try:
+        start_ticks = process_start_ticks(identity.foreground_group)
+        if any((thread / "children").read_text().strip() for thread in (shell / "task").iterdir()):
+            return ""
+    except (OSError, ValueError):
+        return ""
+    if blocked_custody_runtime_identity(target) != runtime or exact_shell_started_foreground_argv(target, fields[0], "fish") != argv:
+        return ""
+    return json.dumps({"runtime_identity": runtime, "shell_pid": identity.foreground_group, "shell_start_ticks": start_ticks, "argv": argv, "lines": report.lines}, separators=(",", ":"))
 
 
 def recorded_snapshot_matches_current(recorded: str, current: str) -> bool:
@@ -6981,6 +7039,14 @@ def consumed_root_cascade_snapshots(
 
 def line_matches_blocked_report_snapshot(root: Path, line: str, task: TaskLine, snapshot: str, owner_target: str) -> bool:
     status = problem_line_status(line)
+    if snapshot.startswith("done-shell:"):
+        return bool(
+            status == "not_codex"
+            and problem_line_value(line, "role") == "todo_unmanaged"
+            and problem_line_value(line, "task_status") == "done"
+            and owner_target == problem_line_owner_target(line)
+            and same_tmux_target(task.target, problem_line_target(line))
+        )
     if snapshot.startswith("done:"):
         if status not in {"ready", "done-stale"} or problem_line_value(line, "task_status") not in {"", "done"}:
             return False
@@ -7031,7 +7097,7 @@ def unchanged_dependency_blocked_idle_line(root: Path, line: str, current: dict[
         ]
         return len(matches) == 1 and matches[0][1].section.startswith("archive:")
     task_status = problem_line_value(line, "task_status")
-    if not ((status in SNAPSHOT_SUPPRESSED_BLOCKED_STATUSES and task_status == "blocked") or status in {"ready", "done-stale"} and task_status in {"", "done"}):
+    if not ((status in SNAPSHOT_SUPPRESSED_BLOCKED_STATUSES and task_status == "blocked") or status in {"ready", "done-stale", "not_codex"} and task_status in {"", "done"}):
         return False
     task_file = problem_line_task(line)
     if not task_file:
@@ -7438,8 +7504,6 @@ def log_manager_problem(args: Args, output: str) -> bool:
                 "--message-file",
                 str(body_file),
             ]
-            if args.manager_target:
-                command.extend(("--tmux-target", args.manager_target))
             result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"omo_pending_watch: manager problem human email failed: {exc}", file=sys.stderr)
@@ -7665,6 +7729,12 @@ def blocked_report_snapshot_state(
             continue
         owner_target = effective_owner_target(root, task, task_path)
         report = inspect_codex(CodexStatusArgs(state.target, 80))
+        shell_evidence = completed_fish_shell_evidence(state.target, report)
+        if shell_evidence:
+            snapshot = recorded_done_ready_snapshot(task_path, task, state, owner_target, shell_evidence)
+            if snapshot:
+                snapshots[task.task_file] = (task, snapshot.replace("done:", "done-shell:", 1), owner_target)
+            continue
         pane_evidence = blocked_custody_pane_evidence(state.target, report) if report.status == "ready" else ""
         snapshot = (
             recorded_done_ready_snapshot(task_path, task, state, owner_target, pane_evidence)
@@ -7767,7 +7837,7 @@ def classify_done_ready(args: Args, task_file: str) -> bool:
         second_state = blocked_report_snapshot_state(args.root, args.state, {task_file})
         first = first_state.get(task_file)
         second = second_state.get(task_file)
-        if first is None or second is None or first != second or not second[1].startswith("done:"):
+        if first is None or second is None or first != second or not second[1].startswith(("done:", "done-shell:")):
             return False
         snapshots = {
             stored_task: snapshot
@@ -8020,7 +8090,8 @@ def handle_agent_problem_result(
         # Issue the exact evidence before any readiness probe or delivery side effect.
         # A manager can receive the queued notice while this process is between
         # those operations, so the claim helper must never observe a missing issue.
-        issue_problem(claim_path, problem_id, claim_owner_target, dispatch.problem_lines, now_wall_s)
+        if claim_owner_target:
+            issue_problem(claim_path, problem_id, claim_owner_target, dispatch.problem_lines, now_wall_s)
         bypass_target_repeat = blocked_report_bypasses_target_repeat(
             args.root,
             dispatch.problem_lines,
@@ -8431,13 +8502,20 @@ def scan_once(
         if marker.origin == "agent" and marker.source == "agent" and not marker_has_authenticated_agent_report(marker, attachments):
             continue
         key = marker_seen_key(args, marker, attachments)
+        if marker.origin == "human" and not marker_is_for_manager(marker, attachments) and not is_main_manager_task_file(marker.file):
+            target = marker_direct_target(args, marker)
+            if target and f"human-direct:{direct_delivery_seen_key(args, marker, target, attachments)}" in locked_consumed_report_entries(args.state, now_s):
+                if push_direct_ref(args, seen, now_s, marker, attachments) == 0:
+                    changed = True
+                continue
         if marker.origin == "agent" and marker.source == "agent" and report_was_consumed(args.state, key):
             status = push_ref(args, seen, now_s, marker, attachments)
             if status == 0:
                 remember_seen(seen, key, now_s)
                 changed = True
             continue
-        if seen_contains(seen, key, now_s):
+        repeat_s = min(DEFAULT_SEEN_TTL_S, args.agent_problem_repeat_s) if marker.origin == "human" else DEFAULT_SEEN_TTL_S
+        if seen_contains(seen, key, now_s, ttl_s=repeat_s):
             continue
         status = push_ref(args, seen, now_s, marker, attachments)
         if status == 0:
@@ -8699,7 +8777,7 @@ def main(argv: list[str]) -> int:
     if args.classify_done_ready:
         if not classify_done_ready(args, args.classify_done_ready):
             print(
-                "omo_pending_watch: task is not uniquely done in TODO previous or one monthly archive with an empty queue and exact ready Codex pane",
+                "omo_pending_watch: task is not uniquely done with an empty queue and exact ready Codex pane or completed idle fish shell in TODO previous",
                 file=sys.stderr,
             )
             return 1

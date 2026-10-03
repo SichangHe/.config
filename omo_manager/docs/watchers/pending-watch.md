@@ -5,6 +5,7 @@
 - purpose
   - deliver new Markdown `(pending)` markers with enough context to act immediately
   - keep transient delivery memory process-local and time-bounded while retaining durable consumed-agent-report receipts
+  - remove a worker's ordinary Human `(pending)` marker after authenticated delivery; failed or uncertain delivery retains it, and an already-consumed delivery receipt permits cleanup without redelivery
   - run agent-problem and digest maintenance without delaying marker scans
 
 - file-change path
@@ -29,6 +30,9 @@
   - while inotify is active, `--poll-backstop-interval-s` runs an mtime scan after 30 seconds without a filesystem notification, full scan, or previous backstop poll
 
 - subprocess isolation
+  - setup strips caller-specific native bridge, runner session, agent task, and pane identity before tmux handoff and after local configuration; detached supervisors retain explicit manager routing, not their launcher's producer identity
+  - watcher error emails use their explicit alert subject without claiming the manager as sender; the affected manager target remains in the body
+  - producer authentication remains unchanged; a direct setup's live launcher ancestors, or a tmux server launched inside an agent, can still supply ancestor identity until those ancestors are gone
   - pending dispatch calls the `omo_tmux_send.py` library sender in-process
   - the watcher retains every asynchronous sender future until the watcher thread awaits and consumes its result
   - one-shot mode emits periodic slow-send notices but does not exit while a retained result remains unconsumed
@@ -45,7 +49,7 @@
 
 - pending ref semantics
   - a task file may have at most one live `(pending)` marker; it is temporary intake, not a backlog
-  - the receiving agent consumes it as soon as possible by routing the request to its sole owner or recording the open request in `pending_task_items`; only the supported record/clear or verified-delivery path removes it
+  - the receiving agent records every open request in `pending_task_items`; verified delivery clears the transient marker without clearing the task queue
   - scans Markdown for literal `(pending)` markers outside fenced code
   - treats the unquoted, unindented line immediately after `(pending)` only as an origin candidate; source-like payload, quoted lines, and free-form lookalikes remain human
   - normal manager deliveries name `omo_record_pending.py`, the required human or agent provenance, and the exact pending source; command syntax remains in helper help; the single-marker warning appears only when one file contains multiple live markers
@@ -63,8 +67,9 @@
   - email source markers are `origin=human source=email`
   - an agent report is `origin=agent source=agent` only when its adjacent compact pointer has strict syntax, names a readable owner-only regular file in `/tmp/omo-agent-messages-$UID/`, matches the artifact tmux target, and has a valid `omo_report.sh` header and message SHA-256
   - exact manager generators from `omo_task_edit`, bidirectional blocking, and email-threshold infrastructure are `origin=agent source=manager`; other `(from manager ...)` text is human payload
-  - verbose `[omo-message-source: ...]`, malformed compact pointers, unsafe files, mismatched headers or hashes, and manual/quoted lookalikes are not authenticated and remain human
-  - unmarked pending blocks in ordinary Markdown are `origin=human source=manual`; unmarked blocks inside frontmatter task records are `origin=agent source=task` and use a manager-delegation envelope, because task prose is not evidence of a human source
+  - malformed or unsafe agent-source markers are not authenticated and never gain Human authority; quoted lookalikes outside the adjacent source position remain ordinary content
+  - unmarked `(pending)` blocks in task records and ordinary Markdown are `origin=human source=manual`; task-body instructions are reserved for the Human, including direct edits; this is a workspace writing convention, not cryptographic proof of who edited a shared file
+  - agents write only task comments and frontmatter through supported helpers; manager delegations use the direct agent channel, not task-body `(pending)` blocks; authenticated report pointers and email-source lines are metadata exceptions and keep their distinct origins
   - human-origin refs routed to a manager require the manager acknowledgement flow; ordinary direct delivery sends no manager acknowledgement
   - manager-bound markers are reserved while an asynchronous send is active; failed sends back off for ten minutes, and later duplicate attempts wait until the manager is ready
   - `omo_report.sh` stores worker- and manager-produced reports on the resolved manager task; the watcher delivers an authenticated report on a manager task to that receiving task's `runat`, while compatibility reports on worker tasks route to their `managerat`
@@ -72,20 +77,24 @@
   - every watcher-owned marker clear relocates the unchanged pending block, takes the shared `task_file_lock`, rereads under the lock, and performs a stat-guarded atomic replacement so concurrent compliant writers are preserved
   - accepted agent reports are fsynced to `pending-watch-consumed-reports.tsv` before marker cleanup, so line movement, cleanup races, repeated pointers, watcher restarts, and identical `omo_report.sh` resubmissions cannot redeliver them
   - delivered blocked-task classifications and completed-task ready-pane classifications are keyed by task/TODO identity, queue, owner, and stable pane identity in a private durable ledger; watcher restarts and changed group problem IDs stay quiet until that evidence changes
+  - explicit `--classify-done-ready` also records a completed fish shell in TODO `previous` with an empty queue and no overlapping live owner; suppression applies only to its `not_codex role=todo_unmanaged task_status=done` row and exact unchanged task, owner, pane, foreground fish process/start time, and visible output; child processes, reopened tasks, changed output, or a respawn invalidate it, so genuine launch failures remain visible
   - `omo_pending_watch.py --root ROOT --classify-done-ready TASK_FILE` records only a freshly reverified `done` task that is uniquely in TODO `previous` or one owner-controlled `YYYYMM/old_todos.md`, has an empty queue, and retains the exact ready Codex pane; an archived task is addressed as `YYYYMM/TASK_FILE`, and its exact unchanged snapshot suppresses the corresponding otherwise-untracked ready pane until its raw archive row, task, target, runtime, or rendered-output evidence changes; unrelated rows may change, while each validation read still rejects a concurrently changing index; the exact Codex usage-limit chooser is treated as a temporary overlay only while the recorded task, archive, target, owner, and pane runtime remain identical, and normal output comparison resumes after the chooser closes; the configured root may use its owner-owned setgid collaborative mode, while each month directory, archive index, and task rejects group/world writes; the helper rejects symlinked, unowned, changing, missing, or duplicate archive evidence and changes no task, TODO, archive, registry, pane, or mail state
   - consumed-report receipts are timestamped, protected by a cross-process file lock, cached by file identity, bounded to 10,000 newest entries and 4 MiB reads, and expired/compacted after 90 days by default (`OMO_MANAGER_CONSUMED_REPORT_TTL_S` overrides the TTL)
   - a definite target or guard rejection before paste, including `not a Codex pane`, remains retryable; an ordinary direct marker stays with its addressed task and is never copied to a manager, while manager-directed and agent-report routes may escalate; live Cursor Agent panes are sendable as `ready`, `running`, or `stuck_input` and are not that rejection; an indeterminate result after submit is durably consumed and never automatically redelivered
   - an indeterminate direct-marker failure after paste keeps the source marker for delayed recovery and does not copy the possibly delivered request to the main manager
   - delivery and cleanup are separate idempotent states: failed cleanup leaves a consumed report that later scans clear without delivery
-  - ordinary pending blocks in validated frontmatter task files route directly to `runat` as `<manager_delegation>`; they never use the human add-task prompt or `<human_instruction>`
-  - direct delivery does not include manager record/replace/remove instructions, relocates and clears the consumed `(pending)` only when its complete original block is unchanged, and sends no manager copy
+  - Human pending blocks in validated frontmatter task files route to `runat` as raw request text, without a delegation envelope; an independently sampled reminder may follow to add the open requests to `pending_task_items`; `for manager` routes to `managerat` the same way
+  - direct delivery does not include manager record/replace/remove instructions; the exact consumed marker is cleared on successful delivery, and no manager copy is sent
   - if a resolved manager delivery target is unavailable and differs from `OMO_MANAGER_TMUX_TARGET`, the same manager-facing message is escalated to `OMO_MANAGER_TMUX_TARGET` with the failed target and error inline
   - `for manager` at the beginning or end of active unquoted content routes to `managerat`; matching ignores case, surrounding punctuation, and edge whitespace, but synonyms and changed internal spacing do not match
   - marker search includes the pending block and its adjacent stored email; arbitrary linked files are not expanded, and links inside emails are not followed
   - unreadable sources and missing, rejected, or unavailable ordinary direct destinations retain their source marker for delayed retry; they never copy the request or failure notice to a manager
   - legacy prose metadata remains recognized only for main manager task files and old explicit source markers
   - direct delivery strips `(pending)` and source-pointer plumbing from the message body; literal `DM` and `DM only` text is ordinary message content
-  - direct email delivery includes readable content and retains the source pointer after the possibly truncated content; authenticated `omo_report.sh` reports remain pointers
+  - direct Human email delivery includes the full readable request and the plain `manager_mail/*.txt` path without truncation; internal `record and delegate` task metadata is not included in worker instructions; agent-origin reports remain pointers
+  - verified direct Human deliveries retain a durable receipt; if marker cleanup fails, later scans clear that exact marker without redelivering the request
+  - a manually removed marker is no longer an active dispatch trigger; a nearby source pointer alone does not recreate it
+  - blocked-worker notices ask the owning manager to check the stated unblocking condition and correct stale status; no proof artifact is required merely to set `blocked_on`
 
 - agent report delivery example
   - `Agent report received; review it and handle any follow-up:`
@@ -107,6 +116,7 @@
   - detects manager pane problems when `OMO_MANAGER_TMUX_TARGET` is set
   - directly emails the Human for each tmux or OmniGent `error` row after dedicated capacity recovery removes recoverable capacity errors; a visibility-only scan that also contains malformed task metadata emails its error rows without running recovery or other pane actions; severe main-manager failures use the same email, while normal owner and recovery-manager routing still proceeds
   - watcher error email runs `email_me.py` with the watcher root, manager target, and exact problem output; delivery requires separate agent and human mailboxes, failed delivery retries after 10 minutes, and each unchanged delivered error uses the normal problem-repeat throttle
+  - OmniGent failed-state evidence includes its last task error, bounded to 512 characters, and session-update time when available; session-update time is not a failure timestamp; an online runner with a failed message submission is still an error, not a claim that the process crashed
   - detects completed task files whose agents still appear open
   - detects `untracked_agent` panes when a non-`h*` tmux session contains a running, ready, errored, or stuck Codex pane that no task file owns
   - agent-problem prompts start with a direct helper instruction and do not need human acknowledgement
@@ -157,6 +167,7 @@
   - executor, pre-paste, paste, submit, and verification failures preserve the three-attempt budget, schedule another same-pane `resume`, and alert the owner not to launch a replacement pane
   - exact-capacity `error` and `untracked_agent` rows are withheld from generic manager prompts while dedicated recovery runs; after three persistent verified submissions, the owner or main-manager peer receives same-pane recovery instructions
   - non-blocked panes classified as `stuck_input` are submitted with Enter when the Codex status helper says the visible input is safe; this includes a nonempty composer under an active `Working (... • esc to interrupt)` line with the `tab to queue message` footer, but excludes background-terminal waits and compaction
+  - 🧑 stuck Codex input is submitted with Enter without proving the visible paste matches the original manager message
   - first and second successful Enter attempts are remembered and suppressed; the third still-stuck report is sent to the owning manager
   - remembered Enter attempts are cleared when that target is no longer reported as stuck
   - for non-human panes only, a newly completed Codex turn (a changed prompt-through-`Worked for` fingerprint) resets the three-attempt Enter counter; partial output, spinners, and unchanged turns do not reset it

@@ -392,7 +392,8 @@ class PendingReportDeliveryTests(unittest.TestCase):
             self.assertEqual("main:1", fallback.call_args.args[0])
             self.assertNotIn("manager_mail/13083.txt", fallback.call_args.args[1])
             self.assertNotIn("pending items recorded", fallback.call_args.args[1])
-            self.assertIn("target disappeared", fallback.call_args.args[1])
+            self.assertIn("target is not a Codex pane: vl:15", fallback.call_args.args[1])
+            self.assertIn("worker_done_rejected", fallback.call_args.args[1])
             self.assertFalse(args.state.exists())
             self.assertIn("(pending)", task.read_text(encoding="utf-8"))
             self.assertEqual(before, task.read_bytes())
@@ -485,8 +486,8 @@ class PendingReportDeliveryTests(unittest.TestCase):
 
             marker = watcher.find_markers(root, [task])[0]
 
-            self.assertEqual(("human", "manual"), (marker.origin, marker.source))
-            self.assertIn("<human_instruction>", watcher.marker_direct_text(marker, watcher.marker_attachments(args_for(root), marker)))
+            self.assertEqual(("agent", "agent"), (marker.origin, marker.source))
+            self.assertFalse(watcher.marker_has_authenticated_agent_report(marker, watcher.marker_attachments(args_for(root), marker)))
 
     def test_manager_delegation_uses_explicit_envelope_and_worker_runat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -667,20 +668,20 @@ class PendingReportDeliveryTests(unittest.TestCase):
             manager.write_text(task_frontmatter(runat="vl:15", managerat="main:1", is_manager=True), encoding="utf-8")
             (root / "TODO.md").write_text("current:\nworker.md cfg:7\nmanager.md vl:15\n", encoding="utf-8")
             draft = base / "draft.md"
-            draft.write_text("same immutable report\n", encoding="utf-8")
-            env = {**os.environ, "OMO_MANAGER_LOCAL_ENV": str(local_env), "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX_PANE": "%1701"}
+            draft.write_text(f"same immutable report {time_ns()}\n", encoding="utf-8")
+            env = {**os.environ, "OMO_MANAGER_LOCAL_ENV": str(local_env), "XDG_STATE_HOME": str(base / "state"), "PATH": f"{bin_dir}:{os.environ['PATH']}", "TMUX_PANE": "%1701"}
             command = [str(Path(__file__).resolve().parents[1] / "omo_report.sh"), "--status", "done", "--agent", "worker", "--message-file", str(draft)]
 
             first = subprocess.run(command, env=env, text=True, capture_output=True, timeout=10, check=False)
             self.assertEqual(0, first.returncode, first.stderr)
             args = args_for(root)
-            with patch.object(watcher, "push_marker_delivery", return_value=watcher.DeliveryResult(0)) as push:
+            with patch.dict(os.environ, {"XDG_STATE_HOME": str(base / "state")}), patch.object(watcher, "push_marker_delivery", return_value=watcher.DeliveryResult(0)) as push:
                 self.assertTrue(watcher.scan_once(args, {}, [manager]))
             self.assertEqual(1, push.call_count)
 
             second = subprocess.run(command, env=env, text=True, capture_output=True, timeout=10, check=False)
             self.assertEqual(0, second.returncode, second.stderr)
-            with patch.object(watcher, "push_marker_delivery", side_effect=AssertionError("consumed report was redelivered")):
+            with patch.dict(os.environ, {"XDG_STATE_HOME": str(base / "state")}), patch.object(watcher, "push_marker_delivery", side_effect=AssertionError("consumed report was redelivered")):
                 self.assertTrue(watcher.scan_once(args, {}, [manager]))
             self.assertNotIn("(pending)", manager.read_text(encoding="utf-8"))
 

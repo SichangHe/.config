@@ -2,6 +2,12 @@
 
 (authored by agents unless marked 🧑)
 
+- same-frame SVM meeting result
+  - `recover-meeting-svm-reviewed-sent` removes only the one answered CC worker item, never the other CC or Slidev items
+  - authority is the September 29 meeting transcript and its exact queued item, not the unrelated `manager_mail/85c5dff58359-2319.txt` cleanup email
+  - requires the original transcript digest and quoted choice, exact existing human-addressed Sent message with its original-thread parent and task subject tag, authenticated `dw:5` task owner, and fresh task/TODO digests
+  - `--dry-run` verifies without mutation; the live command removes the one item without emailing, and a replay fails on queue drift
+
 Public no-send recovery commands are incident-specific. They accept only their registered incident inputs and never invoke the email sender.
 
 - exact bindings
@@ -18,6 +24,8 @@ Public no-send recovery commands are incident-specific. They accept only their r
   - a repeat replays only the matching prepared transaction and never sends mail
 - limits
   - verification reads Gmail Sent Mail and requires exactly one message from the configured agent address to the configured Human address
+  - ordinary completion verification compares the raw decoded Sent body digest, then matches its canonical completion record after CRLF normalization and the sender's exact task-file subject retag
+  - when a combined-answer send already consumed its exact authorization, pass the original answer files to `reconcile-claimed-sent-remove`; it checks the claim, authorization, one-use Sent message and exact prepared body before marking delivery and removing only the named queue items
   - new-email planning still obeys no-contact policy
   - a no-send recovery plan can inspect exact pre-existing Sent evidence despite that policy, but has `send_allowed=false` and the sender rejects it
   - a message can bind one recovery only; its marker includes the transition key, so a second request or replay with different bindings stops before mutation
@@ -44,6 +52,17 @@ Public no-send recovery commands are incident-specific. They accept only their r
   - it authenticates the one existing acknowledgement by Message-ID and exact subject/body digests, plus the three distinct unused item-specific add claims and authorizations
   - it atomically records the three exact items with Human provenance, preserves every unrelated task byte and claim, and supports only its exact prepared/committed replay
   - task, queue, source replay, acknowledgement, or claim drift fails before task mutation
+- Source-2000 retired PB reconciliation
+  - `recover-source2000-retired-pb` removes only the completed configuration queue item; it sends no email and touches no pane
+  - it requires the authenticated config owner, exact Human request and later retirement approval, the recorded closed empty PB manager, the still-blocked news service, and caller-supplied task/PB/news/TODO digests
+  - it locks all four records, preserves unrelated queue items, and rejects changed custody or replay; `--dry-run` verifies without writing
+- Source-1974 retired watcher ownership
+  - `recover-source1974-ownership` removes only the answered unknown-helper-ownership item, without email or pane action
+  - it verifies both exact Human Inbox messages, the existing original-thread Sent update, the three unchanged committed helper files, authenticated config owner, and fresh task/TODO digests
+  - `--dry-run` checks without writing; repeat or changed mail, files, task, or TODO fails closed
+- configuration routing answer
+  - `recover-config-routing-reviewed-sent` removes only the routing item already answered in the configuration owner's original email thread
+  - the Human's request was a direct user turn recorded in the task, not an Inbox message; it checks that exact task text, both existing Sent messages (the earlier update and its reply), authenticated owner, and fresh task/TODO digests before changing one queue item; it never sends mail
 - watcher Pangram reviewed-Sent adapter
   - `recover-watcher-pangram-reviewed-sent` takes no incident parameters and never invokes the sender
   - it binds only the current `watcher_repair.md` bytes, `config:35` owner, `config:39` manager, complete ordered queue, and its exact three-item subset
@@ -55,3 +74,10 @@ Public no-send recovery commands are incident-specific. They accept only their r
   - it authenticates the original reviewed final report for the instruction-diagnosis item and the existing deletion notice for the streaming-batches item
   - it preserves both delivered claims and both agent-authored watcher notices byte-for-byte, retires all three earlier failed claims, and removes only the remaining two Human items
   - task, queue, claim, authorization, or Sent-message drift is rejected before task mutation
+- four-site repair Human intake
+  - `recover-source2234-worker-ack` runs only from the authenticated DW manager pane, never from a task-file environment override
+  - verifies the exact Human Inbox transport identity and original message, the worker's existing Sent acknowledgment in that thread, source bytes, task/TODO snapshots, and the sole manager/worker custody under sorted locks
+  - appends only the original Human instruction to the worker queue; repeated calls fail on task/queue drift and never send mail or start generation
+- configuration pending-marker correction
+  - `recover-source2230-reviewed-sent` closes only the two answered worker-marker/blocker items, retaining every other config task item
+  - requires authenticated config-pane custody, exact original Human Inbox and threaded Sent reply, source/task/TODO digests and sorted task/index locks; never sends mail

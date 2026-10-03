@@ -190,6 +190,7 @@ manager_target="${OMO_MANAGER_TMUX_TARGET:-}"
 if [ -n "$env_root" ]; then root="$env_root"; fi
 task_file=""
 done_task_file=""
+report_task_file=""
 producer_target=""
 status=""
 recover_moved=""
@@ -230,12 +231,12 @@ usage() {
     "       omo_report.sh --alloc-message-file [--done-task-file FILE]" \
     "" \
     "Allocate a private task-specific draft first, write the report through an editor or other non-shell text channel, then submit it with --status blocked|in-progress|done and --message-file." \
-    "The helper infers routing from the producer pane; do not pass task-file, root, manager-target, or other manual route flags." \
+    "Pass --task-file NAME.md when Codex's shell cannot identify its pane; otherwise routing infers the producer pane." \
     "A file named REPORT is refused unless it is in a private owner-only directory. Use --describe to validate and resolve a submission without recording it."
 }
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --status|--message-file|--agent|--recover-moved|--done-task-file|--consumed-attestation-output|--validate-consumed-export|--expected-sha256|--export-archived-consumed|--root-retained-session-transcript|--root-retained-lifecycle-transcript|--ownership-acknowledgment-message-id|--published-result-commit|--root-retained-no-mail-transcript|--root-retained-split-no-mail-owner-transcript|--root-retained-split-no-mail-manager-transcript)
+    --status|--message-file|--agent|--recover-moved|--done-task-file|--task-file|--consumed-attestation-output|--validate-consumed-export|--expected-sha256|--export-archived-consumed|--root-retained-session-transcript|--root-retained-lifecycle-transcript|--ownership-acknowledgment-message-id|--published-result-commit|--root-retained-no-mail-transcript|--root-retained-split-no-mail-owner-transcript|--root-retained-split-no-mail-manager-transcript)
       if [ "$#" -lt 2 ]; then echo "missing value for $1" >&2; usage >&2; exit 2; fi
       option="$1"
       value="$2"
@@ -245,6 +246,7 @@ while [ "$#" -gt 0 ]; do
         --agent) agent="$value"; agent_explicit=1 ;;
         --recover-moved) recover_moved="$value" ;;
         --done-task-file) done_task_file="$value" ;;
+        --task-file) report_task_file="$value" ;;
         --consumed-attestation-output) consumed_attestation_output="$value" ;;
         --validate-consumed-export) validate_consumed_export="$value"; validate_consumed_export_requested=$((validate_consumed_export_requested + 1)) ;;
         --expected-sha256) validate_consumed_export_sha256="$value"; validate_consumed_export_sha256_requested=$((validate_consumed_export_sha256_requested + 1)) ;;
@@ -486,7 +488,7 @@ if [ -n "$omnigent_identity_output" ]; then
 fi
 export OMO_REPORT_OMNIGENT_TARGET="$producer_target"
 if [ -z "$task_file" ]; then
-  inferred_task=$(python3 -I -S - "$root_real" "$HOME/work_logs" "$done_task_file" <<'PY'
+  inferred_task=$(python3 -I -S - "$root_real" "$HOME/work_logs" "$done_task_file" "$report_task_file" <<'PY'
 from __future__ import annotations
 import hashlib
 import json
@@ -498,11 +500,12 @@ import subprocess
 import sys
 from pathlib import Path
 roots: list[Path] = []
-for root_arg in sys.argv[1:-1]:
+for root_arg in sys.argv[1:-2]:
     root = Path(root_arg).resolve()
     if root not in roots:
         roots.append(root)
-selected_done_task = sys.argv[-1]
+selected_done_task = sys.argv[-2]
+named_task = sys.argv[-1]
 selected_done_path: Path | None = None
 if selected_done_task:
     selected_done_path = Path(selected_done_task)
@@ -737,6 +740,39 @@ def exact_done_previous_candidates(root: Path, current: str) -> tuple[list[Path]
     return candidates, reassigned, closed, invalid
 
 current = os.environ.get("OMO_REPORT_OMNIGENT_TARGET", "").strip() or current_tmux_target()
+if named_task:
+    if selected_done_path is not None or Path(named_task).is_absolute() or not named_task.endswith(".md"):
+        print("--task-file requires a relative active task and excludes --done-task-file", file=sys.stderr)
+        raise SystemExit(2)
+    matches = []
+    for selected_root in roots:
+        candidate = (selected_root / named_task).resolve(strict=False)
+        references = task_refs(selected_root, TASK_SECTIONS)
+        for path, listed_targets in references:
+            if path != candidate:
+                continue
+            metadata = parse_frontmatter(path)
+            if metadata is None or metadata.get("status") not in ACTIVE_TASK_STATUSES:
+                continue
+            runat = metadata.get("runat", "")
+            if not (TARGET_RE.fullmatch(runat) or OMNIGENT_TARGET_RE.fullmatch(runat)):
+                continue
+            if not any(same_tmux_target(runat, target) for target in listed_targets):
+                continue
+            if current and not same_tmux_target(current, runat):
+                continue
+            owners = [
+                other for other, _targets in references
+                if (other_metadata := parse_frontmatter(other)) is not None
+                and other_metadata.get("status") in ACTIVE_TASK_STATUSES
+                and same_tmux_target(other_metadata.get("runat", ""), runat)
+            ]
+            if owners == [candidate]:
+                matches.append(runat)
+    if len(matches) != 1:
+        print("--task-file must match exactly one active TODO owner and the current pane when available", file=sys.stderr)
+        raise SystemExit(2)
+    current = matches[0]
 if not current:
     print("current tmux or OmniGent runtime could not be identified; cannot infer report task", file=sys.stderr)
     raise SystemExit(2)
@@ -890,6 +926,7 @@ root = Path(sys.argv[1])
 task_path = Path(sys.argv[2])
 main_target = sys.argv[3].strip()
 TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
+OMNIGENT_TARGET_RE = re.compile(r"^omnigent://[A-Za-z0-9._-]+$")
 TARGET_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?![A-Za-z0-9_.-])")
 TASK_SECTIONS = {"current", "human pending", "low priority", "previous"}
 ACTIVE_MANAGER_STATUSES = {"running", "long_running", "blocked"}
@@ -955,6 +992,8 @@ def canonical_tmux_target(target: str) -> tuple[str, int, int] | None:
     return session, int(window), int(pane) if dot else 0
 
 def same_tmux_target(left: str, right: str) -> bool:
+    if OMNIGENT_TARGET_RE.fullmatch(left) is not None or OMNIGENT_TARGET_RE.fullmatch(right) is not None:
+        return left == right and OMNIGENT_TARGET_RE.fullmatch(left) is not None
     left_target = canonical_tmux_target(left)
     return left_target is not None and left_target == canonical_tmux_target(right)
 
@@ -1048,8 +1087,9 @@ if metadata is None:
     print("task frontmatter is required to route report", file=sys.stderr)
     raise SystemExit(2)
 managerat = metadata.get("managerat", "")
-if not TARGET_RE.fullmatch(managerat):
-    print("task frontmatter `managerat` must be a tmux target", file=sys.stderr)
+# 🧑 "I want you to make it s.t. the main manager can be an omnigent agent"
+if TARGET_RE.fullmatch(managerat) is None and OMNIGENT_TARGET_RE.fullmatch(managerat) is None:
+    print("task frontmatter `managerat` must be a tmux target or an omnigent://SESSION_ID target", file=sys.stderr)
     raise SystemExit(2)
 if same_tmux_target(managerat, main_target):
     print_route(main_manager_file(), "", managerat, main_target, "configured-main-manager")
