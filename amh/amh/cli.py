@@ -99,7 +99,8 @@ def task_show(config: Config, args: argparse.Namespace) -> int:
 
 
 def task_close(config: Config, args: argparse.Namespace) -> int:
-    print(f"closed {args.task} at {work.close_task(config, args.task, args.agent_gone, not args.no_email)}")
+    name = args.task or taskfile.own_task(config, args.task_file).name
+    print(f"closed {name} at {work.close_task(config, name, args.agent_gone, not args.no_email, own=args.task is None)}")
     return 0
 
 
@@ -252,7 +253,7 @@ def build_parser() -> argparse.ArgumentParser:
     _ = p.add_argument("old", metavar="OLD")
     _ = p.add_argument("new", metavar="NEW")
 
-    task = group("task", "Managers: create, inspect, and close the tasks of agents you manage.")
+    task = group("task", "Managers: create, inspect, and close the tasks of agents you manage. Any agent: close yourself.")
     p = action(task, "start", "Create a task and start an agent on it.", task_start, "Prints the new agent's address. The agent gets the standing instructions, then your prompt, then the quoted human email lines.")
     _ = p.add_argument("task", metavar="TASK.md", help="new task file name; also the agent's tag in email subjects")
     _ = p.add_argument("--dir", required=True, help="directory the agent works in")
@@ -268,8 +269,8 @@ def build_parser() -> argparse.ArgumentParser:
     _ = p.add_argument("--lines", metavar="START-END", help="the relevant lines of --email")
     p = action(task, "show", "Show tasks' status, agent address, and open items.", task_show)
     _ = p.add_argument("task", metavar="TASK.md", nargs="+")
-    p = action(task, "close", "Mark a task done, stop its agent, and move it to `previous` in the task list.", task_close, "Refuses while the task has open items. Emails the human one line saying the task is closed.")
-    _ = p.add_argument("task", metavar="TASK.md")
+    p = action(task, "close", "Mark a task done, stop its agent, and move it to `previous` in the task list.", task_close, "Without TASK.md, an agent closes itself: its own task, then its own session.\nRefuses while the task has open items. Emails the human one line saying the task is closed.", own=True)
+    _ = p.add_argument("task", metavar="TASK.md", nargs="?", help="the task to close; omit to close yourself")
     _ = p.add_argument("--agent-gone", action="store_true", help="close even though the agent cannot be stopped because it no longer exists")
     _ = p.add_argument("--no-email", action="store_true", help="do not email the human; for test tasks only")
     p = action(task, "status", "Set a task's status.", task_status)

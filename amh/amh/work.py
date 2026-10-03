@@ -142,8 +142,11 @@ def start_task(
     return start_agent(config, name, fields, tool, model or default_model, effort or default_effort, workdir, tmux_session, guides, request, request, proxy).address
 
 
-def close_task(config: Config, name: str, agent_gone: bool, email: bool) -> str:
-    """Mark a task done, move it to `previous`, stop its agent, tell the human, and return the agent's address."""
+def close_task(config: Config, name: str, agent_gone: bool, email: bool, own: bool = False) -> str:
+    """Mark a task done, move it to `previous`, tell the human, stop its agent last, and return the agent's address.
+
+    `own` means the agent closes itself: its manager is told, and stopping the session ends the caller.
+    """
     with taskfile.locked(config):
         task = taskfile.load(config, name)
         if task.items or taskfile.pending_blocks(task.body):
@@ -152,14 +155,21 @@ def close_task(config: Config, name: str, agent_gone: bool, email: bool) -> str:
         _ = task.fields.pop("blocked_on", None)
         taskfile.save(config, task)
         taskfile.place_in_list(config, task)
+    # 🧑 "When closing an agent, use the last email chain the agent used to send an automatic email ‘Closed xx:n’ with the agent’s window."
+    if email:
+        _ = mail.send(config, Path(name).stem, "", f"Closed {task.address}\n", task.address)
+    # 🧑 "Agents should be able to close themselves. Have a command in amh for that"
+    if own:
+        print(f"closed {name}; stopping your own session now", flush=True)
+        try:
+            agents.send(config, task.fields.get("managerat", ""), envelope(task.address, f"{name} had no open work left and closed itself."))
+        except agents.AgentError:
+            pass
     try:
         agents.stop(config, task.address)
     except agents.AgentError as error:
         if not agent_gone:
             raise SystemExit(f"amh: {name} is marked done, but its agent was not stopped: {error}") from error
-    # 🧑 "When closing an agent, use the last email chain the agent used to send an automatic email ‘Closed xx:n’ with the agent’s window."
-    if email:
-        _ = mail.send(config, Path(name).stem, "", f"Closed {task.address}\n", task.address)
     return task.address
 
 
