@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -21,11 +22,20 @@ from omo_manager.omo_omnigent import (
     send_message,
     session_ready_report,
     session_snapshot,
+    status_evidence,
     stop_session,
+    unrestricted_launch_args,
 )
 
 
 class OmniGentRuntimeTests(unittest.TestCase):
+    def test_native_command_search_path_has_no_duplicate_directories(self) -> None:
+        prefix = "shell_environment_policy.set.PATH="
+        config = next(argument for argument in unrestricted_launch_args("codex") if argument.startswith(prefix))
+        directories = json.loads(config.removeprefix(prefix)).split(os.pathsep)
+        self.assertEqual(len(directories), len(set(directories)))
+        self.assertEqual(str(Path.home() / ".config/bin"), directories[0])
+
     @patch("omo_manager.omo_omnigent.antigravity_terminal_capture")
     def test_antigravity_ready_requires_the_latest_delivered_prompt(self, capture) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -151,6 +161,42 @@ class OmniGentRuntimeTests(unittest.TestCase):
         self.assertEqual("session-1", session_snapshot("omnigent://session-1").session_id)
         request.assert_called_once_with("GET", "/v1/sessions/session-1?include_items=false&refresh_state=true")
 
+    @patch("omo_manager.omo_omnigent.request_json")
+    def test_failed_online_session_preserves_saved_delivery_error_and_time(self, request) -> None:
+        request.return_value = {
+            "id": "session-agy", "status": "failed", "harness": "antigravity-native",
+            "runner_online": True, "host_online": True, "updated_at": 1790978204,
+            "last_task_error": {"code": "runner_error", "message": "Could not deliver the turn\nagy did not render the pasted message before submit"},
+        }
+        snapshot = session_snapshot("omnigent://session-agy")
+        evidence = status_evidence(snapshot)
+        self.assertEqual("error", manager_status(snapshot))
+        self.assertIn("runner_online=true host_online=true", evidence)
+        self.assertIn("session_updated_at=2026-10-02T21:56:44+00:00", evidence)
+        self.assertIn('last_task_error="Could not deliver the turn agy did not render the pasted message before submit"', evidence)
+
+    @patch("omo_manager.omo_omnigent.request_json")
+    def test_status_handles_optional_or_invalid_error_metadata(self, request) -> None:
+        for updated_at in (True, float("inf"), "yesterday", None):
+            with self.subTest(updated_at=updated_at):
+                request.return_value = {"id": "session-1", "status": "failed", "harness": "codex", "runner_online": True, "host_online": True, "updated_at": updated_at, "last_task_error": {"message": 1}}
+                snapshot = session_snapshot("omnigent://session-1")
+                self.assertEqual("error", manager_status(snapshot))
+                self.assertNotIn("session_updated_at=", status_evidence(snapshot))
+                self.assertNotIn("last_task_error=", status_evidence(snapshot))
+
+    def test_healthy_status_does_not_repeat_historical_error_metadata(self) -> None:
+        snapshot = SessionSnapshot("session-1", "idle", "codex", True, True, "old error", "2026-10-02T21:56:44+00:00")
+        self.assertEqual("ready", manager_status(snapshot))
+        self.assertNotIn("last_task_error=", status_evidence(snapshot))
+        self.assertNotIn("session_updated_at=", status_evidence(snapshot))
+
+    def test_saved_error_text_is_bounded_before_status_output(self) -> None:
+        snapshot = SessionSnapshot("session-1", "failed", "codex", True, True, "x" * 10000)
+        evidence = status_evidence(snapshot)
+        self.assertIn('last_task_error="' + "x" * 511 + '…"', evidence)
+        self.assertLess(len(evidence), 700)
+
     @patch("omo_manager.omo_omnigent.antigravity_terminal_ready", return_value=True)
     @patch("omo_manager.omo_omnigent.request_json")
     def test_status_treats_ready_antigravity_terminal_as_idle(self, request, _ready) -> None:
@@ -205,7 +251,7 @@ class OmniGentRuntimeTests(unittest.TestCase):
             {"hosts": [{"host_id": "host-1", "status": "online"}]},
             {"id": "session-1"},
         ]
-        target = launch_session("codex", Path("/work"), "gpt-5.6-sol", "high", title="task")
+        target = launch_session("codex", Path("/work"), "gpt-6-sol", "high", title="task")
         self.assertEqual("omnigent://session-1", target)
         self.assertEqual(
             call(
@@ -216,9 +262,10 @@ class OmniGentRuntimeTests(unittest.TestCase):
                     "host_id": "host-1",
                     "workspace": "/work",
                     "title": "task",
-                    "model_override": "gpt-5.6-sol",
+                    "model_override": "gpt-6-sol",
                     "reasoning_effort": "high",
-                    "terminal_launch_args": None,
+                    "terminal_launch_args": list(unrestricted_launch_args("codex")),
+                    "labels": {"omnigent.codex_native.bypass_sandbox": "1"},
                 },
             ),
             request.call_args_list[-1],
@@ -255,7 +302,7 @@ class OmniGentRuntimeTests(unittest.TestCase):
         self.assertEqual("agent-cursor", payload["agent_id"])
         self.assertEqual("cursor-grok-4.6-xhigh", payload["model_override"])
         self.assertEqual("xhigh", payload["reasoning_effort"])
-        self.assertEqual(["--force", "--sandbox", "disabled", "--trust"], payload["terminal_launch_args"])
+        self.assertEqual(["--force", "--sandbox", "disabled", "--trust", "--approve-mcps"], payload["terminal_launch_args"])
         self.assertNotIn("labels", payload)
 
     def test_launch_rejects_antigravity_codex_effort_and_flags(self) -> None:
@@ -315,7 +362,8 @@ class OmniGentRuntimeTests(unittest.TestCase):
         )
         payload = request.call_args_list[-1].args[2]
         self.assertEqual({"omnigent.codex_native.bypass_sandbox": "1"}, payload["labels"])
-        self.assertIsNone(payload["terminal_launch_args"])
+        self.assertEqual(list(unrestricted_launch_args("codex")), payload["terminal_launch_args"])
+        self.assertNotIn("--no-daemon", payload["terminal_launch_args"])
 
     def test_launch_rejects_other_or_duplicate_raw_flags(self) -> None:
         for flags in (("--profile",), ("--dangerously-bypass-approvals-and-sandbox",) * 2):

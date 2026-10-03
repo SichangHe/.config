@@ -5,6 +5,7 @@ import unittest
 from omo_manager.omo_task_edit import add_pending_items
 from omo_manager.omo_task_metadata import PendingItemsBlocker
 from omo_manager.omo_task_metadata import TaskFrontmatterError
+from omo_manager.omo_task_metadata import pending_items_with_origin
 from omo_manager.omo_task_metadata import parse_task_metadata
 
 TASK_ID = "task_019f0000-0000-7000-8000-000000000001"
@@ -71,6 +72,22 @@ pending_task_items:
 
 
 class TaskMetadataV2Tests(unittest.TestCase):
+    def test_new_pending_item_keeps_mail_provenance_without_source_label(self) -> None:
+        source = "Human Source2230 (manager_mail/85c5dff58359-2230.txt): Fix the pending tag."
+        self.assertEqual(
+            ("🧑 Fix the pending tag. (Human, manager_mail/85c5dff58359-2230.txt)",),
+            pending_items_with_origin((source,), "human"),
+        )
+        self.assertEqual(
+            ("🧑 Human Source2230 (manager_mail/85c5dff58359-2231.txt): Fix the pending tag.",),
+            pending_items_with_origin((source.replace("-2230.txt", "-2231.txt"),), "human"),
+        )
+        self.assertEqual(
+            ("🧑 Keep Source2230 inside the Human quote unchanged",),
+            pending_items_with_origin(("Keep Source2230 inside the Human quote unchanged",), "human"),
+        )
+        self.assertEqual((source,), pending_items_with_origin((source,), "agent"))
+
     def test_long_running_optionally_accepts_persistent_blocked_on(self) -> None:
         text = v2_task().replace("status: blocked\nresume_status: running", "status: long_running").replace(
             f"  - kind: pending_items\n    item_ids: [{ITEM_ID}]\n", ""

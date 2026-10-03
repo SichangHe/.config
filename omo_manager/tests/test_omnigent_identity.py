@@ -438,6 +438,69 @@ class CursorIdentityTests(unittest.TestCase):
                     proc_root=root / "proc",
                 )
 
+    def test_matching_runner_env_conversation_allows_unset_external(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bridge_root, bridge = self.fixture(root)
+            (bridge / "cursor_forwarder.json").unlink()
+            with (
+                patch("omo_manager.omo_omnigent_identity._session", return_value=self.session(external_session_id=None)),
+                patch.dict(
+                    os.environ,
+                    {
+                        "OMNIGENT_RUNNER_LAUNCH_HARNESS": "cursor-native",
+                        "OMNIGENT_RUNNER_PRIMARY_SESSION_ID": "session-cursor-1",
+                        "CURSOR_CONVERSATION_ID": "3a976813-79e8-442b-b7fc-d7b753d80887",
+                    },
+                    clear=False,
+                ),
+            ):
+                identity = authenticate_cursor_session(
+                    bridge_dir=bridge,
+                    session_id="session-cursor-1",
+                    ancestor_pid=200,
+                    bridge_root=bridge_root,
+                    proc_root=root / "proc",
+                )
+            self.assertEqual("3a976813-79e8-442b-b7fc-d7b753d80887", identity.thread_id)
+
+    def test_process_conversation_allows_unset_external(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bridge_root, bridge = self.fixture(root)
+            (bridge / "cursor_forwarder.json").unlink()
+            (root / "proc" / "200" / "environ").write_bytes(
+                f"HARNESS_CURSOR_NATIVE_BRIDGE_DIR={bridge}\0OMNIGENT_RUNNER_LAUNCH_HARNESS=cursor-native\0OMNIGENT_RUNNER_PRIMARY_SESSION_ID=session-cursor-1\0CURSOR_CONVERSATION_ID=3a976813-79e8-442b-b7fc-d7b753d80887\0".encode()
+            )
+            with patch("omo_manager.omo_omnigent_identity._session", return_value=self.session(external_session_id=None)):
+                identity = authenticate_cursor_session(
+                    bridge_dir=bridge,
+                    session_id="session-cursor-1",
+                    ancestor_pid=200,
+                    bridge_root=bridge_root,
+                    proc_root=root / "proc",
+                )
+            self.assertEqual("3a976813-79e8-442b-b7fc-d7b753d80887", identity.thread_id)
+
+    def test_process_conversation_rejects_forwarder_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bridge_root, bridge = self.fixture(root)
+            (root / "proc" / "200" / "environ").write_bytes(
+                f"HARNESS_CURSOR_NATIVE_BRIDGE_DIR={bridge}\0OMNIGENT_RUNNER_LAUNCH_HARNESS=cursor-native\0OMNIGENT_RUNNER_PRIMARY_SESSION_ID=session-cursor-1\0CURSOR_CONVERSATION_ID=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\0".encode()
+            )
+            with (
+                patch("omo_manager.omo_omnigent_identity._session", return_value=self.session(external_session_id=None)),
+                self.assertRaisesRegex(OmniGentIdentityError, "does not match"),
+            ):
+                authenticate_cursor_session(
+                    bridge_dir=bridge,
+                    session_id="session-cursor-1",
+                    ancestor_pid=200,
+                    bridge_root=bridge_root,
+                    proc_root=root / "proc",
+                )
+
     def test_forwarder_chat_allows_unset_external(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -458,6 +521,24 @@ class CursorIdentityTests(unittest.TestCase):
             bridge_root, bridge = self.fixture(root)
             (root / "proc" / "200" / "cmdline").write_bytes(b"/usr/bin/agent\0--force\0--workspace\0/work\0")
             (root / "proc" / "200" / "environ").write_bytes(b"PATH=/usr/bin\0")
+            with patch("omo_manager.omo_omnigent_identity._session", return_value=self.session()):
+                identity = authenticate_cursor_session(
+                    bridge_dir=bridge,
+                    session_id="session-cursor-1",
+                    ancestor_pid=None,
+                    bridge_root=bridge_root,
+                    proc_root=root / "proc",
+                )
+            self.assertEqual(200, identity.app_server_pid)
+
+    def test_runner_session_binds_without_tui_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bridge_root, bridge = self.fixture(root)
+            (root / "proc" / "200" / "cmdline").write_bytes(b"/usr/bin/cursor-agent\0--approve-mcps\0")
+            (root / "proc" / "200" / "environ").write_bytes(
+                b"OMNIGENT_RUNNER_LAUNCH_HARNESS=cursor-native\0OMNIGENT_RUNNER_PRIMARY_SESSION_ID=session-cursor-1\0"
+            )
             with patch("omo_manager.omo_omnigent_identity._session", return_value=self.session()):
                 identity = authenticate_cursor_session(
                     bridge_dir=bridge,
@@ -506,6 +587,27 @@ class CursorIdentityTests(unittest.TestCase):
                     bridge_root=bridge_root,
                     proc_root=root / "proc",
                 )
+
+    def test_global_authentication_picks_the_session_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bridge_root, bridge = self.fixture(root)
+            duplicate = root / "proc" / "201"
+            duplicate.mkdir()
+            (duplicate / "cmdline").write_bytes((root / "proc" / "200" / "cmdline").read_bytes())
+            (duplicate / "environ").write_bytes(
+                f"HARNESS_CURSOR_NATIVE_BRIDGE_DIR={bridge}\0OMNIGENT_RUNNER_LAUNCH_HARNESS=cursor-native\0OMNIGENT_RUNNER_PRIMARY_SESSION_ID=session-cursor-2\0".encode()
+            )
+            (duplicate / "status").write_text("PPid:\t1\n", encoding="utf-8")
+            with patch("omo_manager.omo_omnigent_identity._session", return_value=self.session()):
+                identity = authenticate_cursor_session(
+                    bridge_dir=bridge,
+                    session_id="session-cursor-1",
+                    ancestor_pid=None,
+                    bridge_root=bridge_root,
+                    proc_root=root / "proc",
+                )
+            self.assertEqual(200, identity.app_server_pid)
 
 
 if __name__ == "__main__":

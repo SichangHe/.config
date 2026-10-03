@@ -19,7 +19,8 @@ RETIRED_RUNAT = "retired"
 TARGET_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 OMNIGENT_RUNAT_RE = re.compile(r"^omnigent://([A-Za-z0-9._-]+)$")
 # 🧑 "Let’s support Antigravity. Do we use Omnigent or just do its CLI?"
-OMNIGENT_TOOLS = frozenset({"antigravity", "codex", "cursor"})
+# 🧑 "Change the current agent spawning script ... to also support Claude"
+OMNIGENT_TOOLS = frozenset({"antigravity", "claude", "codex", "cursor"})
 ANTIGRAVITY_EFFORTS = frozenset({"low", "medium", "high"})
 ID_RE = re.compile(r"^(task|pi|wake)_([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$")
 RFC3339_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
@@ -51,14 +52,22 @@ def pending_item_without_human_prefix(item: str) -> str:
     return item
 
 
+def pending_item_without_source_label(item: str) -> str:
+    """Move a leading internal source label into a readable mail reference."""
+    match = re.fullmatch(r"(?:Human )?Source-?(\d+) \((manager_mail/[^()\s]+)\): (.+)", item)
+    if match is None or not match.group(2).endswith(f"-{match.group(1)}.txt"):
+        return item
+    return f"{match.group(3)} (Human, {match.group(2)})"
+
+
 def pending_items_with_origin(items: tuple[str, ...], origin: str) -> tuple[str, ...]:
     """Encode explicit insertion provenance while keeping legacy string queues readable."""
     if origin not in PENDING_ITEM_ORIGINS:
         raise ValueError("pending item insertion requires human or agent provenance")
-    values = tuple(pending_item_without_human_prefix(item) for item in items)
     if origin == "human":
+        values = tuple(pending_item_without_source_label(pending_item_without_human_prefix(item)) for item in items)
         return tuple(f"{HUMAN_PENDING_ITEM_PREFIX}{item}" for item in values)
-    return values
+    return tuple(pending_item_without_human_prefix(item) for item in items)
 
 
 # 🧑 Human source `manager_mail/85c5dff58359-1929.txt:6`: "Pending items originated from the human need emails, ones from agents do not."
@@ -406,15 +415,16 @@ def parse_common(values: Mapping[str, object], allowed: set[str]) -> tuple[str, 
         raise TaskFrontmatterError("`runat` must be a tmux target, an `omnigent://SESSION_ID` target, or `retired`.")
     if runat == RETIRED_RUNAT and status not in {"blocked", "done"}:
         raise TaskFrontmatterError("`runat: retired` is only valid when `status` is `blocked` or `done`.")
-    if TARGET_RE.fullmatch(managerat) is None:
-        raise TaskFrontmatterError("`managerat` must be a tmux target.")
+    # 🧑 "You are a config agent. Fix the managerat mismatch"
+    if runat_kind(managerat) not in {"tmux", "omnigent"}:
+        raise TaskFrontmatterError("`managerat` must be a tmux target or an `omnigent://SESSION_ID` target.")
     if canonical_target(runat) == canonical_target(managerat):
         raise TaskFrontmatterError("`managerat` must be different from `runat`.")
     tool = require_text(values["tool"], "tool")
     # 🧑 "Tool should still be codex or something. Omnigent is just the metaframework, not the actual harness. The runat should be enough for tools to know it’s omnigent"
     if target_kind == "omnigent" and tool not in OMNIGENT_TOOLS:
         raise TaskFrontmatterError(
-            "an OmniGent `runat` requires the actual `tool` harness (`antigravity`, `codex`, or `cursor`)."
+            "an OmniGent `runat` requires the actual `tool` harness (`antigravity`, `claude`, `codex`, or `cursor`)."
         )
     if tool == "antigravity" and target_kind == "tmux":
         raise TaskFrontmatterError("`tool: antigravity` requires an OmniGent `runat`.")

@@ -35,8 +35,10 @@ try:
     from omo_manager.omo_omnigent import launch_session as launch_omnigent_session
     from omo_manager.omo_omnigent import send_message as send_omnigent_message
     from omo_manager.omo_omnigent import session_id as omnigent_session_id
-    from omo_manager.omo_codex_status import current_block, exact_pane_id, status, tail
-    from omo_manager.omo_agent_status import DEFAULT_ROOT, TaskFrontmatterError, parse_task_metadata
+    from omo_manager.omo_omnigent import verify_launch_prompt as verify_omnigent_prompt
+    from omo_manager.omo_omnigent import wait_running_terminal as wait_omnigent_terminal
+    from omo_manager.omo_codex_status import current_block, exact_pane_id, pane_has_exact_codex_process, status, tail
+    from omo_manager.omo_agent_status import DEFAULT_ROOT, TaskFrontmatterError, parse_task_lines, parse_task_metadata, resolve_task_path
     from omo_manager.omo_blocking import V2_VERSION, generated_id, load_yaml_mapping, render_task, split_task_text, v2_enabled
     from omo_manager.omo_manager_rotate import RotationError, is_codex_launch_argv, process_is_under, read_processes
     from omo_manager.omo_task_metadata import ANTIGRAVITY_EFFORTS, OMNIGENT_TOOLS, TASK_FRONTMATTER_V1, TASK_FRONTMATTER_V2, first_version, frontmatter_text, runat_kind
@@ -46,21 +48,37 @@ except ModuleNotFoundError:
     from omo_omnigent import launch_session as launch_omnigent_session
     from omo_omnigent import send_message as send_omnigent_message
     from omo_omnigent import session_id as omnigent_session_id
-    from omo_codex_status import current_block, exact_pane_id, status, tail
-    from omo_agent_status import DEFAULT_ROOT, TaskFrontmatterError, parse_task_metadata
+    from omo_omnigent import verify_launch_prompt as verify_omnigent_prompt
+    from omo_omnigent import wait_running_terminal as wait_omnigent_terminal
+    from omo_codex_status import current_block, exact_pane_id, pane_has_exact_codex_process, status, tail
+    from omo_agent_status import DEFAULT_ROOT, TaskFrontmatterError, parse_task_lines, parse_task_metadata, resolve_task_path
     from omo_blocking import V2_VERSION, generated_id, load_yaml_mapping, render_task, split_task_text, v2_enabled
     from omo_manager_rotate import RotationError, is_codex_launch_argv, process_is_under, read_processes
     from omo_task_metadata import ANTIGRAVITY_EFFORTS, OMNIGENT_TOOLS, TASK_FRONTMATTER_V1, TASK_FRONTMATTER_V2, first_version, frontmatter_text, runat_kind
     from omo_task_lock import process_start_ticks, task_file_lock, task_target_lock
 
 PCODX_WRAPPER = HELPER_DIR / "pcodx"
-# 🧑 "Change the agent launching script to use `bunx @openai/codex@0.155.1` instead of `latest`."
 COMMAND_BY_TOOL = {
-    "codex": ("bunx", "@openai/codex@0.155.1", "--dangerously-bypass-approvals-and-sandbox"),
+    "codex": ("bunx", "@openai/codex@latest", "--no-daemon", "--dangerously-bypass-approvals-and-sandbox"),
     "pcodx": (str(PCODX_WRAPPER),),
     "cursor": ("agent", "--force", "--sandbox", "disabled", "--trust"),
 }
-DEFAULT_TOOL = "cursor"
+# 🧑 "Actually, let’s try gpt-6-luna high for managers and gpt-6.1-sol low for workers for now"
+DEFAULT_TOOL = "codex"
+DEFAULT_CODEX_MANAGER_MODEL = "gpt-6-luna"
+DEFAULT_CODEX_MANAGER_EFFORT = "high"
+# 🧑 "Cursor should use the latest Grok with high by default and not enable fast, Antigravity should use the latest Gemini. Codex Omnigent should use the same LLM as tmux"
+DEFAULT_CURSOR_MODEL = "grok-4.7"
+DEFAULT_CURSOR_EFFORT = "high"
+DEFAULT_ANTIGRAVITY_MODEL = "gemini-3.8-flash-high"
+DEFAULT_ANTIGRAVITY_EFFORT = "high"
+DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
+# 🧑 "Default should be opus 5.5 low"
+DEFAULT_CLAUDE_EFFORT = "low"
+# 🧑 "change the current agent spawning script to use opus 5.5 low as manager default"
+DEFAULT_MANAGER_TOOL = "claude"
+DEFAULT_CODEX_MODEL = "gpt-6.1-sol"
+DEFAULT_CODEX_EFFORT = "low"
 TASK_MEMBERSHIP_LOCK_TIMEOUT_S = 5.0
 TASK_FRONTMATTER_VERSION = "v1.0.0"
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
@@ -181,6 +199,7 @@ class Args:
     prepared_process_environment: tuple[tuple[str, str], ...] = ()
     prepared_tmux_path: Path | None = None
     prepared_tmux_environment: tuple[tuple[str, str], ...] = ()
+    tmux: bool = False
     omnigent: bool = False
     omnigent_host_id: str = ""
     agent_instructions_file: Path | None = None
@@ -277,6 +296,7 @@ class ParsedArgs(argparse.Namespace):
     expected_prepared_prompt_sha256: str = ""
     expected_prepared_queue_sha256: str = ""
     expected_prepared_launch_manifest_sha256: str = ""
+    tmux: bool = False
     omnigent: bool = False
     omnigent_host_id: str = ""
 
@@ -298,7 +318,7 @@ def model_error(model: str) -> str:
     if model and MODEL_RE.fullmatch(model) is None:
         return "--model must be a nonempty model identifier containing only letters, numbers, `.`, `_`, `:`, `/`, or `-`."
     if model == "gpt-5.6":
-        return "--model gpt-5.6 is not a supported Codex model id; use gpt-6-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra."
+        return "--model gpt-5.6 is not a supported Codex model id; use gpt-6.1-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra."
     return ""
 
 
@@ -312,46 +332,72 @@ def line_range(value: str) -> tuple[int, int]:
     return start, end
 
 
+def default_model_and_effort(tool: str, model: str, effort: str, is_manager: bool = False) -> tuple[str, str]:
+    """Fill an omitted launch model from the harness default."""
+    model = model.strip()
+    effort = effort.strip()
+    if tool == "cursor":
+        return model or DEFAULT_CURSOR_MODEL, effort or DEFAULT_CURSOR_EFFORT
+    if tool == "antigravity":
+        return model or DEFAULT_ANTIGRAVITY_MODEL, effort or DEFAULT_ANTIGRAVITY_EFFORT
+    if tool == "claude":
+        return model or DEFAULT_CLAUDE_MODEL, effort or DEFAULT_CLAUDE_EFFORT
+    if tool in {"codex", "pcodx"}:
+        if is_manager:
+            return model or DEFAULT_CODEX_MANAGER_MODEL, effort or DEFAULT_CODEX_MANAGER_EFFORT
+        return model or DEFAULT_CODEX_MODEL, effort or DEFAULT_CODEX_EFFORT
+    return model, effort
+
+
 def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(
         description=__doc__,
         allow_abbrev=False,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Launch behavior:
-  With --workdir, open a tmux window with its normal shell, create or update
-  task frontmatter, link the task in TODO.md unless --no-link is passed, then
-  start Cursor Agent there unless --tool codex or pcodx is selected. Pass --omnigent
-  to create a host-backed OmniGent session instead, or --tool antigravity which selects OmniGent.
-  --tool still names the actual antigravity, codex, or cursor harness, while runat identifies the metaframework.
-  This does not stop already running Codex panes. --prompt-file becomes the
-  worker's initial prompt argument. Every new launch requires --model and
-  --reasoning-effort; model selection in --codex-flag is rejected. Pass
-  --is-manager for submanager launches. Every fresh launch captures the command
-  and output from getagentsmd plus the agent-work document; manager launches also capture the common and
-  submanager instruction documents. Do not repeat those instructions. For a
-  launch caused by email, pass
-  --human-email-file and the exact relevant --human-email-lines. Keep
-  --prompt-file narrowly task-specific. Keep --task-file as manager-side
-  bookkeeping and out of worker prompts.
+  With --workdir, create or update task frontmatter, link the task in TODO.md
+  unless --no-link is passed, then start a worker. OmniGent is the default
+  launch path for antigravity, claude, codex, and cursor. Pass --tmux with
+  --tmux-session SESSION to open a tmux window with its normal shell instead.
+  --tool antigravity selects OmniGent even without --omnigent. --tool still
+  names the actual antigravity, claude, codex, or cursor harness, while runat
+  identifies the metaframework. This does not stop already running Codex panes.
+  --prompt-file becomes the worker's initial prompt argument. Omitted --model and
+  --reasoning-effort use the harness default in Model guidance. Explicit values
+  override that default. model selection in --codex-flag is
+  rejected. Pass --is-manager for submanager launches. Every fresh launch
+  captures the command and output from getagentsmd plus the agent-work
+  document; manager launches also capture the common and submanager instruction
+  documents. Do not repeat those instructions. For a launch caused by email,
+  pass --human-email-file and the exact relevant --human-email-lines. Keep
+  --prompt-file narrowly task-specific. The initial worker prompt includes
+  --task-file so the worker can pass it to every task-aware helper.
 
 Model guidance:
-  For Codex, gpt-6-sol medium is the default; use max for hard tasks and ultra only for
-  very hard tasks. Use gpt-6-sol low for submanagers, gpt-5.6-terra medium for
-  easier routine tasks, and gpt-6-luna xhigh for trivial minimal tasks. Terra
-  and Luna are unreliable decision makers. gpt-6-astra is also supported, but it
-  is very expensive and reserved for tricky tasks.
-  For Cursor Agent, use model cursor-grok-4.6 with reasoning effort xhigh; the
-  launcher passes that to Cursor as cursor-grok-4.6-xhigh.
+  Managers use Claude on OmniGent: model claude-opus-5-5 and reasoning effort low.
+  Codex managers (--tool codex, or the tmux path) use gpt-6-luna high.
+  Workers use Codex on OmniGent. Pass --tmux with --tmux-session SESSION for the old tmux path.
+  Workers use gpt-6.1-sol low; tmux and OmniGent use the same model. Explicit model and effort overrides remain supported.
+  For Claude, the default is claude-opus-5-5 with reasoning effort low.
+  For Cursor, the default is grok-4.7 with reasoning effort high: grok-4.7-high, not grok-4.7-high-fast.
+  gpt-6-astra is also supported, but it is very expensive and reserved for tricky tasks.
+  For Antigravity, the default is the latest Gemini: gemini-3.8-flash-high with reasoning effort high.
 
 Ownership migration:
-  omo_task.py --root ROOT --task-file TASK.md --migrate-manager-owner --old-manager-target OLD --new-manager-target NEW [--dry-run]""",
+  omo_task.py --root ROOT --task-file TASK.md --migrate-manager-owner --old-manager-target OLD --new-manager-target NEW [--dry-run]
+  NEW must own exactly one current, running is_manager:true task. This checks metadata, not live pane acceptance.""",
     )
     _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     _ = parser.add_argument("--task-file", required=True)
     _ = parser.add_argument("--tmux-session", default="")
     _ = parser.add_argument("--tmux-window", default="")
+    _ = parser.add_argument(
+        "--tmux",
+        action="store_true",
+        help="Launch in tmux instead of OmniGent. Requires --tmux-session.",
+    )
     _ = parser.add_argument("--pane", default="", help=argparse.SUPPRESS)
-    _ = parser.add_argument("--tool", default=DEFAULT_TOOL, help="Worker CLI. Defaults to cursor. Tmux: codex, pcodx, or cursor. OmniGent: antigravity, codex, or cursor.")
+    _ = parser.add_argument("--tool", default=DEFAULT_TOOL, help="Harness. Workers default to codex; OmniGent managers (--is-manager) default to claude. Tmux: codex, pcodx, or cursor. OmniGent: antigravity, claude, codex, or cursor.")
     _ = parser.add_argument("--workdir", type=Path)
     _ = parser.add_argument("--window-name", default="")
     _ = parser.add_argument("--prompt-file", type=Path)
@@ -359,8 +405,8 @@ Ownership migration:
     _ = parser.add_argument("--dry-run", action="store_true", help="Print the planned launch or ownership migration without changing files or tmux.")
     _ = parser.add_argument("--session-id", default="", help="Codex session id to resume in a new worker window.")
     _ = parser.add_argument("--resume-idle", action="store_true", help="Resume --session-id without submitting a prompt.")
-    _ = parser.add_argument("--model", default="", help="Model to use for a new worker launch.")
-    _ = parser.add_argument("--reasoning-effort", choices=("low", "medium", "high", "xhigh", "max", "ultra"), default="", help="Start Codex with `model_reasoning_effort` for this worker.")
+    _ = parser.add_argument("--model", default="", help="Model id for a new worker. Omitted launches use grok-4.7 for Cursor, gemini-3.8-flash-high for Antigravity, claude-opus-5-5 for Claude, and gpt-6.1-sol for Codex.")
+    _ = parser.add_argument("--reasoning-effort", choices=("low", "medium", "high", "xhigh", "max", "ultra"), default="", help="Reasoning effort. Omitted launches use high for Cursor and Antigravity, and low for Claude and Codex workers.")
     _ = parser.add_argument("--codex-flag", action="append", help="Extra raw Codex argv token. Repeat for flags and values; use `--codex-flag=--flag` when the token starts with `--`.")
     _ = parser.add_argument("--manager-target", default="", help="Optional manager owner target to write as `managerat:` task metadata.")
     _ = parser.add_argument("--prelaunch-source", type=Path, help="Readable shell script to source before launching the worker command.")
@@ -382,10 +428,10 @@ Ownership migration:
         action="store_true",
         help="Explicitly allow creating the named session when reuse is genuinely unsuitable.",
     )
-    _ = parser.add_argument("--omnigent", action="store_true", help="Launch through OmniGent and record its session URI as `runat`; `tool` remains the actual harness.")
+    _ = parser.add_argument("--omnigent", action="store_true", help="Launch through OmniGent and record its session URI as `runat`; this is the default for antigravity, claude, codex, and cursor. `tool` remains the actual harness.")
     _ = parser.add_argument("--omnigent-host-id", default="", help="Exact OmniGent host id; otherwise the sole online host is used.")
     _ = parser.add_argument(
-        "--migrate-manager-owner", action="store_true", help="Atomically migrate only `managerat` on one existing task; requires explicit old and new targets and performs no launch or TODO action."
+        "--migrate-manager-owner", action="store_true", help="Atomically migrate only `managerat` to one current running is_manager:true task; performs no launch or TODO action."
     )
     _ = parser.add_argument("--old-manager-target", default="", help="Existing `managerat` value required by --migrate-manager-owner.")
     _ = parser.add_argument("--new-manager-target", default="", help="Replacement `managerat` value required by --migrate-manager-owner.")
@@ -414,14 +460,17 @@ Ownership migration:
         parser.error("prepared-successor launch requires its journal plus exact journal, task, prompt, and queue SHA-256 values.")
     if parsed.pane:
         parser.error("pane selection is no longer supported; pane 0 is implied.")
-    if parsed.tool == "antigravity":
+    # 🧑 "make Omnigent the default when launching agents and add `--tmux` for the old tmux"
+    tool_explicit = any(arg == "--tool" or arg.startswith("--tool=") for arg in argv)
+    if parsed.is_manager and parsed.workdir is not None and not (tool_explicit or parsed.session_id or parsed.tmux or parsed.tmux_session):
+        parsed.tool = DEFAULT_MANAGER_TOOL
+    if parsed.tool in {"antigravity", "claude"}:
         parsed.omnigent = True
     if parsed.omnigent:
         if parsed.tool not in OMNIGENT_TOOLS:
-            parser.error("--omnigent supports --tool antigravity, --tool codex, or --tool cursor.")
+            parser.error("--omnigent supports --tool antigravity, --tool claude, --tool codex, or --tool cursor.")
     elif parsed.tool not in COMMAND_BY_TOOL:
         parser.error("only --tool codex, --tool pcodx, or --tool cursor is supported.")
-    tool_explicit = any(arg == "--tool" or arg.startswith("--tool=") for arg in argv)
     amh_caller_agent_explicit = any(arg == "--amh-caller-agent" or arg.startswith("--amh-caller-agent=") for arg in argv)
     if (parsed.human_email_file is None) != (parsed.human_email_lines is None):
         parser.error("--human-email-file and --human-email-lines must be supplied together.")
@@ -434,6 +483,7 @@ Ownership migration:
             (
                 parsed.tmux_session,
                 parsed.tmux_window,
+                parsed.tmux,
                 parsed.workdir,
                 parsed.window_name,
                 parsed.prompt_file,
@@ -463,9 +513,14 @@ Ownership migration:
             )
         ):
             parser.error("--migrate-manager-owner only accepts --root, --task-file, explicit old/new manager targets, and optional --dry-run.")
+    if parsed.tmux and not parsed.tmux_session and not parsed.migrate_manager_owner:
+        parser.error("--tmux requires --tmux-session.")
     if not parsed.migrate_manager_owner and not parsed.tmux_session and not parsed.omnigent:
-        parser.error("--tmux-session is required unless --omnigent is selected.")
-    if parsed.omnigent and any((parsed.tmux_session, parsed.tmux_window, parsed.require_existing_tmux_session, parsed.allow_new_tmux_session, parsed.prelaunch_source, parsed.amh_caller_agent, parsed.prepared_successor_journal)):
+        if parsed.tool in OMNIGENT_TOOLS:
+            parsed.omnigent = True
+        else:
+            parser.error("--tmux-session is required unless OmniGent is selected.")
+    if parsed.omnigent and any((parsed.tmux_session, parsed.tmux_window, parsed.tmux, parsed.require_existing_tmux_session, parsed.allow_new_tmux_session, parsed.prelaunch_source, parsed.amh_caller_agent, parsed.prepared_successor_journal)):
         parser.error("--omnigent does not accept tmux selection, prelaunch-source, AMH caller, or prepared-successor options.")
     if parsed.omnigent and parsed.workdir is None:
         parser.error("--omnigent requires --workdir.")
@@ -474,7 +529,7 @@ Ownership migration:
     if parsed.omnigent and parsed.tool == "codex" and parsed.codex_flag and tuple(parsed.codex_flag) != ("--dangerously-bypass-approvals-and-sandbox",):
         parser.error("--omnigent accepts only one exact --codex-flag=--dangerously-bypass-approvals-and-sandbox token.")
     if parsed.omnigent_host_id and not parsed.omnigent:
-        parser.error("--omnigent-host-id requires --omnigent.")
+        parser.error("--omnigent-host-id requires OmniGent launch.")
     if parsed.require_existing_tmux_session and parsed.allow_new_tmux_session:
         parser.error("--require-existing-tmux-session and --allow-new-tmux-session are mutually exclusive.")
     if parsed.tmux_session and TMUX_SESSION_RE.fullmatch(parsed.tmux_session) is None:
@@ -517,6 +572,8 @@ Ownership migration:
         ):
             if re.fullmatch(r"[0-9a-f]{64}", value) is None:
                 parser.error("prepared-successor SHA-256 values must be lowercase hexadecimal digests.")
+    if parsed.workdir is not None and not parsed.resume_idle:
+        parsed.model, parsed.reasoning_effort = default_model_and_effort(parsed.tool, parsed.model, parsed.reasoning_effort, parsed.is_manager)
     if parsed.workdir is not None and not parsed.resume_idle and (not parsed.model.strip() or not parsed.reasoning_effort.strip()):
         parser.error("--workdir requires nonempty --model MODEL and --reasoning-effort EFFORT.")
     if parsed.omnigent and parsed.tool == "antigravity" and parsed.reasoning_effort not in ANTIGRAVITY_EFFORTS:
@@ -565,6 +622,7 @@ Ownership migration:
         expected_prepared_prompt_sha256=parsed.expected_prepared_prompt_sha256,
         expected_prepared_queue_sha256=parsed.expected_prepared_queue_sha256,
         expected_prepared_launch_manifest_sha256=parsed.expected_prepared_launch_manifest_sha256,
+        tmux=parsed.tmux,
         omnigent=parsed.omnigent,
         omnigent_host_id=parsed.omnigent_host_id.strip(),
     )
@@ -579,6 +637,16 @@ def task_path(root: Path, task_file: str) -> Path:
 
 def task_ref(root: Path, task_file: str) -> str:
     return task_path(root, task_file).relative_to(root.resolve()).as_posix()
+
+
+def same_manager_target(left: str, right: str) -> bool:
+    left_kind = runat_kind(left)
+    right_kind = runat_kind(right)
+    if "omnigent" in {left_kind, right_kind}:
+        return left_kind == right_kind and left == right
+    if left_kind != "tmux" or right_kind != "tmux":
+        return False
+    return canonical_tmux_pane(left) == canonical_tmux_pane(right)
 
 
 def canonical_tmux_pane(tmux_target: str) -> tuple[str, int, int]:
@@ -607,12 +675,12 @@ def manager_owner_migration_text(text: str, old_owner: str, new_owner: str, work
     """Return valid task text with only the exact frontmatter owner value changed."""
     metadata = migration_source_metadata(text, work_log_root)
     for label, owner in (("old", old_owner), ("new", new_owner)):
-        if TMUX_TARGET_RE.fullmatch(owner) is None:
-            raise ValueError(f"{label} manager target must be a full tmux target like `SESSION:WINDOW`.")
-    if canonical_tmux_pane(old_owner) == canonical_tmux_pane(new_owner):
+        if runat_kind(owner) not in {"tmux", "omnigent"}:
+            raise ValueError(f"{label} manager target must be a full tmux target like `SESSION:WINDOW` or an `omnigent://SESSION_ID` target.")
+    if same_manager_target(old_owner, new_owner):
         raise ValueError("old and new manager targets must identify different tmux panes.")
     if metadata is not None and metadata.version == TASK_FRONTMATTER_V2:
-        if canonical_tmux_pane(metadata.runat) == canonical_tmux_pane(new_owner):
+        if same_manager_target(metadata.runat, new_owner):
             raise ValueError("new manager target must be different from task `runat`.")
         frontmatter, body = split_task_text(text)
         values = load_yaml_mapping(frontmatter)
@@ -631,7 +699,7 @@ def manager_owner_migration_text(text: str, old_owner: str, new_owner: str, work
     if len(owner_indexes) != 1:
         raise ValueError("ownership migration requires exactly one frontmatter `managerat` field.")
     runat_values = [line.rstrip("\r\n").partition(":")[2].strip() for line in lines[1:closing_idx] if line.rstrip("\r\n").partition(":")[0] == "runat"]
-    if any(TMUX_TARGET_RE.fullmatch(runat) is not None and canonical_tmux_pane(new_owner) == canonical_tmux_pane(runat) for runat in runat_values):
+    if any(same_manager_target(runat, new_owner) for runat in runat_values):
         raise ValueError("new manager target must be different from task `runat`.")
     owner_idx = owner_indexes[0]
     line = lines[owner_idx]
@@ -700,21 +768,44 @@ def migrate_manager_owner(
         path.resolve(strict=False).relative_to(membership_root)
     except ValueError as exc:
         raise ValueError("ownership migration task must be inside the authoritative work-log root.") from exc
-    while True:
-        with root_membership_lock(membership_root), path.open("r", encoding="utf-8", newline="") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            before = os.fstat(handle.fileno())
-            if not same_file_identity(before, path.stat()):
-                continue
-            existing = handle.read()
-            _ = migration_source_metadata(existing, membership_root)
-            updated = manager_owner_migration_text(existing, old_owner, new_owner, membership_root)
-            if dry_run_only:
-                print(f"dry-run: would change only managerat from {old_owner} to {new_owner} in {path}; no files or tmux panes changed.")
-                return
-            atomic_replace_if_unchanged(path, updated, before)
-            print(f"migrated only managerat from {old_owner} to {new_owner} in {path}")
-            return
+    try:
+        from omo_manager.omo_task_status import authoritative_active_target_task_paths
+    except ModuleNotFoundError:
+        from omo_task_status import authoritative_active_target_task_paths
+    with root_membership_lock(membership_root), task_target_lock(membership_root, new_owner):
+        owners = authoritative_active_target_task_paths(membership_root, new_owner)
+        if len(owners) != 1:
+            raise ValueError("new manager must have one active task in TODO current at its exact target.")
+        manager_path = owners[0]
+        with ExitStack() as locks:
+            for locked_path in sorted({path, manager_path, membership_root / "TODO.md"}, key=str):
+                locks.enter_context(task_file_lock(locked_path))
+            while True:
+                with path.open("r", encoding="utf-8", newline="") as handle:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                    before = os.fstat(handle.fileno())
+                    if not same_file_identity(before, path.stat()):
+                        continue
+                    existing = handle.read()
+                    _ = migration_source_metadata(existing, membership_root)
+                    updated = manager_owner_migration_text(existing, old_owner, new_owner, membership_root)
+                    if authoritative_active_target_task_paths(membership_root, new_owner) != (manager_path,):
+                        raise ValueError("new manager must have one active task in TODO current at its exact target.")
+                    rows = [
+                        row for row in parse_task_lines(membership_root / "TODO.md")
+                        if row.section == "todo:current" and resolve_task_path(membership_root, row.task_file) == manager_path
+                    ]
+                    if len(rows) != 1 or not same_manager_target(rows[0].target, new_owner):
+                        raise ValueError("new manager must have one active task in TODO current at its exact target.")
+                    manager = parse_task_metadata(manager_path.read_text(encoding="utf-8"), membership_root)
+                    if manager is None or not manager.is_manager or manager.status not in {"running", "long_running"} or not same_manager_target(manager.runat, new_owner):
+                        raise ValueError("new manager target must belong to one running is_manager:true task.")
+                    if dry_run_only:
+                        print(f"dry-run: would change only managerat from {old_owner} to {new_owner} in {path}; no files or tmux panes changed.")
+                        return
+                    atomic_replace_if_unchanged(path, updated, before, lock_held=True)
+                    print(f"migrated only managerat from {old_owner} to {new_owner} in {path}")
+                    return
 
 
 def target(args: Args) -> str:
@@ -726,7 +817,7 @@ def target(args: Args) -> str:
 def current_manager_target() -> str:
     for key in ("OMO_MANAGER_TMUX_TARGET", "OMO_AGENT_TMUX_TARGET"):
         target = os.environ.get(key, "").strip()
-        if TMUX_TARGET_RE.fullmatch(target) is not None:
+        if runat_kind(target) in {"tmux", "omnigent"}:
             return target
     if "TMUX" not in os.environ:
         return ""
@@ -1063,8 +1154,9 @@ def managerat_for_task(args: Args, runat: str) -> str:
     managerat = args.manager_target.strip() or current_manager_target()
     if not managerat:
         raise ValueError("--manager-target or OMO_AGENT_TMUX_TARGET is required to write task frontmatter.")
-    if TMUX_TARGET_RE.fullmatch(managerat) is None:
-        raise ValueError("task frontmatter `managerat` must be a tmux target.")
+    # 🧑 "You are a config agent. Fix the managerat mismatch"
+    if runat_kind(managerat) not in {"tmux", "omnigent"}:
+        raise ValueError("task frontmatter `managerat` must be a tmux target or an `omnigent://SESSION_ID` target.")
     if managerat in target_aliases(runat):
         raise ValueError("task frontmatter `managerat` must be different from `runat`.")
     return managerat
@@ -1297,7 +1389,11 @@ def launch_omnigent_task(args: Args) -> tuple[Path, str]:
             path = ensure_task_file(args, target)
             if not args.no_link:
                 link_todo(args, target)
+        # 🧑 "Omnigent does not put in the prompt provided at launch to Antigravity, I suspect also for other things"
+        # 🧑 "Make the agent spawning script start the session and then inject the prompt, in 2 separate steps, and verify that it works"
         send_omnigent_message(target, prompt)
+        wait_omnigent_terminal(target, effective_tool(args))
+        verify_omnigent_prompt(target, effective_tool(args), prompt)
     except Exception as exc:
         raise RuntimeError(
             f"OmniGent session {target} was created, but task registration or initial delivery failed: {exc}. "
@@ -1313,7 +1409,7 @@ def write_instruction_file(text: str, prefix: str) -> Path:
         return Path(handle.name)
 
 
-def write_agent_instructions_file(is_manager: bool, vl_agent: bool = False) -> Path:
+def write_agent_instructions_file(is_manager: bool, vl_agent: bool = False, task_file: str = "") -> Path:
     """Freeze public instruction-command output before mutating launch state."""
 
     extra_names = ("vl_worker",) if vl_agent else ()
@@ -1322,6 +1418,9 @@ def write_agent_instructions_file(is_manager: bool, vl_agent: bool = False) -> P
     )
     with tempfile.NamedTemporaryFile("wb", prefix="omo-getagentsmd-output-", delete=False) as handle:
         os.fchmod(handle.fileno(), 0o600)
+        # 🧑 "put task file, without the ‘.md’ in all starter prompts and use that as tags"
+        if task_file:
+            _ = handle.write(f"Task tag: {task_file.removesuffix('.md')}\nTask file: {task_file}\nUse --task-file {shlex.quote(task_file)} with task-aware helpers.\n".encode("utf-8"))
         _ = handle.write(instructions)
         return Path(handle.name)
 
@@ -1346,14 +1445,31 @@ def write_combined_prompt_file(paths: list[Path]) -> Path:
 # 🧑 "we would extract session IDs when we start codec or maybe cursor. So that we don't need to get the session ID when we close the agent, but instead we already have it always."
 def capture_fresh_codex_session(target: str, task: Path, prompt: Path, expected_task_sha256: str) -> None:
     """Bind a fresh Codex UUID before delivering its first prompt."""
-    from omo_manager.omo_codex_start import query_exact_status_session_id, record_session_id, resolve_pane, send_prompt
+    from omo_manager.omo_codex_start import (
+        Args as StartArgs,
+        PROMPT_END_PROBE_MAX_BYTES,
+        PROMPT_VISIBLE_BYTES,
+        planned_compact_handoff,
+        query_exact_status_session_id,
+        record_session_id,
+        resolve_pane,
+        send_compact_prompt,
+        send_prompt,
+    )
 
     pane = resolve_pane(target)
     session_id = query_exact_status_session_id(pane, 240, 10.0)
     if not session_id:
         raise RuntimeError("could not capture the new Codex session id; no prompt was sent.")
+    source = prompt.read_text(encoding="utf-8")
+    use_compact = len(source.encode("utf-8")) + PROMPT_END_PROBE_MAX_BYTES > PROMPT_VISIBLE_BYTES
+    start_args = StartArgs(task.parent, task.name, target, "", "", session_id, prompt, 10.0, False, False)
+    handoff = planned_compact_handoff(start_args, session_id, source) if use_compact else ""
     record_session_id(task, session_id, expected_task_sha256, replace_existing=True)
-    send_prompt(pane, prompt)
+    if use_compact:
+        send_compact_prompt(start_args, pane, session_id, source, handoff)
+    else:
+        send_prompt(pane, prompt)
 
 
 def prompt_input(
@@ -1413,6 +1529,8 @@ def codex_cmd(
         args.extend(("--model", model))
     if reasoning_effort:
         args.extend(("--config", f'model_reasoning_effort="{reasoning_effort}"'))
+    if tool == "codex":
+        args.extend(("--config", "check_for_update_on_startup=false"))
     args.extend(codex_flags)
     if session_id and tool == "codex" and workdir is not None:
         args.extend(("--cd", str(workdir)))
@@ -1435,7 +1553,11 @@ def worker_command(
     launch_marker: str = "",
     amh_caller_agent: str = "",
 ) -> str:
-    exports = {"OMO_AGENT_TMUX_TARGET": tmux_target}
+    # 🧑 "After the codex update, path no longer works, e.g. agents don't have getagentsmd on path"
+    exports = {
+        "OMO_AGENT_TMUX_TARGET": tmux_target,
+        "PATH": os.pathsep.join(dict.fromkeys((str(Path.home() / '.config/bin'), *os.get_exec_path()))),
+    }
     if amh_caller_agent:
         if AMH_AGENT_ID_RE.fullmatch(amh_caller_agent) is None:
             raise ValueError("AMH caller agent id is invalid.")
@@ -1821,7 +1943,7 @@ def start_codex(target: str, args: Args) -> None:
     prepared_exact_prompt = args.prepared_runtime_path is not None
     local_agent_instructions: Path | None = None
     if not args.resume_idle and not prepared_exact_prompt and args.agent_instructions_file is None:
-        local_agent_instructions = write_agent_instructions_file(args.is_manager, vl_agent)
+        local_agent_instructions = write_agent_instructions_file(args.is_manager, vl_agent, args.task_file)
         args = replace(args, agent_instructions_file=local_agent_instructions)
     excerpt = human_email_excerpt(args)
     human_instruction_file = write_human_instruction_file(excerpt, human_email_source(args)) if excerpt else None
@@ -2320,7 +2442,7 @@ def validate_existing_target_runtime(args: Args) -> str:
             return pane_id
         raise ValueError(f"existing-target mode requires a live Cursor Agent process at `{tmux_target}` for `--tool cursor`; use `--tool codex` for a Codex pane or `--workdir` to launch a new worker.")
     target_status = status(lines, current_block(lines))
-    if target_status not in {"ready", "running"}:
+    if target_status not in {"ready", "running"} and not (target_status == "not_codex" and effective_tool(args) == "codex" and pane_has_exact_codex_process(tmux_target, pane_id)):
         raise ValueError(f"existing-target mode requires a ready or running managed agent pane at `{tmux_target}`, got {target_status}; use --workdir to launch a new worker.")
     return pane_id
 
@@ -2829,7 +2951,7 @@ def prepared_exact_prompt(binding, config: dict[str, object], current_instructio
         raise RuntimeError("prepared launch `getagentsmd` instruction bytes changed.")
     if instructions != current_instructions:
         raise RuntimeError("prepared launch `getagentsmd` command/output changed since preparation.")
-    return instructions + b"\n" + manager_delegation(binding.prompt_data.decode(), binding.manager_target).encode()
+    return f"Task tag: {binding.successor_path.name.removesuffix('.md')}\nTask file: {binding.successor_path.name}\n".encode() + instructions + b"\n" + manager_delegation(binding.prompt_data.decode(), binding.manager_target).encode()
 
 
 def bound_prepared_launch_args(
@@ -3337,7 +3459,7 @@ def main(argv: list[str]) -> int:
         args = parse_args(argv)
         if args.workdir is not None and not args.resume_idle and args.prepared_successor_journal is None:
             agent_instructions_file = write_agent_instructions_file(
-                args.is_manager, is_vl_agent(args.task_file, target(args))
+                args.is_manager, is_vl_agent(args.task_file, target(args)), args.task_file
             )
             args = replace(args, agent_instructions_file=agent_instructions_file)
         if args.migrate_manager_owner:

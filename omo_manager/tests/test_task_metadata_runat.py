@@ -88,10 +88,14 @@ class TaskMetadataRunatTests(unittest.TestCase):
             with self.subTest(target=target), self.assertRaisesRegex(TaskFrontmatterError, "omnigent://SESSION_ID"):
                 _ = parse_task_metadata(task("v1.0.0", target))
 
-    def test_managerat_remains_tmux_only(self) -> None:
+    def test_managerat_accepts_omnigent_uri(self) -> None:
         text = task("v1.0.0", "wl:2").replace("managerat: manager:1", "managerat: omnigent://manager-session")
-        with self.assertRaisesRegex(TaskFrontmatterError, "managerat.*tmux"):
-            _ = parse_task_metadata(text)
+        metadata = parse_task_metadata(text)
+        assert metadata is not None
+        self.assertEqual("omnigent://manager-session", metadata.managerat)
+        rejected = task("v1.0.0", "wl:2").replace("managerat: manager:1", "managerat: not-a-target")
+        with self.assertRaisesRegex(TaskFrontmatterError, "managerat"):
+            _ = parse_task_metadata(rejected)
 
     def test_omnigent_runat_keeps_actual_harness_tool(self) -> None:
         metadata = parse_task_metadata(task("v1.0.0", "omnigent://session-123"))

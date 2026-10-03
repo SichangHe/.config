@@ -24,7 +24,7 @@ class ManagerHelperHelpTests(unittest.TestCase):
         self.assertIn("atomically", record_help)
         self.assertIn("original subject", record_help)
         self.assertIn("initial assignment", record_help)
-        self.assertIn("worker prompts", record_help)
+        self.assertIn("--caller-task-file", record_help)
         for provenance_help in (
             helper_help("omo_pending.py", "add"),
             record_help,
@@ -39,18 +39,21 @@ class ManagerHelperHelpTests(unittest.TestCase):
 
     def test_launch_and_lifecycle_help_owns_operating_details(self) -> None:
         launch_help = helper_help("omo_task.py")
-        self.assertIn("Every new launch requires --model and --reasoning-effort", launch_help)
+        self.assertIn("Omitted --model and", launch_help)
+        self.assertIn("grok-4.7-high, not grok-4.7-high-fast", launch_help)
+        self.assertIn("gemini-3.8-flash-high", launch_help)
+        self.assertIn("tmux and OmniGent use the same model", launch_help)
         self.assertIn("create or update task frontmatter", launch_help)
         self.assertIn("link the task in TODO.md unless --no-link", launch_help)
         self.assertIn("open a tmux window with its normal shell", launch_help)
         self.assertIn("--prompt-file becomes the worker's initial prompt argument", launch_help)
-        self.assertIn("start Cursor Agent there unless --tool codex or pcodx", launch_help)
+        self.assertIn("OmniGent is the default launch path", launch_help)
         self.assertIn("captures the command and output from getagentsmd", launch_help)
         self.assertIn("common and submanager instruction documents", launch_help)
-        self.assertIn("gpt-6-sol medium is the default", launch_help)
+        self.assertIn("Workers use gpt-6.1-sol low", launch_help)
         self.assertIn("gpt-6-astra is also supported", launch_help)
         self.assertIn("very expensive and reserved for tricky tasks", launch_help)
-        self.assertIn("cursor-grok-4.6-xhigh", launch_help)
+        self.assertIn("grok-4.7-high", launch_help)
         self.assertIn("Keep --task-file as manager-side bookkeeping", launch_help)
 
         for direct_help in (
@@ -61,7 +64,7 @@ class ManagerHelperHelpTests(unittest.TestCase):
             self.assertIn("very expensive and reserved for tricky tasks", direct_help)
 
         cursor_help = helper_help("amh_cursor_agent.py")
-        self.assertIn("cursor-grok-4.6-xhigh", cursor_help)
+        self.assertIn("grok-4.7-high", cursor_help)
 
         status_help = helper_help("omo_task_status.py")
         self.assertIn("live `(pending)` marker", status_help)
@@ -96,8 +99,7 @@ class ManagerHelperHelpTests(unittest.TestCase):
     def test_report_help_owns_file_and_routing_details(self) -> None:
         report_help = helper_help("omo_report.sh")
         self.assertIn("private task-specific draft", report_help)
-        self.assertIn("infers routing from the producer pane", report_help)
-        self.assertIn("do not pass task-file, root, manager-target", report_help)
+        self.assertIn("Pass --task-file NAME.md when Codex's shell cannot identify its pane", report_help)
 
     def test_complete_unread_report_replacement_help(self) -> None:
         replacement_help = helper_help("omo_manager_mail_compress.py", "agent-trash-replaced")

@@ -18,6 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -28,9 +29,21 @@ from omo_manager.omo_task_metadata import ANTIGRAVITY_EFFORTS, OMNIGENT_RUNAT_RE
 
 DEFAULT_SERVER_URL = "http://127.0.0.1:6767"
 DEFAULT_TIMEOUT_S = 30.0
+STATUS_ERROR_MAX_CHARS = 512
 FULL_ACCESS_FLAG = "--dangerously-bypass-approvals-and-sandbox"
 FULL_ACCESS_LABEL = "omnigent.codex_native.bypass_sandbox"
-CURSOR_TERMINAL_LAUNCH_ARGS = ("--force", "--sandbox", "disabled", "--trust")
+CURSOR_TERMINAL_LAUNCH_ARGS = ("--force", "--sandbox", "disabled", "--trust", "--approve-mcps")
+ANTIGRAVITY_TERMINAL_LAUNCH_ARGS = ("--dangerously-skip-permissions",)
+CLAUDE_TERMINAL_LAUNCH_ARGS = ("--dangerously-skip-permissions",)
+CODEX_TERMINAL_LAUNCH_ARGS = (
+    FULL_ACCESS_FLAG,
+    "--config",
+    "shell_environment_policy.inherit=all",
+    "--config",
+    f"shell_environment_policy.set.PATH={json.dumps(os.pathsep.join(dict.fromkeys((str(Path.home() / '.config/bin'), *os.get_exec_path()))))}",
+)
+TERMINAL_READY_WAIT_S = 90.0
+PROMPT_VISIBLE_WAIT_S = 60.0
 HOST_ONLINE_WAIT_S = 45.0
 HOST_ONLINE_POLL_S = 1.0
 AGY_BIND_WAIT_S = 30.0
@@ -54,6 +67,8 @@ class SessionSnapshot:
     harness: str
     runner_online: bool | None
     host_online: bool | None
+    last_task_error: str = ""
+    session_updated_at: str = ""
 
 
 def server_url() -> str:
@@ -128,12 +143,23 @@ def session_snapshot(target: str) -> SessionSnapshot:
     status = require_text(value.get("status"), "session status")
     if harness == "antigravity-native" and status == "running" and antigravity_terminal_ready(target):
         status = "idle"
+    last_error = value.get("last_task_error")
+    error_message = last_error.get("message") if isinstance(last_error, dict) else None
+    updated_at = value.get("updated_at")
+    session_updated_at = ""
+    if isinstance(updated_at, (int, float)) and not isinstance(updated_at, bool):
+        try:
+            session_updated_at = datetime.fromtimestamp(updated_at, timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            pass
     return SessionSnapshot(
         require_text(value.get("id"), "session id"),
         status,
         harness if isinstance(harness, str) else "",
         runner_online,
         host_online,
+        " ".join(error_message.split()) if isinstance(error_message, str) else "",
+        session_updated_at,
     )
 
 
@@ -149,12 +175,22 @@ def manager_status(snapshot: SessionSnapshot) -> ManagerStatus:
     return "missing"
 
 
+# 🧑 "That agent seems fine. What’s wrong with the watcher"
 def status_evidence(snapshot: SessionSnapshot) -> str:
     def flag(value: bool | None) -> str:
         return "unknown" if value is None else str(value).lower()
 
     harness = snapshot.harness or "unknown"
-    return f"runtime=omnigent session_status={snapshot.status} harness={harness} runner_online={flag(snapshot.runner_online)} host_online={flag(snapshot.host_online)}"
+    evidence = f"runtime=omnigent session_status={snapshot.status} harness={harness} runner_online={flag(snapshot.runner_online)} host_online={flag(snapshot.host_online)}"
+    if snapshot.status == "failed":
+        if snapshot.session_updated_at:
+            evidence += f" session_updated_at={snapshot.session_updated_at}"
+        if snapshot.last_task_error:
+            error = snapshot.last_task_error
+            if len(error) > STATUS_ERROR_MAX_CHARS:
+                error = f"{error[:STATUS_ERROR_MAX_CHARS - 1]}…"
+            evidence += f" last_task_error={json.dumps(error, ensure_ascii=False)}"
+    return evidence
 
 
 def session_ready_report(target: str) -> tuple[str, bool] | None:
@@ -211,8 +247,12 @@ def _item_invokes_report_helper(item: dict[str, object]) -> bool:
     return any(REPORT_HELPER_RE.search(text) is not None for text in _item_texts(item))
 
 
-def antigravity_terminal_capture(target: str) -> str | None:
-    """Capture a same-host Antigravity terminal advertised by OmniGent."""
+def terminal_name(tool: str) -> str:
+    return f"{tool}:main"
+
+
+def running_terminal(target: str, tool: str) -> tuple[str, str] | None:
+    """Return the local tmux socket and pane once that harness terminal is running."""
     try:
         value = require_mapping(request_json("GET", f"/v1/sessions/{urllib.parse.quote(session_id(target), safe='')}/resources"), "session resources")
     except RuntimeError:
@@ -220,7 +260,8 @@ def antigravity_terminal_capture(target: str) -> str | None:
     data = value.get("data")
     if not isinstance(data, list):
         return None
-    terminals = [resource for resource in data if isinstance(resource, dict) and resource.get("type") == "terminal" and resource.get("name") == "antigravity:main"]
+    name = terminal_name(tool)
+    terminals = [resource for resource in data if isinstance(resource, dict) and resource.get("type") == "terminal" and resource.get("name") == name]
     if len(terminals) != 1:
         return None
     metadata = terminals[0].get("metadata")
@@ -236,11 +277,83 @@ def antigravity_terminal_capture(target: str) -> str | None:
         return None
     if not stat.S_ISSOCK(socket_info.st_mode) or socket_info.st_uid != os.getuid():
         return None
+    return socket, pane
+
+
+def terminal_capture(target: str, tool: str) -> str | None:
+    """Capture a same-host harness terminal advertised by OmniGent."""
+    located = running_terminal(target, tool)
+    if located is None:
+        return None
+    socket, pane = located
     try:
         result = subprocess.run(("tmux", "-S", socket, "capture-pane", "-p", "-t", pane, "-S", "-"), capture_output=True, text=True, timeout=5, check=False)
     except (OSError, subprocess.SubprocessError):
         return None
     return result.stdout if result.returncode == 0 else None
+
+
+def antigravity_terminal_capture(target: str) -> str | None:
+    """Capture a same-host Antigravity terminal advertised by OmniGent."""
+    return terminal_capture(target, "antigravity")
+
+
+def unrestricted_launch_args(tool: str) -> tuple[str, ...]:
+    """CLI args that disable the sandbox and permission prompts for one harness."""
+    if tool == "cursor":
+        return CURSOR_TERMINAL_LAUNCH_ARGS
+    if tool == "antigravity":
+        return ANTIGRAVITY_TERMINAL_LAUNCH_ARGS
+    if tool == "claude":
+        return CLAUDE_TERMINAL_LAUNCH_ARGS
+    if tool == "codex":
+        return CODEX_TERMINAL_LAUNCH_ARGS
+    raise RuntimeError("OmniGent launch currently supports the actual `antigravity`, `claude`, `codex`, and `cursor` harnesses")
+
+
+def wait_running_terminal(target: str, tool: str, *, timeout_s: float = TERMINAL_READY_WAIT_S) -> None:
+    """Wait until the harness terminal exists on this host."""
+    deadline = time.monotonic() + timeout_s
+    while running_terminal(target, tool) is None:
+        if session_snapshot(target).runner_online is True:
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"OmniGent {tool} terminal was not running within {timeout_s:.0f}s")
+        time.sleep(min(HOST_ONLINE_POLL_S, max(0.0, deadline - time.monotonic())))
+
+
+def prompt_is_visible(capture: str, prompt: str) -> bool:
+    line = next((item.strip() for item in reversed(prompt.splitlines()) if item.strip()), "")
+    needle = line[-120:]
+    return bool(needle) and needle in capture
+
+
+def verify_launch_prompt(target: str, tool: str, prompt: str, *, timeout_s: float = PROMPT_VISIBLE_WAIT_S) -> None:
+    """Confirm the injected launch prompt is on the harness terminal."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        capture = terminal_capture(target, tool) or ""
+        if prompt_is_visible(capture, prompt):
+            return
+        if not capture:
+            try:
+                items = require_mapping(
+                    request_json("GET", f"/v1/sessions/{urllib.parse.quote(session_id(target), safe='')}/items?limit=100&order=desc"),
+                    "session items",
+                ).get("data")
+            except RuntimeError:
+                items = None
+            if isinstance(items, list) and any(
+                isinstance(item, dict)
+                and item.get("type") == "message"
+                and item.get("role") == "user"
+                and item.get("content") == [{"type": "input_text", "text": prompt}]
+                for item in items
+            ):
+                return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"launch prompt was not visible in the {tool} terminal")
+        time.sleep(min(HOST_ONLINE_POLL_S, max(0.0, deadline - time.monotonic())))
 
 
 def _antigravity_last_turn(capture: str) -> str | None:
@@ -485,7 +598,7 @@ def launch_session(
     dry_run: bool = False,
 ) -> str:
     if tool not in OMNIGENT_TOOLS:
-        raise RuntimeError("OmniGent launch currently supports the actual `antigravity`, `codex`, and `cursor` harnesses")
+        raise RuntimeError("OmniGent launch currently supports the actual `antigravity`, `claude`, `codex`, and `cursor` harnesses")
     if tool == "antigravity" and reasoning_effort not in ANTIGRAVITY_EFFORTS:
         raise RuntimeError("OmniGent Antigravity launch accepts only reasoning effort `low`, `medium`, or `high`")
     if codex_flags and (tool != "codex" or codex_flags != (FULL_ACCESS_FLAG,)):
@@ -502,14 +615,9 @@ def launch_session(
         "title": title or None,
         "model_override": model_override,
         "reasoning_effort": reasoning_effort or None,
-        "terminal_launch_args": (
-            list(CURSOR_TERMINAL_LAUNCH_ARGS)
-            if tool == "cursor"
-            else ["--dangerously-skip-permissions"]
-            if tool == "antigravity"
-            else None
-        ),
-        **({"labels": {FULL_ACCESS_LABEL: "1"}} if codex_flags else {}),
+        # 🧑 "make Omnigent run every harness without sandbox and with no permission asking"
+        "terminal_launch_args": list(unrestricted_launch_args(tool)),
+        **({"labels": {FULL_ACCESS_LABEL: "1"}} if tool == "codex" else {}),
     }
     value = require_mapping(request_json("POST", "/v1/sessions", payload), "session launch")
     return target_for_session(require_text(value.get("id"), "launched session id"))

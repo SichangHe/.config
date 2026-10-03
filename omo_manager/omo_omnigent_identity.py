@@ -29,6 +29,7 @@ CURSOR_BRIDGE_DIR_ENV = "HARNESS_CURSOR_NATIVE_BRIDGE_DIR"
 CURSOR_HARNESS = "cursor-native"
 CURSOR_AGENT_NAMES = frozenset({"agent", "cursor-agent"})
 CURSOR_FORWARDER_STATE = "cursor_forwarder.json"
+CLAUDE_HARNESS = "claude-native"
 ADVERTISED_FILE_MODES = (0o600, 0o644)
 
 
@@ -587,14 +588,25 @@ def _cursor_tui_argv(argv: list[str]) -> bool:
     return "--trust" in argv or "--force" in argv or "-f" in argv
 
 
-def _is_cursor(proc_root: Path, pid: int, bridge_dir: Path, workspace: str = "", inherited_bridge: str = "") -> bool:
+def _is_cursor(proc_root: Path, pid: int, bridge_dir: Path, workspace: str = "", inherited_bridge: str = "", session_id: str = "") -> bool:
     argv = _proc_argv(proc_root, pid)
     if _cursor_executable_name(argv) not in CURSOR_AGENT_NAMES:
         return False
-    configured = _best_effort_proc_environment(proc_root, pid).get(CURSOR_BRIDGE_DIR_ENV, "")
+    commands = {part for part in argv[1:] if part and not part.startswith("-")}
+    if commands & {"models", "mcp"}:
+        return False
+    environment = _best_effort_proc_environment(proc_root, pid)
+    configured = environment.get(CURSOR_BRIDGE_DIR_ENV, "")
     if configured:
         return _same_path(configured, bridge_dir)
     if inherited_bridge and _same_path(inherited_bridge, bridge_dir):
+        return True
+    # 🧑 "this Cursor session is not a bound OmniGent process"
+    if (
+        session_id
+        and environment.get(ANTIGRAVITY_RUNNER_SESSION_ENV, "") == session_id
+        and environment.get(ANTIGRAVITY_RUNNER_HARNESS_ENV, "") == CURSOR_HARNESS
+    ):
         return True
     if not workspace or not _cursor_tui_argv(argv):
         return False
@@ -633,13 +645,13 @@ def discover_cursor_bridge(*, ancestor_pid: int, bridge_root: Path, proc_root: P
     raise NotOmniGentEnvironment("OmniGent process identity is unavailable")
 
 
-def find_cursor(bridge_dir: Path, *, workspace: str = "", proc_root: Path = Path("/proc"), ancestor_pid: int | None = None) -> int:
+def find_cursor(bridge_dir: Path, *, workspace: str = "", proc_root: Path = Path("/proc"), ancestor_pid: int | None = None, session_id: str = "") -> int:
     if ancestor_pid is not None:
         pid = ancestor_pid
         seen: set[int] = set()
         while pid > 1 and pid not in seen:
             seen.add(pid)
-            if _is_cursor(proc_root, pid, bridge_dir, workspace, os.environ.get(CURSOR_BRIDGE_DIR_ENV, "")):
+            if _is_cursor(proc_root, pid, bridge_dir, workspace, os.environ.get(CURSOR_BRIDGE_DIR_ENV, ""), session_id):
                 return pid
             pid = _proc_parent(proc_root, pid)
         raise OmniGentIdentityError("current process is not descended from the bound OmniGent Cursor process")
@@ -652,10 +664,18 @@ def find_cursor(bridge_dir: Path, *, workspace: str = "", proc_root: Path = Path
         if not entry.name.isdigit():
             continue
         try:
-            if _is_cursor(proc_root, int(entry.name), bridge_dir, workspace):
+            if _is_cursor(proc_root, int(entry.name), bridge_dir, workspace, "", session_id):
                 matches.append(int(entry.name))
         except OmniGentIdentityError:
             continue
+    if session_id:
+        owned = [
+            pid
+            for pid in matches
+            if _best_effort_proc_environment(proc_root, pid).get(ANTIGRAVITY_RUNNER_SESSION_ENV, "") == session_id
+        ]
+        if owned:
+            matches = owned
     if len(matches) != 1:
         raise OmniGentIdentityError(f"expected one bound OmniGent Cursor process, found {len(matches)}")
     return matches[0]
@@ -682,7 +702,23 @@ def _state_for_cursor_bridge(bridge_dir: Path, bridge_root: Path, session_id: st
     return tmux_path, socket_path
 
 
-def _cursor_thread_id(bridge_dir: Path, external: object) -> str:
+def _cursor_conversation_id(value: object) -> str:
+    if isinstance(value, str) and AGY_CONVERSATION_ID_RE.fullmatch(value):
+        return value
+    return ""
+
+
+def _process_cursor_conversation_id(session_id: str, bound_pid: int, proc_root: Path) -> str:
+    bound_env = _best_effort_proc_environment(proc_root, bound_pid)
+    from_bound = _cursor_conversation_id(bound_env.get("CURSOR_CONVERSATION_ID", ""))
+    if from_bound:
+        return from_bound
+    if os.environ.get(ANTIGRAVITY_RUNNER_SESSION_ENV, "") == session_id:
+        return _cursor_conversation_id(os.environ.get("CURSOR_CONVERSATION_ID", ""))
+    return ""
+
+
+def _cursor_thread_id(bridge_dir: Path, external: object, process_conversation_id: str = "") -> str:
     disk = ""
     forwarder = bridge_dir / CURSOR_FORWARDER_STATE
     try:
@@ -697,12 +733,18 @@ def _cursor_thread_id(bridge_dir: Path, external: object) -> str:
             chat_id = Path(store_path).parent.name
             if AGY_CONVERSATION_ID_RE.fullmatch(chat_id):
                 disk = chat_id
+    process_id = _cursor_conversation_id(process_conversation_id)
+    # 🧑 "May make it simpler"
+    if disk:
+        if process_id and process_id != disk:
+            raise OmniGentIdentityError("OmniGent session does not match its live Cursor bridge")
+        return disk
     if isinstance(external, str) and external:
-        if disk and disk != external:
+        if process_id and process_id != external:
             raise OmniGentIdentityError("OmniGent session does not match its live Cursor bridge")
         return external
-    if disk:
-        return disk
+    if process_id:
+        return process_id
     raise OmniGentIdentityError("Cursor conversation identity is not ready")
 
 
@@ -734,8 +776,13 @@ def authenticate_cursor_session(
         workspace=workspace,
         proc_root=proc_root,
         ancestor_pid=ancestor_pid if require_agent_ancestor else None,
+        session_id=session_id,
     )
-    thread_id = _cursor_thread_id(bridge_dir.resolve(strict=True), session.get("external_session_id"))
+    thread_id = _cursor_thread_id(
+        bridge_dir.resolve(strict=True),
+        session.get("external_session_id"),
+        process_conversation_id=_process_cursor_conversation_id(session_id, app_server_pid, proc_root),
+    )
     if (
         session.get("id") != session_id
         or session.get("harness") != CURSOR_HARNESS
@@ -814,6 +861,89 @@ def _authenticate_current_cursor(
     )
 
 
+# 🧑 "Change the current agent spawning script related to the manager stuff to also support Claude"
+def find_claude(session_id: str, *, ancestor_pid: int, proc_root: Path = Path("/proc")) -> tuple[int, Path]:
+    """Return the ancestor Claude Code process OmniGent launched for this session, and its settings file."""
+    pid = ancestor_pid
+    seen: set[int] = set()
+    while pid > 1 and pid not in seen:
+        seen.add(pid)
+        argv = _proc_argv(proc_root, pid)
+        environment = _best_effort_proc_environment(proc_root, pid)
+        if (
+            argv
+            and Path(argv[0]).name == "claude"
+            and "--settings" in argv[:-1]
+            and environment.get(ANTIGRAVITY_RUNNER_HARNESS_ENV, "") == CLAUDE_HARNESS
+            and environment.get(ANTIGRAVITY_RUNNER_SESSION_ENV, "") == session_id
+        ):
+            return pid, Path(argv[argv.index("--settings") + 1])
+        pid = _proc_parent(proc_root, pid)
+    raise OmniGentIdentityError("no ancestor Claude Code process is bound to this OmniGent session")
+
+
+def authenticate_claude_session(
+    *,
+    ancestor_pid: int,
+    expected_target: str = "",
+    expected_thread_id: str = "",
+    expected_workspace: str = "",
+    expected_state_path: str = "",
+    expected_socket_path: str = "",
+    expected_app_server_pid: int = 0,
+    bridge_root: Path | None = None,
+    proc_root: Path = Path("/proc"),
+    server: str | None = None,
+) -> OmniGentIdentity:
+    """Authenticate the calling Claude Code session.
+
+    `thread_id` is the Claude Code session id OmniGent recorded, `state_path` the settings file
+    OmniGent wrote into the bridge directory, and `socket_path` the OmniGent terminal tmux socket.
+    Raises `NotOmniGentEnvironment` when no ancestor runs under a Claude OmniGent runner.
+    """
+    session_id = _runner_native_session(harness=CLAUDE_HARNESS, ancestor_pid=ancestor_pid, proc_root=proc_root)
+    claude_pid, settings = find_claude(session_id, ancestor_pid=ancestor_pid, proc_root=proc_root)
+    root = bridge_root or Path(tempfile.gettempdir()) / f"omnigent-{os.getuid()}" / CLAUDE_HARNESS
+    try:
+        state_path = settings.resolve(strict=True)
+        owned = state_path.parent.parent == root.resolve(strict=True) and state_path.lstat().st_uid == os.getuid()
+    except OSError as exc:
+        raise OmniGentIdentityError("Claude bridge settings are unavailable") from exc
+    if not owned:
+        raise OmniGentIdentityError("Claude bridge settings are outside the OmniGent bridge root")
+    session = _session(session_id, server or os.environ.get("OMO_MANAGER_OMNIGENT_URL", DEFAULT_SERVER_URL))
+    workspace = session.get("workspace")
+    thread_id = session.get("external_session_id")
+    if (
+        session.get("id") != session_id
+        or session.get("harness") != CLAUDE_HARNESS
+        or session.get("runner_online") is not True
+        or session.get("host_online") is not True
+        or session.get("archived") is True
+        or session.get("status") not in {"idle", "running", "waiting"}
+        or not isinstance(thread_id, str)
+        or not thread_id
+        or not isinstance(workspace, str)
+        or not Path(workspace).is_absolute()
+    ):
+        raise OmniGentIdentityError("OmniGent session does not match its live Claude bridge")
+    socket_path = _best_effort_proc_environment(proc_root, claude_pid).get("TMUX", "").partition(",")[0]
+    identity = OmniGentIdentity(f"omnigent://{session_id}", session_id, thread_id, workspace, str(state_path), socket_path, claude_pid, str(state_path.parent))
+    expected = {
+        "target": (expected_target, identity.target),
+        "thread": (expected_thread_id, identity.thread_id),
+        "workspace": (expected_workspace, identity.workspace),
+        "state path": (expected_state_path, identity.state_path),
+        "socket": (expected_socket_path, identity.socket_path),
+    }
+    mismatch = next((field for field, (wanted, actual) in expected.items() if wanted and wanted != actual), "")
+    if mismatch or (expected_app_server_pid and expected_app_server_pid != identity.app_server_pid):
+        raise OmniGentIdentityError(f"OmniGent {mismatch or 'Claude process'} identity changed")
+    if any("\t" in value or "\n" in value for value in identity.lines()):
+        raise OmniGentIdentityError("OmniGent identity contains unsafe control characters")
+    return identity
+
+
 # 🧑 "There’s still no reason to create dir/tmux session"
 def authenticate_current_omnigent(
     *,
@@ -860,6 +990,20 @@ def authenticate_current_omnigent(
             expected_app_server_pid=expected_app_server_pid,
             cursor_bridge=cursor_bridge,
             cursor_bridge_root=cursor_bridge_root,
+            proc_root=proc_root,
+            server=server,
+        )
+    except NotOmniGentEnvironment:
+        pass
+    try:
+        return authenticate_claude_session(
+            ancestor_pid=os.getppid(),
+            expected_target=expected_target,
+            expected_thread_id=expected_thread_id,
+            expected_workspace=expected_workspace,
+            expected_state_path=expected_state_path,
+            expected_socket_path=expected_socket_path,
+            expected_app_server_pid=expected_app_server_pid,
             proc_root=proc_root,
             server=server,
         )

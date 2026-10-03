@@ -39,6 +39,13 @@ pending_task_items:
 
 ## fields
 
+Task-body request blocks, including direct `(pending)` edits, are reserved for
+the Human. Agents edit frontmatter through supported helpers and append only
+parenthesized comments. Agent reports use source-pointer metadata, not task-body
+requests; managers send delegations directly to workers. The watcher treats an
+unmarked task-body `(pending)` block as a Human request. This convention does
+not authenticate a manual file edit against another process with write access.
+
 Avoid unnecessary fields.
 
 Reject fields that are not in the schema. All comments stay inside Markdown bodies in `()` instead.
@@ -172,7 +179,7 @@ replacement custody history
 
 `omo_pending_watch.py` scans for `(pending)` markers. Ordinary task-file messages go directly to that task's `runat`, send no manager copy, and clear the consumed marker only after verified delivery when the original block is unchanged or bounded by a later `(pending)`. `for manager` at the beginning or end of active unquoted pending-block or its structurally adjacent stored email routes to `managerat`; matching ignores case, surrounding punctuation, and edge whitespace. Literal `DM` and `DM only` text has no routing meaning. The receiving agent maintains its own pending queue through `omo_pending.py`.
 
-`omo_report.sh` infers the reporting producer task file from the current tmux pane, finds its `managerat`, and appends the `(pending)` report block to that manager's task file. This applies to worker and manager producers; a manager's report never routes back to its own producer task. Producers invoke it without `--task-file`, `--root`, `--manager-target`, or other manual route flags. If `managerat` is the main manager target, the destination is the dated `work_manager_YYYY-MM-DD.md` file.
+`omo_report.sh` infers the reporting producer task file from the current tmux pane, or accepts `--task-file TASK.md` from a detached tool when the named task has exactly one active TODO owner. It finds `managerat` and appends the `(pending)` report block to that manager's task file. This applies to worker and manager producers; a manager's report never routes back to its own producer task. If `managerat` is the main manager target, the destination is the dated `work_manager_YYYY-MM-DD.md` file.
 
 When a reused target matches blocked historical tasks, `omo_report.sh` prefers the only `running` or `long_running` task. A sole blocked task remains reportable, and unresolved collisions fail as ambiguous.
 
@@ -194,3 +201,7 @@ For each active task file:
 - [ ] finish migrating active task files
 
 Blocked index clarification: `--reconcile-blocked-index` can also move an unchanged blocked worker from `current` to `human pending` when `--blocked-on` exactly matches its unresolved `human review of ...` blocker. This supersedes the older Source-1804-only description above. It rejects completed, denied, optional, non-human, and task-file dependency blockers; it changes only the TODO row, never the task or pane.
+
+Ordinary `blocked` status updates keep non-Human blockers under `current:` and place actual Human waits under `human pending:`. Repeating an unchanged blocked status repairs stale placement; neither action resolves the blocker or starts a pane. Monthly archiving independently moves all `previous:` rows, including historical blocked records, to `YYYYMM/old_todos.md` without reading task status.
+
+Owner-local task resolution checks that the invoking process descends from the tmux pane PID before trusting `TMUX_PANE`. A detached Codex tool subprocess cannot become the pane owner by copying tmux environment variables; it fails before an owner-local completion email claim, leaving the queue unchanged.
