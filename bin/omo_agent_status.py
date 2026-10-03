@@ -1,1 +1,1 @@
-../omo_manager/omo_agent_status.py
+../amh/bin/use-amh

@@ -1,1 +1,1 @@
-../omo_manager/omo_tmux_send.py
+../amh/bin/use-amh

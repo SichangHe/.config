@@ -1,1 +1,1 @@
-../omo_manager/omo_manager_restart.sh
+../amh/bin/use-amh

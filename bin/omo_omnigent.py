@@ -1,1 +1,1 @@
-../omo_manager/omo_omnigent.py
+../amh/bin/use-amh

@@ -1,1 +1,1 @@
-../omo_manager/omo_report.sh
+../amh/bin/use-amh

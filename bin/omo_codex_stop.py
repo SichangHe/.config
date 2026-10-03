@@ -1,1 +1,1 @@
-../omo_manager/omo_codex_stop.py
+../amh/bin/use-amh

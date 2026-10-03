@@ -1,1 +1,1 @@
-../omo_manager/omo_dispatch.sh
+../amh/bin/use-amh

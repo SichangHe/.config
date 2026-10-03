@@ -1,1 +1,1 @@
-../helper.sh/email_me.py
+../amh/bin/use-amh

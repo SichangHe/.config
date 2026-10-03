@@ -1,1 +1,1 @@
-../omo_manager/omo_stuck_watch.py
+../amh/bin/use-amh

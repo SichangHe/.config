@@ -1,1 +1,1 @@
-../omo_manager/omo_digest_queue.py
+../amh/bin/use-amh

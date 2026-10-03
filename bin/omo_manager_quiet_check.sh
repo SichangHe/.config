@@ -1,1 +1,1 @@
-../omo_manager/omo_manager_quiet_check.sh
+../amh/bin/use-amh

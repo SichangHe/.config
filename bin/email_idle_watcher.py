@@ -1,1 +1,1 @@
-../omo_manager/email_idle_watcher.py
+../amh/bin/use-amh

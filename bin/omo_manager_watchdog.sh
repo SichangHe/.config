@@ -1,1 +1,1 @@
-../omo_manager/omo_manager_watchdog.sh
+../amh/bin/use-amh

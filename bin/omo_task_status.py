@@ -1,1 +1,1 @@
-../omo_manager/omo_task_status.py
+../amh/bin/use-amh

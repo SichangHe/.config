@@ -1,1 +1,1 @@
-../omo_manager/omo_worktree_check.py
+../amh/bin/use-amh

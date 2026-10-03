@@ -1,1 +1,1 @@
-../omo_manager/omo_triage_report.py
+../amh/bin/use-amh

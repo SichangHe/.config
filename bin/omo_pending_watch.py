@@ -1,1 +1,1 @@
-../omo_manager/omo_pending_watch.py
+../amh/bin/use-amh
