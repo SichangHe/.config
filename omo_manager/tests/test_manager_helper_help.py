@@ -54,7 +54,7 @@ class ManagerHelperHelpTests(unittest.TestCase):
         self.assertIn("gpt-6-astra is also supported", launch_help)
         self.assertIn("very expensive and reserved for tricky tasks", launch_help)
         self.assertIn("grok-4.7-high", launch_help)
-        self.assertIn("Keep --task-file as manager-side bookkeeping", launch_help)
+        self.assertIn("includes --task-file so the worker can pass it to every task-aware helper", launch_help)
 
         for direct_help in (
             helper_help("omo_codex_start.py"),

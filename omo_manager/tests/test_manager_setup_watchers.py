@@ -15,6 +15,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SETUP = ROOT / "omo_manager" / "omo_manager_setup_watchers.sh"
 TEST_MANAGER_TARGET = "omo-watcher-test:1"
+PRODUCER_ENV = {
+    "OMNIGENT_RUNNER_LAUNCH_HARNESS": "antigravity-native",
+    "OMNIGENT_RUNNER_PRIMARY_SESSION_ID": "stale-session",
+    "HARNESS_ANTIGRAVITY_NATIVE_BRIDGE_DIR": "/tmp/stale-antigravity-bridge",
+    "HARNESS_ANTIGRAVITY_NATIVE_REQUEST_SESSION_ID": "stale-session",
+    "HARNESS_CURSOR_NATIVE_BRIDGE_DIR": "/tmp/stale-cursor-bridge",
+    "CODEX_HOME": "/tmp/stale-codex-home",
+    "CODEX_SESSION_ID": "stale-session",
+    "CODEX_THREAD_ID": "stale-thread",
+    "CODEX_CI": "1",
+    "CURSOR_CONVERSATION_ID": "stale-conversation",
+    "ANTIGRAVITY_CONVERSATION_ID": "stale-conversation",
+    "OMO_AGENT_TMUX_TARGET": "stale-agent:1",
+    "OMO_AGENT_TASK_FILE": "stale-task.md",
+    "TMUX_PANE": "%999999",
+}
 TMUX = shutil.which("tmux")
 SLEEP = shutil.which("sleep")
 FLOCK = shutil.which("flock")
@@ -224,8 +240,10 @@ case "${FAKE_UV_MODE:-real}" in
       mv "$root_arg_lexical" "$root_arg_lexical.moved"
       mkdir "$root_arg_lexical"
     fi
+    trap 'printf "released\\n" >"${FAKE_SLEEP_BARRIER}.released"' EXIT
     "$script" "$@" &
     watcher_pid=$!
+    printf 'AUTHENTIC_WATCHER_PID=%s\n' "$watcher_pid" >>"${FAKE_UV_LOG:?}"
     while [ ! -s "$ready_file" ]; do
       if ! kill -0 "$watcher_pid" 2>/dev/null; then
         wait "$watcher_pid"
@@ -242,7 +260,6 @@ case "${FAKE_UV_MODE:-real}" in
       watcher_rest="${watcher_stat##*) }"
       [ "${watcher_rest%% *}" = T ] || exit 10
     fi
-    printf 'AUTHENTIC_WATCHER_PID=%s\n' "$watcher_pid" >>"${FAKE_UV_LOG:?}"
     if [ "${FAKE_UV_MODE:-real}" = root-swap-ready ]; then
       mv "$root_arg_lexical" "$root_arg_lexical.moved"
       ln -s "$root_arg_lexical.moved" "$root_arg_lexical"
@@ -373,10 +390,11 @@ esac
         env.update(extra_env or {})
         return subprocess.run([str(setup)], env=env, text=True, capture_output=True, timeout=timeout_s, check=False)
 
-    def start_tmux_server(self, tmp: Path) -> tuple[Path, int]:
+    def start_tmux_server(self, tmp: Path, *, extra_env: dict[str, str] | None = None) -> tuple[Path, int]:
         socket = tmp / "tmux.sock"
         subprocess.run(
             [TMUX, "-S", str(socket), "new-session", "-d", "-s", "watcher-test"],
+            env={**os.environ, **(extra_env or {})},
             text=True,
             capture_output=True,
             check=True,
@@ -630,13 +648,16 @@ export OMO_MANAGER_ENABLE_EMAIL_WATCHER="false"
     def test_tmux_invocation_hands_setup_to_persistent_server(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
-            socket, server_pid = self.start_tmux_server(tmp)
+            socket, server_pid = self.start_tmux_server(tmp, extra_env=PRODUCER_ENV)
             tmux_log = tmp / "tmux-wrapper.log"
             tmux_wrapper = tmp / "home" / ".config" / "bin" / "tmux"
             tmux_wrapper.parent.mkdir(parents=True)
             tmux_wrapper.write_text(
                 """#!/usr/bin/env bash
 printf '%s\\n' "$*" >>"${FAKE_TMUX_LOG:?}"
+if [ "${1:-}" = run-shell ]; then
+  cp "${TMPDIR:?}"/omo-manager-watchers.*/environment "${FAKE_HANDOFF_ENV:?}" || exit 1
+fi
 exec "${REAL_TMUX:?}" "$@"
 """,
                 encoding="utf-8",
@@ -650,10 +671,16 @@ exec "${REAL_TMUX:?}" "$@"
                         "TMUX": f"{socket},{server_pid},0",
                         "FAKE_TMUX_LOG": str(tmux_log),
                         "REAL_TMUX": TMUX or "",
+                        "TMPDIR": str(tmp),
+                        "FAKE_HANDOFF_ENV": str(tmp / "handoff-environment"),
+                        **PRODUCER_ENV,
                     },
                 )
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertIn("watchers ready", result.stdout)
+                handoff_environment = (tmp / "handoff-environment").read_text(encoding="utf-8")
+                for key in PRODUCER_ENV:
+                    self.assertNotRegex(handoff_environment, rf"(?m)^declare -x {key}(?:=|$)")
                 self.assertTrue(
                     any(line.startswith("run-shell -b ") for line in tmux_log.read_text(encoding="utf-8").splitlines())
                 )
@@ -662,6 +689,7 @@ exec "${REAL_TMUX:?}" "$@"
                 assert pending_pid is not None
                 time.sleep(1)
                 self.assertTrue(self.process_active(pending_pid))
+                self.assert_clean_producer_environment(pending_pid)
                 self.assertTrue(
                     self.process_parent_id(pending_pid) == 1
                     or self.process_has_ancestor(pending_pid, server_pid)
@@ -669,6 +697,48 @@ exec "${REAL_TMUX:?}" "$@"
             finally:
                 self.stop_supervisors(tmp / "state")
                 subprocess.run([TMUX, "-S", str(socket), "kill-server"], capture_output=True, check=False)
+
+    def assert_clean_producer_environment(self, supervisor_pid: int) -> None:
+        watcher_pids = []
+        for pid in self.descendant_pids(supervisor_pid):
+            try:
+                argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+            except FileNotFoundError:
+                continue
+            if str(ROOT / "omo_manager" / "omo_pending_watch.py").encode() in argv:
+                watcher_pids.append(pid)
+        self.assertTrue(watcher_pids)
+        for pid in [supervisor_pid, *watcher_pids]:
+            environment = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+            keys = {entry.split(b"=", 1)[0].decode() for entry in environment if entry}
+            self.assertFalse(keys & PRODUCER_ENV.keys(), f"producer identity retained by pid={pid}")
+            self.assertIn(f"OMO_MANAGER_TMUX_TARGET={TEST_MANAGER_TARGET}".encode(), environment)
+
+    def test_direct_setup_does_not_inherit_producer_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            try:
+                result = self.run_setup(tmp, extra_env=PRODUCER_ENV)
+                self.assertEqual(0, result.returncode, result.stderr)
+                pending_pid = self.pid_from_file(tmp / "state" / "pending-supervisor.pid")
+                assert pending_pid is not None
+                self.assert_clean_producer_environment(pending_pid)
+            finally:
+                self.stop_supervisors(tmp / "state")
+
+    def test_local_config_cannot_reintroduce_producer_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            local_env = tmp / "local.env"
+            local_env.write_text("\n".join(f"export {key}={shlex.quote(value)}" for key, value in PRODUCER_ENV.items()), encoding="utf-8")
+            try:
+                result = self.run_setup(tmp, extra_env={"OMO_MANAGER_LOCAL_ENV": str(local_env)})
+                self.assertEqual(0, result.returncode, result.stderr)
+                pending_pid = self.pid_from_file(tmp / "state" / "pending-supervisor.pid")
+                assert pending_pid is not None
+                self.assert_clean_producer_environment(pending_pid)
+            finally:
+                self.stop_supervisors(tmp / "state")
 
     @unittest.skipUnless(TMUX, "tmux required")
     def test_tmux_invocation_returns_setup_failure(self) -> None:
@@ -1350,7 +1420,7 @@ esac
                         extra_env={"OMO_WORK_LOGS_ROOT": root_arg},
                     )
                     self.assertNotEqual(0, result.returncode)
-                    self.assertIn("pending watcher did not become ready", result.stderr)
+                    self.assertRegex(result.stderr, "pending watcher (?:did not become ready|supervisor exited)")
                     self.assertEqual(1, len(watcher_pids := self.authentic_watcher_pids(tmp)))
                     watcher_pid = watcher_pids[0]
                     ready_record = (tmp / "fake-ready-snapshot").read_text(encoding="utf-8")
@@ -1359,6 +1429,8 @@ esac
                     self.assertIn(f"root={root}\n", ready_record)
                     self.assertTrue(root.is_symlink())
                     self.wait_for_process_exit(watcher_pid)
+                    pending_log = (tmp / "state" / "pending-watch.log").read_text(encoding="utf-8")
+                    self.assertIn("pending watcher root identity changed; stopping supervisor", pending_log)
                 finally:
                     self.stop_supervisors(tmp / "state")
 
@@ -1370,15 +1442,14 @@ esac
             try:
                 result = self.run_setup(tmp, fake_uv_mode="real-root-replaced-ready", health_timeout_s="3")
                 self.assertNotEqual(0, result.returncode)
-                self.assertIn("pending watcher did not become ready", result.stderr)
+                self.assertRegex(result.stderr, "pending watcher (?:did not become ready|supervisor exited)")
                 self.assertEqual(1, len(watcher_pids := self.authentic_watcher_pids(tmp)))
                 watcher_pid = watcher_pids[0]
-                ready_record = (tmp / "fake-ready-snapshot").read_text(encoding="utf-8")
-                self.assertIn(f"pid={watcher_pid}\n", ready_record)
-                self.assertIn(f"root={root}\n", ready_record)
+                self.assertFalse((tmp / "fake-ready-snapshot").exists())
+                pending_log = (tmp / "state" / "pending-watch.log").read_text(encoding="utf-8")
+                self.assertIn("configured pending-watcher root does not match the supervisor launch identity", pending_log)
                 self.assertTrue(root.is_dir())
                 self.assertTrue(moved_root.is_dir())
-                self.assertIn(f"root_ino={root.stat().st_ino}\n", ready_record)
                 self.assertNotEqual(root.stat().st_ino, moved_root.stat().st_ino)
                 self.wait_for_process_exit(watcher_pid)
             finally:
@@ -1451,7 +1522,7 @@ esac
                 watcher_pid = watcher_pids[0]
                 ready_record = (tmp / "fake-ready-snapshot").read_text(encoding="utf-8")
                 self.assertIn(f"pid={watcher_pid}\n", ready_record)
-                self.assertIn(f"root={root}\n", ready_record)
+                self.assertIn(f"root={actual / 'work_logs'}\n", ready_record)
                 self.assertFalse(alias.exists())
                 self.assertFalse((tmp / "state" / "pending-supervisor.pid").exists())
                 self.wait_for_process_exit(watcher_pid)
@@ -2821,7 +2892,7 @@ while :; do sleep 30; done
             finally:
                 self.stop_supervisors(tmp / "state")
 
-    def test_root_change_during_email_health_failure_preserves_launched_supervisors(self) -> None:
+    def test_root_change_during_email_health_failure_preserves_email_supervisor(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             state = tmp / "state"
@@ -2836,7 +2907,12 @@ while :; do sleep 30; done
                     pid = self.pid_from_file(pidfile)
                     self.assertIsNotNone(pid)
                     assert pid is not None
-                    self.assertTrue(self.process_active(pid))
+                    if name == "email":
+                        self.assertTrue(self.process_active(pid))
+                    else:
+                        self.wait_for_process_exit(pid)
+                pending_log = (state / "pending-watch.log").read_text(encoding="utf-8")
+                self.assertIn("pending watcher root identity changed; stopping supervisor", pending_log)
             finally:
                 self.stop_supervisors(state)
 

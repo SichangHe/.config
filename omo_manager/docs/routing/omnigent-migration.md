@@ -16,6 +16,9 @@ goal
 
 target contract
 
+- new starter prompts and Human email subjects display the current unique task-file basename without `.md`; inbound replies resolve that active task before delivery
+- legacy `[og:task]` and `[SESSION:WINDOW]` mail subjects remain readable; a displayed basename does not authenticate the producer
+
 - tmux `SESSION:WINDOW[.PANE]`
   - unchanged
 - OmniGent `omnigent://SESSION_ID`
@@ -29,7 +32,7 @@ target contract
 
 first migration step
 
-- opt in one task at launch with `omo_task.py --omnigent --tool codex ...`
+- opt in one tmux task at launch with `omo_task.py --tmux --tmux-session SESSION ...`; OmniGent is the default launch path
 - create its session through OmniGent's `/v1/sessions` API on the selected online host
 - store the returned durable session as `runat: omnigent://SESSION_ID`
 - send prompts and later messages through `/v1/sessions/SESSION_ID/events`
@@ -69,14 +72,17 @@ current boundary
   - local Antigravity launches pass `--dangerously-skip-permissions`; the native agent spec uses `caller_process`, `cwd: .`, and `sandbox.type: none`
   - the global Antigravity permission settings are copied into each per-session Gemini directory before launch, preserving OmniGent's session-specific MCP configuration
   - Cursor launch looks up the registered `cursor-native-ui` agent with `cursor-native` harness
-  - Cursor `model_override` is the same concatenated CLI id tmux uses (`MODEL-EFFORT` when effort is set)
+  - Cursor `model_override` is the same concatenated CLI id tmux uses (`MODEL-EFFORT` when effort is set); the default is `grok-4.7-high`, not a `-fast` id
+  - Antigravity's default model id is `gemini-3.8-flash-high` with reasoning effort `high`
+  - Codex `model_override` is the same model id tmux passes to `--model`; the default is `gpt-6.1-sol` with reasoning effort `medium`
   - Cursor `terminal_launch_args` are the same as tmux Cursor Agent: `--force --sandbox disabled --trust`
   - model ids are passed through; they are not checked per harness
 - native producer authentication currently requires Linux process metadata under `/proc` and the matching OmniGent native bridge (`codex-native`, `antigravity-native`, or `cursor-native`)
   - Antigravity may bind the unique on-disk conversation UUID while OmniGent still has a placeholder `external_session_id`
-  - Cursor binds `tmux.json` plus the unique chat id from `cursor_forwarder.json` or `external_session_id`; the live TUI bridge lives under `/tmp/omnigent-<uid>/cursor-native/`
-- `--tool antigravity` selects OmniGent even without `--omnigent`; Cursor and Codex remain tmux unless `--omnigent` is set
+  - Cursor binds `tmux.json` plus the unique chat id from `cursor_forwarder.json`, `external_session_id`, or the bound TUI's `CURSOR_CONVERSATION_ID`; the live TUI bridge lives under `/tmp/omnigent-<uid>/cursor-native/`
+- `--tool antigravity` selects OmniGent even without `--omnigent`; Cursor and Codex also default to OmniGent unless `--tmux` or `--tmux-session` is set
 - pending-watch readiness for OmniGent `runat` uses the session snapshot, not tmux inspect; send still uses the shared helper
+- `omo_pending.py` prefers authenticated OmniGent identity over an inherited tmux pane such as `main:0.0`
 - ready-report for OmniGent uses the newest completed assistant session item instead of a tmux transcript
   - same-host Antigravity falls back to its OmniGent-advertised terminal when its RPC mirror cannot read the current CLI version
   - the fallback binds the first TUI-created conversation, detects the ready prompt, and hashes only the last completed turn

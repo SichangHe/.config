@@ -2,6 +2,7 @@ import contextlib
 import hashlib
 import io
 import os
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -17,6 +18,12 @@ from omo_manager.omo_task import (
     CODEX_LAUNCH_UPDATED,
     Args,
     CursorProcessProof,
+    DEFAULT_ANTIGRAVITY_EFFORT,
+    DEFAULT_ANTIGRAVITY_MODEL,
+    DEFAULT_CODEX_EFFORT,
+    DEFAULT_CODEX_MODEL,
+    DEFAULT_CURSOR_EFFORT,
+    DEFAULT_CURSOR_MODEL,
     DEFAULT_TOOL,
     LaunchSession,
     LaunchWindow,
@@ -96,7 +103,7 @@ def trust_screen(launch_marker: str) -> list[str]:
 
 
 CAPTURED_TRUST_POPUP = (
-    """> You are in /ssd1/sichangheagent/vlnfix1
+    """> You are in /srv/agent/vlnfix1
 
   Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec policies to
   load.
@@ -124,9 +131,11 @@ class OmoTaskTests(unittest.TestCase):
         self.successor_instructions.stop()
         self.launch_instructions.stop()
 
+    @patch("omo_manager.omo_task.verify_omnigent_prompt")
+    @patch("omo_manager.omo_task.wait_omnigent_terminal")
     @patch("omo_manager.omo_task.send_omnigent_message")
     @patch("omo_manager.omo_task.launch_omnigent_session", return_value="omnigent://session-123")
-    def test_main_omnigent_launch_binds_task_and_delivers_initial_prompt(self, launch, send) -> None:
+    def test_main_omnigent_launch_binds_task_and_delivers_initial_prompt(self, launch, send, wait, verify) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             prompt = root / "prompt.md"
@@ -165,6 +174,10 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIn("x.md omnigent://session-123", (root / "TODO.md").read_text(encoding="utf-8"))
             self.assertIn('<manager_delegation from="wl:1">', send.call_args.args[1])
             launch.assert_called_once_with("codex", root, "gpt-5.6-sol", "high", host_id="", title="task", codex_flags=())
+            wait.assert_called_once_with("omnigent://session-123", "codex")
+            verify.assert_called_once()
+            self.assertEqual("omnigent://session-123", verify.call_args.args[0])
+            self.assertEqual("codex", verify.call_args.args[1])
 
     def test_parse_omnigent_accepts_only_one_full_access_codex_flag(self) -> None:
         base = [
@@ -261,9 +274,11 @@ class OmoTaskTests(unittest.TestCase):
                 ]
             )
 
+    @patch("omo_manager.omo_task.verify_omnigent_prompt")
+    @patch("omo_manager.omo_task.wait_omnigent_terminal")
     @patch("omo_manager.omo_task.send_omnigent_message")
     @patch("omo_manager.omo_task.launch_omnigent_session", return_value="omnigent://session-123")
-    def test_main_vl_launch_captures_public_vl_instructions(self, _launch, _send) -> None:
+    def test_main_vl_launch_captures_public_vl_instructions(self, _launch, _send, _wait, _verify) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             prompt = root / "prompt.md"
@@ -1494,21 +1509,21 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIn("exit_status: FileNotFoundError: [Errno 2] tmux unavailable", text)
 
     def test_codex_cmd_resumes_quoted_session(self) -> None:
-        self.assertTrue(codex_cmd("abc", tool="codex", agent_instructions_file=AGENT_INSTRUCTIONS).startswith("bunx @openai/codex@0.155.1 --dangerously-bypass-approvals-and-sandbox resume abc "))
-        self.assertTrue(codex_cmd("abc def", tool="codex", agent_instructions_file=AGENT_INSTRUCTIONS).startswith("bunx @openai/codex@0.155.1 --dangerously-bypass-approvals-and-sandbox resume 'abc def' "))
+        self.assertTrue(codex_cmd("abc", tool="codex", agent_instructions_file=AGENT_INSTRUCTIONS).startswith("bunx @openai/codex@latest --no-daemon --dangerously-bypass-approvals-and-sandbox --config check_for_update_on_startup=false resume abc "))
+        self.assertTrue(codex_cmd("abc def", tool="codex", agent_instructions_file=AGENT_INSTRUCTIONS).startswith("bunx @openai/codex@latest --no-daemon --dangerously-bypass-approvals-and-sandbox --config check_for_update_on_startup=false resume 'abc def' "))
         self.assertTrue(codex_cmd("abc", tool="pcodx", agent_instructions_file=AGENT_INSTRUCTIONS).startswith(f"{PCODX_WRAPPER} resume abc "))
         self.assertIn(str(AGENT_INSTRUCTIONS), codex_cmd("abc", tool="pcodx", agent_instructions_file=AGENT_INSTRUCTIONS))
 
     def test_codex_cmd_can_resume_without_submitting_prompt(self) -> None:
         self.assertEqual(
-            "bunx @openai/codex@0.155.1 --dangerously-bypass-approvals-and-sandbox resume abc",
+            "bunx @openai/codex@latest --no-daemon --dangerously-bypass-approvals-and-sandbox --config check_for_update_on_startup=false resume abc",
             codex_cmd("abc", include_prompt=False, tool="codex"),
         )
 
     def test_codex_cmd_resume_binds_requested_workdir_for_codex_only(self) -> None:
         workdir = Path("/tmp/current work")
         self.assertEqual(
-            "bunx @openai/codex@0.155.1 --dangerously-bypass-approvals-and-sandbox --cd '/tmp/current work' resume abc",
+            "bunx @openai/codex@latest --no-daemon --dangerously-bypass-approvals-and-sandbox --config check_for_update_on_startup=false --cd '/tmp/current work' resume abc",
             codex_cmd("abc", include_prompt=False, workdir=workdir, tool="codex"),
         )
         self.assertNotIn("--cd", codex_cmd("abc", tool="pcodx", include_prompt=False, workdir=workdir))
@@ -1554,7 +1569,7 @@ class OmoTaskTests(unittest.TestCase):
     def test_codex_cmd_uses_prompt_argument_from_file(self) -> None:
         expected_paths = f"{AGENT_INSTRUCTIONS} /tmp/prompt.md"
         self.assertEqual(
-            f'bunx @openai/codex@0.155.1 --dangerously-bypass-approvals-and-sandbox "$(cat -- {expected_paths})"',
+            f'bunx @openai/codex@latest --no-daemon --dangerously-bypass-approvals-and-sandbox --config check_for_update_on_startup=false "$(cat -- {expected_paths})"',
             codex_cmd(prompt_file=Path("/tmp/prompt.md"), tool="codex", agent_instructions_file=AGENT_INSTRUCTIONS),
         )
 
@@ -1563,7 +1578,7 @@ class OmoTaskTests(unittest.TestCase):
 
     def test_codex_cmd_uses_captured_vl_instructions(self) -> None:
         self.assertEqual(
-            f'bunx @openai/codex@0.155.1 --dangerously-bypass-approvals-and-sandbox "$(cat -- {AGENT_INSTRUCTIONS} /tmp/prompt.md)"',
+            f'bunx @openai/codex@latest --no-daemon --dangerously-bypass-approvals-and-sandbox --config check_for_update_on_startup=false "$(cat -- {AGENT_INSTRUCTIONS} /tmp/prompt.md)"',
             codex_cmd(prompt_file=Path("/tmp/prompt.md"), vl_agent=True, tool="codex", agent_instructions_file=AGENT_INSTRUCTIONS),
         )
 
@@ -1572,6 +1587,16 @@ class OmoTaskTests(unittest.TestCase):
         try:
             self.assertEqual(b"$ /test/getagentsmd\nagent instructions\n", instructions.read_bytes())
             self.launch_instructions_mock.assert_called_with(None, ("vl_worker",))
+        finally:
+            instructions.unlink()
+
+    def test_nested_task_file_is_injected_into_worker_prompt(self) -> None:
+        instructions = write_agent_instructions_file(False, task_file="nested/worker.md")
+        try:
+            self.assertTrue(instructions.read_text(encoding="utf-8").startswith(
+                "Task tag: nested/worker\nTask file: nested/worker.md\n"
+                "Use --task-file nested/worker.md with task-aware helpers.\n"
+            ))
         finally:
             instructions.unlink()
 
@@ -1586,14 +1611,14 @@ class OmoTaskTests(unittest.TestCase):
     def test_codex_cmd_adds_reasoning_effort_and_extra_flags(self) -> None:
         self.assertTrue(
             codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="codex", include_prompt=False).startswith(
-                "bunx @openai/codex@0.155.1 --dangerously-bypass-approvals-and-sandbox --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
+                "bunx @openai/codex@latest --no-daemon --dangerously-bypass-approvals-and-sandbox --config 'model_reasoning_effort=\"xhigh\"' --config check_for_update_on_startup=false --profile deep-review",
             )
         )
 
     def test_codex_cmd_orders_and_quotes_explicit_model_and_effort(self) -> None:
         self.assertTrue(
             codex_cmd(model="model name", reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="codex", include_prompt=False).startswith(
-                "bunx @openai/codex@0.155.1 --dangerously-bypass-approvals-and-sandbox --model 'model name' --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
+                "bunx @openai/codex@latest --no-daemon --dangerously-bypass-approvals-and-sandbox --model 'model name' --config 'model_reasoning_effort=\"xhigh\"' --config check_for_update_on_startup=false --profile deep-review",
             )
         )
         self.assertTrue(
@@ -1614,7 +1639,7 @@ class OmoTaskTests(unittest.TestCase):
         self.assertTrue(command.startswith("agent --force --sandbox disabled --trust --workspace /work/tree --model gpt-5.6-terra-medium"))
         self.assertIn("$(cat --", command)
         self.assertTrue(
-            codex_cmd(model="cursor-grok-4.6", reasoning_effort="xhigh", workdir=Path("/work"), include_prompt=False).startswith(
+            codex_cmd(model="cursor-grok-4.6", reasoning_effort="xhigh", tool="cursor", workdir=Path("/work"), include_prompt=False).startswith(
                 "agent --force --sandbox disabled --trust --workspace /work --model cursor-grok-4.6-xhigh"
             )
         )
@@ -1623,8 +1648,19 @@ class OmoTaskTests(unittest.TestCase):
 
     def test_amh_caller_agent_is_exported_only_when_explicit(self) -> None:
         command = worker_command("codex", "cfg:2", amh_caller_agent="pb-agent")
-        self.assertIn("export OMO_AGENT_TMUX_TARGET=cfg:2 AMH_CALLER=agent:pb-agent", command)
+        self.assertIn("OMO_AGENT_TMUX_TARGET=cfg:2", command)
+        self.assertIn("PATH=", command)
+        self.assertIn(f"{Path.home() / '.config/bin'}:", command)
+        self.assertIn("AMH_CALLER=agent:pb-agent", command)
         self.assertNotIn("AMH_CALLER", worker_command("codex", "cfg:2"))
+
+    def test_worker_command_bounds_inherited_path_preserving_precedence(self) -> None:
+        helper = str(Path.home() / ".config/bin")
+        inherited = os.pathsep.join(["/first", helper, "/second", "/first", helper] * 1000)
+        with patch.dict(os.environ, {"PATH": inherited}):
+            command = worker_command("codex", "cfg:2")
+        exported = next(token.removeprefix("PATH=") for token in shlex.split(command) if token.startswith("PATH="))
+        self.assertEqual(os.pathsep.join((helper, "/first", "/second")), exported)
 
     def test_amh_caller_agent_is_launch_only_and_rejects_invalid_ids(self) -> None:
         parsed = parse_args(
@@ -1670,7 +1706,7 @@ class OmoTaskTests(unittest.TestCase):
     def test_codex_cmd_resume_carries_explicit_model_and_effort(self) -> None:
         self.assertTrue(
             codex_cmd("abc def", reasoning_effort="max", model="gpt-5.6-terra", tool="codex", include_prompt=False).startswith(
-                "bunx @openai/codex@0.155.1 --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-terra --config 'model_reasoning_effort=\"max\"' resume 'abc def'",
+                "bunx @openai/codex@latest --no-daemon --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-terra --config 'model_reasoning_effort=\"max\"' --config check_for_update_on_startup=false resume 'abc def'",
             )
         )
         self.assertTrue(
@@ -1733,18 +1769,90 @@ class OmoTaskTests(unittest.TestCase):
     def test_parse_args_requires_exact_tmux_session_name(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
             parse_args(["--task-file", "x.md"])
-        self.assertIn("--tmux-session is required", stderr.getvalue())
+        self.assertIn("--omnigent requires --workdir", stderr.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
+            parse_args(["--task-file", "x.md", "--tmux"])
+        self.assertIn("--tmux requires --tmux-session", stderr.getvalue())
         for invalid in ("=cfg", "cfg:2", "cfg.other", "2cfg"):
             with self.subTest(invalid=invalid), contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
                 parse_args(["--task-file", "x.md", "--tmux-session", invalid])
             self.assertIn("exact session name", stderr.getvalue())
 
-    def test_parse_args_requires_model_and_reasoning_for_launch(self) -> None:
+    def test_parse_args_defaults_to_omnigent_and_tmux_selects_old_path(self) -> None:
+        default = parse_args(
+            [
+                "--task-file",
+                "x.md",
+                "--workdir",
+                "/work",
+                "--model",
+                "cursor-grok-4.6",
+                "--reasoning-effort",
+                "xhigh",
+            ]
+        )
+        self.assertTrue(default.omnigent)
+        self.assertEqual("codex", default.tool)
+        tmux = parse_args(
+            [
+                "--task-file",
+                "x.md",
+                "--tmux",
+                "--tmux-session",
+                "cfg",
+                "--workdir",
+                "/tmp",
+                "--model",
+                "cursor-grok-4.6",
+                "--reasoning-effort",
+                "xhigh",
+            ]
+        )
+        self.assertFalse(tmux.omnigent)
+        self.assertTrue(tmux.tmux)
+        self.assertEqual("cfg", tmux.tmux_session)
+        session_only = parse_args(
+            [
+                "--task-file",
+                "x.md",
+                "--tmux-session",
+                "cfg",
+                "--workdir",
+                "/tmp",
+                "--model",
+                "cursor-grok-4.6",
+                "--reasoning-effort",
+                "xhigh",
+            ]
+        )
+        self.assertFalse(session_only.omnigent)
+
+    def test_parse_args_uses_harness_model_defaults(self) -> None:
         base = ["--task-file", "x.md", "--tmux-session", "cfg", "--workdir", "/tmp"]
-        for supplied in ((), ("--model", "gpt-5.6-terra"), ("--reasoning-effort", "max")):
-            with self.subTest(supplied=supplied), contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
-                parse_args([*base, *supplied])
-            self.assertIn("requires nonempty --model MODEL and --reasoning-effort EFFORT", stderr.getvalue())
+        cursor = parse_args([*base, "--tool", "cursor"])
+        self.assertEqual(DEFAULT_CURSOR_MODEL, cursor.model)
+        self.assertEqual(DEFAULT_CURSOR_EFFORT, cursor.reasoning_effort)
+        partial_model = parse_args([*base, "--model", "gpt-5.6-terra"])
+        self.assertEqual("gpt-5.6-terra", partial_model.model)
+        self.assertEqual(DEFAULT_CODEX_EFFORT, partial_model.reasoning_effort)
+        partial_effort = parse_args([*base, "--reasoning-effort", "max"])
+        self.assertEqual(DEFAULT_CODEX_MODEL, partial_effort.model)
+        self.assertEqual("max", partial_effort.reasoning_effort)
+        antigravity = parse_args(["--task-file", "x.md", "--workdir", "/tmp", "--tool", "antigravity"])
+        self.assertEqual(DEFAULT_ANTIGRAVITY_MODEL, antigravity.model)
+        self.assertEqual(DEFAULT_ANTIGRAVITY_EFFORT, antigravity.reasoning_effort)
+        self.assertTrue(antigravity.omnigent)
+        codex = parse_args([*base, "--tool", "codex", "--tmux"])
+        omnigent_codex = parse_args(["--task-file", "x.md", "--workdir", "/tmp", "--tool", "codex"])
+        self.assertEqual(DEFAULT_CODEX_MODEL, codex.model)
+        self.assertEqual(DEFAULT_CODEX_EFFORT, codex.reasoning_effort)
+        self.assertEqual(codex.model, omnigent_codex.model)
+        self.assertEqual(codex.reasoning_effort, omnigent_codex.reasoning_effort)
+        self.assertFalse(codex.omnigent)
+        self.assertTrue(omnigent_codex.omnigent)
+        command = codex_cmd(model=DEFAULT_CURSOR_MODEL, reasoning_effort=DEFAULT_CURSOR_EFFORT, tool="cursor", workdir=Path("/work"), include_prompt=False)
+        self.assertIn("--model grok-4.7-high", command)
+        self.assertNotIn("-fast", command)
         args = parse_args([*base, "--model", "gpt-5.6-terra", "--reasoning-effort", "max"])
         self.assertEqual("gpt-5.6-terra", args.model)
         self.assertEqual("max", args.reasoning_effort)
@@ -1786,11 +1894,11 @@ class OmoTaskTests(unittest.TestCase):
     def test_bare_gpt_5_6_model_is_rejected(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
             parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--model", "gpt-5.6"])
-        self.assertIn("use gpt-6-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra", stderr.getvalue())
+        self.assertIn("use gpt-6.1-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra", stderr.getvalue())
         args = Args(Path("/tmp"), "x.md", "cfg", "2", "codex", None, "", None, False, False, "", "", (), model="gpt-5.6")
-        with self.assertRaisesRegex(ValueError, "use gpt-6-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra"):
+        with self.assertRaisesRegex(ValueError, "use gpt-6.1-sol, gpt-5.6-terra, gpt-6-luna, or gpt-6-astra"):
             validate_inputs(args)
-        for model in ("gpt-6-sol", "gpt-5.6-terra", "gpt-6-luna", "gpt-6-astra"):
+        for model in ("gpt-6.1-sol", "gpt-6-sol", "gpt-5.6-terra", "gpt-6-luna", "gpt-6-astra"):
             with self.subTest(model=model):
                 parsed = parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--model", model])
                 self.assertEqual(model, parsed.model)
@@ -2123,6 +2231,8 @@ class OmoTaskTests(unittest.TestCase):
             task = root / "x.md"
             original = "---\nversion: v1.0.0\nstatus: running\nrunat: cfg:3\ntool: codex\nmanagerat: cfg:1\nis_manager: false\npending_task_items: []\n---\nwork\n"
             task.write_text(original, encoding="utf-8")
+            (root / "manager.md").write_text(original.replace("runat: cfg:3", "runat: cfg:2").replace("is_manager: false", "is_manager: true"), encoding="utf-8")
+            (root / "TODO.md").write_text("current:\nx.md cfg:3\nmanager.md cfg:2\n", encoding="utf-8")
             with contextlib.redirect_stdout(io.StringIO()):
                 result = main(
                     [
@@ -2150,7 +2260,11 @@ class OmoTaskTests(unittest.TestCase):
                 "---\nversion: v1.0.0\nstatus: running\nrunat: worker:1\ntool: codex\nmanagerat: old:1\nis_manager: false\npending_task_items: []\n---\nbody\n",
                 encoding="utf-8",
             )
-            (root / "TODO.md").write_text("current:\n", encoding="utf-8")
+            (root / "manager.md").write_text(
+                "---\nversion: v1.0.0\nstatus: running\nrunat: new:2\ntool: codex\nmanagerat: old:1\nis_manager: true\npending_task_items: []\n---\nbody\n",
+                encoding="utf-8",
+            )
+            (root / "TODO.md").write_text("current:\nmanager.md new:2\n", encoding="utf-8")
             locked_roots: list[Path] = []
 
             @contextlib.contextmanager
@@ -2162,6 +2276,41 @@ class OmoTaskTests(unittest.TestCase):
                 migrate_manager_owner(task, "old:1", "new:2")
             self.assertEqual([root.resolve()], locked_roots)
             self.assertIn("managerat: new:2\n", task.read_text(encoding="utf-8"))
+
+    def test_migration_rejects_worker_parent_in_dry_run_and_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "child.md"
+            original = "---\nversion: v1.0.0\nstatus: blocked\nblocked_on: replacement pending\nrunat: dw:64\ntool: codex\nmanagerat: dw:1\nis_manager: false\npending_task_items: []\n---\nwork\n"
+            task.write_text(original, encoding="utf-8")
+            worker = root / "worker.md"
+            worker.write_text(original.replace("runat: dw:64", "runat: dw:30").replace("status: blocked\nblocked_on: replacement pending", "status: running"), encoding="utf-8")
+            (root / "TODO.md").write_text("current:\nchild.md dw:64\nworker.md dw:30\n", encoding="utf-8")
+            for dry_run in (True, False):
+                with self.subTest(dry_run=dry_run), self.assertRaisesRegex(ValueError, "is_manager:true"):
+                    migrate_manager_owner(task, "dw:1", "dw:30", dry_run, root)
+                self.assertEqual(original, task.read_text(encoding="utf-8"))
+
+    def test_migration_rejects_noncurrent_or_duplicate_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "child.md"
+            task.write_text("---\nversion: v1.0.0\nstatus: blocked\nblocked_on: replacement pending\nrunat: dw:64\ntool: codex\nmanagerat: dw:1\nis_manager: false\npending_task_items: []\n---\nwork\n", encoding="utf-8")
+            manager = root / "manager.md"
+            manager.write_text("---\nversion: v1.0.0\nstatus: running\nrunat: dw:0\ntool: codex\nmanagerat: dw:1\nis_manager: true\npending_task_items: []\n---\nwork\n", encoding="utf-8")
+            (root / "TODO.md").write_text("current:\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "TODO current"):
+                migrate_manager_owner(task, "dw:1", "dw:0", True, root)
+            for row in ("manager.md wrong:9", "manager.md"):
+                (root / "TODO.md").write_text(f"current:\n{row}\n", encoding="utf-8")
+                for dry_run in (True, False):
+                    with self.subTest(row=row, dry_run=dry_run), self.assertRaisesRegex(ValueError, "TODO current"):
+                        migrate_manager_owner(task, "dw:1", "dw:0", dry_run, root)
+            (root / "TODO.md").write_text("current:\nmanager.md dw:0\n", encoding="utf-8")
+            duplicate = root / "duplicate.md"
+            duplicate.write_text(manager.read_text(encoding="utf-8"), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "one active task"):
+                migrate_manager_owner(task, "dw:1", "dw:0", True, root)
 
     def test_direct_nested_migration_requires_authoritative_root_when_no_todo_exists(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2617,18 +2766,74 @@ class OmoTaskTests(unittest.TestCase):
         self.assertEqual("pcodx", args.tool)
         self.assertTrue(args.tool_explicit)
 
-    def test_parse_args_defaults_to_cursor_unless_codex_requested(self) -> None:
+    def test_parse_args_defaults_to_codex_unless_cursor_requested(self) -> None:
         default = parse_args(["--task-file", "x.md", "--tmux-session", "cfg"])
-        self.assertEqual("cursor", DEFAULT_TOOL)
+        self.assertEqual("codex", DEFAULT_TOOL)
         self.assertEqual(DEFAULT_TOOL, default.tool)
         self.assertFalse(default.tool_explicit)
-        requested = parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--tool", "codex"])
-        self.assertEqual("codex", requested.tool)
+        requested = parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--tool", "cursor"])
+        self.assertEqual("cursor", requested.tool)
         self.assertTrue(requested.tool_explicit)
 
     def test_parse_args_accepts_is_manager(self) -> None:
         args = parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--is-manager"])
         self.assertTrue(args.is_manager)
+
+    def test_omnigent_manager_defaults_to_claude_opus_low(self) -> None:
+        manager = parse_args(["--task-file", "x.md", "--workdir", "/work", "--is-manager"])
+        self.assertEqual(("claude", "claude-opus-5-5", "low"), (manager.tool, manager.model, manager.reasoning_effort))
+        self.assertTrue(manager.omnigent)
+        self.assertFalse(manager.tool_explicit)
+        worker = parse_args(["--task-file", "x.md", "--workdir", "/work", "--tool", "claude"])
+        self.assertEqual(("claude-opus-5-5", "low"), (worker.model, worker.reasoning_effort))
+        self.assertTrue(worker.omnigent)
+
+    def test_role_defaults_use_codex_workers_and_tmux_managers(self) -> None:
+        base = ["--task-file", "x.md", "--workdir", "/work"]
+        for flags in ((), ("--tmux", "--tmux-session", "cfg")):
+            with self.subTest(flags=flags):
+                worker = parse_args([*base, *flags])
+                self.assertEqual("codex", worker.tool)
+                self.assertEqual("gpt-6.1-sol", worker.model)
+                self.assertEqual("low", worker.reasoning_effort)
+                self.assertFalse(worker.tool_explicit)
+                self.assertEqual(not flags, worker.omnigent)
+                if not flags:
+                    continue
+                manager = parse_args([*base, *flags, "--is-manager"])
+                self.assertEqual("codex", manager.tool)
+                self.assertEqual("gpt-6-luna", manager.model)
+                self.assertEqual("high", manager.reasoning_effort)
+                self.assertFalse(manager.tool_explicit)
+                self.assertTrue(manager.is_manager)
+                self.assertEqual(worker.omnigent, manager.omnigent)
+                command = codex_cmd(tool=manager.tool, model=manager.model, reasoning_effort=manager.reasoning_effort, include_prompt=False)
+                self.assertIn("--model gpt-6-luna", command)
+                self.assertIn('model_reasoning_effort="high"', command)
+
+    def test_explicit_harness_overrides_role_default(self) -> None:
+        base = ["--task-file", "x.md", "--workdir", "/work"]
+        for flags in ((), ("--tmux", "--tmux-session", "cfg")):
+            for role, tool, model, effort in (
+                ((), "cursor", "grok-4.7", "high"),
+                (("--is-manager",), "codex", "gpt-6-luna", "high"),
+            ):
+                with self.subTest(flags=flags, role=role, tool=tool):
+                    args = parse_args([*base, *flags, *role, f"--tool={tool}"])
+                    self.assertEqual(tool, args.tool)
+                    self.assertEqual(model, args.model)
+                    self.assertEqual(effort, args.reasoning_effort)
+                    self.assertTrue(args.tool_explicit)
+                    self.assertEqual(not flags, args.omnigent)
+
+    def test_manager_model_and_effort_overrides_preserve_other_role_default(self) -> None:
+        base = ["--task-file", "x.md", "--workdir", "/work", "--is-manager", "--tool", "codex"]
+        model_override = parse_args([*base, "--model", "gpt-6.1-sol"])
+        self.assertEqual("gpt-6.1-sol", model_override.model)
+        self.assertEqual("high", model_override.reasoning_effort)
+        effort_override = parse_args([*base, "--reasoning-effort", "low"])
+        self.assertEqual("gpt-6-luna", effort_override.model)
+        self.assertEqual("low", effort_override.reasoning_effort)
 
     def test_new_task_file_writes_is_manager_frontmatter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2670,7 +2875,8 @@ class OmoTaskTests(unittest.TestCase):
                 contextlib.redirect_stdout(out),
                 patch("omo_manager.omo_task.exact_pane_id", return_value="%2"),
                 patch("omo_manager.omo_task.capture_pane", return_value=["ready"]),
-                patch("omo_manager.omo_task.current_command", return_value="agent"),
+                patch("omo_manager.omo_task.current_command", return_value="bunx"),
+                patch("omo_manager.omo_task.status", return_value="ready"),
             ):
                 self.assertEqual(
                     0,
@@ -2928,7 +3134,7 @@ class OmoTaskTests(unittest.TestCase):
             prelaunch_idx = launch_line.index(str(prelaunch))
             export_idx = launch_line.index("export OMO_AGENT_TMUX_TARGET=cfg:2")
             marker_idx = launch_line.index("[omo:DRY]")
-            exec_idx = launch_line.index("exec agent --force --sandbox disabled --trust")
+            exec_idx = launch_line.index("exec bunx @openai/codex@latest --no-daemon")
             self.assertLess(source_idx, prelaunch_idx)
             self.assertLess(prelaunch_idx, export_idx)
             self.assertLess(export_idx, marker_idx)
@@ -3021,7 +3227,7 @@ class OmoTaskTests(unittest.TestCase):
                 self.assertEqual(task, bound_task)
                 self.assertEqual(hashlib.sha256(task.read_bytes()).hexdigest(), expected)
                 text = captured.read_text(encoding="utf-8")
-                self.assertTrue(text.startswith("$ /test/getagentsmd\nagent instructions\n"))
+                self.assertTrue(text.startswith("Task tag: x\nTask file: x.md\nUse --task-file x.md with task-aware helpers.\n$ /test/getagentsmd\nagent instructions\n"))
                 self.assertIn('<manager_delegation from="mgr:1">', text)
                 self.assertIn(VALID_GOAL_TREE.rstrip(), text)
                 events.append("capture-and-prompt")
@@ -3056,6 +3262,28 @@ class OmoTaskTests(unittest.TestCase):
 
             self.assertEqual(["record", "send"], events)
             self.assertTrue(record.call_args.kwargs["replace_existing"])
+
+    def test_capture_fresh_codex_session_preserves_large_prompt_for_verified_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "x.md"
+            prompt = Path(tmp) / "prompt.md"
+            task.write_text("task", encoding="utf-8")
+            source = "captured instructions\n" * 100
+            prompt.write_text(source, encoding="utf-8")
+            session_id = "11111111-1111-4111-8111-111111111111"
+            preserved = Path(tmp) / ".omo-codex-initial-prompts" / f"{session_id}.txt"
+            events: list[str] = []
+
+            def verify_handoff(_pane: object, handoff: Path) -> None:
+                self.assertEqual(source, preserved.read_text(encoding="utf-8"))
+                self.assertEqual(0o600, preserved.stat().st_mode & 0o777)
+                self.assertIn(str(preserved), handoff.read_text(encoding="utf-8"))
+                self.assertIn(hashlib.sha256(source.encode()).hexdigest(), handoff.read_text(encoding="utf-8"))
+                events.append("send")
+
+            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=object()), patch("omo_manager.omo_codex_start.query_exact_status_session_id", return_value=session_id), patch("omo_manager.omo_codex_start.record_session_id", side_effect=lambda *_args, **_kwargs: events.append("record")), patch("omo_manager.omo_codex_start.send_prompt", side_effect=verify_handoff):
+                capture_fresh_codex_session("cfg:7", task, prompt, hashlib.sha256(b"task").hexdigest())
+            self.assertEqual(["record", "send"], events)
 
     def test_start_codex_can_launch_cursor_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3124,7 +3352,7 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIn("resume abc", text)
             self.assertNotIn("$(cat --", text)
 
-    def test_resume_idle_dry_run_defaults_to_cursor_agent_resume(self) -> None:
+    def test_resume_idle_dry_run_defaults_to_codex_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "x.md").write_text(VALID_GOAL_TREE, encoding="utf-8")
@@ -3148,9 +3376,9 @@ class OmoTaskTests(unittest.TestCase):
             with patch("omo_manager.omo_task.launch_session", return_value=LaunchSession("cfg", "$1")), contextlib.redirect_stdout(out):
                 self.assertEqual(0, main(argv))
             text = out.getvalue()
-            self.assertIn("exec agent --force --sandbox disabled --trust", text)
-            self.assertIn("--resume abc", text)
-            self.assertNotIn("bunx @openai/codex", text)
+            self.assertIn("exec bunx @openai/codex@latest --no-daemon", text)
+            self.assertIn("resume abc", text)
+            self.assertNotIn("exec agent", text)
             self.assertNotIn("$(cat --", text)
 
     def test_vl_resume_idle_does_not_require_prompt(self) -> None:
@@ -3799,7 +4027,7 @@ class OmoTaskTests(unittest.TestCase):
                 "- speak directly with the human in this pane\n"
                 "- do not report to a manager unless explicitly asked\n"
                 "- do not touch other `h*` sessions or use PCODX\n"
-                "- use `/ssd1/sichangheagent/work_logs/dw_github_issues_755/` for the issue drafts\n\n"
+                "- use `/srv/agent/work_logs/dw_github_issues_755/` for the issue drafts\n\n"
                 "Start by briefly telling the human you are ready to help revise the issues.\n"
             )
             self.assertNotIn("<human_instruction", sanitized_prompt.casefold())
@@ -4119,7 +4347,7 @@ class OmoTaskTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "live Cursor Agent process"):
                     validate_existing_target_runtime(args)
 
-    def test_existing_target_default_cursor_rejects_codex_pane_without_mutation(self) -> None:
+    def test_existing_target_explicit_cursor_rejects_codex_pane_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             prompt = root / "prompt.md"
@@ -4140,6 +4368,8 @@ class OmoTaskTests(unittest.TestCase):
                         "x.md",
                         "--tmux-session",
                         "wl",
+                        "--tool",
+                        "cursor",
                         "--tmux-window",
                         "2",
                         "--prompt-file",
@@ -4187,6 +4417,19 @@ class OmoTaskTests(unittest.TestCase):
             self.assertEqual(0, result)
             self.assertTrue((root / "x.md").is_file())
             self.assertTrue((root / "TODO.md").is_file())
+
+    def test_existing_target_mode_accepts_authenticated_node_codex_when_ui_unrecognized(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = Args(root, "x.md", "dw-manager-20260926", "1", "codex", None, "", None, False, False, "", "", (), False, "wl:1")
+            with (
+                patch("omo_manager.omo_task.exact_pane_id", return_value="%2"),
+                patch("omo_manager.omo_task.capture_pane", return_value=["unrecognized Codex UI"]),
+                patch("omo_manager.omo_task.status", return_value="not_codex"),
+                patch("omo_manager.omo_task.pane_has_exact_codex_process", return_value=True) as authenticated,
+            ):
+                self.assertEqual("%2", validate_existing_target_runtime(args))
+            authenticated.assert_called_once_with("dw-manager-20260926:1", "%2")
 
     def test_existing_target_mode_relinks_manager_without_launch_or_task_rewrite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
