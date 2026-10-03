@@ -7,6 +7,10 @@ one program for agents and managers; usage lives in `amh --help`, not here
 - Python 3.10 standard library only
 - entry `bin/amh`; watcher `python3 -m amh.watch` under `amh-watch.service`
 - `bin/use-amh`: stub that old command names link to
+- test: `/usr/bin/python3 test_amh.py`; prints only failures
+    - runs the real CLI entry and watcher steps on a temporary copy of the root's `*.md`
+    - fakes: Omnigent API, tmux, IMAP, SMTP; settings from a temporary `local.env`, so no real agent or mailbox is touched
+    - run it after every change; the program is live as soon as a file is saved
 
 records, all under the work-log root (`OMO_WORK_LOGS_ROOT`)
 - task file `NAME.md`
@@ -20,14 +24,17 @@ records, all under the work-log root (`OMO_WORK_LOGS_ROOT`)
 - name of a task file without `.md` = tag in email subjects `[tag]`
 
 modules
-- `config`: reads `local.env` (`export K="V"`); `own_address` from the Omnigent session variable, else the tmux pane
+- `config`: reads `local.env` (`export K="V"`, `$VAR` expanded); the environment overrides it; `OMO_MANAGER_LOCAL_ENV` names another file
 - `taskfile`: parse/render task files without a YAML library; one lock file serializes every writer; atomic replace
 - `agents`: send, status, stop, launch for Omnigent (HTTP) and tmux
+    - `own_address`: the caller's Omnigent session variable, else its tmux pane
     - multi-line message to Omnigent is followed by one typed line
         - Claude Code treats multi-line input as pasted text and does not act on it alone
     - tmux commands drop `TMUX` so they reach the user's default server
-- `mail`: send on the tag's thread (agent Gmail account), list/trash the human's unread (human mailbox via himalaya config), fetch the human's new mail
+- `mail`: send on the tag's thread (agent Gmail account), list/trash the human's unread (human mailbox via himalaya config), fetch unread mail from one sender
+    - `compose` + `deliver` build and send every outgoing email, to the human and to the guest
 - `work`: what each action does; `problems`, `check`, `tree`, `rotate`
+    - `rotate` of the main manager rewrites its address in `local.env`
 - `watch`: loop every 5 s
     - mail intake: store, route, append `(pending)` + source line, mark read
         - route: `[tag]` task; `for manager` at body edge -> its manager; done task -> its manager; else main manager

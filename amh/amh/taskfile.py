@@ -12,10 +12,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from amh import agents
 from amh.config import Config
 
 HUMAN_MARK = "🧑 "
-ACTIVE = ("running", "long_running", "blocked")
 SECTIONS = ("current:", "human pending:", "low priority:", "previous:")
 ITEMS_KEY = "pending_task_items"
 MARKER = "(pending)"
@@ -33,6 +33,11 @@ class Task:
     @property
     def address(self) -> str:
         return self.fields["runat"]
+
+    @property
+    def tag(self) -> str:
+        """The file name without `.md`: the `[tag]` of the task's email subjects."""
+        return Path(self.name).stem
 
     def render(self) -> str:
         head = "".join(f"{key}: {scalar(value)}\n" for key, value in self.fields.items())
@@ -64,7 +69,7 @@ def parse(name: str, text: str) -> Task:
     fields: dict[str, str] = {}
     items: list[str] = []
     key = ""
-    for line in match.group(1).splitlines():
+    for line in match[1].splitlines():
         pair = re.fullmatch(r"(\w+):(?: (.*))?", line)
         if line.startswith("  - ") and key == ITEMS_KEY:
             items.append(unscalar(line[4:]))
@@ -76,7 +81,7 @@ def parse(name: str, text: str) -> Task:
                 fields[key] = unscalar(pair[2] or "")
     if "status" not in fields or "runat" not in fields:
         raise ValueError(f"{name} records no status or no agent address")
-    return Task(name, fields, items, match.group(2))
+    return Task(name, fields, items, match[2])
 
 
 @contextmanager
@@ -120,7 +125,7 @@ def pending_blocks(body: str) -> list[tuple[int, list[str]]]:
     found = []
     for index, line in enumerate(lines):
         if index not in fenced and line.strip() == MARKER:
-            end = next((i for i in range(index + 1, len(lines)) if not lines[i].strip() or lines[i].strip() == MARKER), len(lines))
+            end = next((i for i in range(index + 1, len(lines)) if lines[i].strip() in ("", MARKER)), len(lines))
             found.append((index, lines[index + 1 : end]))
     return found
 
@@ -133,7 +138,7 @@ def active_tasks(config: Config) -> list[Task]:
             task = parse(path.name, path.read_text(encoding="utf-8"))
         except ValueError:
             continue
-        if task.fields.get("status") in ACTIVE:
+        if task.fields["status"] in ("running", "long_running", "blocked"):
             tasks.append(task)
     return tasks
 
@@ -143,8 +148,8 @@ def own_task(config: Config, named: str | None) -> Task:
     # 🧑 "We need to pass in the task file name at launch and let the agent pass in that when they use any helper command."
     if named := named or os.environ.get("OMO_AGENT_TASK_FILE"):
         return load(config, named)
-    address = config.own_address()
-    matches = [task for task in active_tasks(config) if task.fields.get("runat") == address]
+    address = agents.own_address()
+    matches = [task for task in active_tasks(config) if task.address == address]
     if len(matches) != 1:
         raise SystemExit(f"amh: {len(matches)} active tasks run at {address}; pass --task-file NAME.md")
     return matches[0]
@@ -155,7 +160,7 @@ def mark(item: str, from_human: bool) -> str:
     # 🧑 "agents’ pending task item list distinguishes human requests from agent-made ones ... prepend a human emoji"
     text = " ".join(item.split())
     while text.startswith(HUMAN_MARK.strip()):
-        text = text[len(HUMAN_MARK.strip()) :].lstrip()
+        text = text.removeprefix(HUMAN_MARK.strip()).lstrip()
     if not text:
         raise SystemExit("amh: the item is empty")
     return HUMAN_MARK + text if from_human else text
@@ -171,27 +176,25 @@ def section_of(task: Task) -> str:
     return "human pending:" if waits_on_human else "current:"
 
 
+def section_at(rows: list[str], index: int) -> str:
+    """Name the section that row `index` of the task list lies in."""
+    return next((rows[i].strip().lower() for i in range(index, -1, -1) if rows[i].strip().lower() in SECTIONS), "")
+
+
 def place_in_list(config: Config, task: Task) -> None:
     """Put the task's row at the top of its section of `TODO.md`, removing any other row for it."""
     # 🧑 "the task reference moves from `TODO.md` `current` to the top of `previous`"
     path = config.root / "TODO.md"
     section = section_of(task)
     rows = path.read_text(encoding="utf-8").split("\n")
-    old = [row for row in rows if row.split(" ", 1)[0] == task.name]
-    heading = next((i for i, row in enumerate(rows) if row.strip().lower() == section), None)
-    if heading is None:
-        raise SystemExit(f"amh: TODO.md has no `{section}` section")
-    in_section = [i for i, row in enumerate(rows) if row.split(" ", 1)[0] == task.name and section_at(rows, i) == section]
-    if len(old) == 1 and in_section and rows[in_section[0]].split()[1:2] == [task.address]:
+    old = [i for i, row in enumerate(rows) if row.split(" ", 1)[0] == task.name]
+    if len(old) == 1 and section_at(rows, old[0]) == section and rows[old[0]].split()[1:2] == [task.address]:
         return
-    rows = [row for row in rows if row.split(" ", 1)[0] != task.name]
-    heading = next(i for i, row in enumerate(rows) if row.strip().lower() == section)
-    at = heading + 1
+    rows = [row for i, row in enumerate(rows) if i not in old]
+    at = next((i + 1 for i, row in enumerate(rows) if row.strip().lower() == section), None)
+    if at is None:
+        raise SystemExit(f"amh: TODO.md has no `{section}` section")
     while section != "previous:" and at < len(rows) and not rows[at].strip():
         at += 1
     rows.insert(at, f"{task.name} {task.address}")
     write(path, "\n".join(rows))
-
-
-def section_at(rows: list[str], index: int) -> str:
-    return next((rows[i].strip().lower() for i in range(index, -1, -1) if rows[i].strip().lower() in SECTIONS), "")

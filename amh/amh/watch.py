@@ -49,30 +49,31 @@ def route(config: Config, subject: str, body: str) -> Task:
             manager = ""
         if manager in by_address:
             return by_address[manager]
-    if work.main_manager(config) not in by_address:
+    if config.main_manager not in by_address:
         raise LookupError("no active task file runs at the main manager address")
-    return by_address[work.main_manager(config)]
+    return by_address[config.main_manager]
 
 
 def take_in_mail(config: Config, box: imaplib.IMAP4_SSL) -> None:
     """Store each new human email and append a `(pending)` block naming it to the right task file."""
-    for incoming in mail.fetch_new(box, config):
-        name = f"{config.get('AMH_MAIL_PREFIX', 'mail')}-{incoming.uid}.txt"
+    for uid, parsed in mail.unseen_from(box, config.get("OMO_HUMAN_EMAIL_ADDRESS")):
+        name = f"{config.get('AMH_MAIL_PREFIX', 'mail')}-{uid}.txt"
         stored = config.mail_dir / name
+        subject, body = " ".join(str(parsed["Subject"] or "").split()), mail.text_of(parsed)
         if not stored.exists():
             try:
                 with taskfile.locked(config):
-                    task = route(config, incoming.subject, incoming.body)
-                    stored.write_text(f"Subject: {incoming.subject}\n\n{incoming.body}", encoding="utf-8")
+                    task = route(config, subject, body)
+                    stored.write_text(f"Subject: {subject}\n\n{body}", encoding="utf-8")
                     stored.chmod(0o600)
                     path = config.root / task.name
                     taskfile.write(path, path.read_text(encoding="utf-8").rstrip("\n") + f"\n\n{MARKER}\n{MAIL_SOURCE}{name})\n")
             except (LookupError, ValueError, OSError) as error:
                 stored.unlink(missing_ok=True)
-                log(f"mail {name} {incoming.subject!r} left unread, not taken in: {error!r}")
+                log(f"mail {name} {subject!r} left unread, not taken in: {error!r}")
                 continue
-            log(f"mail {name} {incoming.subject!r} -> {task.name}")
-        mail.mark_read(box, incoming.uid)
+            log(f"mail {name} {subject!r} -> {task.name}")
+        mail.mark_read(box, uid)
 
 
 def delivery_text(config: Config, block: list[str]) -> str:
@@ -92,7 +93,7 @@ def delivery_text(config: Config, block: list[str]) -> str:
 def deliver_pending(config: Config, failed_at: dict[str, float]) -> None:
     """Send every pending block to its task's agent, then delete the marker line."""
     for task in taskfile.active_tasks(config):
-        if MARKER not in task.body or task.address == "retired" or time.monotonic() - failed_at.get(task.name, -RETRY_S) < RETRY_S:
+        if task.address == "retired" or time.monotonic() - failed_at.get(task.name, -RETRY_S) < RETRY_S:
             continue
         for _, block in taskfile.pending_blocks(task.body):
             if not block:
@@ -156,7 +157,7 @@ def nudge(config: Config, told_at: dict[tuple[str, str], float]) -> None:
         # 🧑 "Harness errors should directly email me too"
         if problem == "error":
             try:
-                _ = mail.send(config, Path(task.name).stem, "", text + "\nIts manager has been told to handle it.\n", "amh watcher")
+                _ = mail.send(config, task.tag, "", text + "\nIts manager has been told to handle it.\n", "amh watcher")
             except Exception as failure:
                 log(f"failure email for {task.name} was not sent: {failure!r}")
                 now.discard(key)
@@ -181,8 +182,7 @@ def run() -> int:
         config = configuration.load()
         try:
             if box is None and time.monotonic() >= retry_login_at:
-                box = imaplib.IMAP4_SSL(mail.IMAP_HOST, timeout=60)
-                _ = box.login(config.get("OMO_AGENT_GMAIL_ADDRESS"), config.get("OMO_AGENT_GMAIL_APP_PASSWORD"))
+                box = mail.connect(config)
             if box is not None:
                 take_in_mail(config, box)
                 guest.take_in(config, box)

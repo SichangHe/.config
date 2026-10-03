@@ -16,34 +16,33 @@ from pathlib import Path
 from amh import agents, config as configuration, guest, mail, taskfile, work
 from amh.config import Config
 
-Run = Callable[[Config, argparse.Namespace], int]
+Run = Callable[[Config, argparse.Namespace], int | None]
 UNIT = "amh-watch.service"
 
 
-def todo_list(config: Config, args: argparse.Namespace) -> int:
+def todo_list(config: Config, args: argparse.Namespace) -> None:
     print("\n".join(taskfile.own_task(config, args.task_file).items))
-    return 0
 
 
-def todo_add(config: Config, args: argparse.Namespace) -> int:
+def add_item(config: Config, args: argparse.Namespace) -> None:
+    """`todo add` to the caller's own task, or `task give` to the named task."""
+    named = getattr(args, "task", None)
     with taskfile.locked(config):
-        task = taskfile.own_task(config, args.task_file)
-        new = work.add_items(config, task, [args.item], args.from_human)
+        task = taskfile.load(config, named) if named else taskfile.own_task(config, args.task_file)
+        new = work.add_item(config, task, args.item, args.from_human)
     work.notify_human(config, task, "created", new)
-    print(f"added {len(new)} open item(s)")
-    return 0
+    print(f"added {len(new)} open item(s)" + (f" to {named}" if named else ""))
 
 
-def todo_done(config: Config, args: argparse.Namespace) -> int:
+def todo_done(config: Config, args: argparse.Namespace) -> None:
     with taskfile.locked(config):
         task = taskfile.own_task(config, args.task_file)
         work.remove_item(config, task, args.item, args.evidence)
     work.notify_human(config, task, "deleted", [args.item])
     print("removed 1 open item")
-    return 0
 
 
-def todo_replace(config: Config, args: argparse.Namespace) -> int:
+def todo_replace(config: Config, args: argparse.Namespace) -> None:
     with taskfile.locked(config):
         task = taskfile.own_task(config, args.task_file)
         if args.old not in task.items:
@@ -51,32 +50,27 @@ def todo_replace(config: Config, args: argparse.Namespace) -> int:
         task.items[task.items.index(args.old)] = taskfile.mark(args.new, args.old.startswith(taskfile.HUMAN_MARK))
         taskfile.save(config, task)
     print("replaced 1 open item")
-    return 0
 
 
-def tell_manager(config: Config, args: argparse.Namespace) -> int:
+def tell_manager(config: Config, args: argparse.Namespace) -> None:
     work.tell_manager(config, taskfile.own_task(config, args.task_file), args.text, "blocked" if args.blocked else "done" if args.done else "")
     print("message sent to your manager; do not send it again")
-    return 0
 
 
-def tell_human(config: Config, args: argparse.Namespace) -> int:
+def tell_human(config: Config, args: argparse.Namespace) -> None:
     body = Path(args.file).read_text(encoding="utf-8") if args.file else sys.stdin.read()
     work.tell_human(config, taskfile.own_task(config, args.task_file), args.subject, body, args.replaces)
-    return 0
 
 
-def tell_agent(config: Config, args: argparse.Namespace) -> int:
+def tell_agent(config: Config, args: argparse.Namespace) -> None:
     if bool(args.text) == bool(args.file):
         raise SystemExit("amh: give the message as TEXT or as --file, not both")
     text = Path(args.file).read_text(encoding="utf-8") if args.file else args.text
-    agents.send(config, address(config, args.who), work.envelope(config.own_address(), text))
-    return 0
+    agents.send(config, address(config, args.who), work.envelope(agents.own_address(), text))
 
 
-def tell_guest(config: Config, args: argparse.Namespace) -> int:
+def tell_guest(config: Config, args: argparse.Namespace) -> None:
     print(f"Email sent to the guest.\nMessage-ID: {guest.reply(config, args.mail, Path(args.file).read_text(encoding='utf-8'), [Path(image) for image in args.image])}")
-    return 0
 
 
 def address(config: Config, who: str) -> str:
@@ -84,49 +78,36 @@ def address(config: Config, who: str) -> str:
     return taskfile.load(config, who).address if who.endswith(".md") else who
 
 
-def task_start(config: Config, args: argparse.Namespace) -> int:
+def task_start(config: Config, args: argparse.Namespace) -> None:
     if bool(args.email) != bool(args.lines):
         raise SystemExit("amh: --email and --lines go together")
-    print(work.start_task(config, args.task, Path(args.dir), Path(args.prompt), args.tool, args.model, args.effort, args.manager, args.as_manager, args.tmux, args.email, args.lines, args.proxy))
-    return 0
+    goal = Path(args.prompt).read_text(encoding="utf-8")
+    print(work.start_task(config, args.task, Path(args.dir), goal, args.manager or agents.own_address(), args.tool, args.model, args.effort, args.as_manager, args.tmux, args.proxy, args.email, args.lines))
 
 
-def task_show(config: Config, args: argparse.Namespace) -> int:
+def task_show(config: Config, args: argparse.Namespace) -> None:
     for name in args.task:
         task = taskfile.load(config, name)
         print(f"{task.name}\n" + "".join(f"  {key}: {value}\n" for key, value in task.fields.items()) + "".join(f"  - {item}\n" for item in task.items), end="")
-    return 0
 
 
-def task_close(config: Config, args: argparse.Namespace) -> int:
+def task_close(config: Config, args: argparse.Namespace) -> None:
     name = args.task or taskfile.own_task(config, args.task_file).name
     print(f"closed {name} at {work.close_task(config, name, args.agent_gone, not args.no_email, own=args.task is None)}")
-    return 0
 
 
-def task_status(config: Config, args: argparse.Namespace) -> int:
+def task_status(config: Config, args: argparse.Namespace) -> None:
     work.set_status(config, args.task, args.status, args.on)
-    return 0
 
 
-def task_note(config: Config, args: argparse.Namespace) -> int:
+def task_note(config: Config, args: argparse.Namespace) -> None:
     with taskfile.locked(config):
         task = taskfile.load(config, args.task)
         taskfile.note(task, args.text)
         taskfile.save(config, task)
-    return 0
 
 
-def task_give(config: Config, args: argparse.Namespace) -> int:
-    with taskfile.locked(config):
-        task = taskfile.load(config, args.task)
-        new = work.add_items(config, task, [args.item], args.from_human)
-    work.notify_human(config, task, "created", new)
-    print(f"added {len(new)} open item(s) to {args.task}")
-    return 0
-
-
-def task_move(config: Config, args: argparse.Namespace) -> int:
+def task_move(config: Config, args: argparse.Namespace) -> None:
     with taskfile.locked(config):
         source, to = taskfile.load(config, args.source), taskfile.load(config, args.to)
         if args.item not in source.items or to.fields["status"] == "done" or args.source == args.to:
@@ -135,7 +116,6 @@ def task_move(config: Config, args: argparse.Namespace) -> int:
         to.items += [args.item] if args.item not in to.items else []
         taskfile.save(config, to)
         taskfile.save(config, source)
-    return 0
 
 
 def task_check(config: Config, _args: argparse.Namespace) -> int:
@@ -151,31 +131,26 @@ def agent_problems(config: Config, _args: argparse.Namespace) -> int:
     return 3 if found else 0
 
 
-def agent_list(config: Config, _args: argparse.Namespace) -> int:
+def agent_list(config: Config, _args: argparse.Namespace) -> None:
     for task in taskfile.active_tasks(config):
         state, evidence = ("retired", "") if task.address == "retired" else agents.status(config, task.address)
         print(f"{state}: {task.name} [{task.fields['status']}] {task.address} {evidence}")
-    return 0
 
 
-def agent_tree(config: Config, _args: argparse.Namespace) -> int:
+def agent_tree(config: Config, _args: argparse.Namespace) -> None:
     print(work.tree(config))
-    return 0
 
 
-def agent_status(config: Config, args: argparse.Namespace) -> int:
+def agent_status(config: Config, args: argparse.Namespace) -> None:
     print(": ".join(agents.status(config, address(config, args.who))))
-    return 0
 
 
-def agent_stop(config: Config, args: argparse.Namespace) -> int:
+def agent_stop(config: Config, args: argparse.Namespace) -> None:
     agents.stop(config, address(config, args.who))
-    return 0
 
 
-def agent_compact(config: Config, args: argparse.Namespace) -> int:
+def agent_compact(config: Config, args: argparse.Namespace) -> None:
     agents.send(config, address(config, args.who), "/compact")
-    return 0
 
 
 def manager_watchers(_config: Config, _args: argparse.Namespace) -> int:
@@ -183,20 +158,18 @@ def manager_watchers(_config: Config, _args: argparse.Namespace) -> int:
     return restarted or subprocess.run(["systemctl", "--user", "--no-pager", "--lines=3", "status", UNIT], check=False).returncode
 
 
-def manager_rotate(config: Config, args: argparse.Namespace) -> int:
+def manager_rotate(config: Config, args: argparse.Namespace) -> None:
     print(work.rotate(config, args.who, args.tool, args.model, args.effort))
-    return 0
 
 
-def manager_worktree(config: Config, _args: argparse.Namespace) -> int:
+def manager_worktree(config: Config, _args: argparse.Namespace) -> None:
     for repo in (Path.home() / ".config", config.root):
         dirty = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True, check=False).stdout
         print(f"{repo}:\n{dirty}" if dirty else f"{repo}: clean")
-    return 0
 
 
 def mail_unread(config: Config, args: argparse.Namespace) -> int:
-    for header in mail.unread(config, Path(taskfile.own_task(config, args.task_file).name).stem, []):
+    for header in mail.unread(config, taskfile.own_task(config, args.task_file).tag, []):
         print(f"{header.message_id} {header.subject!r} {header.date}")
     return 0
 
@@ -243,7 +216,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     todo = group("todo", "Read and update your own list of open work.")
     _ = action(todo, "list", "Show your open work.", todo_list, own=True)
-    p = action(todo, "add", "Add one open item.", todo_add, "Adding the human's request emails the human that it was created.", own=True)
+    p = action(todo, "add", "Add one open item.", add_item, "Adding the human's request emails the human that it was created.", own=True)
     _ = p.add_argument("item", metavar="ITEM")
     _ = p.add_argument("--from-human", action="store_true", help="the item is the human's request, in the human's words")
     p = action(todo, "done", "Remove one finished or cancelled item.", todo_done, "Removing a 🧑 item emails the human that it was deleted.", own=True)
@@ -258,7 +231,7 @@ def build_parser() -> argparse.ArgumentParser:
     _ = p.add_argument("task", metavar="TASK.md", help="new task file name; also the agent's tag in email subjects")
     _ = p.add_argument("--dir", required=True, help="directory the agent works in")
     _ = p.add_argument("--prompt", required=True, metavar="FILE", help="file holding the goal: one goal line, then sub-goals as bullets")
-    _ = p.add_argument("--tool", choices=agents.TOOLS, help="default: claude for managers, codex for workers")
+    _ = p.add_argument("--tool", choices=tuple(agents.DEFAULTS), help="default: claude for managers, codex for workers")
     _ = p.add_argument("--model", help="default: the tool's usual model")
     _ = p.add_argument("--effort", help="reasoning effort; default: the tool's usual effort")
     _ = p.add_argument("--manager", metavar="ADDRESS", help="who the agent reports to; default: you")
@@ -280,7 +253,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = action(task, "note", "Append a manager note to a task file.", task_note)
     _ = p.add_argument("task", metavar="TASK.md")
     _ = p.add_argument("text", metavar="TEXT")
-    p = action(task, "give", "Add one open item to a task's list.", task_give, "Giving the human's request emails the human that it was created.")
+    p = action(task, "give", "Add one open item to a task's list.", add_item, "Giving the human's request emails the human that it was created.")
     _ = p.add_argument("task", metavar="TASK.md")
     _ = p.add_argument("item", metavar="ITEM")
     _ = p.add_argument("--from-human", action="store_true", help="the item is the human's request, in the human's words")
@@ -309,7 +282,7 @@ def build_parser() -> argparse.ArgumentParser:
     _ = action(manager, "watchers", "Restart the background watcher that takes in email and delivers pending work.", manager_watchers)
     p = action(manager, "rotate", "Replace a manager with a fresh one that takes over its task and reports.", manager_rotate)
     _ = p.add_argument("who", metavar="TASK.md", help="the manager's task file")
-    _ = p.add_argument("--tool", choices=agents.TOOLS, help="default: the same tool")
+    _ = p.add_argument("--tool", choices=tuple(agents.DEFAULTS), help="default: the same tool")
     _ = p.add_argument("--model", help="default: the same model")
     _ = p.add_argument("--effort", help="default: the same effort")
     _ = action(manager, "worktree", "List uncommitted changes in manager-owned repositories.", manager_worktree)
@@ -322,7 +295,7 @@ def main() -> int:
         return 0
     args = build_parser().parse_args()
     try:
-        return args.run(configuration.load(), args)
+        return args.run(configuration.load(), args) or 0
     except agents.AgentError as error:
         raise SystemExit(f"amh: {error}") from error
 

@@ -9,22 +9,15 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
-from amh.config import OMNIGENT_PREFIX, Config
+from amh.config import Config
 
-TOOLS = ("claude", "codex", "cursor", "antigravity")
+OMNIGENT_PREFIX = "omnigent://"
 # 🧑 "Default should be opus 5.5 low" ... "gpt-6-luna high for managers and gpt-6.1-sol low for workers" ... "Cursor should use the latest Grok with high by default and not enable fast, Antigravity should use the latest Gemini"
-DEFAULTS = {
-    ("claude", False): ("claude-opus-5-5", "low"),
-    ("claude", True): ("claude-opus-5-5", "low"),
-    ("codex", False): ("gpt-6.1-sol", "low"),
-    ("codex", True): ("gpt-6-luna", "high"),
-    ("cursor", False): ("grok-4.7", "high"),
-    ("cursor", True): ("grok-4.7", "high"),
-    ("antigravity", False): ("gemini-3.8-flash-high", "high"),
-    ("antigravity", True): ("gemini-3.8-flash-high", "high"),
-}
+DEFAULTS = {"claude": ("claude-opus-5-5", "low"), "codex": ("gpt-6.1-sol", "low"), "cursor": ("grok-4.7", "high"), "antigravity": ("gemini-3.8-flash-high", "high")}
+MANAGER_DEFAULTS = DEFAULTS | {"codex": ("gpt-6-luna", "high")}
 # 🧑 "make Omnigent run every harness without sandbox and with no permission asking"
 UNRESTRICTED = {
     "claude": ["--dangerously-skip-permissions"],
@@ -34,6 +27,7 @@ UNRESTRICTED = {
 }
 FOLLOW_UP = "The message above reached you through `amh`, the helper that carries the human's and your manager's requests to you; act on it."
 CODEX_COMMAND = "bunx @openai/codex@latest --no-daemon --dangerously-bypass-approvals-and-sandbox"
+WAIT_S = 90
 
 
 class AgentError(Exception):
@@ -42,6 +36,11 @@ class AgentError(Exception):
 
 def is_omnigent(address: str) -> bool:
     return address.startswith(OMNIGENT_PREFIX)
+
+
+def session_path(address: str) -> str:
+    """The Omnigent API path of the session at `address`."""
+    return "/v1/sessions/" + address.removeprefix(OMNIGENT_PREFIX)
 
 
 def api(config: Config, method: str, path: str, body: dict[str, object] | None = None) -> dict[str, object]:
@@ -61,7 +60,11 @@ def api(config: Config, method: str, path: str, body: dict[str, object] | None =
 
 
 def post_event(config: Config, address: str, kind: str, data: dict[str, object]) -> dict[str, object]:
-    return api(config, "POST", f"/v1/sessions/{address.removeprefix(OMNIGENT_PREFIX)}/events", {"type": kind, "data": data})
+    return api(config, "POST", session_path(address) + "/events", {"type": kind, "data": data})
+
+
+def post_message(config: Config, address: str, text: str) -> dict[str, object]:
+    return post_event(config, address, "message", {"role": "user", "content": [{"type": "input_text", "text": text}]})
 
 
 def tmux(*args: str, text_in: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -76,16 +79,37 @@ def pane_text(address: str, n_lines: int = 40) -> str | None:
     return shown.stdout if shown.returncode == 0 else None
 
 
+def own_address() -> str:
+    """Where the calling agent runs: its Omnigent session, else its tmux window."""
+    if session := os.environ.get("OMNIGENT_RUNNER_PRIMARY_SESSION_ID"):
+        return OMNIGENT_PREFIX + session
+    if pane := os.environ.get("TMUX_PANE"):
+        shown = tmux("display-message", "-p", "-t", pane, "#{session_name}:#{window_index}")
+        if shown.returncode == 0:
+            return shown.stdout.strip()
+    raise SystemExit("amh: cannot tell which agent is calling; pass --task-file NAME.md")
+
+
+def wait_for(done: Callable[[], bool]) -> bool:
+    """Poll `done` every second for up to `WAIT_S`; say whether it came true."""
+    deadline = time.monotonic() + WAIT_S
+    while not done():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(1)
+    return True
+
+
 def send(config: Config, address: str, text: str) -> None:
     """Deliver `text` to an agent as its next user message."""
     if is_omnigent(address):
-        answer = post_event(config, address, "message", {"role": "user", "content": [{"type": "input_text", "text": text}]})
+        answer = post_message(config, address, text)
         if answer.get("queued") is not True:
             raise AgentError(f"{address} did not queue the message: {answer}")
         if "\n" in text.strip():
             # Claude Code shows a multi-line message as pasted text and acts on it only when a typed line says to.
             try:
-                _ = post_event(config, address, "message", {"role": "user", "content": [{"type": "input_text", "text": FOLLOW_UP}]})
+                _ = post_message(config, address, FOLLOW_UP)
             except AgentError:
                 pass
         return
@@ -108,7 +132,7 @@ def status(config: Config, address: str) -> tuple[str, str]:
     """Classify an agent as `running`, `ready` (idle), `error`, or `missing`, with one line of evidence."""
     if is_omnigent(address):
         try:
-            session = api(config, "GET", f"/v1/sessions/{address.removeprefix(OMNIGENT_PREFIX)}?include_items=false&refresh_state=true")
+            session = api(config, "GET", session_path(address) + "?include_items=false&refresh_state=true")
         except AgentError as error:
             return "missing", str(error)
         state = session.get("status")
@@ -122,8 +146,7 @@ def status(config: Config, address: str) -> tuple[str, str]:
     if text is None:
         return "missing", "no such tmux window"
     last = " / ".join(line.strip() for line in text.splitlines() if line.strip())[-200:]
-    command = tmux("display-message", "-p", "-t", address, "#{pane_current_command}").stdout.strip()
-    if command in ("zsh", "bash", "fish", "sh"):
+    if tmux("display-message", "-p", "-t", address, "#{pane_current_command}").stdout.strip() in ("zsh", "bash", "fish", "sh"):
         return "missing", f"only a shell runs there: {last}"
     return ("running" if "esc to interrupt" in text else "ready"), last
 
@@ -140,7 +163,7 @@ def stop(config: Config, address: str) -> None:
         raise AgentError(f"no tmux window {address}")
 
 
-def launch(config: Config, tool: str, model: str, effort: str, workdir: Path, title: str, tmux_session: str | None, proxy: str | None = None) -> str:
+def launch(config: Config, tool: str, model: str, effort: str, workdir: Path, title: str, tmux_session: str | None, proxy: str | None) -> str:
     """Start an agent with no prompt and return its address."""
     # 🧑 "make Omnigent the default when launching agents and add `--tmux` for the old tmux"
     if tmux_session is not None:
@@ -157,46 +180,38 @@ def launch(config: Config, tool: str, model: str, effort: str, workdir: Path, ti
         if made.returncode:
             raise AgentError(f"tmux could not open a window in session {tmux_session}: {made.stderr.strip()}")
         address = made.stdout.strip()
-        deadline = time.monotonic() + 90
-        while "OpenAI Codex" not in (pane_text(address, 200) or ""):
-            if time.monotonic() > deadline:
-                raise AgentError(f"Codex did not come up in {address}: {(pane_text(address) or 'the window closed').strip()[-300:]}")
-            time.sleep(2)
+        if not wait_for(lambda: "OpenAI Codex" in (pane_text(address, 200) or "")):
+            raise AgentError(f"Codex did not come up in {address}: {(pane_text(address) or 'the window closed').strip()[-300:]}")
         return address
-    agents = [a for a in api(config, "GET", "/v1/agents?limit=1000").get("data", []) if a.get("name") == f"{tool}-native-ui"]
+    found = [a for a in api(config, "GET", "/v1/agents?limit=1000").get("data", []) if a.get("name") == f"{tool}-native-ui"]
     hosts = [h for h in api(config, "GET", "/v1/hosts").get("hosts", []) if h.get("status") == "online"]
-    if len(agents) != 1 or len(hosts) != 1:
-        raise AgentError(f"Omnigent has {len(agents)} `{tool}-native-ui` agents and {len(hosts)} online hosts; need exactly one of each")
-    args = list(UNRESTRICTED[tool])
-    if tool == "codex":
-        # 🧑 "After the codex update, path no longer works, e.g. agents don't have getagentsmd on path"
-        args += ["--config", f'shell_environment_policy.set.PATH="{Path.home()}/.config/bin:{os.environ["PATH"]}"']
+    if len(found) != 1 or len(hosts) != 1:
+        raise AgentError(f"Omnigent has {len(found)} `{tool}-native-ui` agents and {len(hosts)} online hosts; need exactly one of each")
+    # 🧑 "After the codex update, path no longer works, e.g. agents don't have getagentsmd on path"
+    codex_args = ["--config", f'shell_environment_policy.set.PATH="{Path.home()}/.config/bin:{os.environ["PATH"]}"'] if tool == "codex" else []
     session = api(
         config,
         "POST",
         "/v1/sessions",
         {
-            "agent_id": agents[0]["id"],
+            "agent_id": found[0]["id"],
             "host_id": hosts[0]["host_id"],
             "workspace": str(workdir),
             "title": title,
             "model_override": f"{model}-{effort}" if tool == "cursor" else model,
             "reasoning_effort": effort,
-            "terminal_launch_args": args,
+            "terminal_launch_args": UNRESTRICTED[tool] + codex_args,
             "labels": {"omnigent.codex_native.bypass_sandbox": "1"} if tool == "codex" else {},
         },
     )
     address = OMNIGENT_PREFIX + str(session["id"])
-    deadline = time.monotonic() + 90
-    while api(config, "GET", f"/v1/sessions/{session['id']}?include_items=false").get("runner_online") is not True:
-        if time.monotonic() > deadline:
-            raise AgentError(f"{address} was created but its runner never came online; stop it before retrying")
-        time.sleep(1)
+    if not wait_for(lambda: api(config, "GET", session_path(address) + "?include_items=false").get("runner_online") is True):
+        raise AgentError(f"{address} was created but its runner never came online; stop it before retrying")
     return address
 
 
 def saw_message(config: Config, address: str, text: str) -> bool:
     """Whether an Omnigent session's recent history holds the last line of `text`."""
     tail = json.dumps(text.strip().splitlines()[-1][-80:], ensure_ascii=False)[1:-1]
-    items = api(config, "GET", f"/v1/sessions/{address.removeprefix(OMNIGENT_PREFIX)}/items?limit=100&order=desc").get("data", [])
+    items = api(config, "GET", session_path(address) + "/items?limit=100&order=desc").get("data", [])
     return any(tail in json.dumps(item, ensure_ascii=False) for item in items)

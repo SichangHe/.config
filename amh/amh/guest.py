@@ -7,20 +7,18 @@ from __future__ import annotations
 
 import imaplib
 import re
-import smtplib
-import tempfile
-from email import message_from_bytes, policy
 from email.message import EmailMessage
-from email.utils import make_msgid, parseaddr
+from email.utils import parseaddr
 from pathlib import Path
 
-from amh import agents, taskfile, work
+from amh import agents, mail, taskfile, work
 from amh.config import Config
 
 TASK = "guest_hees.md"
 MAIL_DIR = "guest_hees_manager_mail"
 SOURCE = f"(guest mail {MAIL_DIR}/"
 IMAGE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
+IMAGE_KINDS = {suffix: kind for kind, suffix in IMAGE_TYPES.items()} | {".jpeg": "image/jpeg"}
 N_IMAGES_MAX = 4
 IMAGE_BYTES_MAX = 10 << 20
 # 🧑 "Make it lazy. Make the watcher start an agent. If there's no agent for that guest or reuse an agent if they already exist."
@@ -43,42 +41,38 @@ def take_in(config: Config, box: imaplib.IMAP4_SSL) -> None:
     address = config.get("AMH_GUEST_ADDRESS")
     if not address:
         return
-    _ = box.select("INBOX")
-    for uid in box.uid("search", "UNSEEN", "FROM", f'"{address}"')[1][0].split():
-        stored = config.root / MAIL_DIR / f"{config.get('AMH_GUEST_MAIL_PREFIX', 'guest')}-{uid.decode()}.txt"
-        if not stored.exists():
-            parsed = message_from_bytes(box.uid("fetch", uid, "(BODY.PEEK[])")[1][0][1], policy=policy.default)
-            # The sender must be exactly the guest and Gmail must have verified the sending domain, so nobody else can pose as the guest.
-            verified = f"smtp.mailfrom={address}" in str(parsed.get("Authentication-Results", "")).replace("\n", " ") and "spf=pass" in str(parsed.get("Authentication-Results", ""))
-            if parseaddr(str(parsed["From"]))[1].lower() != address.lower() or not verified:
-                print(f"guest mail uid {uid.decode()} rejected: the sender is not verified as {address}", flush=True)
-                _ = box.uid("store", uid, "+FLAGS", "(\\Seen)")
-                continue
-            part = parsed.get_body(preferencelist=("plain", "html"))
-            try:
-                body = part.get_content() if part else ""
-            except (LookupError, ValueError):
-                body = (part.get_payload(decode=True) or b"").decode(errors="replace")
-            images = [p for p in parsed.walk() if p.get_content_type() in IMAGE_TYPES][:N_IMAGES_MAX]
-            stored.parent.mkdir(mode=0o700, exist_ok=True)
-            saved = []
-            for index, image in enumerate(images):
-                data = image.get_payload(decode=True) or b""
-                if len(data) <= IMAGE_BYTES_MAX:
-                    path = stored.with_name(f"{stored.stem}-{index}{IMAGE_TYPES[image.get_content_type()]}")
-                    _ = path.write_bytes(data)
-                    saved.append(path.name)
-            head = "".join(f"{name}: {' '.join(str(parsed.get(name, '')).split())}\n" for name in ("Message-ID", "In-Reply-To", "References", "Subject"))
-            listing = "\n\nGuest images:\n" + "".join(f"- {MAIL_DIR}/{name}\n" for name in saved) if saved else ""
-            ensure_agent(config, address)
-            stored.write_text(f"{head}\n{body}{listing}", encoding="utf-8")
-            stored.chmod(0o600)
-            with taskfile.locked(config):
-                task = taskfile.load(config, TASK)
-                task.items.append(f"Answer the guest email {MAIL_DIR}/{stored.name}")
-                task.body = task.body.rstrip("\n") + f"\n\n{taskfile.MARKER}\n{SOURCE}{stored.name})\n"
-                taskfile.save(config, task)
-        _ = box.uid("store", uid, "+FLAGS", "(\\Seen)")
+    for uid, parsed in mail.unseen_from(box, address):
+        stored = config.root / MAIL_DIR / f"{config.get('AMH_GUEST_MAIL_PREFIX', 'guest')}-{uid}.txt"
+        # The sender must be exactly the guest and Gmail must have verified the sending domain, so nobody else can pose as the guest.
+        checks = " ".join(str(parsed.get("Authentication-Results", "")).split())
+        verified = parseaddr(str(parsed["From"]))[1].lower() == address.lower() and f"smtp.mailfrom={address}" in checks and "spf=pass" in checks
+        if verified and not stored.exists():
+            store(config, address, parsed, stored)
+        elif not verified:
+            print(f"guest mail uid {uid} rejected: the sender is not verified as {address}", flush=True)
+        mail.mark_read(box, uid)
+
+
+def store(config: Config, address: str, parsed: EmailMessage, stored: Path) -> None:
+    """Save one guest email as `stored` with its images beside it, then add it to the guest agent's open work."""
+    stored.parent.mkdir(mode=0o700, exist_ok=True)
+    saved = []
+    for index, image in enumerate([p for p in parsed.walk() if p.get_content_type() in IMAGE_TYPES][:N_IMAGES_MAX]):
+        data = image.get_payload(decode=True) or b""
+        if len(data) <= IMAGE_BYTES_MAX:
+            path = stored.with_name(f"{stored.stem}-{index}{IMAGE_TYPES[image.get_content_type()]}")
+            _ = path.write_bytes(data)
+            saved.append(path.name)
+    head = "".join(f"{name}: {' '.join(str(parsed.get(name, '')).split())}\n" for name in ("Message-ID", "In-Reply-To", "References", "Subject"))
+    listing = "\n\nGuest images:\n" + "".join(f"- {MAIL_DIR}/{name}\n" for name in saved) if saved else ""
+    ensure_agent(config, address)
+    stored.write_text(f"{head}\n{mail.text_of(parsed)}{listing}", encoding="utf-8")
+    stored.chmod(0o600)
+    with taskfile.locked(config):
+        task = taskfile.load(config, TASK)
+        task.items.append(f"Answer the guest email {MAIL_DIR}/{stored.name}")
+        task.body = task.body.rstrip("\n") + f"\n\n{taskfile.MARKER}\n{SOURCE}{stored.name})\n"
+        taskfile.save(config, task)
 
 
 def ensure_agent(config: Config, address: str) -> None:
@@ -87,10 +81,7 @@ def ensure_agent(config: Config, address: str) -> None:
         task = taskfile.load(config, TASK)
         if task.fields["status"] != "done" and agents.status(config, task.address)[0] != "missing":
             return
-    with tempfile.NamedTemporaryFile("w", suffix=".md", encoding="utf-8") as prompt:
-        _ = prompt.write(GOAL.format(address=address))
-        prompt.flush()
-        _ = work.start_task(config, TASK, Path(config.get("AMH_GUEST_WORKDIR")), Path(prompt.name), None, None, None, work.main_manager(config), False, None, None, None)
+    _ = work.start_task(config, TASK, Path(config.get("AMH_GUEST_WORKDIR")), GOAL.format(address=address), config.main_manager)
 
 
 def delivery_text(config: Config, source_line: str) -> str:
@@ -105,21 +96,11 @@ def reply(config: Config, mail_name: str, body: str, images: list[Path]) -> str:
     if not body.strip():
         raise SystemExit("amh: the answer is empty")
     headers = stored_headers((config.root / MAIL_DIR / Path(mail_name).name).read_text(encoding="utf-8"))
-    message = EmailMessage()
-    message["From"] = config.get("OMO_AGENT_GMAIL_ADDRESS")
-    message["To"] = config.get("AMH_GUEST_ADDRESS")
-    message["Subject"] = "Re: " + re.sub(r"^(\s*(re|回复)\s*[:：]\s*)+", "", headers.get("Subject", ""), flags=re.IGNORECASE)
-    message["Message-ID"] = make_msgid(domain="gmail.com")
-    if headers.get("Message-ID"):
-        message["In-Reply-To"] = headers["Message-ID"]
-        message["References"] = f"{headers.get('References', '')} {headers['Message-ID']}".strip()
-    message.set_content(body)
+    subject = "Re: " + re.sub(r"^(\s*(re|回复)\s*[:：]\s*)+", "", headers.get("Subject", ""), flags=re.IGNORECASE)
+    message = mail.compose(config, config.get("AMH_GUEST_ADDRESS"), subject, body, headers.get("Message-ID", ""), headers.get("References", ""))
     for image in images:
-        kind = next((kind for kind, suffix in IMAGE_TYPES.items() if image.suffix.lower() in (suffix, ".jpeg")), None)
+        kind = IMAGE_KINDS.get(image.suffix.lower())
         if kind is None:
             raise SystemExit(f"amh: {image} is not a png, jpeg, gif, or webp image")
         message.add_attachment(image.read_bytes(), maintype="image", subtype=kind.split("/")[1], filename=image.name)
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=60) as smtp:
-        _ = smtp.login(config.get("OMO_AGENT_GMAIL_ADDRESS"), config.get("OMO_AGENT_GMAIL_APP_PASSWORD"))
-        _ = smtp.send_message(message)
-    return str(message["Message-ID"])
+    return mail.deliver(config, message)
