@@ -92,10 +92,10 @@ def instructions(guides: tuple[str, ...], task_name: str) -> str:
     return "\n".join(parts)
 
 
-def start_agent(config: Config, name: str, fields: dict[str, str], tool: str, model: str, effort: str, workdir: Path, tmux_session: str | None, guides: tuple[str, ...], request: str, record: str) -> Task:
+def start_agent(config: Config, name: str, fields: dict[str, str], tool: str, model: str, effort: str, workdir: Path, tmux_session: str | None, guides: tuple[str, ...], request: str, record: str, proxy: str | None = None) -> Task:
     """Launch an agent for task `name`, record where it runs plus `fields` and `record` in the task file, and give it its first prompt."""
     prompt = f"{instructions(guides, name)}\n{request}"
-    address = agents.launch(config, tool, model, effort, workdir, Path(name).stem, tmux_session)
+    address = agents.launch(config, tool, model, effort, workdir, Path(name).stem, tmux_session, proxy)
     with taskfile.locked(config):
         task = taskfile.load(config, name) if (config.root / name).exists() else Task(name, {"version": "v1.0.0"}, [], "")
         task.fields |= {**fields, "runat": address, "tool": tool}
@@ -118,7 +118,7 @@ def start_agent(config: Config, name: str, fields: dict[str, str], tool: str, mo
 
 
 def start_task(
-    config: Config, name: str, workdir: Path, prompt: Path, tool: str | None, model: str | None, effort: str | None, manager: str | None, as_manager: bool, tmux_session: str | None, email: str | None, lines: str | None
+    config: Config, name: str, workdir: Path, prompt: Path, tool: str | None, model: str | None, effort: str | None, manager: str | None, as_manager: bool, tmux_session: str | None, email: str | None, lines: str | None, proxy: str | None = None
 ) -> str:
     """Create or reuse a task file, launch its agent, and return the agent's address."""
     if (config.root / name).exists():
@@ -139,7 +139,7 @@ def start_task(
     # 🧑 “Long running simply means that the agent will not be closed if they have zero pending item.”
     fields = {"status": "long_running" if as_manager else "running", "managerat": manager, "is_manager": str(as_manager).lower()}
     guides = (*MANAGER_GUIDES, "submanager") if as_manager else ("agent_work",)
-    return start_agent(config, name, fields, tool, model or default_model, effort or default_effort, workdir, tmux_session, guides, request, request).address
+    return start_agent(config, name, fields, tool, model or default_model, effort or default_effort, workdir, tmux_session, guides, request, request, proxy).address
 
 
 def close_task(config: Config, name: str, agent_gone: bool, email: bool) -> str:

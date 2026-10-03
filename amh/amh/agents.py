@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import time
 import urllib.error
@@ -88,8 +89,9 @@ def send(config: Config, address: str, text: str) -> None:
             except AgentError:
                 pass
         return
-    if pane_text(address) is None:
-        raise AgentError(f"no tmux window {address}")
+    state, evidence = status(config, address)
+    if state == "missing":
+        raise AgentError(f"no agent runs in tmux window {address}: {evidence}")
     buffer = f"amh-{os.getpid()}"
     loaded = tmux("load-buffer", "-b", buffer, "-", text_in=text)
     pasted = tmux("paste-buffer", "-d", "-p", "-b", buffer, "-t", address)
@@ -140,19 +142,28 @@ def stop(config: Config, address: str) -> None:
         raise AgentError(f"no tmux window {address}")
 
 
-def launch(config: Config, tool: str, model: str, effort: str, workdir: Path, title: str, tmux_session: str | None) -> str:
+def launch(config: Config, tool: str, model: str, effort: str, workdir: Path, title: str, tmux_session: str | None, proxy: str | None = None) -> str:
     """Start an agent with no prompt and return its address."""
     # 🧑 "make Omnigent the default when launching agents and add `--tmux` for the old tmux"
     if tmux_session is not None:
         if tool != "codex":
             raise AgentError("only Codex can be launched in tmux")
-        made = tmux("new-window", "-d", "-P", "-F", "#{session_name}:#{window_index}", "-t", f"{tmux_session}:", "-n", title, "-c", str(workdir))
+        command = f'{CODEX_COMMAND} --model {model} --config model_reasoning_effort="{effort}" --config check_for_update_on_startup=false'
+        if proxy:
+            # The local proxy owns upstream login and account rotation, so Codex must not use its own saved login.
+            settings = ('model_provider="amh_proxy"', 'model_providers.amh_proxy.name="Local proxy"', f"model_providers.amh_proxy.base_url={json.dumps(proxy)}", 'model_providers.amh_proxy.wire_api="responses"', "model_providers.amh_proxy.requires_openai_auth=false")
+            command += "".join(f" --config {shlex.quote(setting)}" for setting in settings)
+        # The window runs Codex directly, not a shell, so a prompt can never be typed into a shell.
+        script = f"export OMO_AGENT_TASK_FILE={shlex.quote(title + '.md')} PATH={shlex.quote(str(Path.home() / '.config/bin'))}:$PATH; exec {command}"
+        made = tmux("new-window", "-d", "-P", "-F", "#{session_name}:#{window_index}", "-t", f"{tmux_session}:", "-n", title, "-c", str(workdir), f"bash -lc {shlex.quote(script)}")
         if made.returncode:
             raise AgentError(f"tmux could not open a window in session {tmux_session}: {made.stderr.strip()}")
         address = made.stdout.strip()
-        command = f'{CODEX_COMMAND} --model {model} --config model_reasoning_effort="{effort}" --config check_for_update_on_startup=false'
-        _ = tmux("send-keys", "-t", address, f"export OMO_AGENT_TASK_FILE={title}.md PATH={Path.home()}/.config/bin:$PATH && exec {command}", "Enter")
-        time.sleep(8)
+        deadline = time.monotonic() + 90
+        while "OpenAI Codex" not in (pane_text(address, 200) or ""):
+            if time.monotonic() > deadline:
+                raise AgentError(f"Codex did not come up in {address}: {(pane_text(address) or 'the window closed').strip()[-300:]}")
+            time.sleep(2)
         return address
     agents = [a for a in api(config, "GET", "/v1/agents?limit=1000").get("data", []) if a.get("name") == f"{tool}-native-ui"]
     hosts = [h for h in api(config, "GET", "/v1/hosts").get("hosts", []) if h.get("status") == "online"]

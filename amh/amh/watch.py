@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from amh import agents, config as configuration, mail, taskfile, work
+from amh import agents, config as configuration, guest, mail, taskfile, work
 from amh.config import Config
 from amh.taskfile import MARKER, Task
 
@@ -79,6 +79,8 @@ def delivery_text(config: Config, block: list[str]) -> str:
     """Turn a pending block into the message for its agent; a stored human email is inlined verbatim."""
     # 🧑 "Pending blocks in task files should not be `manager_delegation`, they should be dispatched naked, randomly followed by a reminder to add to pending task items"
     # 🧑 "human requests should be sent verbatim"
+    if block[0].startswith(guest.SOURCE):
+        return guest.delivery_text(config, block[0])
     reminder = ADD_REMINDER if random.random() < 1 / 8 else ""
     if block[0].startswith(MAIL_SOURCE):
         name = block[0].removeprefix(MAIL_SOURCE).rstrip(")")
@@ -155,6 +157,7 @@ def run() -> int:
                 _ = box.login(config.get("OMO_AGENT_GMAIL_ADDRESS"), config.get("OMO_AGENT_GMAIL_APP_PASSWORD"))
             if box is not None:
                 take_in_mail(config, box)
+                guest.take_in(config, box)
         except (imaplib.IMAP4.error, OSError) as error:
             log(f"mail connection failed, reconnecting in {RECONNECT_S} s: {error!r}")
             box = None

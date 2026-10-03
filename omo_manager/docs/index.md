@@ -1,9 +1,0 @@
-- `helpers/index.md` shared helper conventions and general helper scripts
-- `mail/index.md` manager-human mail ingestion, cleanup, and compression workflows
-- `monthly-archive.md` TODO.md previous-task and manager work-log archive policy
-- `pb-agent.md` PB watcher and PB agent manager usage
-- `watchers/index.md` pending-marker delivery and maintenance watchers
-- `codex/index.md` Codex-specific helper references, including the live `/model` picker procedure
-- `routing/index.md` task, project, and submanager routing helpers
-- `omo_agent_instructions.py` captures the commands and output used for launch instructions
-- `getagentsmd get vl_worker` extra prompt additions for VL workers

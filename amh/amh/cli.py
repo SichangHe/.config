@@ -13,7 +13,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from amh import agents, config as configuration, mail, taskfile, work
+from amh import agents, config as configuration, guest, mail, taskfile, work
 from amh.config import Config
 
 Run = Callable[[Config, argparse.Namespace], int]
@@ -74,6 +74,11 @@ def tell_agent(config: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def tell_guest(config: Config, args: argparse.Namespace) -> int:
+    print(f"Email sent to the guest.\nMessage-ID: {guest.reply(config, args.mail, Path(args.file).read_text(encoding='utf-8'), [Path(image) for image in args.image])}")
+    return 0
+
+
 def address(config: Config, who: str) -> str:
     """Resolve a task file name to where its agent runs; pass an address through."""
     return taskfile.load(config, who).address if who.endswith(".md") else who
@@ -82,7 +87,7 @@ def address(config: Config, who: str) -> str:
 def task_start(config: Config, args: argparse.Namespace) -> int:
     if bool(args.email) != bool(args.lines):
         raise SystemExit("amh: --email and --lines go together")
-    print(work.start_task(config, args.task, Path(args.dir), Path(args.prompt), args.tool, args.model, args.effort, args.manager, args.as_manager, args.tmux, args.email, args.lines))
+    print(work.start_task(config, args.task, Path(args.dir), Path(args.prompt), args.tool, args.model, args.effort, args.manager, args.as_manager, args.tmux, args.email, args.lines, args.proxy))
     return 0
 
 
@@ -215,7 +220,7 @@ def build_parser() -> argparse.ArgumentParser:
             _ = p.add_argument("--task-file", metavar="NAME.md", help="your task file, when `amh` cannot tell who you are")
         return p
 
-    tell = group("tell", "Send a message to your manager, the human, or an agent you manage.")
+    tell = group("tell", "Send a message to your manager, the human, an agent you manage, or the guest.")
     p = action(tell, "manager", "Message your manager, like a chat message.", tell_manager, f"Use it only to ask for help or coordination, or to say you are done or blocked.\nAt most {work.MANAGER_MESSAGE_MAX_CHARS} characters. For details, write a file and name its path in the message.", own=True)
     _ = p.add_argument("text", metavar="TEXT", help="what you need from the manager, or what changed, in one or two sentences")
     state = p.add_mutually_exclusive_group()
@@ -229,6 +234,11 @@ def build_parser() -> argparse.ArgumentParser:
     _ = p.add_argument("who", metavar="WHO", help="its task file name, or its address")
     _ = p.add_argument("text", metavar="TEXT", nargs="?", help="the message")
     _ = p.add_argument("--file", help="file holding the message, instead of TEXT")
+
+    p = action(tell, "guest", "The guest agent only: answer a guest email; it goes to the guest alone.", tell_guest)
+    _ = p.add_argument("--mail", required=True, metavar="FILE.txt", help="name of the stored guest email being answered")
+    _ = p.add_argument("--file", required=True, help="file holding the answer")
+    _ = p.add_argument("--image", action="append", default=[], metavar="PATH", help="png, jpeg, gif, or webp image to attach; repeat as needed")
 
     todo = group("todo", "Read and update your own list of open work.")
     _ = action(todo, "list", "Show your open work.", todo_list, own=True)
@@ -253,6 +263,7 @@ def build_parser() -> argparse.ArgumentParser:
     _ = p.add_argument("--manager", metavar="ADDRESS", help="who the agent reports to; default: you")
     _ = p.add_argument("--as-manager", action="store_true", help="the new agent is itself a manager")
     _ = p.add_argument("--tmux", metavar="SESSION", help="run Codex in a new window of this tmux session instead of on Omnigent")
+    _ = p.add_argument("--proxy", metavar="URL", help="with --tmux: make Codex talk to this local proxy, e.g. http://localhost:18181/backend-api/codex, instead of using its saved login")
     _ = p.add_argument("--email", metavar="FILE", help="stored human email that caused this task; needs --lines")
     _ = p.add_argument("--lines", metavar="START-END", help="the relevant lines of --email")
     p = action(task, "show", "Show tasks' status, agent address, and open items.", task_show)
