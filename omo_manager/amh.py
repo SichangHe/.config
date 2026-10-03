@@ -237,7 +237,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("item", metavar="ITEM", help="the work, quoting the human's words when it is their request")
     p.add_argument("--from-human", action="store_true", help="the human asked for this; omit for work you or another agent added")
     p = action(todo, "done", "Remove one finished or cancelled item.", todo_done)
-    p.add_argument("item", metavar="ITEM", help="the exact item text as `amh todo list` shows it, without the 🧑 mark")
+    p.add_argument("item", metavar="ITEM", help="the exact item text as `amh todo list` shows it, including a leading 🧑 mark; removing a 🧑 item emails the human")
     p.add_argument("--evidence", required=True, help="one sentence saying how you know it is finished")
     p.add_argument("--cancelled", action="store_true", help="the item was cancelled, not finished")
     p = action(todo, "replace", "Reword one open item.", lambda a, e: call(helper("omo_pending.py"), "replace", "--old-item", a.old, "--new-item", a.new, *e))
