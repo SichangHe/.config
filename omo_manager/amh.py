@@ -112,6 +112,14 @@ def authorship(args: argparse.Namespace) -> str:
     return "--human-authored" if args.from_human else "--agent-authored"
 
 
+def task_record(args: argparse.Namespace, extra: list[str]) -> int:
+    if args.from_human and not args.email_file:
+        raise SystemExit("amh: --from-human requires --email-file MAIL.txt, the stored manager_mail/*.txt file with the human's request")
+    ack = ["--ack-human", "--email-file", args.email_file] if args.from_human else []
+    items = [x for item in args.item for x in ("--item", item)]
+    return call(helper("omo_record_pending.py"), "--pending-file", args.file, "--line", args.line, *items, authorship(args), *ack, *extra)
+
+
 def todo_done(args: argparse.Namespace, extra: list[str]) -> int:
     outcome = "cancelled" if args.cancelled else "completed"
     return call(
@@ -299,14 +307,13 @@ def build_parser() -> argparse.ArgumentParser:
         task,
         "record",
         "Turn a `(pending)` marker in a task file into open items and clear the marker.",
-        lambda a, e: call(
-            helper("omo_record_pending.py"), "--pending-file", a.file, "--line", a.line, *[x for item in a.item for x in ("--item", item)], authorship(a), *e
-        ),
+        task_record,
     )
     p.add_argument("file", metavar="FILE.md", help="file holding the marker")
     p.add_argument("line", metavar="LINE", help="line number of the marker")
     p.add_argument("item", metavar="ITEM", nargs="+", help="one open item per argument, quoting the source's words")
-    p.add_argument("--from-human", action="store_true", help="the items are the human's requests")
+    p.add_argument("--from-human", action="store_true", help="the items are the human's requests; emails the human an acknowledgement, so needs --email-file")
+    p.add_argument("--email-file", metavar="MAIL.txt", help="with --from-human: the stored `manager_mail/*.txt` file holding the human's request")
     _ = action(task, "check", "Check that task files and the task list agree.", passthrough(helper("omo_task_audit.py"), "--check"))
 
     agent = group("agent", "Managers: look at and control running agents.")

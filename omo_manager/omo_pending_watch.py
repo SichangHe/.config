@@ -248,11 +248,12 @@ LIST_POINTER_PREFIX_RE = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
 CHECKBOX_POINTER_PREFIX_RE = re.compile(r"^\[[ xX]\]\s+")
 MARKDOWN_POINTER_LINK_RE = re.compile(r"^\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^)]*\)))?\s*\)$")
 STATUS_DETAIL_RE = re.compile(r"^\((pending|running|long_running|done|blocked)(?::\s*([^)]*))?\)(?:\s+\(([^)]*)\))?$")
+AGENT_TARGET_PATTERN = r"(?:[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?|omnigent://[A-Za-z0-9._-]+)"
 AGENT_POINTER_WITH_TARGET_RE = re.compile(
-    rf"^\(from agent ([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) (/tmp/omo-agent-messages-{os.getuid()}/[A-Za-z0-9_.-]+\.md)\)$"
+    rf"^\(from agent ({AGENT_TARGET_PATTERN}) (/tmp/omo-agent-messages-{os.getuid()}/[A-Za-z0-9_.-]+\.md)\)$"
 )
 AGENT_REPORT_SENT_RE = re.compile(
-    r"^\(sent from [A-Za-z0-9_.-]+ via omo_report\.sh tmux=([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) "
+    rf"^\(sent from [A-Za-z0-9_.-]+ via omo_report\.sh tmux=({AGENT_TARGET_PATTERN}) "
     r"time=\S+ task-file=[A-Za-z0-9_.-]+\)$"
 )
 AGENT_REPORT_HASH_RE = re.compile(r"^\[message-sha256: ([0-9a-f]{64})\]$")
@@ -6795,7 +6796,7 @@ def consumed_blocked_handoffs(
         except UnicodeDecodeError:
             continue
         sent = re.fullmatch(
-            r"\(sent from [A-Za-z0-9_.-]+ via omo_report\.sh tmux=([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) "
+            rf"\(sent from [A-Za-z0-9_.-]+ via omo_report\.sh tmux=({AGENT_TARGET_PATTERN}) "
             r"time=\S+ task-file=([A-Za-z0-9_.-]+)\)",
             first_line,
         )
