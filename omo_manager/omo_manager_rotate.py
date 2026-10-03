@@ -154,10 +154,16 @@ def default_state_dir() -> Path:
     return Path(os.environ.get("OMO_MANAGER_STATE_DIR", Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omo-manager"))
 
 
+def local_env_root() -> str:
+    """Return the work-log root configured in `local.env`, which agent shells do not export."""
+    match = re.search(r'^export OMO_WORK_LOGS_ROOT="([^"$]+)"$', LOCAL_ENV.read_text(encoding="utf-8"), re.MULTILINE) if LOCAL_ENV.is_file() else None
+    return match.group(1) if match else ""
+
+
 def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     _ = parser.add_argument("--target", default=os.environ.get("OMO_MANAGER_TMUX_TARGET"), help="Exact SESSION:WINDOW[.PANE] or omnigent://SESSION_ID target (default: OMO_MANAGER_TMUX_TARGET).")
-    _ = parser.add_argument("--root", type=Path, default=Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs")))
+    _ = parser.add_argument("--root", type=Path, default=Path(os.environ.get("OMO_WORK_LOGS_ROOT") or local_env_root() or Path.home() / "work_logs"))
     _ = parser.add_argument("--state-dir", type=Path, default=default_state_dir(), help="Private audit state (default: OMO_MANAGER_STATE_DIR or XDG state).")
     _ = parser.add_argument("--model", help="Required with --reasoning-effort only when live metadata is unavailable.")
     _ = parser.add_argument("--reasoning-effort", choices=sorted(EFFORTS), help="Required with --model only when live metadata is unavailable.")
@@ -881,8 +887,8 @@ def rotate_omnigent(args: Args) -> Path:
     So the successor is launched first, then every task file, `TODO.md` line, and,
     for the main manager, `local.env` and the watchers are repointed to it.
     The old session is stopped last because the caller may be that session.
-    The session named in `local.env`, or one with no task file, is the main manager;
-    any other is a submanager.
+    The session named in `local.env` is the main manager; any other must own a task file
+    under the root and is a submanager.
     """
     old = args.target
     session = omo_omnigent.require_mapping(
@@ -896,7 +902,9 @@ def rotate_omnigent(args: Args) -> Path:
     workspace = Path(omo_omnigent.require_text(session.get("workspace"), "session workspace"))
     task_files = sorted(args.root.glob("*.md"))
     own_task = next((path for path in task_files if f"\nrunat: {old}\n" in path.read_text(encoding="utf-8", errors="replace")[:2000]), None)
-    is_main = own_task is None or (LOCAL_ENV.is_file() and old in LOCAL_ENV.read_text(encoding="utf-8"))
+    is_main = LOCAL_ENV.is_file() and old in LOCAL_ENV.read_text(encoding="utf-8")
+    if own_task is None and not is_main:
+        raise RotationError(f"{old} is neither the `local.env` main manager nor the `runat` of a task file under {args.root}")
     try:
         prompt = launch_instructions("main_manager" if is_main else "submanager").decode()
     except (AgentInstructionsError, UnicodeDecodeError) as exc:
