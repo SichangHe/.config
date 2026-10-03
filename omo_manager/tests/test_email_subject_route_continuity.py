@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime
+import importlib.util
+import os
+import sys
+import tempfile
+from datetime import datetime, timedelta
+from pathlib import Path
 from unittest.mock import patch
 
 from omo_manager.omo_email_subject import (
@@ -14,11 +19,74 @@ from omo_manager.omo_email_subject import (
     prepare_latest_thread_for_tmux_target,
     prepare_subject_and_headers,
     select_recent_thread,
+    subject_tmux_target,
+    subject_task_stem,
+    subject_base,
 )
 
 
 class EmailSubjectRouteContinuityTests(unittest.TestCase):
     profile = MailRouteProfile("agent@example.test", "human@example.test", "primary")
+
+    def test_authenticated_sender_keeps_agent_address_and_exact_once_receipt(self) -> None:
+        module_path = Path(__file__).resolve().parents[2] / "helper.sh" / "email_me.py"
+        spec = importlib.util.spec_from_file_location("email_me_route_test", module_path)
+        assert spec is not None and spec.loader is not None
+        sender = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = sender
+        spec.loader.exec_module(sender)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "TODO.md").write_text("current:\n- worker_0927.md dw:64\n", encoding="utf-8")
+            (root / "worker_0927.md").write_text("---\nversion: v1.0.0\nstatus: running\nrunat: dw:64\ntool: codex\nmanagerat: dw:1\nis_manager: false\npending_task_items: []\n---\n", encoding="utf-8")
+            with patch.dict(os.environ, {"OMO_WORK_LOGS_ROOT": str(root)}):
+                self.assertEqual("worker_0927", sender.email_subject_target("dw:64"))
+                self.assertEqual("worker_0927", sender.email_subject_target("dw:64"))
+                receipt, _payload = sender.exact_once_email_record("Update", "[worker_0927] Update", "body", "dw:64")
+                self.assertTrue(receipt)
+                with self.assertRaisesRegex(ValueError, "does not match"):
+                    sender.exact_once_email_record("Update", "[other:64] Update", "body", "dw:64")
+            (root / "work_manager_today.md").write_text("manager log\n", encoding="utf-8")
+            with patch.dict(os.environ, {"OMO_WORK_LOGS_ROOT": str(root)}):
+                self.assertEqual("wl:1", sender.email_subject_target("wl:1"))
+            (root / "pb.md").write_text((root / "worker_0927.md").read_text(encoding="utf-8").replace("dw:64", "pb:1"), encoding="utf-8")
+            (root / "TODO.md").write_text("current:\n- worker_0927.md dw:64\n- pb.md pb:1\n", encoding="utf-8")
+            with patch.dict(os.environ, {"OMO_WORK_LOGS_ROOT": str(root)}):
+                self.assertEqual("pb:1", sender.email_subject_target("pb:1"))
+
+    def test_task_tag_preserves_original_human_thread_and_legacy_tags(self) -> None:
+        parent = RecentHeader("human@example.test", "Original Human subject", datetime.now().astimezone(), "<human@example.test>")
+        with patch("omo_manager.omo_email_subject.verified_recent_thread_header", return_value=parent):
+            subject, headers = prepare_subject_and_headers("Re: Original Human subject", "worker_0927", route_profile=self.profile)
+        self.assertEqual("Re: [worker_0927] Original Human subject", subject)
+        self.assertEqual(parent.message_id, headers["In-Reply-To"])
+        self.assertEqual("worker_0927", subject_task_stem(subject))
+        self.assertEqual("", subject_tmux_target(subject))
+        self.assertEqual("Original Human subject", subject_base(subject))
+        self.assertEqual("", subject_tmux_target("Original Human subject"))
+        self.assertEqual("wl:1", subject_tmux_target("Re: [wl:1] Original Human subject"))
+        self.assertEqual("og:legacy", subject_tmux_target("[og:legacy] Original Human subject"))
+        self.assertEqual("worker_0927", subject_task_stem("Re: [a] [worker_0927] Original Human subject"))
+        self.assertEqual("Original Human subject", subject_base("Re: [worker_0927.md] Original Human subject"))
+        self.assertEqual("Original Human subject", subject_base("Re: [worker_0927.md] Original Human subject"))
+
+    def test_different_task_cannot_retag_task_thread(self) -> None:
+        parent = RecentHeader("human@example.test", "[other_0927] Original Human subject", datetime.now().astimezone(), "<human@example.test>")
+        with patch("omo_manager.omo_email_subject.verified_recent_thread_header", return_value=parent):
+            with self.assertRaisesRegex(SubjectInputError, "may not retag"):
+                prepare_subject_and_headers("Re: Original Human subject", "worker_0927", route_profile=self.profile)
+
+    def test_first_task_tag_in_thread_remains_bound_after_retag(self) -> None:
+        root = "<root@example.test>"
+        first = RecentHeader("agent@example.test", "[worker_0927] Update", datetime.fromisoformat("2026-09-12T08:00:00+00:00"), "<first@example.test>", root)
+        retagged = RecentHeader("agent@example.test", "[other_0927] Update", datetime.fromisoformat("2026-09-12T09:00:00+00:00"), "<latest@example.test>", f"{root} {first.message_id}")
+        selected = select_recent_thread([retagged, first], reject_ambiguous=True)
+        self.assertIsNotNone(selected)
+        assert selected is not None
+        self.assertEqual("worker_0927", selected.thread_target)
+        with patch("omo_manager.omo_email_subject.verified_recent_thread_header", return_value=selected):
+            with self.assertRaisesRegex(SubjectInputError, "may not retag"):
+                prepare_subject_and_headers("Re: Update", "other_0927", route_profile=self.profile)
 
     def test_exact_recovery_preserves_verified_thread_target(self) -> None:
         parent = RecentHeader(
@@ -177,6 +245,75 @@ class EmailSubjectRouteContinuityTests(unittest.TestCase):
         self.assertEqual("<wl1@example.test>", selected.message_id)
         self.assertEqual("config:24", selected.thread_target)
 
+    def test_exact_message_id_routes_two_same_subject_replies_independently(self) -> None:
+        original = RecentHeader("agent@example.test", "[config:24] Update", datetime.now().astimezone(), "<original@example.test>", recipient="human@example.test")
+        replies = [
+            RecentHeader("human@example.test", "Re: Update", datetime.now().astimezone(), f"<reply-{number}@example.test>", recipient="agent@example.test", in_reply_to=original.message_id)
+            for number in (1, 2)
+        ]
+        headers = {"1": replies[0], "2": replies[1], "3": original}
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        class Client:
+            mailbox = ""
+
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                return None
+
+            def login(self, *_args: object) -> None:
+                return None
+
+            def logout(self) -> None:
+                return None
+
+            def select(self, mailbox: str, **_kwargs: object) -> tuple[str, list[bytes]]:
+                self.mailbox = mailbox.strip('"')
+                return "OK", [b""]
+
+            def uid(self, command: str, *arguments: object) -> tuple[str, list[bytes]]:
+                if command != "search" or "HEADER" not in arguments:
+                    raise AssertionError((command, arguments))
+                message_id = str(arguments[-1]).strip('"')
+                if self.mailbox == "INBOX":
+                    return "OK", [b"1" if message_id == replies[0].message_id else b"2" if message_id == replies[1].message_id else b""]
+                return "OK", [b"3" if message_id == original.message_id else b""]
+
+        with (
+            patch("omo_manager.omo_email_subject.configured_agent_mail", return_value=Settings()),
+            patch("omo_manager.omo_email_subject.imaplib.IMAP4_SSL", Client),
+            patch("omo_manager.omo_email_subject.fetch_recent_headers", side_effect=lambda _client, uids: [headers[uid] for uid in uids]),
+        ):
+            for reply in replies:
+                target = authenticated_referenced_thread_target(
+                    Client(), reply, [reply], [
+                        ("[Gmail]/Sent Mail", "agent@example.test", "human@example.test"),
+                        ("INBOX", "human@example.test", "agent@example.test"),
+                    ],
+                )
+                self.assertEqual("config:24", target)
+
+    def test_verified_human_retag_cannot_supply_owner_without_agent_ancestor(self) -> None:
+        original = RecentHeader("agent@example.test", "[config:24] Update", datetime.now().astimezone(), "<agent-root@example.test>", recipient="human@example.test")
+        reply = RecentHeader("human@example.test", "Re: [victim_task] Update", datetime.now().astimezone(), "<human-reply@example.test>", recipient="agent@example.test", in_reply_to=original.message_id)
+        target = authenticated_referenced_thread_target(
+            object(), reply, [reply, original], [],
+            agent_sender="agent@example.test", human_recipient="human@example.test",
+        )
+        self.assertEqual("config:24", target)
+        human_root = RecentHeader("human@example.test", "[victim_task] Update", datetime.now().astimezone(), "<human-root@example.test>", recipient="agent@example.test")
+        unowned = RecentHeader("human@example.test", "Re: [victim_task] Update", datetime.now().astimezone(), "<human-latest@example.test>", recipient="agent@example.test", in_reply_to=human_root.message_id)
+        self.assertEqual(
+            "",
+            authenticated_referenced_thread_target(
+                object(), unowned, [unowned, human_root], [],
+                agent_sender="agent@example.test", human_recipient="human@example.test",
+            ),
+        )
+
     def test_ancestor_lookup_fails_closed_for_missing_ambiguous_or_wrong_route(self) -> None:
         first_id = "<config24@example.test>"
         latest = RecentHeader(
@@ -267,6 +404,180 @@ class EmailSubjectRouteContinuityTests(unittest.TestCase):
             )
         self.assertEqual(header.subject, subject)
         self.assertEqual(header.message_id, reply_headers["In-Reply-To"])
+
+    def test_same_subject_primary_update_without_reply_prefix_chains_session(self) -> None:
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        header = RecentHeader(
+            "agent@example.test",
+            "[shut_down_codex] Closing Codex and turning off fast",
+            datetime.now().astimezone(),
+            "<previous@example.test>",
+            recipient="human@example.test",
+            agent_session=session,
+        )
+        with patch("omo_manager.omo_email_subject.find_recent_thread", return_value=header) as lookup:
+            subject, headers = prepare_subject_and_headers(
+                "Closing Codex and turning off fast",
+                "shut_down_codex",
+                route_profile=self.profile,
+                required_agent_session=session,
+            )
+        self.assertEqual("Re: [shut_down_codex] Closing Codex and turning off fast", subject)
+        self.assertEqual(header.message_id, headers["In-Reply-To"])
+        self.assertEqual(header.message_id, headers["References"])
+        self.assertEqual(session, lookup.call_args.kwargs["required_agent_session"])
+
+    def test_new_primary_subject_starts_fresh_without_same_session_parent(self) -> None:
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        with patch("omo_manager.omo_email_subject.find_recent_thread", return_value=None):
+            subject, headers = prepare_subject_and_headers(
+                "New topic", "shut_down_codex", route_profile=self.profile,
+                required_agent_session=session,
+            )
+        self.assertEqual("[shut_down_codex] New topic", subject)
+        self.assertEqual({}, headers)
+
+    def test_changed_explicit_reply_uses_authenticated_session_thread(self) -> None:
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        subject = "Re: [shut_down_codex] Closing Codex and turning off fast"
+        parent_id = "<179079635152.1477563.10754487308162452655@gmail.com>"
+        now = datetime.now().astimezone()
+        previous = RecentHeader(
+            self.profile.agent_address, subject, now - timedelta(minutes=2), parent_id,
+            recipient=self.profile.counterparty_address, agent_session=session,
+        )
+        other_session = RecentHeader(
+            self.profile.agent_address, subject + " — current", now,
+            "<179088292457.1170842.468749574602537914@gmail.com>",
+            recipient=self.profile.counterparty_address,
+            agent_session="01a0369c-7895-70f2-ae4b-5f59d920e99b",
+        )
+        inbound = RecentHeader(
+            self.profile.counterparty_address, subject, now,
+            "<human@example.test>", recipient=self.profile.agent_address,
+            in_reply_to=parent_id,
+        )
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        class FakeClient:
+            def __init__(self, _host: str, timeout: float) -> None:
+                self.timeout = timeout
+
+            def login(self, _user: str, _password: str) -> None:
+                return None
+
+            def select(self, _mailbox: str, readonly: bool) -> tuple[str, list[bytes]]:
+                if not readonly:
+                    raise AssertionError("thread lookup must be read-only")
+                return "OK", []
+
+            def uid(self, command: str, *_args: str) -> tuple[str, list[bytes]]:
+                if command != "search":
+                    raise AssertionError("unexpected mailbox mutation")
+                return "OK", [b"1 2 3"]
+
+            def logout(self) -> None:
+                return None
+
+        with (
+            patch("omo_manager.omo_email_subject.configured_agent_mail", return_value=Settings()),
+            patch("omo_manager.omo_email_subject.imaplib.IMAP4_SSL", FakeClient),
+            patch("omo_manager.omo_email_subject.fetch_recent_headers", return_value=[previous, other_session, inbound]),
+        ):
+            prepared, headers = prepare_subject_and_headers(
+                subject + " — current", "shut_down_codex", route_profile=self.profile,
+                required_agent_session=session,
+            )
+        self.assertEqual(subject, prepared)
+        self.assertEqual({"In-Reply-To": parent_id, "References": parent_id}, headers)
+
+    def test_first_explicit_reply_retains_exact_subject_lookup(self) -> None:
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        with patch("omo_manager.omo_email_subject.find_recent_thread_for_tmux_target", return_value=None), patch(
+            "omo_manager.omo_email_subject.find_recent_thread", return_value=None,
+        ) as lookup:
+            with self.assertRaisesRegex(SubjectInputError, "no exact email thread"):
+                prepare_subject_and_headers(
+                    "Re: First reply", "shut_down_codex", route_profile=self.profile,
+                    required_agent_session=session,
+                )
+        self.assertEqual("first reply", lookup.call_args.args[0])
+        self.assertEqual(session, lookup.call_args.kwargs["required_agent_session"])
+
+    def test_explicit_reply_to_nonreply_parent_keeps_canonical_subject(self) -> None:
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        header = RecentHeader(
+            self.profile.agent_address, "[shut_down_codex] Closing Codex and turning off fast",
+            datetime.now().astimezone(), "<previous@example.test>",
+            recipient=self.profile.counterparty_address, agent_session=session,
+        )
+        with patch("omo_manager.omo_email_subject.find_recent_thread_for_tmux_target", return_value=header):
+            subject, headers = prepare_subject_and_headers(
+                "Re: Closing Codex and turning off fast — current", "shut_down_codex",
+                route_profile=self.profile, required_agent_session=session,
+            )
+        self.assertEqual("Re: [shut_down_codex] Closing Codex and turning off fast", subject)
+        self.assertEqual({"In-Reply-To": header.message_id, "References": header.message_id}, headers)
+
+    def test_unprofiled_explicit_reply_does_not_override_selected_subject(self) -> None:
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        with patch("omo_manager.omo_email_subject.find_recent_thread_for_tmux_target") as latest, patch(
+            "omo_manager.omo_email_subject.find_recent_thread", return_value=None,
+        ) as exact:
+            subject, headers = prepare_subject_and_headers(
+                "Re: Deliberately separate topic", "shut_down_codex", required_agent_session=session,
+            )
+        self.assertEqual("Re: [shut_down_codex] Deliberately separate topic", subject)
+        self.assertEqual({}, headers)
+        latest.assert_not_called()
+        self.assertEqual("deliberately separate topic", exact.call_args.args[0])
+        self.assertEqual(session, exact.call_args.kwargs["required_agent_session"])
+
+    def test_explicit_reply_lookup_failure_refuses_delivery(self) -> None:
+        with patch("omo_manager.omo_email_subject.find_recent_thread_for_tmux_target", side_effect=OSError("mailbox unavailable")):
+            with self.assertRaisesRegex(SubjectInputError, "mailbox unavailable"):
+                prepare_subject_and_headers(
+                    "Re: Changed title", "shut_down_codex", route_profile=self.profile,
+                    required_agent_session="01a0369c-7895-70f2-ae4b-5f59d920e99a",
+                )
+
+    def test_changed_explicit_reply_still_rejects_another_task_thread(self) -> None:
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        header = RecentHeader(
+            self.profile.agent_address, "Re: [other_task] Topic", datetime.now().astimezone(),
+            "<other@example.test>", recipient=self.profile.counterparty_address,
+            agent_session=session,
+        )
+        with patch("omo_manager.omo_email_subject.find_recent_thread_for_tmux_target", return_value=header):
+            with self.assertRaisesRegex(SubjectInputError, "may not retag"):
+                prepare_subject_and_headers(
+                    "Re: Topic — current", "shut_down_codex", route_profile=self.profile,
+                    required_agent_session=session,
+                )
+
+    def test_repeated_primary_subject_still_rejects_other_task_parent(self) -> None:
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        header = RecentHeader(
+            "agent@example.test", "[other_task] Topic", datetime.now().astimezone(),
+            "<other@example.test>", recipient="human@example.test", agent_session=session,
+        )
+        with patch("omo_manager.omo_email_subject.find_recent_thread", return_value=header):
+            with self.assertRaisesRegex(SubjectInputError, "may not retag"):
+                prepare_subject_and_headers(
+                    "Topic", "shut_down_codex", route_profile=self.profile,
+                    required_agent_session=session,
+                )
+
+    def test_repeated_subject_lookup_failure_does_not_start_separate_thread(self) -> None:
+        with patch("omo_manager.omo_email_subject.find_recent_thread", side_effect=OSError("mailbox unavailable")):
+            with self.assertRaisesRegex(SubjectInputError, "mailbox unavailable"):
+                prepare_subject_and_headers(
+                    "Topic", "shut_down_codex", route_profile=self.profile,
+                    required_agent_session="01a0369c-7895-70f2-ae4b-5f59d920e99a",
+                )
 
     def test_omitted_subject_rejects_retag_against_recovered_first_target(self) -> None:
         latest = RecentHeader(

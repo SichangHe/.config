@@ -10,6 +10,7 @@ timeout 30s env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$repo_root" /usr/bin/pytho
   "$repo_root/omo_manager/email_idle_watcher.py"
 
 timeout 120s "$python_bin" -m unittest \
+  omo_manager.tests.test_guest_agent \
   omo_manager.tests.test_guest_hees_email_watcher \
   omo_manager.tests.test_guest_images \
   omo_manager.tests.test_guest_hees_pending_delivery \
@@ -23,7 +24,9 @@ timeout 60s "$ruff_bin" check \
   "$repo_root/omo_manager/omo_completion_email.py" \
   "$repo_root/omo_manager/omo_email_config.py" \
   "$repo_root/omo_manager/omo_guest_images.py" \
+  "$repo_root/omo_manager/omo_guest_agent.py" \
   "$repo_root/omo_manager/omo_pending_watch.py" \
   "$repo_root/omo_manager/omo_email_subject.py" \
   "$repo_root/omo_manager/tests/test_guest_hees_email_watcher.py" \
+  "$repo_root/omo_manager/tests/test_guest_agent.py" \
   "$repo_root/omo_manager/tests/test_guest_hees_pending_delivery.py"

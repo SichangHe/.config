@@ -36,7 +36,7 @@ if __package__ in {None, ""}:
 
 from omo_manager.email_idle_watcher import LEGACY_MANAGER_SUBJECT_TOKENS, is_mail_cleanup_excluded_subject, message_text, parse_env_config
 from omo_manager.omo_email_config import configured_agent_mail, human_config_path, parse_env_file
-from omo_manager.omo_email_subject import OMNIGENT_TARGET_RE, TMUX_TARGET_RE, canonical_tmux_target, current_agent_session_id, is_producer_target, subject_tmux_target
+from omo_manager.omo_email_subject import OMNIGENT_TARGET_RE, TMUX_TARGET_RE, canonical_tmux_target, current_agent_session_id, is_producer_target, leading_mail_target, subject_task_stem, subject_tmux_target
 
 HEADER_FETCH = "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID X-OMO-AGENT-SESSION-ID)])"
 HEADER_BATCH_FETCH = "(UID BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID X-OMO-AGENT-SESSION-ID)])"
@@ -1770,6 +1770,16 @@ def cmd_unread_summary(args: argparse.Namespace) -> int:
 
 
 def current_agent_mail_target() -> str:
+    task_file = os.environ.get("OMO_AGENT_TASK_FILE")
+    if task_file:
+        from omo_manager.omo_agent_status import DEFAULT_ROOT, read_task_metadata
+        from omo_manager.omo_task_context import current_pending_task
+
+        root = Path(os.environ.get("OMO_WORK_LOGS_ROOT", DEFAULT_ROOT)).expanduser().resolve()
+        metadata = read_task_metadata(current_pending_task(root, task_file), root)
+        if metadata is None:
+            raise RuntimeError("named task has no active owner")
+        return canonical_tmux_target(metadata.runat)
     try:
         from omo_manager.omo_omnigent_identity import NotOmniGentEnvironment, OmniGentIdentityError, authenticate_current_omnigent
 
@@ -1810,22 +1820,21 @@ def agent_unread_records(client: imaplib.IMAP4_SSL, sender_email: str, recipient
     candidates = manager_unread_candidate_uids(client, sender_email)
     headers, _skipped = accepted_manager_headers(client, candidates, sender_email, recipient_email)
     records = unread_records_with_metadata(client, headers)
-    return [
-        record
-        for record in records
-        if r"\Seen" not in record.flags
-        and (
-            bool(agent_session)
-            and record.agent_session_id == agent_session
-            and (
-                subject_tmux_target(record.subject) == target
-                or subject_tmux_target(record.subject).startswith("og:")
-            )
+    selected: list[MailRecord] = []
+    for record in records:
+        if r"\Seen" in record.flags:
+            continue
+        producer_tag = subject_tmux_target(record.subject)
+        same_session = bool(agent_session) and record.agent_session_id == agent_session
+        task_match = same_session and bool(subject_task_stem(record.subject))
+        legacy_match = (
+            same_session and (producer_tag == target or producer_tag.startswith("og:"))
             if OMNIGENT_TARGET_RE.fullmatch(target) is not None
-            else subject_tmux_target(record.subject) == target
-            and record.agent_session_id in {"", agent_session}
+            else producer_tag == target and record.agent_session_id in {"", agent_session}
         )
-    ]
+        if task_match or legacy_match:
+            selected.append(record)
+    return selected
 
 
 def cmd_agent_unread(args: argparse.Namespace) -> int:
@@ -1943,9 +1952,16 @@ def cmd_agent_trash_replaced(args: argparse.Namespace) -> int:
             raise RuntimeError("required Gmail All Mail, Sent, or Trash mailbox is unavailable")
         if not replacement_exists(client, all_mailbox, args.replacement_message_id, sender_email, recipient_email):
             raise RuntimeError("replacement Message-ID is missing, ambiguous, or outside the agent-human mail boundary")
-        replacement_route = subject_tmux_target(replacement_subject(client, all_mailbox, args.replacement_message_id, sender_email, recipient_email))
+        replacement_title = replacement_subject(client, all_mailbox, args.replacement_message_id, sender_email, recipient_email)
+        replacement_route = subject_tmux_target(replacement_title)
+        if subject_task_stem(replacement_title) or any(subject_task_stem(record.subject) for record in sources):
+            if {leading_mail_target(record.subject) for record in sources} != {leading_mail_target(replacement_title)}:
+                raise RuntimeError("replacement does not preserve the selected sources' task subject tag")
         replacement_session = ""
-        if replacement_route != target and OMNIGENT_TARGET_RE.fullmatch(target) is not None and replacement_route.startswith("og:"):
+        if replacement_route != target and (
+            subject_task_stem(replacement_title)
+            or OMNIGENT_TARGET_RE.fullmatch(target) is not None and replacement_route.startswith("og:")
+        ):
             replacement_session = replacement_agent_session_id(client, all_mailbox, args.replacement_message_id)
         if replacement_route != target and not (bool(agent_session) and replacement_session == agent_session):
             raise RuntimeError("replacement was not sent by the current agent target")
@@ -3702,14 +3718,14 @@ def original_sender_targets_by_task(
     context_records: list[MailRecord],
     replacement_gmail_ids: set[str],
 ) -> list[str]:
-    """Derive one fail-closed original sender target for every task."""
+    """Derive one original producer or task subject tag for every task."""
     source_by_id = {record.gmail_msgid: record for record in source_records}
     targets: list[str] = []
     for task_index, task_id in enumerate(task_ids, 1):
         bound_sources = [source_by_id[gmail_msgid] for index, gmail_msgid in task_sources if index == task_index]
         thread_ids = {record.gmail_thrid for record in bound_sources}
         relevant = [record for record in context_records if record.gmail_thrid in thread_ids and record.gmail_msgid not in replacement_gmail_ids]
-        found = [subject_tmux_target(record.subject) for record in relevant]
+        found = [leading_mail_target(record.subject) for record in relevant]
         unique = set(found)
         if not found or "" in unique:
             raise RuntimeError(f"task has missing original sender tmux target: {task_id}")
@@ -4409,7 +4425,7 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
         except RuntimeError as exc:
             return refuse_trash(f"refusing because {exc}")
         set_trash_stage("special-use-mailboxes-recheck")
-        if replacement_ids and [subject_tmux_target(subject) for subject in replacement_subjects] != original_targets:
+        if replacement_ids and [leading_mail_target(subject) for subject in replacement_subjects] != original_targets:
             return refuse_trash("refusing because a replacement does not preserve its original sender tmux target")
         if special_use_mailboxes(client) != special_use:
             return refuse_trash("refusing because special-use mailbox identity changed")
@@ -4463,7 +4479,7 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             raise
         except RuntimeError as exc:
             return refuse_trash(f"refusing because {exc}")
-        if final_replacement_subjects != replacement_subjects or (replacement_ids and [subject_tmux_target(subject) for subject in final_replacement_subjects] != original_targets):
+        if final_replacement_subjects != replacement_subjects or (replacement_ids and [leading_mail_target(subject) for subject in final_replacement_subjects] != original_targets):
             return refuse_trash("refusing because a replacement sender tmux target changed immediately before move")
         set_trash_stage("select-inbox-mutation-gate")
         select_mailbox(client, "INBOX", readonly=False)
@@ -4855,6 +4871,7 @@ def parser() -> argparse.ArgumentParser:
     unread_summary.add_argument("--max-messages-per-thread", type=int, default=20, help="Maximum unread messages to fetch per chain; 1..50.")
     unread_summary.set_defaults(func=cmd_unread_summary)
     agent_unread = sub.add_parser("agent-unread", help="List unread agent-to-human mail sent by the current tmux agent.")
+    agent_unread.add_argument("--task-file", default="", help="Exact task bound to this Codex session.")
     agent_unread.set_defaults(func=cmd_agent_unread)
     agent_trash = sub.add_parser(
         "agent-trash-replaced",
@@ -4866,6 +4883,7 @@ The source and replacement must preserve the current exact tmux sender and Codex
 This command moves the old message only from Inbox to recoverable Gmail Trash and never expunges it. A repeated identical command reconciles an interrupted move; mixed or missing Inbox/Trash outcomes require manual inspection. Do not schedule this cleanup.""",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    agent_trash.add_argument("--task-file", default="", help="Exact task bound to this Codex session.")
     agent_trash.add_argument("--uid", action="append", required=True, help="Unread Inbox UID printed by agent-unread; repeat for multiple messages.")
     agent_trash.add_argument("--source-uidvalidity", required=True, help="Exact UIDVALIDITY printed by agent-unread.")
     agent_trash.add_argument("--replacement-message-id", required=True, help="Message-ID printed by email_me.py after sending the replacement.")
@@ -5087,6 +5105,8 @@ This command moves the old message only from Inbox to recoverable Gmail Trash an
 def main(argv: list[str]) -> int:
     args = parser().parse_args(argv)
     try:
+        if getattr(args, "task_file", ""):
+            os.environ["OMO_AGENT_TASK_FILE"] = args.task_file
         return args.func(args)
     except (OSError, RuntimeError, imaplib.IMAP4.error) as exc:
         print(str(exc), file=sys.stderr)

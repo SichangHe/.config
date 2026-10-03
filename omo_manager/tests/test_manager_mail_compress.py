@@ -101,6 +101,7 @@ from omo_manager.omo_manager_mail_compress import (
     parse_explicit_source,
     parse_retained_replacement,
     parse_route_resolutions,
+    original_sender_targets_by_task,
     require_source_1140_direct_removal,
     manager_candidate_uids,
     manager_unread_candidate_uids,
@@ -927,6 +928,34 @@ with tempfile.TemporaryDirectory() as tmp:
             records = agent_unread_records(FakeClient({}), "agent@example.test", "human@example.test", "omnigent://session-1", "session-a")
         self.assertEqual([], records)
 
+    def test_agent_unread_records_accepts_task_tag_only_for_current_session(self) -> None:
+        current = MailRecord("7", "date", "agent@example.test", "human@example.test", "[shut_down_codex] current", "digest", agent_session_id="session-a")
+        prior = replace(current, uid="8", agent_session_id="session-b")
+        legacy = replace(current, uid="9", agent_session_id="")
+        read = replace(current, uid="10", flags=r"\Seen")
+        for target in ("omnigent://session-1", "config:1"):
+            with (
+                self.subTest(target=target),
+                patch("omo_manager.omo_manager_mail_compress.manager_unread_candidate_uids", return_value=["7", "8", "9", "10"]),
+                patch("omo_manager.omo_manager_mail_compress.accepted_manager_headers", return_value=([current, prior, legacy, read], [])),
+                patch("omo_manager.omo_manager_mail_compress.unread_records_with_metadata", return_value=[current, prior, legacy, read]),
+            ):
+                records = agent_unread_records(FakeClient({}), "agent@example.test", "human@example.test", target, "session-a")
+            self.assertEqual(["7"], [record.uid for record in records])
+
+    def test_original_sender_routes_accept_same_exact_task_subject_tag(self) -> None:
+        source = MailRecord("7", "date", "agent@example.test", "human@example.test", "[shut_down_codex] old", "digest", gmail_msgid="100", gmail_thrid="200")
+        reply = replace(source, uid="8", gmail_msgid="101", subject="Re: [shut_down_codex] old")
+        self.assertEqual(
+            ["shut_down_codex"],
+            original_sender_targets_by_task(["shut_down_codex.md"], {(1, "100")}, [source], [source, reply], set()),
+        )
+        with self.assertRaisesRegex(RuntimeError, "conflicting"):
+            original_sender_targets_by_task(
+                ["shut_down_codex.md"], {(1, "100")}, [source],
+                [source, replace(reply, subject="[other_task] old")], set(),
+            )
+
     def test_current_agent_mail_target_preserves_nonzero_pane(self) -> None:
         result = SimpleNamespace(returncode=0, stdout="wl:7.1\n")
         with patch.dict(os.environ, {"TMUX_PANE": "%42"}), patch("omo_manager.omo_manager_mail_compress.subprocess.run", return_value=result):
@@ -1012,8 +1041,14 @@ with tempfile.TemporaryDirectory() as tmp:
         session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
         source = MailRecord("7", "date", "agent@example.test", "human@example.test", "[og:task.md] old", "digest", gmail_msgid="100", gmail_thrid="200", message_id="<old@example.test>", agent_session_id=session)
         args = SimpleNamespace(uid=["7"], source_uidvalidity="9", replacement_message_id="<new@example.test>", yes=True)
-        for supersedes, succeeds in (({"<old@example.test>"}, True), (set(), False), ({"<wrong@example.test>"}, False)):
-            with self.subTest(supersedes=supersedes):
+        for supersedes, succeeds, tag in (
+            ({"<old@example.test>"}, True, "og:task.md"),
+            ({"<old@example.test>"}, True, "shut_down_codex"),
+            (set(), False, "shut_down_codex"),
+            ({"<wrong@example.test>"}, False, "shut_down_codex"),
+        ):
+            with self.subTest(supersedes=supersedes, tag=tag):
+                source = replace(source, subject=f"[{tag}] old")
                 client = FakeClient({("MOVE", "7", '"[Gmail]/Trash"'): ("OK", [b""])})
                 final = {"7": SimpleNamespace(flags="", gmail_msgid="100", gmail_thrid="200")}
                 with (
@@ -1027,7 +1062,7 @@ with tempfile.TemporaryDirectory() as tmp:
                     patch("omo_manager.omo_manager_mail_compress.special_use_mailboxes", return_value={r"\All": "All", r"\Sent": "Sent"}),
                     patch("omo_manager.omo_manager_mail_compress.mailbox_exists", return_value=True),
                     patch("omo_manager.omo_manager_mail_compress.replacement_exists", return_value=True),
-                    patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[og:task.md] new"),
+                    patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value=f"[{tag}] new"),
                     patch("omo_manager.omo_manager_mail_compress.replacement_agent_session_id", return_value=session) as replacement_session,
                     patch("omo_manager.omo_manager_mail_compress.replacement_supersedes_ids", return_value=supersedes),
                     patch("omo_manager.omo_manager_mail_compress.replacement_gmail_msgid", return_value="101"),
@@ -1042,6 +1077,29 @@ with tempfile.TemporaryDirectory() as tmp:
                             cmd_agent_trash_replaced(args)
                 replacement_session.assert_called_once()
                 self.assertEqual(succeeds, any(call[0] == "MOVE" for call in client.uid_calls))
+
+    def test_task_tag_replacement_rejects_other_task_before_move(self) -> None:
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        source = MailRecord("7", "date", "agent@example.test", "human@example.test", "[task_a] old", "digest", gmail_msgid="100", gmail_thrid="200", message_id="<old@example.test>", agent_session_id=session)
+        client = FakeClient({})
+        args = SimpleNamespace(uid=["7"], source_uidvalidity="9", replacement_message_id="<new@example.test>", yes=True)
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": tmp}),
+            patch("omo_manager.omo_manager_mail_compress.current_agent_mail_target", return_value="omnigent://session-1"),
+            patch("omo_manager.omo_manager_mail_compress.current_agent_session_id", return_value=session),
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {})),
+            patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            patch("omo_manager.omo_manager_mail_compress.selected_uidvalidity", return_value="9"),
+            patch("omo_manager.omo_manager_mail_compress.agent_unread_records", return_value=[source]),
+            patch("omo_manager.omo_manager_mail_compress.special_use_mailboxes", return_value={r"\All": "All", r"\Sent": "Sent"}),
+            patch("omo_manager.omo_manager_mail_compress.mailbox_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.replacement_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[task_b] new"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "task subject tag"):
+                cmd_agent_trash_replaced(args)
+        self.assertFalse(any(call[0] == "MOVE" for call in client.uid_calls))
 
     def test_agent_trash_replaced_refuses_source_read_at_mutation_gate(self) -> None:
         client = FakeClient({})

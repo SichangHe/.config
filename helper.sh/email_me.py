@@ -72,9 +72,10 @@ TMUX_WINDOW_RE = re.compile(r"[^:\n]+:\d+(?:\.\d+)?\Z")
 AGENT_SESSION_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z", re.IGNORECASE
 )
-PRODUCER_TARGET = r"(?:[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?|omnigent://[A-Za-z0-9._-]+|og:[A-Za-z0-9_.-]+(?:\.md)?)"
+LEGACY_PRODUCER_TARGET = r"(?:[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?|omnigent://[A-Za-z0-9._-]+|og:[A-Za-z0-9_.-]+(?:\.md)?)"
+PRODUCER_TARGET = rf"(?:{LEGACY_PRODUCER_TARGET}|[A-Za-z0-9_-]+(?:\.md)?)"
 TMUX_SUBJECT_TAG_RE = re.compile(
-    rf"^\s*(?:\[{PRODUCER_TARGET}\]|{PRODUCER_TARGET})(?:\s+|$)"
+    rf"^\s*(?:\[{PRODUCER_TARGET}\]|{LEGACY_PRODUCER_TARGET})(?:\s+|$)"
 )
 BRACKETED_TMUX_TAG_RE = re.compile(rf"\[{PRODUCER_TARGET}\]")
 MANAGER_HUMAN_SUBJECT_RE = re.compile(
@@ -122,6 +123,7 @@ class CliArgs:
     pending_notice_key: str
     require_human_recipient: bool
     preserve_source2048_thread: bool
+    task_file: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
@@ -143,6 +145,7 @@ class ParsedArgs(argparse.Namespace):
     pending_notice_key: str = ""
     require_human_recipient: bool = False
     preserve_source2048_thread: bool = False
+    task_file: str = ""
 
 
 def parse_args(argv: list[str]) -> CliArgs:
@@ -151,11 +154,19 @@ def parse_args(argv: list[str]) -> CliArgs:
         description=(
             "Email the human with manager-safe subject handling. The body accepts Markdown input, but plain text is preferred. "
             "Reads the email body from standard input by default; "
-            "use --message-file for a saved body. Do not pass body text as a shell argument."
+            "use --message-file for a saved body. Do not pass body text as a shell argument. "
+            "After sending to a thread with earlier unread mail from this agent run, consolidate those emails: "
+            "run omo_manager_mail_compress.py agent-unread; send one replacement with "
+            "--supersedes-message-id MESSAGE_ID repeated for each replaced message, then "
+            "consult omo_manager_mail_compress.py agent-trash-replaced --help, then invoke agent-trash-replaced with the exact inputs and --yes to remove the older unread copies. "
+            "The post-send check lists only this thread's unread messages from the same agent session when the mailbox is available. It never removes mail automatically."
         ),
     )
     _ = parser.add_argument("legacy_args", nargs="*", help=argparse.SUPPRESS)
     _ = parser.add_argument("--subject", help="Email subject/title.")
+    _ = parser.add_argument(
+        "--task-file", help="Exact active task filename; no Codex session ID required."
+    )
     _ = parser.add_argument(
         "--subject-file",
         type=Path,
@@ -344,6 +355,7 @@ def parse_args(argv: list[str]) -> CliArgs:
         pending_notice_key=parsed.pending_notice_key,
         require_human_recipient=parsed.require_human_recipient,
         preserve_source2048_thread=parsed.preserve_source2048_thread,
+        task_file=parsed.task_file,
     )
 
 
@@ -414,18 +426,30 @@ def current_tmux_window() -> str | None:
         ancestors = process_ancestor_pids(os.getpid())
         try:
             result = subprocess.run(
-                ["tmux", "list-panes", "-a", "-F", "#{pane_pid}\t#{session_name}:#{window_index}.#{pane_index}"],
-                capture_output=True, text=True, timeout=2, check=False,
+                [
+                    "tmux",
+                    "list-panes",
+                    "-a",
+                    "-F",
+                    "#{pane_pid}\t#{session_name}:#{window_index}.#{pane_index}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
         if result.returncode != 0:
             return None
         matches = {
-            target for line in result.stdout.splitlines()
+            target
+            for line in result.stdout.splitlines()
             if (parts := line.split("\t", 1)) and len(parts) == 2
             for pid, target in [parts]
-            if pid.isdigit() and int(pid) in ancestors and TMUX_WINDOW_RE.fullmatch(target)
+            if pid.isdigit()
+            and int(pid) in ancestors
+            and TMUX_WINDOW_RE.fullmatch(target)
         }
         return next(iter(matches)) if len(matches) == 1 else None
     command = ["tmux", "display-message", "-p", "-t", pane_id, "#S:#I.#P"]
@@ -753,11 +777,9 @@ def validate_manager_route_identity(
     inferred_target = inferred_tmux_target(True)
     if inferred_target is None:
         return
-    if (
-        OMNIGENT_TARGET_RE.fullmatch(inferred_target)
-        and canonical_email_tmux_target(explicit_target)
-        != canonical_email_tmux_target(inferred_target)
-    ):
+    if OMNIGENT_TARGET_RE.fullmatch(inferred_target) and canonical_email_tmux_target(
+        explicit_target
+    ) != canonical_email_tmux_target(inferred_target):
         raise ValueError(
             f"explicit tmux target {canonical_email_tmux_target(explicit_target)} conflicts with verified producer route {canonical_email_tmux_target(inferred_target)}"
         )
@@ -818,6 +840,20 @@ def inferred_tmux_target(manager_human: bool) -> str | None:
     omnigent_target = omnigent_inferred_target()
     if omnigent_target is not None:
         return omnigent_target
+    task_file = os.environ.get("OMO_AGENT_TASK_FILE")
+    if task_file:
+        from omo_agent_status import DEFAULT_ROOT, read_task_metadata
+        from omo_task_context import current_pending_task
+
+        root = (
+            Path(os.environ.get("OMO_WORK_LOGS_ROOT", DEFAULT_ROOT))
+            .expanduser()
+            .resolve()
+        )
+        metadata = read_task_metadata(current_pending_task(root, task_file), root)
+        if metadata is None:
+            raise ValueError("named task has no active owner")
+        return canonical_email_tmux_target(metadata.runat)
     agent_target = env_tmux_target()
     current_target = current_tmux_window()
     if current_target is not None:
@@ -847,38 +883,81 @@ def omnigent_inferred_target() -> str | None:
     except NotOmniGentEnvironment:
         return None
     except (OmniGentIdentityError, OSError) as exc:
-        raise ValueError("OmniGent producer identity could not be authenticated") from exc
+        raise ValueError(
+            "OmniGent producer identity could not be authenticated"
+        ) from exc
     if not isinstance(target, str) or OMNIGENT_TARGET_RE.fullmatch(target) is None:
         raise ValueError("OmniGent producer identity could not be authenticated")
     return target
 
 
-# 🧑 "emails from omnigent agents should render their tags as [og:task_file_name], instead of the long session ID"
+# 🧑 "Let email_me.py prefer the task file name in the subject tag. I find it easier"
 def email_subject_target(authenticated_target: str) -> str:
     """Return the visible tag for one authenticated producer target."""
 
-    if OMNIGENT_TARGET_RE.fullmatch(authenticated_target) is None:
+    omnigent = OMNIGENT_TARGET_RE.fullmatch(authenticated_target) is not None
+    if not omnigent and not valid_tmux_target(authenticated_target):
         return authenticated_target
-    from omo_agent_status import DEFAULT_ROOT, parse_task_lines, read_task_metadata, resolve_task_path
-    from omo_task_context import ACTIVE_STATUSES, LIVE_SECTIONS, infer_pending_task
+    from omo_agent_status import (
+        DEFAULT_ROOT,
+        parse_task_lines,
+        read_task_metadata,
+        resolve_task_path,
+    )
+    from omo_task_context import (
+        ACTIVE_STATUSES,
+        LIVE_SECTIONS,
+        current_pending_task,
+        infer_pending_task,
+    )
 
-    root = Path(os.environ.get("OMO_WORK_LOGS_ROOT", DEFAULT_ROOT)).expanduser().resolve()
+    root = (
+        Path(os.environ.get("OMO_WORK_LOGS_ROOT", DEFAULT_ROOT)).expanduser().resolve()
+    )
     try:
-        task = infer_pending_task(root, authenticated_target)
+        named_task = os.environ.get("OMO_AGENT_TASK_FILE", "")
+        task = (
+            current_pending_task(root, named_task)
+            if named_task
+            else infer_pending_task(root, authenticated_target)
+        )
     except (OSError, ValueError) as exc:
-        raise ValueError("OmniGent email tag requires one exact active task owner") from exc
+        if (
+            not omnigent
+            and not named_task
+            and str(exc) == "no active work queue matches the current agent"
+        ):
+            return authenticated_target
+        raise ValueError("email tag requires one exact active task owner") from exc
+    metadata = read_task_metadata(task, root)
+    if metadata is None or canonical_email_tmux_target(
+        metadata.runat
+    ) != canonical_email_tmux_target(authenticated_target):
+        raise ValueError("email task tag does not match its authenticated producer")
     same_name = []
     for row in parse_task_lines(root / "TODO.md"):
-        if row.section not in LIVE_SECTIONS:
+        if row.section not in LIVE_SECTIONS - {"todo:previous"}:
             continue
         candidate = resolve_task_path(root, row.task_file)
-        metadata = read_task_metadata(candidate, root) if candidate is not None else None
-        if candidate is not None and candidate.name == task.name and metadata is not None and metadata.status in ACTIVE_STATUSES:
+        metadata = (
+            read_task_metadata(candidate, root) if candidate is not None else None
+        )
+        if (
+            candidate is not None
+            and candidate.name == task.name
+            and metadata is not None
+            and metadata.status in ACTIVE_STATUSES
+            and row.target == metadata.runat
+        ):
             same_name.append(candidate)
     if len(set(same_name)) != 1:
-        raise ValueError("OmniGent email tag requires a unique active task filename")
-    # 🧑 "Also make it s.t. the email subjects do not have .md in the tag"
-    return f"og:{task.name.removesuffix('.md')}"
+        raise ValueError("email tag requires a unique active task filename")
+    tag = task.name.removesuffix(".md")
+    if tag.casefold() in {"main", "pb"}:
+        if not omnigent:
+            return authenticated_target
+        raise ValueError("task mail tag collides with a legacy agent identifier")
+    return tag
 
 
 def retag_subject(subject: str, target: str) -> str:
@@ -1439,6 +1518,28 @@ def validate_manager_operational_reply(
 def validate_invoking_owner_target(producer_target: str, purpose: str) -> None:
     """Bind a Human-mail route to the exact live OmniGent session or pane presenting it."""
 
+    task_file = os.environ.get("OMO_AGENT_TASK_FILE")
+    if task_file:
+        from omo_agent_status import DEFAULT_ROOT, read_task_metadata
+        from omo_task_context import authenticated_pending_task, current_pending_task
+
+        root = (
+            Path(os.environ.get("OMO_WORK_LOGS_ROOT", DEFAULT_ROOT))
+            .expanduser()
+            .resolve()
+        )
+        task = current_pending_task(root, task_file)
+        if (
+            purpose == "completion Human mail"
+            and authenticated_pending_task(root) != task
+        ):
+            raise ValueError(f"{purpose} requires the authenticated invoking owner")
+        metadata = read_task_metadata(task, root)
+        if metadata is None or canonical_email_tmux_target(
+            metadata.runat
+        ) != canonical_email_tmux_target(producer_target):
+            raise ValueError(f"{purpose} target does not match the named task")
+        return
     if OMNIGENT_TARGET_RE.fullmatch(canonical_email_tmux_target(producer_target)):
         omnigent_target = omnigent_inferred_target()
         if omnigent_target is None:
@@ -1446,7 +1547,9 @@ def validate_invoking_owner_target(producer_target: str, purpose: str) -> None:
         if canonical_email_tmux_target(omnigent_target) != canonical_email_tmux_target(
             producer_target
         ):
-            raise ValueError(f"{purpose} target does not match the invoking OmniGent session")
+            raise ValueError(
+                f"{purpose} target does not match the invoking OmniGent session"
+            )
         return
     if not os.environ.get("TMUX_PANE", "").strip():
         raise ValueError(f"{purpose} requires the exact invoking owner pane")
@@ -2176,7 +2279,83 @@ def fake_send_log_path() -> Path | None:
 
 def maybe_print_thread_reminder() -> None:
     if secrets.randbelow(8) == 0:
-        print("Tip: omit --subject to continue this tmux window's latest email thread.")
+        print("Tip: omit --subject to continue this agent run's latest email thread.")
+
+
+# 🧑 "sending email on a thread with unread emails from the same agent prompts the agent to replace unread emails with one single after the send"
+def print_prior_unread_mail(target: str | None, sent_message_id: str, supersedes_message_ids: tuple[str, ...] = ()) -> None:
+    if not target:
+        print("Unread-mail check unavailable: sender window was not authenticated.")
+        return
+    sender_session = agent_session_id()
+    if not sender_session:
+        print("Unread-mail check unavailable: sender session was not authenticated.")
+        return
+    try:
+        from omo_manager import omo_manager_mail_compress as mail_compress
+
+        client, config = mail_compress.open_mailbox(readonly=True)
+        try:
+            sender, recipient = mail_compress.mail_boundary(config)
+            sent_record = None
+            for attempt in range(3):
+                if attempt:
+                    time.sleep(1)
+                    mail_compress.select_mailbox(client, "INBOX", readonly=True)
+                records = mail_compress.agent_unread_records(
+                    client, sender, recipient, target, sender_session
+                )
+                sent_record = next((record for record in records if record.message_id == sent_message_id), None)
+                if sent_record is not None:
+                    break
+                all_mailbox = mail_compress.special_use_mailboxes(client).get(r"\All", "")
+                if not all_mailbox:
+                    raise RuntimeError("All Mail could not be identified for the thread check")
+                mail_compress.select_mailbox(client, all_mailbox, readonly=True)
+                status, data = mail_compress.imap_uid(client, "post-send-thread-search", "search", None, "HEADER", "Message-ID", mail_compress.imap_quoted(sent_message_id))
+                if status != "OK":
+                    raise RuntimeError("sent message thread lookup failed")
+                sent_uids = [raw.decode() for raw in data[0].split()] if data and data[0] else []
+                if len(sent_uids) > 1:
+                    raise RuntimeError("sent message thread is ambiguous")
+                if sent_uids:
+                    sent_record = mail_compress.fetch_record(client, sent_uids[0], with_body=False, with_metadata=True)
+                    break
+            if sent_record is None:
+                raise RuntimeError("sent message thread is not yet visible")
+            if sent_record.message_id != sent_message_id or sent_record.agent_session_id != sender_session or not sent_record.gmail_thrid.isdecimal():
+                raise RuntimeError("sent message thread or sender session could not be verified")
+            prior = [
+                record for record in records
+                if record.message_id != sent_message_id
+                and record.agent_session_id == sender_session
+                and record.gmail_thrid == sent_record.gmail_thrid
+            ]
+        finally:
+            mail_compress.logout_mailbox(client)
+    except (OSError, RuntimeError, ValueError, imaplib.IMAP4.error) as error:
+        print(f"Unread-mail check unavailable: {error}")
+        return
+    if not prior:
+        return
+    print(f"Earlier unread email in this thread from this agent run: {len(prior)}")
+    for record in prior[:10]:
+        print(f"  {record.message_id} {record.subject!r}")
+    if len(prior) > 10:
+        print(
+            f"  ... and {len(prior) - 10} more; run omo_manager_mail_compress.py agent-unread"
+        )
+    if {record.message_id for record in prior} <= set(supersedes_message_ids):
+        print("The email just sent already supersedes these unread messages. Keep it; do not send another replacement solely because of this reminder.")
+    else:
+        print(
+            "Send one replacement email in this thread that retains everything still needed from these unread emails and the email just sent. "
+            "Use --supersedes-message-id for each replaced Message-ID, including the just-sent message if it is still unread."
+        )
+    print(
+        "Then run omo_manager_mail_compress.py agent-unread, consult agent-trash-replaced --help, and invoke agent-trash-replaced with the exact inputs and --yes to remove only the superseded, unread messages from this agent run. "
+        "Do not remove mail before the replacement is sent; this check has not changed any mail."
+    )
 
 
 def main(argv: list[str]) -> int:
@@ -2186,6 +2365,25 @@ def main(argv: list[str]) -> int:
     digest_authorization: tuple[Path, bytes] | None = None
     non_completion_manager = False
     try:
+        if args.task_file:
+            from omo_agent_status import DEFAULT_ROOT, read_task_metadata
+            from omo_task_context import current_pending_task
+
+            os.environ["OMO_AGENT_TASK_FILE"] = args.task_file
+            root = (
+                Path(os.environ.get("OMO_WORK_LOGS_ROOT", DEFAULT_ROOT))
+                .expanduser()
+                .resolve()
+            )
+            task = current_pending_task(root, args.task_file)
+            metadata = read_task_metadata(task, root)
+            if metadata is None:
+                raise ValueError("task file has no active owner")
+            if args.tmux_target is not None and canonical_email_tmux_target(
+                args.tmux_target
+            ) != canonical_email_tmux_target(metadata.runat):
+                raise ValueError("task file and explicit producer target disagree")
+            args = dataclass_replace(args, tmux_target=metadata.runat)
         validate_explicit_omnigent_identity(args.tmux_target)
         subject_tmux_target = footer_tmux_target(args.tmux_target, args.manager_human)
         if (
@@ -2194,7 +2392,9 @@ def main(argv: list[str]) -> int:
             and os.environ.get("CODEX_CI") == "1"
             and os.environ.get("CODEX_SESSION_ID")
         ):
-            raise ValueError("Codex email requires an authenticated tmux pane; use --tmux-target only after verifying the sender's window")
+            raise ValueError(
+                "Codex email requires an authenticated tmux pane; use --tmux-target only after verifying the sender's window"
+            )
         if args.manager_human and subject_tmux_target is not None:
             validate_manager_route_identity(args.tmux_target, subject_tmux_target)
         if (
@@ -2263,20 +2463,20 @@ def main(argv: list[str]) -> int:
             split_settings = guest_hees_mail(split_settings)
             if split_settings.human_address != GUEST_HEES_ADDRESS:
                 raise ValueError("guest-hees recipient configuration is not pinned")
-        elif (
-            args.manager_human
-            and split_settings is not None
-            and split_settings.human_address.casefold() == GUEST_HEES_ADDRESS.casefold()
-        ):
-            raise ValueError(
-                "primary email route must not use the pinned guest recipient"
-            )
+        sender_agent_session = agent_session_id() or None
         route_profile = None
-        if args.manager_human:
+        if args.manager_human or (
+            split_settings is not None
+            and sender_agent_session is not None
+            and subject_tmux_target is not None
+            and not args.guest_hees
+        ):
             if MailRouteProfile is None or split_settings is None:
                 raise ValueError(
-                    "manager-human route-profile validation is unavailable"
+                    "agent-human route-profile validation is unavailable"
                 )
+            if not args.guest_hees and split_settings.human_address.casefold() == GUEST_HEES_ADDRESS.casefold():
+                raise ValueError("primary email route must not use the pinned guest recipient")
             route_profile = MailRouteProfile(
                 agent_address=split_settings.agent_address,
                 counterparty_address=split_settings.human_address,
@@ -2315,8 +2515,7 @@ def main(argv: list[str]) -> int:
         omnigent_sender = bool(
             subject_tmux_target and OMNIGENT_TARGET_RE.fullmatch(subject_tmux_target)
         )
-        omnigent_agent_session = agent_session_id() if omnigent_sender else None
-        if omnigent_sender and not omnigent_agent_session:
+        if omnigent_sender and not sender_agent_session:
             raise ValueError(
                 "OmniGent email thread lookup requires the current agent session identity"
             )
@@ -2329,9 +2528,11 @@ def main(argv: list[str]) -> int:
                 raise ValueError(
                     "email thread lookup is unavailable; pass --subject or --subject-file."
                 )
-            session_bound_thread = bool(
-                args.completion_authorization or args.pending_notice_key
-            ) or omnigent_sender
+            session_bound_thread = (
+                bool(args.completion_authorization or args.pending_notice_key)
+                or omnigent_sender
+                or bool(sender_agent_session)
+            )
             required_agent_session = (
                 agent_session_id() if session_bound_thread else None
             )
@@ -2345,7 +2546,7 @@ def main(argv: list[str]) -> int:
                 route_profile,
                 required_agent_session,
             )
-            if OMNIGENT_TARGET_RE.fullmatch(subject_tmux_target):
+            if display_target != subject_tmux_target:
                 subject = retag_subject(subject, display_target)
             title = subject
         elif args.digest_authorization:
@@ -2362,10 +2563,8 @@ def main(argv: list[str]) -> int:
                 subject, reply_headers = prepare_subject_and_headers(
                     args.title,
                     display_target,
-                    legacy_target=subject_tmux_target
-                    if OMNIGENT_TARGET_RE.fullmatch(subject_tmux_target or "")
-                    else "",
-                    required_agent_session=omnigent_agent_session,
+                    legacy_target=subject_tmux_target or "",
+                    required_agent_session=sender_agent_session,
                 )
             else:
                 subject, reply_headers = prepare_subject_and_headers(
@@ -2375,10 +2574,8 @@ def main(argv: list[str]) -> int:
                     preserve_verified_thread_target=SOURCE2048_RECOVERY_THREAD_TARGET
                     if args.preserve_source2048_thread
                     else "",
-                    legacy_target=subject_tmux_target
-                    if OMNIGENT_TARGET_RE.fullmatch(subject_tmux_target or "")
-                    else "",
-                    required_agent_session=omnigent_agent_session,
+                    legacy_target=subject_tmux_target or "",
+                    required_agent_session=sender_agent_session,
                 )
             title = args.title
         else:
@@ -2410,7 +2607,7 @@ def main(argv: list[str]) -> int:
                 # Some inbound human subjects are untagged.  Reply safely by
                 # rebuilding the prepared subject with the known sender
                 # target, rather than rejecting a valid acknowledgement.
-                subject = normalize_subject(subject, subject_tmux_target or "")
+                subject = normalize_subject(subject, display_target)
                 validate_manager_human_subject(subject)
         if args.non_completion and fake_send_log_path() is None:
             validate_non_completion_thread(subject_tmux_target, reply_headers)
@@ -2433,7 +2630,7 @@ def main(argv: list[str]) -> int:
     except (OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    if args.manager_human and route_profile is not None:
+    if route_profile is not None:
         if split_settings is None or (
             split_settings.agent_address.casefold()
             != route_profile.agent_address.casefold()
@@ -2751,7 +2948,7 @@ def main(argv: list[str]) -> int:
                 exact_once=exact_once,
                 producer_display_target=display_target,
             )
-        elif args.completion_authorization:
+        elif args.completion_authorization and not smtp_delivery_attempted:
             release_completion_authorization(
                 args.completion_authorization, completion_authorization
             )
@@ -2845,6 +3042,7 @@ def main(argv: list[str]) -> int:
     else:
         print("Email sent.")
     print(f"Message-ID: {msg['Message-ID']}")
+    print_prior_unread_mail(subject_tmux_target, str(msg["Message-ID"]), args.supersedes_message_ids)
     maybe_print_thread_reminder()
     return 0
 

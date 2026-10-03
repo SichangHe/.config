@@ -31,6 +31,263 @@ literal `touch /tmp/email-me-should-not-run-backtick`
 
 
 class EmailMeTests(unittest.TestCase):
+    def test_post_send_reminder_is_same_thread_and_same_agent_run_only(self) -> None:
+        sent = SimpleNamespace(message_id="<sent@example.com>", gmail_thrid="11", agent_session_id="current", subject="Topic")
+        prior = SimpleNamespace(message_id="<prior@example.com>", gmail_thrid="11", agent_session_id="current", subject="Topic")
+        unrelated = SimpleNamespace(message_id="<unrelated@example.com>", gmail_thrid="22", agent_session_id="current", subject="Topic")
+        old = SimpleNamespace(message_id="<old@example.com>", gmail_thrid="11", agent_session_id="old", subject="Topic")
+        output = StringIO()
+        with (
+            patch.object(email_me, "agent_session_id", return_value="current"),
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(Mock(), {})) as opened,
+            patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.com", "human@example.com")),
+            patch("omo_manager.omo_manager_mail_compress.agent_unread_records", return_value=[sent, prior, unrelated, old]),
+            patch("omo_manager.omo_manager_mail_compress.logout_mailbox") as logout,
+            patch("sys.stdout", output),
+        ):
+            email_me.print_prior_unread_mail("cfg:2", sent.message_id)
+        opened.assert_called_once_with(readonly=True)
+        logout.assert_called_once()
+        self.assertIn("in this thread from this agent run: 1", output.getvalue())
+        self.assertIn(prior.message_id, output.getvalue())
+        self.assertNotIn(unrelated.message_id, output.getvalue())
+        self.assertNotIn(old.message_id, output.getvalue())
+        self.assertIn("the email just sent", output.getvalue())
+
+    def test_post_send_read_message_uses_readonly_human_all_mail_thread_lookup(self) -> None:
+        sent = SimpleNamespace(message_id="<sent@example.com>", gmail_thrid="11", agent_session_id="current")
+        prior = SimpleNamespace(message_id="<prior@example.com>", gmail_thrid="11", agent_session_id="current", subject="Topic")
+        output = StringIO()
+        with (
+            patch.object(email_me, "agent_session_id", return_value="current"),
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(Mock(), {})),
+            patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.com", "human@example.com")),
+            patch("omo_manager.omo_manager_mail_compress.agent_unread_records", return_value=[prior]),
+            patch("omo_manager.omo_manager_mail_compress.special_use_mailboxes", return_value={r"\All": "All Mail"}),
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox") as select,
+            patch("omo_manager.omo_manager_mail_compress.imap_uid", return_value=("OK", [b"73"])) as search,
+            patch("omo_manager.omo_manager_mail_compress.fetch_record", return_value=sent) as fetched,
+            patch("omo_manager.omo_manager_mail_compress.logout_mailbox"),
+            patch("sys.stdout", output),
+        ):
+            email_me.print_prior_unread_mail("cfg:2", sent.message_id)
+        self.assertEqual({"readonly": True}, select.call_args.kwargs)
+        self.assertEqual("All Mail", select.call_args.args[1])
+        self.assertEqual("search", search.call_args.args[2])
+        self.assertEqual({"with_body": False, "with_metadata": True}, fetched.call_args.kwargs)
+        self.assertIn(prior.message_id, output.getvalue())
+
+    def test_post_send_replacement_reminds_cleanup_without_recursive_replacement(self) -> None:
+        sent = SimpleNamespace(message_id="<sent@example.com>", gmail_thrid="11", agent_session_id="current")
+        prior = SimpleNamespace(message_id="<prior@example.com>", gmail_thrid="11", agent_session_id="current", subject="Topic")
+        output = StringIO()
+        with (
+            patch.object(email_me, "agent_session_id", return_value="current"),
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(Mock(), {})),
+            patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.com", "human@example.com")),
+            patch("omo_manager.omo_manager_mail_compress.agent_unread_records", return_value=[sent, prior]),
+            patch("omo_manager.omo_manager_mail_compress.logout_mailbox"),
+            patch("sys.stdout", output),
+        ):
+            email_me.print_prior_unread_mail("cfg:2", sent.message_id, (prior.message_id,))
+        self.assertNotIn("Send one replacement", output.getvalue())
+        self.assertIn("Keep it; do not send another replacement", output.getvalue())
+        self.assertIn("agent-trash-replaced", output.getvalue())
+
+    def test_post_send_waits_for_new_message_to_reach_human_mailbox(self) -> None:
+        sent = SimpleNamespace(message_id="<sent@example.com>", gmail_thrid="11", agent_session_id="current")
+        prior = SimpleNamespace(message_id="<prior@example.com>", gmail_thrid="11", agent_session_id="current", subject="Topic")
+        output = StringIO()
+        with (
+            patch.object(email_me, "agent_session_id", return_value="current"),
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(Mock(), {})),
+            patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.com", "human@example.com")),
+            patch("omo_manager.omo_manager_mail_compress.agent_unread_records", side_effect=[[prior], [sent, prior]]) as unread,
+            patch("omo_manager.omo_manager_mail_compress.special_use_mailboxes", return_value={r"\All": "All Mail"}),
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox") as selected,
+            patch("omo_manager.omo_manager_mail_compress.imap_uid", return_value=("OK", [b""])),
+            patch("omo_manager.omo_manager_mail_compress.logout_mailbox"),
+            patch.object(email_me.time, "sleep") as sleep,
+            patch("sys.stdout", output),
+        ):
+            email_me.print_prior_unread_mail("cfg:2", sent.message_id)
+        self.assertEqual(2, unread.call_count)
+        sleep.assert_called_once_with(1)
+        self.assertEqual("INBOX", selected.call_args.args[1])
+        self.assertTrue(selected.call_args.kwargs["readonly"])
+        self.assertIn("Send one replacement", output.getvalue())
+
+    def test_post_send_no_reminder_for_other_thread_or_unverified_identity(self) -> None:
+        for session, sent_thread in (("current", "11"), ("current", ""), ("", "11")):
+            with self.subTest(session=session, sent_thread=sent_thread):
+                sent = SimpleNamespace(message_id="<sent@example.com>", gmail_thrid=sent_thread, agent_session_id=session)
+                unrelated = SimpleNamespace(message_id="<other@example.com>", gmail_thrid="22", agent_session_id=session, subject="Topic")
+                output = StringIO()
+                with (
+                    patch.object(email_me, "agent_session_id", return_value=session),
+                    patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(Mock(), {})),
+                    patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.com", "human@example.com")),
+                    patch("omo_manager.omo_manager_mail_compress.agent_unread_records", return_value=[sent, unrelated]),
+                    patch("omo_manager.omo_manager_mail_compress.logout_mailbox"),
+                    patch("sys.stdout", output),
+                ):
+                    email_me.print_prior_unread_mail("cfg:2", sent.message_id)
+                self.assertNotIn("Send one replacement", output.getvalue())
+
+    def test_main_unread_check_runs_only_after_confirmed_smtp_send(self) -> None:
+        settings = SimpleNamespace(agent_address="agent@example.test", human_address="human@example.test", app_password="secret")
+        for mode in ("success", "connect-failed", "send-uncertain", "dry-run", "fake-send"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                events: list[str] = []
+                smtp = Mock()
+                smtp.__enter__ = Mock(return_value=smtp)
+                smtp.__exit__ = Mock(return_value=False)
+                smtp.send_message.side_effect = lambda _message: events.append("smtp")
+                if mode == "send-uncertain":
+                    smtp.send_message.side_effect = email_me.smtplib.SMTPException("connection lost")
+                smtp_factory = Mock(return_value=smtp)
+                if mode == "connect-failed":
+                    smtp_factory.side_effect = OSError("connection refused")
+                with (
+                    patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state")}, clear=False),
+                    patch.object(email_me, "configured_agent_mail", return_value=settings),
+                    patch.object(email_me, "prepare_subject_and_headers", return_value=("[wl:1] Topic", {})),
+                    patch.object(email_me.smtplib, "SMTP_SSL", smtp_factory),
+                    patch.object(email_me.ssl, "create_default_context", return_value=None),
+                    patch.object(email_me, "fake_send_log_path", return_value=Path(tmp) / "fake-send.log" if mode == "fake-send" else None),
+                    patch.object(email_me, "print_prior_unread_mail", side_effect=lambda *_args: events.append("unread-check")) as checked,
+                    patch.object(email_me, "maybe_print_thread_reminder"),
+                    patch.object(sys, "stdin", StringIO("body\n")),
+                    patch("sys.stdout", StringIO()),
+                    patch("sys.stderr", StringIO()),
+                ):
+                    args = ["--manager-human", "--non-completion", "--tmux-target", "wl:1", "--subject", "Topic"]
+                    if mode == "dry-run":
+                        args.append("--dry-run")
+                    result = email_me.main(args)
+                if mode == "success":
+                    self.assertEqual(0, result)
+                    self.assertEqual(["smtp", "unread-check"], events)
+                    checked.assert_called_once()
+                else:
+                    checked.assert_not_called()
+                    self.assertEqual(1 if mode in {"connect-failed", "send-uncertain"} else 0, result)
+
+    def test_retag_strips_exact_task_filename_tag(self) -> None:
+        self.assertEqual(
+            "Re: [config_repair_0926] Pending item wording",
+            email_me.retag_subject(
+                "Re: [config_repair_0926.md] Pending item wording", "config_repair_0926"
+            ),
+        )
+
+    def test_tmux_subject_tag_keeps_authenticated_agent_address(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(
+                os.environ, {"OMO_WORK_LOGS_ROOT": tmp, "OMO_AGENT_TASK_FILE": ""}
+            ),
+        ):
+            self.assertEqual("wl:1", email_me.email_subject_target("wl:1"))
+            self.assertEqual("config:1", email_me.email_subject_target("config:1"))
+
+    def test_tmux_subject_tag_prefers_exact_live_task_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "slides_0928.md"
+            task.write_text(
+                "---\nversion: v1.0.0\nstatus: running\nrunat: wl:4\n"
+                "tool: codex\nmanagerat: wl:5\nis_manager: false\n"
+                "session_id: 00000000-0000-4000-8000-000000000123\npending_task_items: []\n---\n",
+                encoding="utf-8",
+            )
+            (root / "TODO.md").write_text(
+                "current:\nslides_0928.md wl:4\n\nprevious:\n", encoding="utf-8"
+            )
+            with patch.dict(
+                os.environ, {"OMO_WORK_LOGS_ROOT": str(root), "OMO_AGENT_TASK_FILE": ""}
+            ):
+                self.assertEqual("slides_0928", email_me.email_subject_target("wl:4"))
+                self.assertEqual(
+                    "[slides_0928] Update",
+                    email_me.normalize_subject(
+                        "Update", email_me.email_subject_target("wl:4")
+                    ),
+                )
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "OMO_WORK_LOGS_ROOT": str(root),
+                        "OMO_AGENT_TASK_FILE": "slides_0928.md",
+                    },
+                ),
+                patch("omo_task_context.current_tmux_target", return_value="wl:4"),
+            ):
+                self.assertEqual("slides_0928", email_me.email_subject_target("wl:4"))
+                with self.assertRaisesRegex(
+                    ValueError, "does not match its authenticated producer"
+                ):
+                    email_me.email_subject_target("wl:3")
+
+    def test_task_file_route_uses_unique_active_assignment_not_session_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            task = root / "worker.md"
+            task.write_text(
+                "---\nversion: v1.0.0\nstatus: running\nrunat: cfg:2\ntool: codex\nmanagerat: main:0\nis_manager: false\nsession_id: 00000000-0000-4000-8000-000000000123\npending_task_items: []\n---\n",
+                encoding="utf-8",
+            )
+            (root / "TODO.md").write_text(
+                "current:\n\nworker.md cfg:2\n\nprevious:\n", encoding="utf-8"
+            )
+            environment = {
+                "OMO_WORK_LOGS_ROOT": str(root),
+                "OMO_AGENT_TASK_FILE": "worker.md",
+                "CODEX_THREAD_ID": "00000000-0000-4000-8000-000000000123",
+            }
+            with (
+                patch.dict(os.environ, environment),
+                patch.object(email_me, "omnigent_inferred_target", return_value=None),
+                patch("omo_task_context.current_tmux_target", return_value="cfg:2"),
+            ):
+                self.assertEqual("cfg:2", email_me.inferred_tmux_target(False))
+                email_me.validate_invoking_owner_target("cfg:2", "test mail")
+                with self.assertRaisesRegex(
+                    ValueError, "does not match the named task"
+                ):
+                    email_me.validate_invoking_owner_target("cfg:3", "test mail")
+            environment["CODEX_THREAD_ID"] = "00000000-0000-4000-8000-000000000456"
+            with (
+                patch.dict(os.environ, environment),
+                patch.object(email_me, "omnigent_inferred_target", return_value=None),
+                patch("omo_task_context.current_tmux_target", return_value="cfg:2"),
+            ):
+                self.assertEqual("cfg:2", email_me.inferred_tmux_target(False))
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch.object(email_me, "omnigent_inferred_target", return_value=None),
+            ):
+                self.assertEqual("cfg:2", email_me.inferred_tmux_target(False))
+                with patch(
+                    "omo_task_context.authenticated_pending_task",
+                    side_effect=ValueError("no authenticated pane"),
+                ):
+                    email_me.validate_invoking_owner_target(
+                        "cfg:2", "non-completion Human mail"
+                    )
+                    with self.assertRaisesRegex(ValueError, "no authenticated pane"):
+                        email_me.validate_invoking_owner_target(
+                            "cfg:2", "completion Human mail"
+                        )
+            (root / "TODO.md").write_text("current:\n\nprevious:\n", encoding="utf-8")
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch.object(email_me, "omnigent_inferred_target", return_value=None),
+            ):
+                with self.assertRaisesRegex(ValueError, "no active work queue"):
+                    email_me.inferred_tmux_target(False)
+
     def setUp(self) -> None:
         self.state_tmp = tempfile.TemporaryDirectory()
         self.env_patch = patch.dict(
@@ -47,7 +304,20 @@ class EmailMeTests(unittest.TestCase):
             },
         )
         self.env_patch.start()
-        self.smtp_guard = patch.object(email_me.smtplib, "SMTP_SSL", side_effect=AssertionError("email test must stub SMTP"))
+        original_tmux_window = email_me.current_tmux_window
+        self.tmux_window_patch = patch.object(
+            email_me,
+            "current_tmux_window",
+            side_effect=lambda: original_tmux_window()
+            if os.environ.get("TMUX")
+            else None,
+        )
+        self.tmux_window_patch.start()
+        self.smtp_guard = patch.object(
+            email_me.smtplib,
+            "SMTP_SSL",
+            side_effect=AssertionError("email test must stub SMTP"),
+        )
         self.smtp_guard.start()
         self.non_completion_caller_patch = patch.object(
             email_me, "validate_non_completion_owner", return_value=None
@@ -59,6 +329,7 @@ class EmailMeTests(unittest.TestCase):
         self.completion_caller_patch.start()
 
     def tearDown(self) -> None:
+        self.tmux_window_patch.stop()
         self.smtp_guard.stop()
         self.completion_caller_patch.stop()
         self.non_completion_caller_patch.stop()
@@ -78,7 +349,9 @@ class EmailMeTests(unittest.TestCase):
         self.assertEqual(f"body\n\nPWD: {Path(tmp).name}\n", plain.get_content())
 
     def test_tmux_context_still_uses_pwd_footer(self) -> None:
-        result = subprocess.CompletedProcess(["tmux"], 0, stdout="42\twl:2.0\n", stderr="")
+        result = subprocess.CompletedProcess(
+            ["tmux"], 0, stdout="42\twl:2.0\n", stderr=""
+        )
         with (
             patch.dict(os.environ, {"TMUX": "/tmp/tmux-session"}, clear=False),
             patch.object(email_me, "process_ancestor_pids", return_value={42}),
@@ -89,7 +362,13 @@ class EmailMeTests(unittest.TestCase):
         self.assertIsNotNone(plain)
         self.assertEqual(f"body\n\nPWD: {Path.cwd().name}\n", plain.get_content())
         run.assert_called_once_with(
-            ["tmux", "list-panes", "-a", "-F", "#{pane_pid}\t#{session_name}:#{window_index}.#{pane_index}"],
+            [
+                "tmux",
+                "list-panes",
+                "-a",
+                "-F",
+                "#{pane_pid}\t#{session_name}:#{window_index}.#{pane_index}",
+            ],
             capture_output=True,
             text=True,
             timeout=2,
@@ -192,14 +471,22 @@ class EmailMeTests(unittest.TestCase):
                 },
                 clear=False,
             ),
-            patch.object(email_me.subprocess, "run", return_value=subprocess.CompletedProcess(["tmux"], 0, stdout="", stderr="")) as run,
+            patch.object(
+                email_me.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    ["tmux"], 0, stdout="", stderr=""
+                ),
+            ) as run,
         ):
             msg = email_me.build_message("me@example.com", "hi", "body\n")
         self.assertEqual("[wl:4] hi", msg["Subject"])
         run.assert_called_once()
 
     def test_malformed_env_tmux_target_falls_back_to_caller_tmux(self) -> None:
-        result = subprocess.CompletedProcess(["tmux"], 0, stdout="42\twl:2.0\n", stderr="")
+        result = subprocess.CompletedProcess(
+            ["tmux"], 0, stdout="42\twl:2.0\n", stderr=""
+        )
         with (
             patch.dict(
                 os.environ,
@@ -314,7 +601,9 @@ class EmailMeTests(unittest.TestCase):
         self.assertEqual("body\n", plain.get_content())
 
     def test_can_omit_footer_inside_tmux_when_explicitly_requested(self) -> None:
-        result = subprocess.CompletedProcess(["tmux"], 0, stdout="42\twl:2.0\n", stderr="")
+        result = subprocess.CompletedProcess(
+            ["tmux"], 0, stdout="42\twl:2.0\n", stderr=""
+        )
         with (
             patch.dict(os.environ, {"TMUX": "/tmp/tmux-session"}, clear=False),
             patch.object(email_me, "process_ancestor_pids", return_value={42}),
@@ -655,7 +944,9 @@ class EmailMeTests(unittest.TestCase):
                 "omnigent://session-1", email_me.inferred_tmux_target(False)
             )
 
-    def test_inferred_target_prefers_authenticated_omnigent_over_inherited_tmux(self) -> None:
+    def test_inferred_target_prefers_authenticated_omnigent_over_inherited_tmux(
+        self,
+    ) -> None:
         identity = SimpleNamespace(target="omnigent://session-1")
         with (
             patch.dict(
@@ -677,28 +968,48 @@ class EmailMeTests(unittest.TestCase):
             )
         current_tmux.assert_not_called()
 
-    def test_inferred_target_prefers_authenticated_pane_without_tmux_environment(self) -> None:
+    def test_inferred_target_prefers_authenticated_pane_without_tmux_environment(
+        self,
+    ) -> None:
         with (
-            patch.dict(os.environ, {"TMUX": "", "TMUX_PANE": "", "OMO_AGENT_TMUX_TARGET": "wl:1"}),
+            patch.dict(
+                os.environ,
+                {"TMUX": "", "TMUX_PANE": "", "OMO_AGENT_TMUX_TARGET": "wl:1"},
+            ),
             patch.object(email_me, "omnigent_inferred_target", return_value=None),
-            patch.object(email_me, "current_tmux_window", return_value="config:1") as current_tmux,
+            patch.object(
+                email_me, "current_tmux_window", return_value="config:1"
+            ) as current_tmux,
         ):
             self.assertEqual("config:1", email_me.inferred_tmux_target(False))
         current_tmux.assert_called_once_with()
 
     def test_detached_codex_ignores_unverified_inherited_target(self) -> None:
         with (
-            patch.dict(os.environ, {"TMUX": "", "TMUX_PANE": "", "OMO_AGENT_TMUX_TARGET": "wl:1", "CODEX_CI": "1", "CODEX_SESSION_ID": "active-session"}),
+            patch.dict(
+                os.environ,
+                {
+                    "TMUX": "",
+                    "TMUX_PANE": "",
+                    "OMO_AGENT_TMUX_TARGET": "wl:1",
+                    "CODEX_CI": "1",
+                    "CODEX_SESSION_ID": "active-session",
+                },
+            ),
             patch.object(email_me, "omnigent_inferred_target", return_value=None),
             patch.object(email_me, "current_tmux_window", return_value=None),
         ):
             self.assertIsNone(email_me.inferred_tmux_target(False))
 
-    def test_completion_owner_accepts_authenticated_omnigent_over_inherited_tmux(self) -> None:
+    def test_completion_owner_accepts_authenticated_omnigent_over_inherited_tmux(
+        self,
+    ) -> None:
         with (
             patch.dict(os.environ, {"TMUX_PANE": "%0"}, clear=False),
             patch.object(
-                email_me, "omnigent_inferred_target", return_value="omnigent://session-1"
+                email_me,
+                "omnigent_inferred_target",
+                return_value="omnigent://session-1",
             ),
             patch.object(email_me, "current_tmux_window") as current_tmux,
             patch.object(email_me, "invoking_process_belongs_to_pane") as pane_process,
@@ -713,7 +1024,9 @@ class EmailMeTests(unittest.TestCase):
         current_tmux.assert_not_called()
         pane_process.assert_not_called()
 
-    def test_inferred_target_rejects_broken_omnigent_identity_before_tmux_fallback(self) -> None:
+    def test_inferred_target_rejects_broken_omnigent_identity_before_tmux_fallback(
+        self,
+    ) -> None:
         identity_error = __import__("omo_omnigent_identity").OmniGentIdentityError
         with (
             patch.dict(
@@ -731,7 +1044,9 @@ class EmailMeTests(unittest.TestCase):
         ):
             email_me.inferred_tmux_target(False)
 
-    def test_inferred_target_rejects_invalid_omnigent_target_before_inherited_fallback(self) -> None:
+    def test_inferred_target_rejects_invalid_omnigent_target_before_inherited_fallback(
+        self,
+    ) -> None:
         identity = SimpleNamespace(target="")
         with (
             patch.dict(
@@ -749,7 +1064,9 @@ class EmailMeTests(unittest.TestCase):
         ):
             email_me.inferred_tmux_target(False)
 
-    def test_inferred_target_rejects_tmux_shaped_omnigent_target_before_inherited_fallback(self) -> None:
+    def test_inferred_target_rejects_tmux_shaped_omnigent_target_before_inherited_fallback(
+        self,
+    ) -> None:
         identity = SimpleNamespace(target="main:7")
         with (
             patch.dict(
@@ -783,7 +1100,9 @@ class EmailMeTests(unittest.TestCase):
                 "omnigent://other-session", "omnigent://other-session"
             )
 
-    def test_ordinary_explicit_omnigent_target_must_match_authenticated_runtime(self) -> None:
+    def test_ordinary_explicit_omnigent_target_must_match_authenticated_runtime(
+        self,
+    ) -> None:
         with (
             patch.object(
                 email_me,
@@ -804,7 +1123,9 @@ class EmailMeTests(unittest.TestCase):
         self.assertEqual(2, result)
         self.assertIn("authenticated OmniGent producer identity", stderr.getvalue())
 
-    def test_ordinary_explicit_tmux_target_rejected_in_authenticated_omnigent_runtime(self) -> None:
+    def test_ordinary_explicit_tmux_target_rejected_in_authenticated_omnigent_runtime(
+        self,
+    ) -> None:
         with (
             patch.object(
                 email_me,
@@ -818,7 +1139,9 @@ class EmailMeTests(unittest.TestCase):
         self.assertEqual(2, result)
         self.assertIn("authenticated OmniGent producer identity", stderr.getvalue())
 
-    def test_manager_human_fake_send_uses_authenticated_omnigent_subject_tag(self) -> None:
+    def test_manager_human_fake_send_uses_authenticated_omnigent_subject_tag(
+        self,
+    ) -> None:
         class Settings:
             agent_address = "agent@example.test"
             human_address = "human@example.test"
@@ -850,7 +1173,9 @@ class EmailMeTests(unittest.TestCase):
                     },
                 ),
                 patch.object(sys, "stdin", StringIO("figure update\n")),
-                patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(
+                    email_me, "configured_agent_mail", return_value=Settings()
+                ),
                 patch(
                     "omo_omnigent_identity.authenticate_current_omnigent",
                     return_value=identity,
@@ -869,7 +1194,7 @@ class EmailMeTests(unittest.TestCase):
                 )
             self.assertTrue(
                 sent.read_text(encoding="utf-8").startswith(
-                    "[og:b12_3x2_plot2] Figure update\n"
+                    "[b12_3x2_plot2] Figure update\n"
                 )
             )
 
@@ -955,7 +1280,9 @@ class EmailMeTests(unittest.TestCase):
             [call.args[0] for call in lookup.call_args_list],
         )
 
-    def test_omnigent_legacy_thread_is_retagged_without_session_bound_lookup(self) -> None:
+    def test_omnigent_legacy_thread_is_retagged_without_session_bound_lookup(
+        self,
+    ) -> None:
         self.assertEqual(
             "Re: [og:task.md] old topic",
             email_me.retag_subject(
@@ -963,7 +1290,9 @@ class EmailMeTests(unittest.TestCase):
             ),
         )
 
-    def test_omnigent_retag_removes_manager_prefix_and_repeated_reply_prefixes(self) -> None:
+    def test_omnigent_retag_removes_manager_prefix_and_repeated_reply_prefixes(
+        self,
+    ) -> None:
         self.assertEqual(
             "Re: [og:task.md] old",
             email_me.retag_subject(
@@ -1030,15 +1359,112 @@ class EmailMeTests(unittest.TestCase):
         self.assertEqual("Re: [og:task.md] Topic", subject)
         self.assertEqual(session, lookup.call_args.kwargs["required_agent_session"])
 
-    def test_omnigent_non_reply_subject_is_always_fresh(self) -> None:
+    def test_omnigent_non_reply_subject_starts_fresh_without_same_session_mail(self) -> None:
         session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
-        with patch.object(omo_email_subject, "recent_thread_header") as lookup:
+        with patch.object(omo_email_subject, "find_recent_thread", return_value=None) as lookup:
             subject, headers = omo_email_subject.prepare_subject_and_headers(
                 "Fresh topic", "og:task.md", required_agent_session=session
             )
         self.assertEqual("[og:task.md] Fresh topic", subject)
         self.assertEqual({}, headers)
-        lookup.assert_not_called()
+        self.assertEqual(session, lookup.call_args.kwargs["required_agent_session"])
+
+    def test_omnigent_repeated_subject_chains_same_session_mail(self) -> None:
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        header = omo_email_subject.RecentHeader(
+            "agent@example.test",
+            "[shut_down_codex] Closing Codex and turning off fast",
+            email_me.datetime.now().astimezone(),
+            "<previous@example.test>",
+            agent_session=session,
+        )
+        with patch.object(omo_email_subject, "find_recent_thread", return_value=header) as lookup:
+            subject, headers = omo_email_subject.prepare_subject_and_headers(
+                "Closing Codex and turning off fast",
+                "shut_down_codex",
+                required_agent_session=session,
+            )
+        self.assertEqual("Re: [shut_down_codex] Closing Codex and turning off fast", subject)
+        self.assertEqual(header.message_id, headers["In-Reply-To"])
+        self.assertEqual(header.message_id, headers["References"])
+        self.assertEqual(session, lookup.call_args.kwargs["required_agent_session"])
+
+    def test_tmux_repeated_subject_main_chains_current_session(self) -> None:
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        header = omo_email_subject.RecentHeader(
+            "agent@example.test", "[config:1] Topic", email_me.datetime.now().astimezone(),
+            "<previous@example.test>", recipient="human@example.test", agent_session=session,
+        )
+        for flags, title, lookup_name in (
+            (["--manager-human", "--non-completion"], "Topic", "find_recent_thread"),
+            (["--manager-human", "--non-completion"], "Re: Topic — current", "find_recent_thread_for_tmux_target"),
+            ([], "Re: Topic — current", "find_recent_thread_for_tmux_target"),
+        ):
+            with self.subTest(flags=flags, title=title), tempfile.TemporaryDirectory() as tmp:
+                sent = Path(tmp) / "sent.txt"
+                with (
+                    patch.dict(os.environ, {"EMAIL_ME_FAKE_SEND_LOG": str(sent), "CODEX_SESSION_ID": session, "OMO_MANAGER_STATE_DIR": tmp}),
+                    patch.object(sys, "stdin", StringIO("update\n")),
+                    patch.object(email_me, "footer_tmux_target", return_value="config:1"),
+                    patch.object(email_me, "email_subject_target", return_value="config:1"),
+                    patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                    patch.object(email_me, "validate_manager_route_identity"),
+                    patch.object(omo_email_subject, lookup_name, return_value=header) as lookup,
+                ):
+                    self.assertEqual(0, email_me.main([*flags, "--subject", title]))
+                self.assertTrue(sent.read_text(encoding="utf-8").startswith("Re: [config:1] Topic\n"))
+            self.assertEqual(session, lookup.call_args.kwargs["required_agent_session"])
+            self.assertEqual("primary", lookup.call_args.args[1].route_kind)
+
+    def test_tmux_omitted_subject_main_uses_current_session_task_tagged_mail(self) -> None:
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        header = omo_email_subject.RecentHeader(
+            "agent@example.test", "Re: [config_agent_0930] Topic", email_me.datetime.now().astimezone(),
+            "<previous@example.test>", recipient="human@example.test", agent_session=session,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            sent = Path(tmp) / "sent.txt"
+            with (
+                patch.dict(os.environ, {"EMAIL_ME_FAKE_SEND_LOG": str(sent), "CODEX_SESSION_ID": session, "OMO_MANAGER_STATE_DIR": tmp}),
+                patch.object(sys, "stdin", StringIO("update\n")),
+                patch.object(email_me, "footer_tmux_target", return_value="config:1"),
+                patch.object(email_me, "email_subject_target", return_value="config_agent_0930"),
+                patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(email_me, "validate_manager_route_identity"),
+                patch.object(omo_email_subject, "find_recent_thread_for_tmux_target", return_value=header) as lookup,
+            ):
+                self.assertEqual(0, email_me.main(["--manager-human", "--non-completion"]))
+            self.assertTrue(sent.read_text(encoding="utf-8").startswith(header.subject + "\n"))
+        self.assertEqual(session, lookup.call_args.kwargs["required_agent_session"])
+
+    def test_ordinary_worker_reply_rejects_another_tasks_latest_thread(self) -> None:
+        session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        settings = SimpleNamespace(agent_address="agent@example.test", human_address="human@example.test", app_password="secret")
+        parent = omo_email_subject.RecentHeader(
+            settings.agent_address, "Re: [other_task] Topic", email_me.datetime.now().astimezone(),
+            "<previous@example.test>", recipient=settings.human_address, agent_session=session,
+        )
+        with (
+            patch.dict(os.environ, {"CODEX_SESSION_ID": session}),
+            patch.object(sys, "stdin", StringIO("update\n")),
+            patch.object(sys, "stderr", new_callable=StringIO) as stderr,
+            patch.object(email_me, "footer_tmux_target", return_value="config:1"),
+            patch.object(email_me, "email_subject_target", return_value="config_agent_0930"),
+            patch.object(email_me, "configured_agent_mail", return_value=settings),
+            patch.object(omo_email_subject, "find_recent_thread_for_tmux_target", return_value=parent),
+        ):
+            self.assertEqual(2, email_me.main(["--dry-run", "--subject", "Re: Topic — current"]))
+        self.assertIn("may not retag", stderr.getvalue())
 
     def test_non_manager_omitted_omnigent_reply_binds_current_session(self) -> None:
         session = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
@@ -1054,15 +1480,15 @@ class EmailMeTests(unittest.TestCase):
             "find_recent_thread_for_tmux_target",
             return_value=header,
         ) as lookup:
-            subject, _headers = (
-                omo_email_subject.prepare_latest_thread_for_tmux_target(
-                    "og:task.md", required_agent_session=session
-                )
+            subject, _headers = omo_email_subject.prepare_latest_thread_for_tmux_target(
+                "og:task.md", required_agent_session=session
             )
         self.assertEqual(header.subject, subject)
         self.assertEqual(session, lookup.call_args.kwargs["required_agent_session"])
 
-    def test_non_manager_explicit_omnigent_reply_main_binds_session_end_to_end(self) -> None:
+    def test_non_manager_explicit_omnigent_reply_main_binds_session_end_to_end(
+        self,
+    ) -> None:
         class Settings:
             agent_address = "agent@example.test"
             human_address = "human@example.test"
@@ -1075,6 +1501,7 @@ class EmailMeTests(unittest.TestCase):
             f"Re: [{target}] Topic",
             email_me.datetime.now().astimezone(),
             "<current@example.test>",
+            recipient="human@example.test",
             agent_session=session,
         )
         with tempfile.TemporaryDirectory() as tmp:
@@ -1099,7 +1526,9 @@ class EmailMeTests(unittest.TestCase):
                     },
                 ),
                 patch.object(sys, "stdin", StringIO("body\n")),
-                patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(
+                    email_me, "configured_agent_mail", return_value=Settings()
+                ),
                 patch.object(email_me, "omnigent_inferred_target", return_value=target),
                 patch.object(
                     omo_email_subject,
@@ -1110,15 +1539,14 @@ class EmailMeTests(unittest.TestCase):
                 self.assertEqual(
                     0,
                     email_me.main(
-                        ["--tmux-target", target, "--subject", f"Re: [{target}] Topic"]
+                        ["--task-file", "task.md", "--subject", f"Re: [{target}] Topic — current"]
                     ),
                 )
             self.assertTrue(
-                sent.read_text(encoding="utf-8").startswith(
-                    "Re: [og:task] Topic\n"
-                )
+                sent.read_text(encoding="utf-8").startswith("Re: [task] Topic\n")
             )
         self.assertEqual(session, lookup.call_args.kwargs["required_agent_session"])
+        self.assertEqual("primary", lookup.call_args.kwargs["route_profile"].route_kind)
 
     def test_help_says_tmux_target_should_normally_be_omitted(self) -> None:
         with (
@@ -1230,15 +1658,26 @@ class EmailMeTests(unittest.TestCase):
 
     def test_detached_codex_email_refuses_untagged_delivery(self) -> None:
         with (
-            patch.dict(os.environ, {"CODEX_CI": "1", "CODEX_SESSION_ID": "01a0369c-7895-70f2-ae4b-5f59d920e99a"}),
+            patch.dict(
+                os.environ,
+                {
+                    "CODEX_CI": "1",
+                    "CODEX_SESSION_ID": "01a0369c-7895-70f2-ae4b-5f59d920e99a",
+                },
+            ),
             patch.object(email_me, "omnigent_inferred_target", return_value=None),
-            patch.object(email_me.subprocess, "run", return_value=subprocess.CompletedProcess(["tmux"], 1, "", "")),
+            patch.object(
+                email_me.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(["tmux"], 1, "", ""),
+            ),
             patch.object(sys, "stdin", StringIO("body\n")),
             patch("sys.stderr", new_callable=StringIO) as stderr,
         ):
             self.assertEqual(2, email_me.main(["--subject", "Status update"]))
-        self.assertIn("Codex email requires an authenticated tmux pane", stderr.getvalue())
-
+        self.assertIn(
+            "Codex email requires an authenticated tmux pane", stderr.getvalue()
+        )
 
     def test_guest_hees_mode_requires_manager_human_and_guest_session(self) -> None:
         for argv in (
@@ -5078,6 +5517,31 @@ class EmailMeTests(unittest.TestCase):
                 send_log.read_text(encoding="utf-8"),
             )
 
+    def test_completion_authentication_error_after_delivery_keeps_authorization_used(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            values = {"target": "wl:1", "task": "task.md", "task_sha256": "b" * 64, "notice_key": "c" * 64, "semantic_key": "d" * 64}
+            key = "a" * 64
+            ledger = state / "completion-email-claims.tsv"
+            ledger.write_text(f"{key}\twl:1\ttask.md\twl:0\t{values['task_sha256']}\t{values['notice_key']}\t{values['semantic_key']}\n")
+            ledger.chmod(0o600)
+            settings = SimpleNamespace(agent_address="agent@example.test", human_address="human@example.test", app_password="secret")
+            smtp = Mock()
+            smtp.__enter__ = Mock(return_value=smtp)
+            smtp.__exit__ = Mock(return_value=False)
+            smtp.send_message.side_effect = email_me.smtplib.SMTPAuthenticationError(535, b"authentication failed after delivery started")
+            with (
+                patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(state), "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0"}),
+                patch.object(email_me, "validate_completion_authorization", return_value=values),
+                patch.object(email_me, "configured_agent_mail", return_value=settings),
+                patch.object(email_me, "prepare_subject_and_headers", return_value=("[wl:1] Topic", {})),
+                patch.object(email_me.smtplib, "SMTP_SSL", return_value=smtp),
+                patch("sys.stdin", StringIO("done\n")),
+                patch("sys.stderr", StringIO()),
+            ):
+                self.assertEqual(1, email_me.main(["--manager-human", "--completion-authorization", key, "--tmux-target", "wl:1", "--subject", "Topic"]))
+            self.assertTrue((state / "completion-email-authorization-used" / key).is_file())
+
     def test_completion_authorization_is_recoverable_before_smtp_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp) / "state"
@@ -5616,8 +6080,17 @@ class EmailMeTests(unittest.TestCase):
                 "Re: [vl:15] Topic\nbody\n", send_log.read_text(encoding="utf-8")
             )
             run.assert_called_once_with(
-                ["tmux", "list-panes", "-a", "-F", "#{pane_pid}\t#{session_name}:#{window_index}.#{pane_index}"],
-                capture_output=True, text=True, timeout=2, check=False,
+                [
+                    "tmux",
+                    "list-panes",
+                    "-a",
+                    "-F",
+                    "#{pane_pid}\t#{session_name}:#{window_index}.#{pane_index}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
             )
 
     def test_no_pwd_footer_still_passes_tmux_target_to_subject_preparation(

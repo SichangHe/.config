@@ -1,5 +1,7 @@
 # guest hees reply pipeline
 
+(authored by agents unless marked 🧑)
+
 - goal
   - every authenticated request from `46496337@qq.com` reaches the one current guest manager
   - the request stays open until Gmail Sent Mail contains the exact substantive same-thread reply to that address
@@ -8,6 +10,9 @@
   - prefer nonempty plain text, then visible HTML text
   - ignore hidden HTML and attachments when deriving the body
   - reject mail with neither readable text nor supported guest images
+  - 🧑 "Make it lazy. Make the watcher start an agent. If there's no agent for that guest or reuse an agent if they already exist."
+  - only after exact sender authentication and message validation, reuse the current guest manager or launch the scoped on-demand handler through `omo_task.py`
+  - paused legacy managers retain their unrelated queues; do not reinstate them as always-on mail agents
   - resolve exactly one active sendable manager from current task custody
   - add reply headers only to guest artifacts, preserving the primary-Human artifact format
   - create one durable reply obligation keyed by the stable mail artifact
@@ -35,5 +40,11 @@
   - keep the inbound UID unread after manager delivery
   - suppress duplicate delivery only for the same full owner identity
   - mark the UID seen only after its reply obligation is fulfilled
+- lazy lifecycle
+  - the enabled `source1269-guest-watcher.service` runs the reviewed current watcher, not the old immutable deployment snapshot
+  - normal setup's guest toggle stays disabled to avoid a second supervisor; both launch paths retain the same single-instance lock
+  - watcher runs without a guest agent; launch ownership is serialized and uncertain starts do not permit duplicate launches
+  - the on-demand handler closes its own task after replying and clearing its work; watcher may reap only that handler when no request, reply obligation, pending marker, child task, or active turn remains
+  - reused older guest agents keep their own work and lifecycle
 - check
   - run `omo_manager/tests/run_guest_hees_email_checks.sh`

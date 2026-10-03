@@ -22,6 +22,7 @@ from omo_manager.omo_completion_email import completion_email_is_delivered
 from omo_manager.omo_completion_email import plan_completion_email
 from omo_manager.omo_completion_email import reconcile_delivered_completion
 from omo_manager.omo_completion_email import reconcile_ordinary_sent_completion
+from omo_manager.omo_completion_email import reconcile_claimed_sent_completion
 from omo_manager.omo_completion_email import refresh_unattempted_completion_claim
 from omo_manager.omo_completion_email import require_completion_entrypoint
 from omo_manager.omo_completion_email import require_owner_completion
@@ -37,6 +38,7 @@ from omo_manager.omo_completion_email import digest_fields
 from omo_manager.omo_completion_email import send_completion_email
 from omo_manager.omo_completion_email import validate_completion_notice_delivery
 from omo_manager.omo_completion_email import verify_ordinary_completion_in_sent
+from omo_manager.omo_completion_email import verify_original_human_in_inbox
 from omo_manager.omo_completion_email import SOURCE1241_ENVELOPE
 from omo_manager.omo_completion_email import SOURCE1241_CONTEXT
 from omo_manager.omo_completion_email import SOURCE1241_HUMAN
@@ -69,6 +71,138 @@ def source1241_task(
 
 
 class CompletionEmailTest(unittest.TestCase):
+    def test_unchanged_unattempted_retry_preserves_claim_and_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_text()
+            task.write_text(text)
+            state = root / "state"
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
+                plan = build_completion_email(root, task, text, "completed", semantic_key="a" * 64)
+                assert plan is not None
+                self.assertTrue(claim_completion_email(plan))
+                ledger = state / "completion-email-claims.tsv"
+                authorization = state / "completion-email-authorizations" / plan.key
+                before = (ledger.read_bytes(), authorization.read_bytes())
+                omo_completion_email.retry_unattempted_completion_claim(plan, plan.key)
+                self.assertEqual(before, (ledger.read_bytes(), authorization.read_bytes()))
+
+    def test_unattempted_retry_rejects_missing_used_changed_and_ambiguous_claims(self) -> None:
+        for mode in ("missing", "used", "changed-task", "changed-key", "changed-content", "ambiguous", "queued", "receipt-consumption"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task = root / "task.md"
+                text = task_text()
+                task.write_text(text)
+                state = root / "state"
+                with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
+                    plan = build_completion_email(root, task, text, "completed", semantic_key="a" * 64)
+                    assert plan is not None
+                    if mode != "missing":
+                        self.assertTrue(claim_completion_email(plan))
+                    if mode in {"used", "queued", "receipt-consumption"}:
+                        directory_name = {"used": "completion-email-authorization-used", "queued": "completion-email-requests", "receipt-consumption": "completion-email-reconciliations"}[mode]
+                        directory = state / directory_name
+                        directory.mkdir(mode=0o700)
+                        (directory / plan.key).write_text("outbound evidence")
+                    if mode == "changed-task":
+                        task.write_text(text + "changed\n")
+                    if mode == "changed-content":
+                        plan = replace(plan, body=plan.body + "changed")
+                    if mode == "ambiguous":
+                        ledger = state / "completion-email-claims.tsv"
+                        ledger.write_bytes(ledger.read_bytes() * 2)
+                    key = "b" * 64 if mode == "changed-key" else plan.key
+                    with self.assertRaises(OSError):
+                        omo_completion_email.retry_unattempted_completion_claim(plan, key)
+
+    def test_cli_unattempted_retry_validates_before_sending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_text()
+            task.write_text(text)
+            state = root / "state"
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch("omo_manager.omo_completion_email.subprocess.run") as run,
+            ):
+                plan = plan_completion_email(root, task, text, "completed", semantic_key="a" * 64)
+                assert plan is not None
+                argv = ["--root", str(root), "--task", str(task), "--outcome", "completed", "--semantic-key", "a" * 64, "--retry-unattempted-claim", plan.key]
+                self.assertEqual(2, main(argv))
+                run.assert_not_called()
+                self.assertTrue(claim_completion_email(plan))
+                self.assertEqual(0, main(argv))
+                run.assert_called_once()
+
+    def test_same_key_retry_after_thread_lookup_failure_sends_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_text()
+            task.write_text(text)
+            state = root / "state"
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}),
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=task),
+                patch("omo_manager.omo_completion_email.subprocess.run") as run,
+            ):
+                plan = plan_completion_email(root, task, text, "completed", semantic_key="a" * 64)
+                assert plan is not None
+                run.side_effect = subprocess.CalledProcessError(2, "email_me.py", stderr="thread lookup timed out")
+                self.assertFalse(send_completion_email(plan))
+                ledger = state / "completion-email-claims.tsv"
+                before = ledger.read_bytes()
+                run.side_effect = None
+                argv = ["--root", str(root), "--task", str(task), "--outcome", "completed", "--semantic-key", "a" * 64, "--retry-unattempted-claim", plan.key]
+                self.assertEqual(0, main(argv))
+                self.assertEqual(before, ledger.read_bytes())
+                self.assertEqual(2, run.call_count)
+                self.assertEqual(2, main(argv))
+                self.assertEqual(2, run.call_count)
+
+    def test_original_human_inbox_verification_requires_unique_message_and_participants(self) -> None:
+        message = EmailMessage()
+        message["From"] = "human@example.test"
+        message["To"] = "agent@example.test"
+        message["Return-Path"] = "<human@example.test>"
+        message["Authentication-Results"] = "mx.google.com; spf=pass smtp.mailfrom=human@example.test"
+        message["Subject"] = "Re: CC repair"
+        message["Message-ID"] = "<original@example.test>"
+        message.set_content("Complete the repair.\n")
+
+        class FakeInbox:
+            def login(self, _address: str, _password: str) -> None:
+                return None
+
+            def select(self, mailbox: str, *, readonly: bool) -> tuple[str, list[bytes]]:
+                assert mailbox == "INBOX" and readonly
+                return "OK", []
+
+            def uid(self, command: str, *_args: str) -> tuple[str, list[bytes | tuple[bytes, bytes]]]:
+                return ("OK", [b"1"]) if command == "search" else ("OK", [(b"1", message.as_bytes())])
+
+            def logout(self) -> None:
+                return None
+
+        settings = type("Settings", (), {"agent_address": "agent@example.test", "human_address": "human@example.test", "app_password": "secret"})()
+        with (
+            patch("omo_manager.omo_completion_email.configured_agent_mail", return_value=settings),
+            patch("omo_manager.omo_completion_email.imaplib.IMAP4_SSL", return_value=FakeInbox()),
+        ):
+            body_sha256 = hashlib.sha256(b"Complete the repair.\n").hexdigest()
+            subject_sha256 = hashlib.sha256(b"Re: CC repair").hexdigest()
+            self.assertTrue(verify_original_human_in_inbox("<original@example.test>", subject_sha256, body_sha256))
+            self.assertFalse(verify_original_human_in_inbox("<original@example.test>", subject_sha256, "0" * 64))
+            message.replace_header("From", "attacker@example.test")
+            self.assertFalse(verify_original_human_in_inbox("<original@example.test>", subject_sha256, body_sha256))
+            message.replace_header("From", "human@example.test")
+            message.replace_header("Authentication-Results", "mx.google.com; spf=fail smtp.mailfrom=human@example.test")
+            self.assertFalse(verify_original_human_in_inbox("<original@example.test>", subject_sha256, body_sha256))
+
     def source1970_fixture(self, root: Path, state: Path) -> tuple[Path, str, dict[str, object], tuple[str, ...]]:
         items = omo_completion_email.SOURCE1970_LIVE_ITEMS
         rendered_items = "".join(f"  - '{item.replace(chr(39), chr(39) * 2)}'\n" for item in items)
@@ -1330,6 +1464,14 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
                 with self.subTest(outcome=outcome):
                     self.assertIsNotNone(build_completion_email(root, task, text, outcome, items=("🧑 finish review",)))
 
+    def test_pending_item_notice_does_not_treat_later_positive_email_as_no_contact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_text("Do not restart the old agent; have the new agent email Human acceptance.")
+            task.write_text(text, encoding="utf-8")
+            self.assertIsNotNone(build_completion_email(root, task, text, "pending item removed after verification", items=("🧑 finish review",)))
+
     def test_pending_item_notice_ignores_no_contact_safeguard_meta_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1409,6 +1551,47 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
 
             self.assertIsNone(build_completion_email(root, task, text, "task done"))
 
+    def test_manager_can_answer_exact_human_item_without_enabling_task_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "manager.md"
+            text = task_text().replace("is_manager: false", "is_manager: true")
+            task.write_text(text, encoding="utf-8")
+            items = ("🧑 Answer the Human's wording question",)
+            self.assertIsNotNone(build_completion_email(root, task, text, "pending item removed after verification", items=items))
+            self.assertIsNone(build_completion_email(root, task, text, "task done", items=items, manager_human_answer=True))
+            with (
+                patch("omo_manager.omo_completion_email.current_pending_task", return_value=task) as owner,
+                patch("omo_manager.omo_completion_email.require_completion_entrypoint"),
+            ):
+                plan = plan_completion_email(
+                    root, task, text, "pending item removed after verification", items=items,
+                    human_subject="Re: Human wording", human_body="The wording is corrected.",
+                    semantic_key="a" * 64, pending_item_owner=True,
+                )
+            assert plan is not None
+            self.assertEqual("Re: Human wording", plan.subject)
+            self.assertIn("The wording is corrected.", plan.body)
+            owner.assert_called_once_with(root)
+
+    def test_manager_human_pending_notices_preserve_reporting_boundaries(self) -> None:
+        for outcome in ("pending item created", "pending item removed after verification"):
+            for policy, permitted in (("Report only to your manager.", True), ("Agent-authored pending items must not email the Human.", True), ("Never email the Human.", False)):
+                with self.subTest(outcome=outcome, policy=policy), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    task = root / "manager.md"
+                    text = task_text(policy, human_report=False).replace("is_manager: false", "is_manager: true")
+                    task.write_text(text, encoding="utf-8")
+                    plan = build_completion_email(root, task, text, outcome, items=("🧑 answer the Human",))
+                    self.assertEqual(permitted, plan is not None)
+                    if plan is not None:
+                        event = "created" if outcome == "pending item created" else "deleted"
+                        self.assertEqual(f"pending item {event}:\n- answer the Human\n", plan.body)
+                        self.assertEqual("", plan.subject)
+                    self.assertIsNone(build_completion_email(root, task, text, outcome, items=("agent work",)))
+                    self.assertIsNone(build_completion_email(root, task, text, "task done"))
+                    self.assertIsNone(build_completion_email(root, task, text, "completed", items=("🧑 answer the Human",)))
+
     def test_pending_item_notice_uses_explicit_queue_owner_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1461,6 +1644,7 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
         message["To"] = "human@example.test"
         message["Subject"] = "Exact subject"
         message["Message-ID"] = "<sent@example.test>"
+        message["References"] = "<human@example.test>"
         message.set_content(body)
 
         class FakeImap:
@@ -1484,7 +1668,7 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
             (),
             {"agent_address": "agent@example.test", "human_address": "human@example.test", "app_password": "secret"},
         )()
-        with patch("omo_manager.omo_completion_email.configured_agent_mail", return_value=settings), patch("omo_manager.omo_completion_email.imaplib.IMAP4_SSL", return_value=FakeImap()):
+        with patch("omo_manager.omo_completion_email.configured_agent_mail", return_value=settings), patch("omo_manager.omo_completion_email.imaplib.IMAP4_SSL", return_value=FakeImap()), patch.dict("os.environ", {"OMO_COMPLETION_SENT_VERIFY_TIMEOUT_S": "0"}):
             self.assertEqual(
                 PARTICIPANT_EVIDENCE,
                 verify_ordinary_completion_in_sent(
@@ -1493,8 +1677,148 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
                     hashlib.sha256(body.encode()).hexdigest(),
                     required_items=items,
                     required_evidence=evidence,
+                    required_subject_key="exact subject",
                 ),
             )
+            self.assertIsNone(
+                verify_ordinary_completion_in_sent(
+                    "<sent@example.test>",
+                    hashlib.sha256(b"Exact subject").hexdigest(),
+                    hashlib.sha256(body.encode()).hexdigest(),
+                    required_subject_key="different thread",
+                )
+            )
+            self.assertEqual(
+                PARTICIPANT_EVIDENCE,
+                verify_ordinary_completion_in_sent(
+                    "<sent@example.test>",
+                    hashlib.sha256(b"Exact subject").hexdigest(),
+                    hashlib.sha256(body.encode()).hexdigest(),
+                    required_reference_id="<human@example.test>",
+                ),
+            )
+            self.assertIsNone(
+                verify_ordinary_completion_in_sent(
+                    "<sent@example.test>",
+                    hashlib.sha256(b"Exact subject").hexdigest(),
+                    hashlib.sha256(body.encode()).hexdigest(),
+                    required_reference_id="<unrelated@example.test>",
+                )
+            )
+
+    def test_ordinary_sent_reconciliation_accepts_exact_task_retag_and_crlf(self) -> None:
+        from email import policy
+        from email.parser import BytesParser
+
+        items = ("🧑 finish review",)
+        evidence = "review passed"
+        original = "Re: Review finished"
+        tagged = "Re: [review_task] Review finished"
+        record = omo_completion_email.sent_reconciliation_record(original, items, evidence)
+        message = EmailMessage()
+        message["From"] = "agent@example.test"
+        message["To"] = "human@example.test"
+        message["Subject"] = tagged
+        message["Message-ID"] = "<sent@example.test>"
+        message.set_content(f"Exact body\n\n{record}")
+        payload = message.as_bytes(policy=policy.SMTP)
+        parsed = BytesParser(policy=policy.default).parsebytes(payload)
+        sent_body = omo_completion_email.ordinary_sent_text(parsed)
+        self.assertIn("\r\n", sent_body)
+
+        class FakeImap:
+            def login(self, _address: str, _password: str) -> None:
+                return None
+
+            def select(self, _mailbox: str, *, readonly: bool) -> tuple[str, list[bytes]]:
+                return "OK", []
+
+            def uid(self, command: str, *_args: str) -> tuple[str, list[bytes | tuple[bytes, bytes]]]:
+                return ("OK", [b"1"]) if command == "search" else ("OK", [(b"1", payload)])
+
+            def logout(self) -> None:
+                return None
+
+        settings = type(
+            "Settings", (), {"agent_address": "agent@example.test", "human_address": "human@example.test", "app_password": "secret"}
+        )()
+        args = ("<sent@example.test>", hashlib.sha256(tagged.encode()).hexdigest(), hashlib.sha256(sent_body.encode()).hexdigest())
+        requirements = {"required_items": items, "required_evidence": evidence, "require_record": True,
+                        "required_record_subject": original, "required_task_tag": "review_task"}
+        with patch("omo_manager.omo_completion_email.configured_agent_mail", return_value=settings), patch("omo_manager.omo_completion_email.imaplib.IMAP4_SSL", return_value=FakeImap()), patch.dict("os.environ", {"OMO_COMPLETION_SENT_VERIFY_TIMEOUT_S": "0"}):
+            self.assertEqual(PARTICIPANT_EVIDENCE, verify_ordinary_completion_in_sent(*args, **requirements))
+            self.assertEqual(PARTICIPANT_EVIDENCE, verify_ordinary_completion_in_sent(*args, **{**requirements, "required_record_subject": ""}))
+            self.assertIsNone(verify_ordinary_completion_in_sent(*args, **{**requirements, "required_task_tag": "other_task"}))
+            self.assertIsNone(verify_ordinary_completion_in_sent(*args, **{**requirements, "required_evidence": "different"}))
+            self.assertIsNone(verify_ordinary_completion_in_sent(args[0], args[1], "0" * 64, **requirements))
+
+    def test_claimed_sent_recovery_consumes_only_exact_used_authorized_answer(self) -> None:
+        from email import policy
+        from email.parser import BytesParser
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            text = task_text()
+            task.write_text(text, encoding="utf-8")
+            item = "🧑 finish review"
+            evidence = "review passed"
+            semantic_key = "a" * 64
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state), "OMO_COMPLETION_SENT_VERIFY_TIMEOUT_S": "0"}),
+                patch("omo_manager.omo_completion_email.current_pending_task", return_value=task),
+                patch("omo_manager.omo_completion_email.require_completion_entrypoint"),
+            ):
+                plan = plan_completion_email(
+                    root, task, text, "pending item removed after verification", items=(item,), evidence=evidence,
+                    semantic_key=semantic_key, human_subject="Re: Review finished", human_body="Review passed.", pending_item_owner=True,
+                )
+                assert plan is not None
+                self.assertTrue(claim_completion_email(plan))
+                used = state / "completion-email-authorization-used" / plan.key
+                used.parent.mkdir(parents=True, exist_ok=True)
+                used.write_text(f"{plan.target}\t{task.name}\n", encoding="utf-8")
+                used.chmod(0o600)
+                message = EmailMessage()
+                message["From"] = "agent@example.test"
+                message["To"] = "human@example.test"
+                message["Subject"] = "Re: [task] Review finished"
+                message["Message-ID"] = "<sent@example.test>"
+                message.set_content(plan.body)
+                payload = message.as_bytes(policy=policy.SMTP)
+                parsed = BytesParser(policy=policy.default).parsebytes(payload)
+                sent_body = omo_completion_email.ordinary_sent_text(parsed)
+                self.assertEqual(plan.body, sent_body.replace("\r\n", "\n"))
+
+                class FakeImap:
+                    def login(self, _address: str, _password: str) -> None:
+                        return None
+
+                    def select(self, _mailbox: str, *, readonly: bool) -> tuple[str, list[bytes]]:
+                        return "OK", []
+
+                    def uid(self, command: str, *_args: str) -> tuple[str, list[bytes | tuple[bytes, bytes]]]:
+                        return ("OK", [b"1"]) if command == "search" else ("OK", [(b"1", payload)])
+
+                    def logout(self) -> None:
+                        return None
+
+                settings = type("Settings", (), {"agent_address": "agent@example.test", "human_address": "human@example.test", "app_password": "secret"})()
+                with (
+                    patch("omo_manager.omo_completion_email.configured_agent_mail", return_value=settings),
+                    patch("omo_manager.omo_completion_email.imaplib.IMAP4_SSL", return_value=FakeImap()),
+                ):
+                    kwargs = dict(items=(item,), evidence=evidence, semantic_key=semantic_key, human_subject="Re: Review finished", human_body="Review passed.")
+                    digests = (hashlib.sha256(str(message["Subject"]).encode()).hexdigest(), hashlib.sha256(sent_body.encode()).hexdigest())
+                    with self.assertRaisesRegex(OSError, "exact delivered answer"):
+                        reconcile_claimed_sent_completion(root, task, text, "<sent@example.test>", "0" * 64, digests[1], **kwargs)
+                    self.assertFalse((state / "completion-email-delivered" / plan.key).exists())
+                    reconcile_claimed_sent_completion(root, task, text, "<sent@example.test>", *digests, **kwargs)
+                    self.assertTrue(completion_email_is_delivered(plan))
+                    reconcile_claimed_sent_completion(root, task, text, "<sent@example.test>", *digests, **kwargs)
+                    with self.assertRaisesRegex(OSError, "exact delivered answer"):
+                        reconcile_claimed_sent_completion(root, task, text, "<other@example.test>", *digests, **kwargs)
 
     def delivered_receipt(
         self,
@@ -1842,6 +2166,7 @@ Diagnose and complete the supported done-live closure for `mail_cleanup_v.md`.
                 required_items=(),
                 required_evidence="",
                 require_record=True,
+                required_task_tag="task",
             )
 
     def test_unrelated_verified_sent_content_cannot_remove_human_item(self) -> None:

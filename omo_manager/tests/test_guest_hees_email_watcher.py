@@ -160,6 +160,71 @@ class GuestHeesEmailWatcherTests(unittest.TestCase):
         self.assertEqual(watcher.GUEST_IMAGE_AUTHENTICATION, store.call_args.kwargs["authentication"])
         self.assertRegex(store.call_args.kwargs["source_id"], r"^gmail:[0-9a-f]{64}:41$")
 
+    def test_authenticated_mail_starts_absent_guest_owner_once_and_reuses_it(self) -> None:
+        msg = EmailMessage()
+        msg["From"] = GUEST_HEES_ADDRESS
+        msg["Return-Path"] = f"<{GUEST_HEES_ADDRESS}>"
+        msg["Authentication-Results"] = f"mx.google.com; spf=pass smtp.mailfrom={GUEST_HEES_ADDRESS}"
+        msg["Message-ID"] = "<guest-lazy@example.test>"
+        msg["Subject"] = "guest request"
+        msg.set_content("Please answer this request.")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = guest_args(root)
+            args.mail_dir.mkdir()
+            args.state_dir.mkdir()
+            client = Client(msg.as_bytes())
+
+            def create_owner(*_args):
+                install_guest_manager(root)
+                return watcher.active_guest_hees_owner(root)
+
+            with patch.object(watcher, "ensure_guest_hees_agent", side_effect=create_owner) as ensure, patch.object(
+                watcher, "reap_idle_guest_hees_agent", return_value=False
+            ):
+                self.assertTrue(watcher.handle_unseen(client, args))
+                self.assertTrue(watcher.handle_unseen(client, args))
+                ensure.assert_called_once_with(root, args.state_dir, args.manager_target)
+            self.assertEqual([], client.seen)
+            task = root / "guest_current_mgr.md"
+            self.assertEqual(1, task.read_text().count("(pending)"))
+
+    def test_rejected_or_empty_mail_never_starts_guest_agent(self) -> None:
+        for body, authenticated, message_id in (("request", False, "<bad@example.test>"), ("", True, "<empty@example.test>"), ("request", True, "invalid")):
+            with self.subTest(body=body, authenticated=authenticated, message_id=message_id), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                args = guest_args(root)
+                msg = EmailMessage()
+                msg["From"] = GUEST_HEES_ADDRESS
+                if authenticated:
+                    msg["Return-Path"] = f"<{GUEST_HEES_ADDRESS}>"
+                    msg["Authentication-Results"] = f"mx.google.com; spf=pass smtp.mailfrom={GUEST_HEES_ADDRESS}"
+                msg["Message-ID"] = message_id
+                msg["Subject"] = "request"
+                msg.set_content(body)
+                client = Client(msg.as_bytes())
+                with patch.object(watcher, "ensure_guest_hees_agent") as ensure, patch.object(watcher, "reap_idle_guest_hees_agent", return_value=False):
+                    self.assertFalse(watcher.handle_unseen(client, args))
+                    ensure.assert_not_called()
+                self.assertEqual([], client.seen)
+
+    def test_failed_guest_launch_retains_unread_mail(self) -> None:
+        msg = EmailMessage()
+        msg["From"] = GUEST_HEES_ADDRESS
+        msg["Return-Path"] = f"<{GUEST_HEES_ADDRESS}>"
+        msg["Authentication-Results"] = f"mx.google.com; spf=pass smtp.mailfrom={GUEST_HEES_ADDRESS}"
+        msg["Message-ID"] = "<guest-launch-failure@example.test>"
+        msg["Subject"] = "request"
+        msg.set_content("request")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = guest_args(root)
+            client = Client(msg.as_bytes())
+            with patch.object(watcher, "ensure_guest_hees_agent", side_effect=RuntimeError("unverified launch")), patch.object(watcher, "reap_idle_guest_hees_agent", return_value=False):
+                self.assertFalse(watcher.handle_unseen(client, args))
+            self.assertEqual([], client.seen)
+            self.assertFalse(args.mail_dir.exists())
+
     def test_guest_artifact_preserves_exact_header_body_bytes(self) -> None:
         msg = EmailMessage()
         msg["Message-ID"] = "<guest-request@example.test>"
@@ -243,6 +308,26 @@ Guest images:
             path = watcher.write_mail(args, "7", msg, "human@example.test", "Primary topic")
             payload = path.read_bytes()
         self.assertEqual(b"Subject: Primary topic\n\nprimary request\n", payload)
+
+    def test_tagged_reply_artifact_preserves_original_subject(self) -> None:
+        msg = EmailMessage()
+        msg["Message-ID"] = "<slide-reply@example.test>"
+        msg["Subject"] = "Re: [tuesday_slides_0927] DW presentation slides"
+        msg.set_content("Where’s the outline path?\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = watcher.replace(
+                guest_args(root),
+                mail_dir=root / "manager_mail",
+                guest_hees=False,
+                self_email="human@example.test",
+            )
+            path = watcher.write_mail(args, "2225", msg, "human@example.test", str(msg["Subject"]))
+            payload = path.read_text(encoding="utf-8")
+        self.assertEqual(
+            "Subject: Re: [tuesday_slides_0927] DW presentation slides\n\nWhere’s the outline path?\n",
+            payload,
+        )
 
     def test_authenticated_guest_image_uses_promoted_store_contract(self) -> None:
         msg = EmailMessage()

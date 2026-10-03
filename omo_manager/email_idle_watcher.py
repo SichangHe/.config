@@ -35,30 +35,38 @@ from urllib.parse import urlparse
 
 try:
     from .omo_email_config import AgentMailSettings, GMAIL_IMAP_HOST, active_guest_hees_owner, ensure_guest_hees_reply_obligation, guest_hees_intake_is_delivered, guest_hees_reply_is_fulfilled, guest_hees_mail, configured_agent_mail, human_config_path
-    from .omo_email_subject import OMNIGENT_SUBJECT_TARGET_RE, subject_base, subject_tmux_target, worker_lifecycle_report_guard
+    from .omo_email_subject import DEFAULT_THREAD_LOOKUP_DEADLINE_S, DEFAULT_THREAD_LOOKUP_OPERATION_TIMEOUT_S, MailRouteProfile, OMNIGENT_SUBJECT_TARGET_RE, RecentHeader, SubjectInputError, SubjectLookupTimeout, authenticated_referenced_thread_target, fetch_recent_headers, find_recent_thread_matching, normalized_subject_key, recent_thread_lookup_deadline, route_matches_header, subject_base, subject_tmux_target, subject_task_stem, worker_lifecycle_report_guard
     from .omo_guest_images import AUTHENTICATION as GUEST_IMAGE_AUTHENTICATION
     from .omo_guest_images import GUEST_HEES_ADDRESS as GUEST_IMAGE_SENDER
     from .omo_guest_images import GuestImageError, store_message_images
-    from .omo_agent_status import TaskFrontmatterError, parse_task_metadata
+    from .omo_guest_images import incoming_images
+    from .omo_guest_agent import ensure_guest_hees_agent, reap_idle_guest_hees_agent
+    from .omo_agent_status import TaskFrontmatterError, parse_task_metadata, parse_task_lines, resolve_task_path
     from .omo_task_status import authoritative_active_target_task_paths, replace_if_unchanged_locked, root_membership_lock
     from .omo_task_metadata import runat_kind
     from .omo_task_lock import task_file_lock, task_target_lock
+    from .omo_tmux_input_lock import tmux_input_lock
     from .omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_system_to_codex as send_to_codex
 except ImportError:
     try:
         from omo_email_config import AgentMailSettings, GMAIL_IMAP_HOST, active_guest_hees_owner, ensure_guest_hees_reply_obligation, guest_hees_intake_is_delivered, guest_hees_reply_is_fulfilled, guest_hees_mail, configured_agent_mail, human_config_path
-        from omo_email_subject import OMNIGENT_SUBJECT_TARGET_RE, subject_base, subject_tmux_target, worker_lifecycle_report_guard
+        from omo_email_subject import DEFAULT_THREAD_LOOKUP_DEADLINE_S, DEFAULT_THREAD_LOOKUP_OPERATION_TIMEOUT_S, MailRouteProfile, OMNIGENT_SUBJECT_TARGET_RE, RecentHeader, SubjectInputError, SubjectLookupTimeout, authenticated_referenced_thread_target, fetch_recent_headers, find_recent_thread_matching, normalized_subject_key, recent_thread_lookup_deadline, route_matches_header, subject_base, subject_tmux_target, subject_task_stem, worker_lifecycle_report_guard
         from omo_guest_images import AUTHENTICATION as GUEST_IMAGE_AUTHENTICATION
         from omo_guest_images import GUEST_HEES_ADDRESS as GUEST_IMAGE_SENDER
         from omo_guest_images import GuestImageError, store_message_images
-        from omo_agent_status import TaskFrontmatterError, parse_task_metadata
+        from omo_guest_images import incoming_images
+        from omo_guest_agent import ensure_guest_hees_agent, reap_idle_guest_hees_agent
+        from omo_agent_status import TaskFrontmatterError, parse_task_metadata, parse_task_lines, resolve_task_path
         from omo_task_status import authoritative_active_target_task_paths, replace_if_unchanged_locked, root_membership_lock
         from omo_task_metadata import runat_kind
         from omo_task_lock import task_file_lock, task_target_lock
+        from omo_tmux_input_lock import tmux_input_lock
         from omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_system_to_codex as send_to_codex
     except ImportError:
         subject_base = None
         subject_tmux_target = None
+        def subject_task_stem(_subject: str) -> str:
+            return ""
         OMNIGENT_SUBJECT_TARGET_RE = re.compile(r"^og:[A-Za-z0-9_.-]+(?:\.md)?$")
         TaskFrontmatterError = ValueError
 
@@ -214,6 +222,10 @@ class AgentLifecycleAction(Enum):
     REPLACE = "replace"
     TERMINATE = "terminate"
     REVIEW = "review"
+
+
+class MainReplacementUncertain(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -399,7 +411,27 @@ def parse_args(argv: list[str]) -> Args:
 
 
 def current_manager_file(args: Args) -> Path:
-    return args.manager_file or dated_manager_file(args.root)
+    if args.manager_file is not None:
+        return args.manager_file
+    aliases = target_aliases(args.manager_target)
+    owners = {
+        resolve_task_path(args.root, row.task_file)
+        for row in parse_task_lines(args.root / "TODO.md")
+        if row.section in {"todo:current", "todo:human pending", "todo:low priority"} and row.target in aliases
+    }
+    owner = current_task_file_for_target(args.root, args.manager_target)
+    if owner is None and not owners:
+        return dated_manager_file(args.root)
+    claimants = {
+        task_file_for_target_in_candidates(args.root, args.manager_target, [path])
+        for path in current_todo_task_candidates(args.root)
+    } - {None}
+    if owner is None or owners != {owner} or claimants != {owner}:
+        raise RuntimeError(f"manager target has no unique matching current owner: {args.manager_target}")
+    metadata = parse_task_metadata(owner.read_text(encoding="utf-8"), args.root)
+    if metadata is None or not metadata.is_manager or metadata.status not in {"running", "long_running", "blocked"}:
+        raise RuntimeError(f"manager target has no active manager owner: {args.manager_target}")
+    return owner
 
 
 def args_w_manager_file(args: Args, manager_file: Path) -> Args:
@@ -900,12 +932,118 @@ def inactive_task_files_for_target(root: Path, tmux_target: str) -> list[Path]:
     return matches
 
 
-def email_route(args: Args, subject: str, body: str = "") -> EmailRoute:
+def verified_direct_task_parent_target(subject: str, header: RecentHeader, settings: AgentMailSettings) -> str:
+    task_stem = subject_task_stem(subject)
+    tmux_target = subject_manager_target(subject)
+    parent_id = header.in_reply_to.strip()
+    if not (task_stem or tmux_target) or re.fullmatch(r'<[^<>\s"]+>', parent_id) is None:
+        return ""
+    references = header.references.split()
+    if references and references[-1] != parent_id:
+        return ""
+    with imaplib.IMAP4_SSL(GMAIL_IMAP_HOST, timeout=DEFAULT_THREAD_LOOKUP_OPERATION_TIMEOUT_S) as client:
+        client.login(settings.agent_address, settings.app_password)
+        if client.select('"[Gmail]/Sent Mail"', readonly=True)[0] != "OK":
+            raise SubjectInputError("direct reply parent mailbox unavailable")
+        typ, data = client.uid("search", None, "HEADER", "Message-ID", f'"{parent_id}"')
+        if typ != "OK" or not data:
+            raise SubjectInputError("direct reply parent search unavailable")
+        uids = data[0].decode().split() if isinstance(data[0], bytes) else str(data[0]).split()
+        if len(uids) != 1:
+            return ""
+        parents = fetch_recent_headers(client, uids)
+        if len(parents) != 1 or parents[0].message_id.strip() != parent_id:
+            return ""
+        parent = parents[0]
+        if route_matches_header(parent, settings.agent_address, settings.human_address):
+            if task_stem and subject_task_stem(parent.subject) == task_stem:
+                return task_stem
+            if tmux_target and same_agent_target(subject_manager_target(parent.subject), tmux_target):
+                return tmux_target
+    return ""
+
+
+def verified_reply_owner_target(subject: str, message: Message) -> str:
+    if not re.match(r"^\s*Re:\s*", subject, re.IGNORECASE):
+        return ""
+    if not str(message.get("In-Reply-To", "")).strip():
+        raise RuntimeError("reply has no verifiable parent Message-ID")
+    settings = configured_agent_mail()
+    if settings is None:
+        raise RuntimeError("reply needs configured authenticated thread lookup")
+    message_id = str(message.get("Message-ID", "")).strip()
+    if re.fullmatch(r'<[^<>\s"]+>', message_id) is None:
+        raise RuntimeError("reply has no valid Message-ID")
+    header = RecentHeader(
+        sender=str(message.get("From", "")), subject=subject, date=None,
+        message_id=message_id, recipient=str(message.get("To", "")),
+        references=str(message.get("References", "")), in_reply_to=str(message.get("In-Reply-To", "")),
+    )
+    if not route_matches_header(header, settings.human_address, settings.agent_address):
+        raise RuntimeError("reply addresses do not match the configured Human and agent")
+    try:
+        with recent_thread_lookup_deadline(DEFAULT_THREAD_LOOKUP_DEADLINE_S):
+            # 🧑 “Let's stop stripping out the agent address tag in the emails so it is easier to debug the routing”
+            direct_target = verified_direct_task_parent_target(subject, header, settings)
+            if direct_target:
+                return direct_target
+            ascii_prefix = re.split(r"[^\x00-\x7f]", normalized_subject_key(subject), maxsplit=1)[0].strip()
+            if ascii_prefix:
+                selected = find_recent_thread_matching(
+                    lambda _candidate: True,
+                    ascii_prefix,
+                    route_profile=MailRouteProfile(settings.agent_address, settings.human_address, "primary"),
+                    selected_header=header,
+                )
+                target = "" if selected is None else selected.thread_target
+            else:
+                with imaplib.IMAP4_SSL(GMAIL_IMAP_HOST, timeout=DEFAULT_THREAD_LOOKUP_OPERATION_TIMEOUT_S) as client:
+                    client.login(settings.agent_address, settings.app_password)
+                    target = authenticated_referenced_thread_target(client, header, [header], [
+                        ("[Gmail]/Sent Mail", settings.agent_address, settings.human_address),
+                        ("INBOX", settings.human_address, settings.agent_address),
+                    ], agent_sender=settings.agent_address, human_recipient=settings.human_address)
+    except (SubjectInputError, SubjectLookupTimeout, imaplib.IMAP4.error, OSError, TimeoutError, UnicodeError) as exc:
+        raise RuntimeError(f"reply ancestry cannot be verified: {exc}") from exc
+    if not target:
+        raise RuntimeError("reply has no verified addressed agent")
+    return target
+
+
+def email_route(args: Args, subject: str, body: str = "", *, verified_reply_target: str = "") -> EmailRoute:
     del body
     if args.guest_hees:
         owner = active_guest_hees_owner(args.root)
         return EmailRoute(owner.task_file, owner.target, pending_watcher_delivery=True)
-    tmux_target = subject_manager_target(subject)
+    legacy_target = subject_manager_target(subject)
+    tmux_target = legacy_target or subject_task_stem(subject) or verified_reply_target
+    if not legacy_target and tmux_target.casefold() in {"main", "pb"}:
+        return default_email_route(args)
+    if tmux_target and re.fullmatch(r"[A-Za-z0-9_-]+", tmux_target):
+        # 🧑 "put task file, without the ‘.md’ in all starter prompts and use that as tags"
+        task_name = tmux_target + ".md"
+        matches = [path for path in current_todo_task_candidates(args.root) if path.name == task_name and path.is_file()]
+        if len(matches) != 1:
+            historical = unique_named_task_file(task_name, markdown_task_files(args.root))
+            if historical is None:
+                raise RuntimeError(f"task tag does not map to one current task: {tmux_target}")
+            historical_metadata = parse_task_metadata(historical.read_text(encoding="utf-8"), args.root)
+            if historical_metadata is None or historical_metadata.status != "done":
+                raise RuntimeError(f"task tag does not map to one current task: {tmux_target}")
+            route = current_route_for_owner(args, historical_metadata.managerat)
+            if route is None:
+                raise RuntimeError(f"completed task has no current manager: {tmux_target}")
+            manager = parse_task_metadata(route.manager_file.read_text(encoding="utf-8"), args.root)
+            if manager is None or not manager.is_manager or manager.status not in {"running", "long_running"}:
+                raise RuntimeError(f"completed task has no active manager: {tmux_target}")
+            return route
+        task = matches[0]
+        metadata = parse_task_metadata(task.read_text(encoding="utf-8"), args.root)
+        if metadata is None or metadata.status not in {"running", "long_running", "blocked"} or runat_kind(metadata.runat) not in {"tmux", "omnigent"}:
+            raise RuntimeError(f"task tag has no active owner: {tmux_target}")
+        if not any(resolve_task_path(args.root, row.task_file) == task and row.target in target_aliases(metadata.runat) for row in parse_task_lines(args.root / "TODO.md") if row.section in {"todo:current", "todo:human pending", "todo:low priority"}):
+            raise RuntimeError(f"task tag has no matching current owner: {tmux_target}")
+        return EmailRoute(task, metadata.runat, pending_watcher_delivery=True)
     if not tmux_target:
         return default_email_route(args)
     manager_file = current_task_file_for_target(args.root, tmux_target)
@@ -940,6 +1078,13 @@ def email_route(args: Args, subject: str, body: str = "") -> EmailRoute:
     return EmailRoute(manager_file, fallback_manager_target_for_file(args, manager_file, tmux_target), pending_watcher_delivery=True)
 
 
+def indexed_task_stem_subject(root: Path, subject: str) -> bool:
+    stem = subject_task_stem(subject)
+    if stem.casefold() in {"main", "pb"}:
+        return False
+    return bool(stem and any(path.name == stem + ".md" for path in current_todo_task_candidates(root)))
+
+
 def manager_target_for_file(args: Args, manager_file: Path) -> str:
     current = current_manager_file(args)
     if manager_file == current or manager_file.name.startswith("work_manager_"):
@@ -969,12 +1114,23 @@ def same_agent_target(left: str, right: str) -> bool:
     return left.removesuffix(".0") == right.removesuffix(".0")
 
 
-def lifecycle_subject_target(args: Args, subject: str) -> str:
+def lifecycle_subject_target(args: Args, subject: str, verified_reply_target: str = "") -> str:
     if re.match(r"^\s*re:\s*", subject, re.IGNORECASE) is None:
         return ""
+    if verified_reply_target:
+        if verified_reply_target.casefold() in {"main", "pb"}:
+            return ""
+        if runat_kind(verified_reply_target) not in {"tmux", "omnigent"}:
+            return email_route(args, "", verified_reply_target=verified_reply_target).manager_target
+        return verified_reply_target
     target = subject_manager_target(subject)
     if target:
         return target
+    if subject_task_stem(subject) and subject_task_stem(subject).casefold() not in {"main", "pb"}:
+        try:
+            return email_route(args, subject).manager_target
+        except (OSError, RuntimeError, TaskFrontmatterError):
+            pass
     if is_manager_subject(subject):
         return args.manager_target
     reply_base = re.sub(r"^(?:\s*re:\s*)+", "", subject, flags=re.IGNORECASE)
@@ -1037,54 +1193,57 @@ def lifecycle_manager_file(args: Args, manager_target: str) -> Path:
     return manager.task_file
 
 
-def require_main_manager_transport_custody(args: Args, manager_file: Path) -> None:
+def require_main_manager_transport_custody(args: Args, manager_file: Path, *, stopped_replacement_mail: Path | None = None) -> None:
     if runat_kind(args.manager_target) != "tmux" or not manager_file.is_file():
         raise RuntimeError("main-manager transport custody is unavailable")
     try:
         _ = require_sendable_codex_target(args.manager_target)
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        if stopped_replacement_mail is not None:
+            mail_digest = hashlib.sha256(stopped_replacement_mail.read_bytes()).hexdigest()
+            receipt = args.state_dir / "email-lifecycle-stops" / f"{mail_digest}.json"
+            try:
+                stopped = json.loads(receipt.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                stopped = None
+            stopped_shell_verified = False
+            if isinstance(stopped, dict) and stopped.get("outcome") == "started":
+                try:
+                    from .omo_codex_start import SHELL_COMMANDS, resolve_pane
+                except ImportError:
+                    from omo_codex_start import SHELL_COMMANDS, resolve_pane
+                try:
+                    pane = resolve_pane(args.manager_target)
+                except (OSError, RuntimeError):
+                    pane = None
+                old_pid = stopped.get("pane_pid")
+                stopped_shell_verified = (
+                    pane is not None
+                    and pane.pane_id == stopped.get("pane_id")
+                    and pane.command in SHELL_COMMANDS
+                    and isinstance(old_pid, int)
+                    and old_pid > 1
+                    and pane.pane_pid != old_pid
+                    and not Path(f"/proc/{old_pid}").exists()
+                )
+            if (
+                isinstance(stopped, dict)
+                and (stopped.get("outcome") == "stopped" or stopped_shell_verified)
+                and stopped.get("requested_action") == "replace"
+                and stopped.get("target") == args.manager_target
+                and stopped.get("mail_sha256") == mail_digest
+                and stopped.get("owner") == str(manager_file)
+            ):
+                return
         raise RuntimeError(f"main-manager transport custody is unavailable: {exc}") from exc
-
-
-def lifecycle_queue_payload(items: tuple[str, ...]) -> tuple[str, str]:
-    serialized = json.dumps(list(items), ensure_ascii=False, separators=(",", ":"))
-    return serialized, hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def lifecycle_action_guidance(command: AgentLifecycleCommand, binding: AgentLifecycleBinding, *, main_manager: bool) -> list[str]:
     if command.action is AgentLifecycleAction.REVIEW:
-        return [
-            "decision: do not perform a lifecycle action automatically",
-            f"review_reason: {sanitized_one_line(command.reason or 'the command could not be authenticated unambiguously')}",
-        ]
+        return [f"review_reason: {sanitized_one_line(command.reason or 'the command could not be authenticated unambiguously')}"]
     if command.action is AgentLifecycleAction.REPLACE:
-        if main_manager:
-            return [
-                "decision: replace the main manager in place",
-                "supported_tool: omo_manager_rotate.py",
-                "required_invariant: preserve exactly one active main-manager owner",
-                f"decision: after replacement, deliver this exact JSON-decoded text to the replacement agent: {json.dumps(command.replacement_context, ensure_ascii=False)}",
-            ]
-        if binding.is_manager:
-            return [
-                "decision: replace the addressed submanager in place",
-                "supported_tool: omo_manager_rotate.py with the marker's replacement_email_file; omo_codex_start.py --rotate-worker rejects manager tasks",
-                "required_invariant: preserve exactly one active owner throughout replacement",
-                f"decision: after replacement, deliver this exact JSON-decoded text to the replacement agent: {json.dumps(command.replacement_context, ensure_ascii=False)}",
-            ]
-        return [
-            "decision: replace the addressed worker in place",
-            "supported_tool: omo_codex_start.py --rotate-worker",
-            "required_invariant: bind the exact task bytes, status, manager, ordered queue, protected targets, pane, and sole ownership",
-            f"decision: after replacement, deliver this exact JSON-decoded text to the replacement agent: {json.dumps(command.replacement_context, ensure_ascii=False)}",
-        ]
-    return [
-        "decision: terminate the addressed agent only after the responsible manager receives the complete ordered queue as message text",
-        "supported_tools: after verified manager delivery, remove the delivered items from the addressed queue and use manager-owned omo_task_status.py TASK.md done",
-        "required_invariant: preserve source order in the manager message and remove exactly those delivered items before closure",
-        f"decision: ordered queued task message text (do not record in manager pending_task_items): {json.dumps(list(binding.pending_items), ensure_ascii=False, separators=(',', ':'))}",
-        "queue_rule: do not add a delivered queue item or the Human email to any manager pending_task_items",
-    ]
+        return ["decision: stop this agent; give its successor the complete original Human request"]
+    return ["decision: stop this agent; retain its task queue"]
 
 
 def lifecycle_marker_text(
@@ -1094,53 +1253,26 @@ def lifecycle_marker_text(
     binding: AgentLifecycleBinding,
     *,
     main_manager: bool,
-    pending_line: int,
 ) -> str:
-    queue_json, queue_sha256 = lifecycle_queue_payload(binding.pending_items)
-    task_ref = source_ref(args.root, binding.task_file)
+    if main_manager and command.action is AgentLifecycleAction.REVIEW:
+        return "\n".join((
+            "(email watcher lifecycle-command explanation; generated by the watcher, not Human text)",
+            "requested_action: review",
+            f"human_mail: {source_ref(args.root, txt_path)}",
+            f"addressed_target: {binding.target}",
+            f"review_reason: {sanitized_one_line(command.reason or 'the requested agent could not be identified')}",
+            "(for manager)",
+        ))
     lines = [
         "(email watcher lifecycle-command explanation; generated by the watcher, not Human text)",
         f"requested_action: {command.action.value}",
-        f"human_mail: {source_ref(args.root, txt_path)} (the stored artifact contains the exact Human words)",
-        f"addressed_task: {task_ref}",
         f"addressed_target: {binding.target}",
+        f"addressed_task: {source_ref(args.root, binding.task_file)}",
         f"responsible_manager_target: {binding.manager_target}",
-        f"responsible_manager_task: {source_ref(args.root, binding.manager_task_file)}",
-        f"task_status: {binding.status}",
-        f"task_sha256_before_transport: {binding.task_sha256}",
-        f"pending_task_items_sha256: {queue_sha256}",
-        f"pending_task_items_ordered_json: {queue_json}",
-        "drift_check: the task SHA-256 covers the exact file bytes before this transport block was appended",
-        "consume_rule: never default the lifecycle email into the addressed task",
-        "reporting_rule: managers handle lifecycle only; do not send worker task progress or completion to the Human; the responsible worker reports directly",
         *lifecycle_action_guidance(command, binding, main_manager=main_manager),
         "(for manager)",
     ]
-    if command.action is AgentLifecycleAction.REPLACE:
-        lines.insert(-1, f"replacement_email_file: {txt_path}")
-    if main_manager and command.action is AgentLifecycleAction.REPLACE:
-        command_line = shlex.join(
-            (
-                "omo_manager_rotate.py",
-                "--target",
-                binding.target,
-                "--root",
-                str(args.root),
-                "--state-dir",
-                str(args.state_dir),
-                "--replacement-email-file",
-                str(txt_path),
-            )
-        )
-        lines.insert(-1, "decision: execute this replacement before unrelated work and do not treat the Human email as ordinary task input")
-        lines.insert(-1, f"supported_command: {command_line}")
-    lines.insert(-1, "delivery_rule: the pending watcher clears this transport only after verified manager delivery")
     return "\n".join(lines)
-
-
-def next_lifecycle_pending_line(task_file: Path) -> int:
-    text = task_file.read_text(encoding="utf-8") if task_file.exists() else ""
-    return len(text.splitlines()) + 2
 
 
 def append_lifecycle_marker_locked(root: Path, txt_path: Path, task_file: Path, explanation: str, expected_sha256: str) -> int:
@@ -1219,11 +1351,12 @@ def append_main_lifecycle_transport(
     command: AgentLifecycleCommand,
     guard_targets: tuple[str, ...] = (),
     message_id: str = "",
+    stopped_replacement_mail: Path | None = None,
 ) -> tuple[EmailRoute, int]:
     manager_file = current_manager_file(args).resolve()
-    require_main_manager_transport_custody(args, manager_file)
+    require_main_manager_transport_custody(args, manager_file, stopped_replacement_mail=stopped_replacement_mail)
     with root_membership_lock(args.root), task_target_lock(args.root, args.manager_target), task_file_lock(manager_file):
-        require_main_manager_transport_custody(args, manager_file)
+        require_main_manager_transport_custody(args, manager_file, stopped_replacement_mail=stopped_replacement_mail)
         task_bytes = manager_file.read_bytes()
         binding = AgentLifecycleBinding(
             manager_file,
@@ -1239,8 +1372,7 @@ def append_main_lifecycle_transport(
         try:
             for target in guard_targets:
                 guards.append(record_worker_lifecycle_report_guard(args, target, message_id))
-            expected_line = existing_source_pending_line(args.root, txt_path, manager_file) or next_lifecycle_pending_line(manager_file)
-            explanation = lifecycle_marker_text(args, txt_path, command, binding, main_manager=True, pending_line=expected_line)
+            explanation = lifecycle_marker_text(args, txt_path, command, binding, main_manager=True)
             pending_line = append_lifecycle_marker_locked(args.root, txt_path, manager_file, explanation, binding.task_sha256)
         except Exception:
             try:
@@ -1272,6 +1404,7 @@ def append_main_lifecycle_review(
         AgentLifecycleCommand(AgentLifecycleAction.REVIEW, reason),
         guard_targets,
         message_id,
+        stopped_replacement_mail=txt_path if same_agent_target(requested_target, args.manager_target) else None,
     )
 
 
@@ -1284,8 +1417,6 @@ def append_bound_lifecycle_command(
 ) -> tuple[EmailRoute, int]:
     main_manager = same_agent_target(requested_target, args.manager_target)
     if main_manager:
-        if command.action is AgentLifecycleAction.TERMINATE:
-            command = AgentLifecycleCommand(AgentLifecycleAction.REVIEW, "the main manager may be replaced but never terminated")
         return append_main_lifecycle_transport(args, txt_path, command)
 
     initial = sole_lifecycle_binding(args.root, requested_target)
@@ -1311,8 +1442,7 @@ def append_bound_lifecycle_command(
             try:
                 guards.append(record_worker_lifecycle_report_guard(args, current.manager_target, message_id))
                 guards.append(record_worker_lifecycle_report_guard(args, current.target, message_id))
-                expected_line = existing_source_pending_line(args.root, txt_path, current.task_file) or next_lifecycle_pending_line(current.task_file)
-                explanation = lifecycle_marker_text(args, txt_path, command, current, main_manager=False, pending_line=expected_line)
+                explanation = lifecycle_marker_text(args, txt_path, command, current, main_manager=False)
                 pending_line = append_lifecycle_marker_locked(args.root, txt_path, current.task_file, explanation, current.task_sha256)
             except Exception:
                 try:
@@ -1343,8 +1473,9 @@ def append_agent_lifecycle_pending(
     subject: str,
     command: AgentLifecycleCommand,
     message_id: str,
+    verified_reply_target: str = "",
 ) -> tuple[EmailRoute, int]:
-    requested_target = lifecycle_subject_target(args, subject)
+    requested_target = lifecycle_subject_target(args, subject, verified_reply_target)
     if not requested_target:
         return append_main_lifecycle_review(args, txt_path, message_id, command, requested_target)
     try:
@@ -1355,78 +1486,246 @@ def append_agent_lifecycle_pending(
         return append_main_lifecycle_review(args, txt_path, message_id, review, requested_target)
 
 
-def is_main_manager_replacement(args: Args, subject: str, command: AgentLifecycleCommand) -> bool:
+def _lifecycle_ancestor_chain(pid: int, root_pid: int, parents: dict[int, int]) -> set[int]:
+    ancestors: set[int] = set()
+    while pid != root_pid:
+        if pid in ancestors or pid not in parents:
+            raise RuntimeError("termination process tree changed before the stop")
+        ancestors.add(pid)
+        pid = parents[pid]
+    return ancestors
+
+
+def stop_terminated_lifecycle_agent(args: Args, txt_path: Path, target: str) -> None:
+    """Stop the exact Codex process for one authenticated lifecycle email."""
+
+    if runat_kind(target) != "tmux" or target.partition(":")[0].startswith("h"):
+        raise RuntimeError("lifecycle stop target must be a non-Human tmux agent")
+    try:
+        from .omo_codex_start import descendant_pids, resolve_pane, require_restartable_codex, stop_unverified_replacement
+    except ImportError:
+        from omo_codex_start import descendant_pids, resolve_pane, require_restartable_codex, stop_unverified_replacement
+
+    mail_digest = hashlib.sha256(txt_path.read_bytes()).hexdigest()
+    receipt = args.state_dir / "email-lifecycle-stops" / f"{mail_digest}.json"
+    with tmux_input_lock(target), root_membership_lock(args.root), task_target_lock(args.root, target):
+        if same_agent_target(target, args.manager_target):
+            manager_file = current_manager_file(args).resolve()
+            owner_file = manager_file
+        else:
+            owner_file = sole_lifecycle_binding(args.root, target).task_file
+        with task_file_lock(owner_file):
+            if not same_agent_target(target, args.manager_target):
+                if sole_lifecycle_binding(args.root, target).task_file != owner_file:
+                    raise RuntimeError("termination owner changed before stopping its pane")
+            _headers, separator, body = txt_path.read_text(encoding="utf-8").partition("\n\n")
+            command = agent_lifecycle_command(body) if separator else None
+            if command is None or command.action not in {AgentLifecycleAction.TERMINATE, AgentLifecycleAction.REPLACE}:
+                raise RuntimeError("lifecycle stop source does not retain the exact Human action")
+            action = command.action
+            if existing_source_line(args.root, txt_path, owner_file) is None and existing_consumed_source_line(args.root, txt_path, owner_file) is None:
+                replacement_claim = args.state_dir / "email-lifecycle-replacements" / f"{mail_digest}.json"
+                try:
+                    claimed = json.loads(replacement_claim.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    claimed = None
+                if not (
+                    action is AgentLifecycleAction.REPLACE
+                    and same_agent_target(target, args.manager_target)
+                    and isinstance(claimed, dict)
+                    and claimed.get("outcome") == "started"
+                    and claimed.get("target") == target
+                    and claimed.get("mail_sha256") == mail_digest
+                ):
+                    raise RuntimeError("lifecycle stop source has no manager transport in the addressed task")
+            if receipt.exists():
+                try:
+                    prior = json.loads(receipt.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise RuntimeError("lifecycle stop receipt is invalid; no stop replay") from exc
+                if prior.get("target") != target or prior.get("mail_sha256") != mail_digest or prior.get("requested_action") != action.value:
+                    raise RuntimeError("lifecycle stop receipt has changed authority")
+                if prior.get("outcome") == "stopped":
+                    return
+                raise RuntimeError("prior termination outcome is unknown; do not replay the stop")
+            pane = resolve_pane(target)
+            require_restartable_codex(pane)
+            if pane.command not in {"bunx", "node", "codex", "bun"}:
+                raise RuntimeError("termination pane does not contain a directly bound Codex launcher")
+            descendants = descendant_pids(pane.pane_pid)
+            shell_ancestors: set[int] = set()
+            codex_descendants: set[int] = set()
+            parents: dict[int, int] = {}
+            for descendant in descendants:
+                try:
+                    argv = Path(f"/proc/{descendant}/cmdline").read_bytes().split(b"\0")
+                except OSError as exc:
+                    raise RuntimeError("termination process tree changed before the stop") from exc
+                executable = Path(os.fsdecode(argv[0])).name if argv and argv[0] else ""
+                if executable not in {"fish", "zsh", "bash", "sh", "bunx", "node", "codex", "bun"} or (
+                    executable in {"bunx", "node", "codex", "bun"}
+                    and not any(b"codex" in part.lower() for part in argv[:3])
+                ):
+                    raise RuntimeError("termination would risk an unrelated child process; no stop was attempted")
+                try:
+                    status = Path(f"/proc/{descendant}/status").read_text(encoding="utf-8")
+                except OSError as exc:
+                    raise RuntimeError("termination process tree changed before the stop") from exc
+                parent_line = next((line for line in status.splitlines() if line.startswith("PPid:")), "")
+                parent_text = parent_line.removeprefix("PPid:").strip()
+                if not parent_text.isdecimal():
+                    raise RuntimeError("termination process tree changed before the stop")
+                parent = int(parent_text)
+                parents[descendant] = parent
+                if executable in {"fish", "zsh", "bash", "sh"}:
+                    shell_ancestors.add(descendant)
+                elif executable in {"bunx", "node", "codex", "bun"} and any(b"codex" in part.lower() for part in argv[:3]):
+                    codex_descendants.add(descendant)
+                else:
+                    raise RuntimeError("termination would risk an unrelated child process; no stop was attempted")
+                if parent != pane.pane_pid and parent not in descendants:
+                    raise RuntimeError("termination process tree changed before the stop")
+            for shell_pid in shell_ancestors:
+                if not any(
+                    shell_pid in _lifecycle_ancestor_chain(codex_pid, pane.pane_pid, parents)
+                    for codex_pid in codex_descendants
+                ):
+                    raise RuntimeError("termination would risk an unrelated child process; no stop was attempted")
+            receipt.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            started = {
+                "outcome": "started",
+                "target": target,
+                "mail_sha256": mail_digest,
+                "requested_action": action.value,
+                "owner": str(owner_file),
+                "owner_sha256": hashlib.sha256(owner_file.read_bytes()).hexdigest(),
+                "pane_id": pane.pane_id,
+                "pane_pid": pane.pane_pid,
+                "pane_start_ticks": pane.start_ticks,
+            }
+            fd = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(started, handle, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            fsync_directory(receipt.parent)
+            stopped = stop_unverified_replacement(pane, 5.0)
+            write_private_state(receipt, json.dumps({**started, "outcome": "stopped", "shell_pid": stopped.pane_pid}, sort_keys=True) + "\n")
+            with receipt.open("rb") as handle:
+                os.fsync(handle.fileno())
+            fsync_directory(receipt.parent)
+
+
+def is_main_manager_replacement(args: Args, subject: str, command: AgentLifecycleCommand, verified_reply_target: str = "") -> bool:
     return command.action is AgentLifecycleAction.REPLACE and same_agent_target(
-        lifecycle_subject_target(args, subject), args.manager_target
+        lifecycle_subject_target(args, subject, verified_reply_target), args.manager_target
     )
 
 
 def execute_main_manager_replacement(args: Args, txt_path: Path) -> str:
-    """Run the supported atomic rotation from the watcher, never through the old manager."""
+    """Stop the addressed manager and start one successor in its exact pane."""
 
     try:
         mail_digest = hashlib.sha256(txt_path.read_bytes()).hexdigest()
     except OSError as exc:
         raise RuntimeError(f"main-manager replacement email is unavailable: {exc}") from exc
+    try:
+        from . import omo_manager_rotate as rotation
+    except ImportError:
+        import omo_manager_rotate as rotation
+
+    rotation_args = rotation.parse_args([
+        "--target", args.manager_target,
+        "--root", str(args.root),
+        "--state-dir", str(args.state_dir),
+        "--replacement-email-file", str(txt_path),
+        "--skip-watcher-refresh",
+    ])
     receipt = args.state_dir / "email-lifecycle-replacements" / f"{mail_digest}.json"
     started = json.dumps(
         {"outcome": "started", "target": args.manager_target, "mail_sha256": mail_digest, "audit_output": ""},
         ensure_ascii=True,
         sort_keys=True,
     ) + "\n"
-    receipt.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        fd = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
-    except FileExistsError:
+    if receipt.exists():
         try:
             prior = json.loads(receipt.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"main-manager replacement receipt is invalid: {exc}") from exc
-        if prior.get("mail_sha256") != mail_digest or prior.get("target") != args.manager_target or prior.get("outcome") != "succeeded":
+        if prior.get("mail_sha256") != mail_digest or prior.get("target") != args.manager_target:
+            raise RuntimeError("main-manager replacement receipt does not match this command")
+        if prior.get("outcome") == "started":
+            raise MainReplacementUncertain("a prior main-manager replacement attempt has no verified outcome; do not retry it automatically")
+        if prior.get("outcome") != "succeeded":
+            raise RuntimeError("main-manager replacement receipt does not match this command")
+        return str(prior.get("audit_output", "replacement receipt"))
+    try:
+        prepared = rotation.preflight(rotation_args)
+    except rotation.RotationError as exc:
+        prepared = None
+        preflight_error = str(exc)
+    else:
+        preflight_error = ""
+    lock_fd = rotation.acquire_lock(args.state_dir)
+    try:
+        if prepared is not None and rotation.resolve_exact_pane(args.manager_target) != prepared.pane:
+            raise MainReplacementUncertain("main-manager pane changed after preflight; no stop attempted")
+    except Exception:
+        os.close(lock_fd)
+        raise
+    try:
+        receipt.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError:
+        os.close(lock_fd)
+        raise
+    try:
+        fd = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+    except FileExistsError:
+        os.close(lock_fd)
+        try:
+            prior = json.loads(receipt.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"main-manager replacement receipt is invalid: {exc}") from exc
+        if prior.get("mail_sha256") != mail_digest or prior.get("target") != args.manager_target:
+            raise RuntimeError("main-manager replacement receipt does not match this command")
+        if prior.get("outcome") == "started":
+            raise MainReplacementUncertain("a prior main-manager replacement attempt has no verified outcome; do not retry it automatically")
+        if prior.get("outcome") != "succeeded":
             raise RuntimeError("main-manager replacement receipt does not match this command")
         return str(prior.get("audit_output", "replacement receipt"))
     except OSError as exc:
+        os.close(lock_fd)
         raise RuntimeError(f"main-manager replacement could not claim this email: {exc}") from exc
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(started)
-        handle.flush()
-        os.fsync(handle.fileno())
-    fsync_directory(receipt.parent)
-
-    helper = Path(__file__).with_name("omo_manager_rotate.py")
-    command = [
-        str(helper),
-        "--target",
-        args.manager_target,
-        "--root",
-        str(args.root),
-        "--state-dir",
-        str(args.state_dir),
-        "--replacement-email-file",
-        str(txt_path),
-        "--skip-watcher-refresh",
-    ]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=180, check=False)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise RuntimeError(f"main-manager replacement could not start: {exc}") from exc
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
-        raise RuntimeError(f"main-manager replacement failed: {detail}")
-    output = result.stdout.strip()
-    if not output.startswith("audit_record: "):
-        raise RuntimeError("main-manager replacement did not complete with an audit record")
-    audit_path = Path(output.removeprefix("audit_record: ").strip())
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(started)
+            handle.flush()
+            os.fsync(handle.fileno())
+        fsync_directory(receipt.parent)
+        try:
+            with tmux_input_lock(args.manager_target):
+                stop_terminated_lifecycle_agent(args, txt_path, args.manager_target)
+                if prepared is None:
+                    raise MainReplacementUncertain(f"main manager stopped; successor preflight failed: {preflight_error}")
+                audit_path = rotation.execute_rotation(prepared)
+        except (RuntimeError, rotation.RotationError) as exc:
+            raise MainReplacementUncertain(f"main-manager stop/start has an unverified outcome: {exc}") from exc
+    except (RuntimeError, rotation.RotationError) as exc:
+        raise MainReplacementUncertain(f"main-manager replacement claim or startup is unverified: {exc}") from exc
+    finally:
+        os.close(lock_fd)
     try:
         audit = json.loads(audit_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"main-manager replacement audit is unavailable: {exc}") from exc
+        raise MainReplacementUncertain(f"main-manager replacement audit is unavailable: {exc}") from exc
     if (
         audit.get("outcome") != "succeeded"
         or not same_agent_target(str(audit.get("target", "")), args.manager_target)
         or Path(str(audit.get("replacement_email_file", ""))).resolve(strict=False) != txt_path.resolve(strict=False)
     ):
-        raise RuntimeError("main-manager replacement audit does not prove success for the exact target")
+        raise MainReplacementUncertain("main-manager replacement audit does not prove success for the exact target")
+    output = f"audit_record: {audit_path}"
     write_private_state(
         receipt,
         json.dumps(
@@ -1449,7 +1748,7 @@ def record_main_manager_replacement(args: Args, txt_path: Path, audit_output: st
     mail_ref = source_ref(args.root, txt_path)
     line = (
         f"(manager handled: {mail_ref}; authenticated main-manager replacement completed; "
-        f"successor received exact post-command text; {sanitized_one_line(audit_output)})\n"
+        f"successor received exact Human request; {sanitized_one_line(audit_output)})\n"
     )
     with task_file_lock(manager_file):
         with manager_file.open("a", encoding="utf-8") as handle:
@@ -2249,12 +2548,12 @@ def write_mail(args: Args, uid: str, msg: Message, _sender: str, subject: str, i
             f"Message-ID: {str(msg.get('Message-ID', '')).strip()}",
             f"In-Reply-To: {str(msg.get('In-Reply-To', '')).strip()}",
             f"References: {str(msg.get('References', '')).strip()}",
-            f"Subject: {normalize_human_subject(subject)}",
+            f"Subject: {subject}",
         ]
         header_text = "\n".join(headers)
         body = f"{header_text}\n\n{message_text(msg)}{references}"
     else:
-        body = f"Subject: {normalize_human_subject(subject)}\n\n{message_text(msg)}{references}"
+        body = f"Subject: {subject}\n\n{message_text(msg)}{references}"
     fd = os.open(txt_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(body)
@@ -3927,6 +4226,11 @@ def handle_live_mailbox_approval_replies(client: imaplib.IMAP4_SSL, args: Args) 
 
 
 def handle_unseen(client: imaplib.IMAP4_SSL, args: Args, trigger: str = "direct") -> bool:
+    if args.guest_hees:
+        try:
+            reap_idle_guest_hees_agent(args.root, args.state_dir)
+        except (OSError, RuntimeError) as exc:
+            logging.warning("guest idle agent closure deferred: %s", exc)
     processed_path = processed_uids_path(args)
     processed_uids = load_processed_uids(processed_path)
     ignored_path = ignored_uids_path(args)
@@ -3937,7 +4241,11 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args, trigger: str = "direct"
     ignored_changed = False
     unaccepted_changed = False
     handled = False
-    manager_file = current_manager_file(args)
+    try:
+        manager_file = current_manager_file(args)
+    except (OSError, RuntimeError, TaskFrontmatterError) as exc:
+        logging.warning("current manager route unavailable; continuing addressed intake: %s", exc)
+        manager_file = args.manager_file or dated_manager_file(args.root)
     unseen_uids = search_sender_uids(client, args.self_email, processed_uids)
     for raw_uid in processed_unseen_uids_to_mark_seen(unseen_uids, processed_uids, unaccepted_pending_uids):
         uid = raw_uid.decode()
@@ -3969,20 +4277,21 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args, trigger: str = "direct"
                 processed_changed = True
                 handled = True
             continue
+        current_guest_owner = None
         if args.guest_hees:
             try:
                 current_guest_owner = active_guest_hees_owner(args.root)
-            except RuntimeError as exc:
-                logging.warning("guest email owner unavailable during replay; leaving unread: uid=%s error=%s", uid, exc)
-                handled = True
-                continue
-            if guest_hees_intake_is_delivered(args.state_dir, expected_source, current_guest_owner):
+            except RuntimeError:
+                pass
+            if current_guest_owner is not None and guest_hees_intake_is_delivered(args.state_dir, expected_source, current_guest_owner):
                 unaccepted_pending_uids.add(uid)
                 unaccepted_changed = True
                 handled = True
                 continue
         pending_ref = existing_source_pending_path_line_in_root(args.root, expected_txt_path, manager_file) if uid in unaccepted_pending_uids else None
-        if pending_ref is not None and not possible_lifecycle_replay:
+        if pending_ref is not None and not possible_lifecycle_replay and (
+            not args.guest_hees or current_guest_owner is not None and pending_ref[0].resolve() == current_guest_owner.task_file
+        ):
             pending_file, pending_line = pending_ref
             if args.guest_hees:
                 unaccepted_pending_uids.add(uid)
@@ -4002,7 +4311,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args, trigger: str = "direct"
                 unaccepted_pending_uids.add(uid)
                 unaccepted_changed = True
             continue
-        if not possible_lifecycle_replay and uid in unaccepted_pending_uids and (
+        if not args.guest_hees and not possible_lifecycle_replay and uid in unaccepted_pending_uids and (
             existing_source_line_in_root(args.root, expected_txt_path, manager_file) is not None
             or existing_consumed_source_line(args.root, expected_txt_path, manager_file) is not None
         ):
@@ -4014,7 +4323,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args, trigger: str = "direct"
                 processed_changed = True
                 handled = True
             continue
-        if uid in processed_uids:
+        if uid in processed_uids and not args.guest_hees:
             if uid not in unaccepted_pending_uids:
                 logging.info("email processed uid remains authoritative without an active source marker: uid=%s root=%s", uid, args.root)
                 handled = mark_seen_after_human_intake(client, uid, args, txt_path=expected_txt_path) or handled
@@ -4025,7 +4334,9 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args, trigger: str = "direct"
             elif uid in unaccepted_pending_uids:
                 logging.warning("email unaccepted processed uid lacks source; reprocessing: uid=%s root=%s", uid, args.root)
         existing_pending = existing_source_pending_path_line_in_root(args.root, expected_txt_path, manager_file)
-        if existing_pending is not None and not possible_lifecycle_replay:
+        if existing_pending is not None and not possible_lifecycle_replay and (
+            not args.guest_hees or current_guest_owner is not None and existing_pending[0].resolve() == current_guest_owner.task_file
+        ):
             pending_file, existing_pending_line = existing_pending
             if args.guest_hees:
                 unaccepted_pending_uids.add(uid)
@@ -4045,7 +4356,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args, trigger: str = "direct"
                 unaccepted_pending_uids.add(uid)
                 unaccepted_changed = True
             continue
-        if not possible_lifecycle_replay and existing_consumed_source_line(args.root, expected_txt_path, manager_file) is not None:
+        if not args.guest_hees and not possible_lifecycle_replay and existing_consumed_source_line(args.root, expected_txt_path, manager_file) is not None:
             logging.info("email uid already has acknowledged or routed source; accepting without duplicate pending: uid=%s root=%s", uid, args.root)
             unaccepted_pending_uids.discard(uid)
             unaccepted_changed = True
@@ -4078,12 +4389,29 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args, trigger: str = "direct"
             continue
         raw_mime = msg_data[0][1]
         body_text = message_text(msg)
-        lifecycle_command = agent_lifecycle_command(body_text) if not args.guest_hees and lifecycle_reply_candidate(subject) else None
+        try:
+            verified_reply_target = "" if args.guest_hees else verified_reply_owner_target(subject, msg)
+        except RuntimeError as exc:
+            logging.warning("email reply route unavailable; leaving unread: uid=%s error=%s", uid, exc)
+            unaccepted_pending_uids.add(uid)
+            unaccepted_changed = True
+            handled = True
+            continue
+        lifecycle_command = agent_lifecycle_command(body_text) if not args.guest_hees and (lifecycle_reply_candidate(subject) or verified_reply_target) else None
         image_references: tuple[str, ...] = ()
         if args.guest_hees:
             try:
-                owner = active_guest_hees_owner(args.root)
-            except RuntimeError as exc:
+                if re.fullmatch(r"<[^<>\s]+>", str(msg.get("Message-ID", "")).strip()) is None:
+                    logging.warning("guest email has no valid reply identity; leaving unread: uid=%s", uid)
+                    continue
+                images = incoming_images(msg)
+                if len({image.sha256 for image in images}) != len(images):
+                    raise GuestImageError("guest mail must not repeat an identical image attachment")
+                if not body_text.strip() and not images:
+                    logging.warning("guest email has no readable body or supported image; leaving unread: uid=%s", uid)
+                    continue
+                owner = ensure_guest_hees_agent(args.root, args.state_dir, args.manager_target)
+            except (GuestImageError, OSError, RuntimeError) as exc:
                 logging.warning("guest email owner unavailable; leaving unread: uid=%s error=%s", uid, exc)
                 continue
             try:
@@ -4100,11 +4428,18 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args, trigger: str = "direct"
             if not body_text.strip() and not image_references:
                 logging.warning("guest email has no readable body or supported image; leaving unread: uid=%s", uid)
                 continue
-        amh_result = (
-            AmhRouteDisposition.FALLBACK
-            if args.guest_hees or lifecycle_command is not None
-            else try_route_amh_message(client, args, uid, msg, raw_mime if isinstance(raw_mime, bytes) else b"")
-        )
+        try:
+            amh_result = (
+                AmhRouteDisposition.FALLBACK
+                if args.guest_hees or lifecycle_command is not None or verified_reply_target and verified_reply_target.casefold() not in {"main", "pb"} or indexed_task_stem_subject(args.root, subject)
+                else try_route_amh_message(client, args, uid, msg, raw_mime if isinstance(raw_mime, bytes) else b"")
+            )
+        except OSError as exc:
+            logging.warning("email AMH staging unavailable; leaving unread: uid=%s error=%s", uid, exc)
+            unaccepted_pending_uids.add(uid)
+            unaccepted_changed = True
+            handled = True
+            continue
         if amh_result is AmhRouteDisposition.HOLD:
             logging.info("email AMH route held for replay: uid=%s subject=%r", uid, subject)
             handled = True
@@ -4120,7 +4455,14 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args, trigger: str = "direct"
         if amh_result is AmhRouteDisposition.SKIP:
             logging.warning("email AMH metadata unavailable; leaving unread: uid=%s subject=%r", uid, subject)
             continue
-        txt_path = write_mail(args, uid, msg, sender, subject, image_references)
+        try:
+            txt_path = write_mail(args, uid, msg, sender, subject, image_references)
+        except OSError as exc:
+            logging.warning("email source write unavailable; leaving unread: uid=%s error=%s", uid, exc)
+            unaccepted_pending_uids.add(uid)
+            unaccepted_changed = True
+            handled = True
+            continue
         logging.info("email stored: uid=%s path=%s subject=%r", uid, source_ref(args.root, txt_path), subject)
         if args.guest_hees and not ensure_guest_hees_reply_obligation(
             args.state_dir, str(source_ref(args.root, txt_path)), str(msg.get("Message-ID", "")).strip()
@@ -4141,13 +4483,20 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args, trigger: str = "direct"
                 handled = True
         else:
             try:
-                if lifecycle_command is not None and is_main_manager_replacement(args, subject, lifecycle_command):
-                    audit_output = execute_main_manager_replacement(args, txt_path)
-                    record_main_manager_replacement(args, txt_path, audit_output)
-                    route = None
-                    pending_line = 0
+                if lifecycle_command is not None and is_main_manager_replacement(args, subject, lifecycle_command, verified_reply_target):
+                    try:
+                        audit_output = execute_main_manager_replacement(args, txt_path)
+                    except MainReplacementUncertain as exc:
+                        route, pending_line = append_main_lifecycle_review(
+                            args, txt_path, str(msg.get("Message-ID", "")).strip(),
+                            AgentLifecycleCommand(AgentLifecycleAction.REVIEW, str(exc)), args.manager_target,
+                        )
+                    else:
+                        record_main_manager_replacement(args, txt_path, audit_output)
+                        route = None
+                        pending_line = 0
                 elif lifecycle_command is None:
-                    route = email_route(args, subject, body_text)
+                    route = email_route(args, subject, body_text, verified_reply_target=verified_reply_target)
                     pending_line = append_pending(
                         args.root,
                         txt_path,
@@ -4177,8 +4526,14 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args, trigger: str = "direct"
                         subject,
                         lifecycle_command,
                         str(msg.get("Message-ID", "")).strip(),
+                        verified_reply_target,
                     )
-            except RuntimeError as exc:
+                    if lifecycle_command.action in {AgentLifecycleAction.TERMINATE, AgentLifecycleAction.REPLACE}:
+                        target = lifecycle_subject_target(args, subject, verified_reply_target)
+                        if not target:
+                            raise RuntimeError("lifecycle email has no exact addressed agent")
+                        stop_terminated_lifecycle_agent(args, txt_path, target)
+            except (OSError, RuntimeError, TaskFrontmatterError) as exc:
                 logging.warning("email route unavailable; leaving unread: uid=%s error=%s", uid, exc)
                 unaccepted_pending_uids.add(uid)
                 unaccepted_changed = True
