@@ -97,13 +97,11 @@ def send(config: Config, address: str, text: str) -> None:
     pasted = tmux("paste-buffer", "-d", "-p", "-b", buffer, "-t", address)
     if loaded.returncode or pasted.returncode:
         raise AgentError(f"tmux refused the paste into {address}: {loaded.stderr}{pasted.stderr}")
-    # 🧑 "After putting the message in the input box of Codex, the script should send ‘enter’ ... DONT LEAVE MESSAGES IN THE INPUT BOX!!"
-    for _ in range(3):
-        time.sleep(1)
-        _ = tmux("send-keys", "-t", address, "Enter")
-        tail = text.strip().splitlines()[-1][-40:]
-        if tail not in "\n".join((pane_text(address, 8) or "").splitlines()[-6:]):
-            return
+    # 🧑 "don’t need to check if the pasted message renders for any harness and just send them"
+    time.sleep(1)
+    submitted = tmux("send-keys", "-t", address, "Enter")
+    if submitted.returncode:
+        raise AgentError(f"tmux refused to submit into {address}: {submitted.stderr}")
 
 
 def status(config: Config, address: str) -> tuple[str, str]:

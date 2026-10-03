@@ -35,7 +35,11 @@ modules
     - delivery: each `(pending)` block -> the task's agent; then the marker line is deleted, the source line stays
         - stored email is inlined verbatim in `<human_instruction>`
         - failed target retried after 10 min
-    - nudges, each at most every 30 min: idle agent with open items; managers told of missing/failed agents
+    - nudges: idle agent with open items is reminded at most every 30 min
+    - agent problems (`missing`, `error`): each is reported once, naming the task file, tool, address, manager, and the harness error
+        - to the task's manager; for `error` also by email to the human on the task's thread
+        - reported keys live in `amh-problem-notices.txt`; a problem that goes away is forgotten, so a recurrence is reported again
+        - nothing is reported while Omnigent is unreachable
 - `guest`: guest mailbox; mail from `AMH_GUEST_ADDRESS` with SPF pass is stored under `guest_hees_manager_mail/`, a dedicated agent (task `guest_hees.md`) is started or reused, and it answers with `amh tell guest`
 - `cli`: argparse tree; `amh help tmux` prints `amh/tmux.md`
 

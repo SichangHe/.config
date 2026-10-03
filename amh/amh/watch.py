@@ -120,25 +120,53 @@ def deliver_pending(config: Config, failed_at: dict[str, float]) -> None:
                 taskfile.save(config, fresh)
 
 
+def failure_text(config: Config, task: Task, problem: str, error: str) -> str:
+    """Say in plain words which task's agent has which problem."""
+    # 🧑 “This message sucks. I don’t know the task file. Has been recurring.”
+    manager = next((other.name for other in taskfile.active_tasks(config) if other.address == task.fields.get("managerat")), task.fields.get("managerat", "none"))
+    what = "has failed and is not working any more" if problem == "error" else "is gone: nothing runs at its address"
+    return f"The agent working on task file {task.name} {what}.\nTool: {task.fields.get('tool', 'unknown')}, running at {task.address}\nIts manager: {manager}\nOpen items on the task: {len(task.items)}\n" + (f"The error its harness reported:\n{error}\n" if error else "")
+
+
 def nudge(config: Config, told_at: dict[tuple[str, str], float]) -> None:
-    """Remind idle agents of their open items and tell managers about agents that are gone or failed."""
+    """Remind idle agents of their open items; report each agent failure once to its manager and, for harness errors, to the human."""
+    notified = config.state_dir / "amh-problem-notices.txt"
+    before = set(notified.read_text(encoding="utf-8").splitlines()) if notified.exists() else set()
+    now: set[str] = set()
     by_manager: dict[str, list[str]] = {}
     for task, problem, evidence in work.problems(config):
-        if "unreachable" in evidence or time.monotonic() - told_at.get((task.name, problem), -REMINDER_S) < REMINDER_S:
+        if "unreachable" in evidence:
+            return
+        if problem == "idle with open items":
+            if time.monotonic() - told_at.get((task.name, problem), -REMINDER_S) >= REMINDER_S:
+                told_at[task.name, problem] = time.monotonic()
+                try:
+                    agents.send(config, task.address, f"You have {len(task.items)} open items. See them with `amh todo list`. Continue until each is finished or cancelled.")
+                except agents.AgentError as error:
+                    log(f"reminder to {task.name} failed: {error}")
             continue
-        told_at[task.name, problem] = time.monotonic()
+        error = " ".join(evidence.partition("last_task_error=")[2].split("; pane_tail:", 1)[0].split()) if problem == "error" else ""
+        key = f"{task.name} {task.address} {problem} {error[:200]}"
+        now.add(key)
+        if key in before:
+            continue
+        log(f"agent problem: {task.name} at {task.address}: {problem} ({evidence})")
+        text = failure_text(config, task, problem, error)
+        by_manager.setdefault(task.fields.get("managerat", ""), []).append(text)
+        # 🧑 "Harness errors should directly email me too"
+        if problem == "error":
+            try:
+                _ = mail.send(config, Path(task.name).stem, "", text + "\nIts manager has been told to handle it.\n", "amh watcher")
+            except Exception as failure:
+                log(f"failure email for {task.name} was not sent: {failure!r}")
+                now.discard(key)
+    for manager, texts in by_manager.items():
         try:
-            if problem == "idle with open items":
-                agents.send(config, task.address, f"You have {len(task.items)} open items. See them with `amh todo list`. Continue until each is finished or cancelled.")
-            else:
-                by_manager.setdefault(task.fields.get("managerat", ""), []).append(f"{task.name} at {task.address}: {problem} ({evidence})")
+            agents.send(config, manager, "Handle these agent problems; only email the human if you cannot:\n\n" + "\n".join(texts))
         except agents.AgentError as error:
-            log(f"reminder to {task.name} failed: {error}")
-    for manager, rows in by_manager.items():
-        try:
-            agents.send(config, manager, "Handle these agent problems; only email the human if you cannot:\n" + "\n".join(rows))
-        except agents.AgentError as error:
-            log(f"problem notice to {manager} failed: {error}; rows: {rows}")
+            log(f"problem notice to {manager} failed: {error}")
+    # A problem that went away is forgotten, so it is reported again if it comes back.
+    taskfile.write(notified, "".join(f"{key}\n" for key in sorted(now)))
 
 
 def run() -> int:
