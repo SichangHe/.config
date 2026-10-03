@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -83,7 +84,15 @@ def tell_manager(args: argparse.Namespace, extra: list[str]) -> int:
     path = allocated.stdout.strip().splitlines()[-1]
     _ = Path(path).write_text(args.text.rstrip() + "\n", encoding="utf-8")
     status = "blocked" if args.blocked else "done" if args.done else "in-progress"
-    return call(helper("omo_report.sh"), "--status", status, "--message-file", path, *extra)
+    sent = subprocess.run([helper("omo_report.sh"), "--status", status, "--message-file", path, *extra], capture_output=True, text=True, check=False)
+    try:
+        receipt = json.loads(sent.stdout.strip().splitlines()[-1])
+    except (IndexError, ValueError):
+        sys.stdout.write(sent.stdout)
+        sys.stderr.write(sent.stderr)
+        return sent.returncode
+    print(f"message sent to your manager at {receipt.get('requested_manager_target')}; do not send it again ({receipt.get('reason')})")
+    return sent.returncode
 
 
 def tell_human(args: argparse.Namespace, extra: list[str]) -> int:
