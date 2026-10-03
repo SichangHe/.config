@@ -97,7 +97,8 @@ def tell_manager(args: argparse.Namespace, extra: list[str]) -> int:
 
 def tell_human(args: argparse.Namespace, extra: list[str]) -> int:
     body = ["--message-file", args.file] if args.file else []
-    return call(str(HELPER_DIR.parent / "helper.sh" / "email_me.py"), "--subject", args.subject, *body, *extra)
+    replaced = [x for message_id in args.replaces for x in ("--supersedes-message-id", message_id)]
+    return call(str(HELPER_DIR.parent / "helper.sh" / "email_me.py"), "--subject", args.subject, *body, *replaced, *extra)
 
 
 def tell_agent(args: argparse.Namespace, extra: list[str]) -> int:
@@ -226,6 +227,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = action(tell, "human", "Email the human.", tell_human, "The body comes from --file, or from standard input when --file is omitted.\nReuse the subject of the thread you are answering.")
     p.add_argument("--subject", required=True, help="plain English, under 60 characters")
     p.add_argument("--file", help="file holding the email body")
+    p.add_argument("--replaces", metavar="MESSAGE_ID", action="append", default=[], help="an earlier unread email of yours that this one replaces; repeat as needed, then run `amh mail trash-replaced`")
     p = action(tell, "agent", "Message an agent you manage.", tell_agent)
     p.add_argument("who", metavar="WHO", help="the agent's task file name, such as `x.md`, or its address")
     p.add_argument("text", metavar="TEXT", nargs="?", help="the message; or use --file")
