@@ -511,18 +511,15 @@ def test_intake_and_delivery() -> None:
         sub.body += "\n(pending)\nplain block line one\nline two\n"
         taskfile.save(CONFIG, sub)
     failed_at: dict[str, float] = {}
-    down.add("omnigent://s2")
-    n = len(to("omnigent://s2"))
+    down.update({"omnigent://s2", "omnigent://s1", MAIN})
+    n, n_mail = len(to("omnigent://s2")), len(sent_mail)
     watch.deliver_pending(CONFIG, failed_at)
-    check("t_sub.md" in failed_at and text_of("t_sub.md").count("(pending)") == 2, "a failed delivery keeps the marker")
+    watch.deliver_pending(CONFIG, {})
+    check("t_sub.md" in failed_at and text_of("t_sub.md").count("(pending)") == 2, "a delivery that reaches nobody keeps the marker")
+    check([m[0] for m in sent_mail[n_mail:]] == ["t_sub", "t_work"] and "not been delivered to anyone" in sent_mail[-1][2] and sent_mail[-1][3] == mail.WATCHER, "the human is told once that nobody got their message", sent_mail[n_mail:])
     down.clear()
     watch.deliver_pending(CONFIG, failed_at)
     check(len(to("omnigent://s2")) == n, "a failed target is not retried at once")
-    states["omnigent://s2"] = ("missing", "gone")
-    failed_at.clear()
-    watch.deliver_pending(CONFIG, failed_at)
-    check(len(to("omnigent://s2")) == n and "t_sub.md" in failed_at, "nothing is sent to a missing agent")
-    states.clear()
     failed_at.clear()
     watch.deliver_pending(CONFIG, failed_at)
     got = to("omnigent://s2")[n:]
@@ -538,6 +535,31 @@ def test_intake_and_delivery() -> None:
     taskfile.save(CONFIG, done)
     watch.deliver_pending(CONFIG, {})
     check("note left in a closed task" in to("omnigent://s1")[-1] and "t_done.md" in to("omnigent://s1")[-1] and "(pending)" not in text_of("t_done.md"), "a block in a task with no agent goes to its manager", to("omnigent://s1")[-1:])
+    awaiting = STATE / watch.AWAITING
+    check(" t_sub.md m-11.txt 0\n" in awaiting.read_text(encoding="utf-8"), "a delivered human email awaits an answer", awaiting.read_text(encoding="utf-8"))
+    with taskfile.locked(CONFIG):
+        sub = task("t_sub.md")
+        sub.body += "\n(pending)\nsecond note\n"
+        taskfile.save(CONFIG, sub)
+    states["omnigent://s2"] = ("missing", "gone")
+    n, n_mail = len(to("omnigent://s2")), len(sent_mail)
+    watch.deliver_pending(CONFIG, {})
+    check(len(to("omnigent://s2")) == n and "second note" in to("omnigent://s1")[-1] and "could not be delivered to the agent of t_sub.md" in to("omnigent://s1")[-1] and "(pending)" not in text_of("t_sub.md"), "a message for an unreachable agent goes to its manager", to("omnigent://s1")[-1:])
+    check(len(sent_mail) == n_mail + 1 and "gave it to its manager" in sent_mail[-1][2], "and the human is told", sent_mail[n_mail:])
+    states.clear()
+    old = time.time() - watch.ANSWER_S - 5
+    awaiting.write_text(f"{old:.0f} t_sub.md m-11.txt 0\n", encoding="utf-8")
+    n, n_mail = len(to("omnigent://s2")), len(sent_mail)
+    watch.chase_answers(CONFIG)
+    check(len(to("omnigent://s2")) == n + 1 and "m-11.txt" in to("omnigent://s2")[-1] and awaiting.read_text(encoding="utf-8").endswith(" 1\n"), "a silent agent is reminded of the human's email", to("omnigent://s2")[n:])
+    awaiting.write_text(f"{old - watch.ANSWER_S:.0f} t_sub.md m-11.txt 1\n", encoding="utf-8")
+    watch.chase_answers(CONFIG)
+    check("has not emailed the human" in to("omnigent://s1")[-1] and len(sent_mail) == n_mail + 1 and "has not emailed you" in sent_mail[-1][2] and awaiting.read_text(encoding="utf-8") == "", "then its manager and the human are told", sent_mail[n_mail:])
+    awaiting.write_text(f"{old:.0f} t_sub.md m-11.txt 0\n", encoding="utf-8")
+    (STATE / mail.SENT_LOG).write_text(f"{time.time():.0f} t_sub\n", encoding="utf-8")
+    n = len(messages)
+    watch.chase_answers(CONFIG)
+    check(len(messages) == n and awaiting.read_text(encoding="utf-8") == "", "an answered email is not chased")
     random.random = lambda: 0.0
     check(watch.delivery_text(CONFIG, ["do it"]) == "do it" + watch.ADD_REMINDER, "the reminder is appended at random")
     random.random = lambda: 0.5

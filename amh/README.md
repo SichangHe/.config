@@ -43,7 +43,12 @@ modules
         - a block in a task with no agent (done or retired) goes to that task's manager, else the main manager
         - an idle Omnigent session whose runner is offline is reachable: the next message brings the runner back
         - stored email is inlined verbatim in `<human_instruction>`
-        - failed target retried after 10 min
+        - 🧑 "if I message an agent and somehow they are not whatever state they are, I should get some sort of response"
+            - delivery to the agent fails -> the block goes to its manager, else the main manager, and the human is emailed once that it was rerouted
+            - nobody reachable -> the human is emailed once; retried after 10 min
+            - delivered human email is recorded in `amh-awaiting.txt`; every email an agent sends is recorded in `amh-sent.txt`
+            - no email from that task within 15 min -> the agent is reminded; within 30 min -> its manager is told and the human is emailed
+            - human notices are sent once per message and outcome, keys in `amh-told-human.txt`
     - nudges: idle agent with open items is reminded at most every 30 min
     - agent problems (`missing`, `error`): each is reported once, naming the task file, tool, address, manager, and the harness error
         - to the task's manager; for `error` also by email to the human on the task's thread

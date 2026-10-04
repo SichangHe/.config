@@ -17,6 +17,8 @@ MAIL_SOURCE = "(record and delegate manager_mail/"
 MAIL_POLL_S = 5
 RECONNECT_S = 30
 RETRY_S = 600
+ANSWER_S = 900
+AWAITING = "amh-awaiting.txt"
 REMINDER_S = 1800
 ACCEPT = "Immediately email the Human to acknowledge acceptance. Record every open item with `amh todo add --from-human`, quoting the human's words:"
 ADD_REMINDER = "\nAdd every still-open request to your open items."
@@ -107,15 +109,34 @@ def deliver_pending(config: Config, failed_at: dict[str, float]) -> None:
                 continue
             try:
                 text = (f"This was left in {task.name}, a task that has no agent; it comes to you as its manager.\n" if orphan else "") + delivery_text(config, block)
+            except OSError as error:
+                failed_at[task.name] = time.monotonic()
+                log(f"a block in {task.name} names a stored email that cannot be read: {error}")
+                break
+            try:
                 state, evidence = agents.status(config, target)
                 if state == "missing":
                     raise agents.AgentError(f"the agent is missing: {evidence}")
                 agents.send(config, target, text)
             except (agents.AgentError, OSError) as error:
-                failed_at[task.name] = time.monotonic()
                 log(f"delivery of a block in {task.name} to {target} failed: {error}")
-                break
-            log(f"delivered {block[0][:80]!r} in {task.name} to {target}")
+                fallback = next((t for t in (task.fields.get("managerat"), config.main_manager) if t in agent_at and t != target), None)
+                try:
+                    if fallback is None:
+                        raise agents.AgentError("no manager to fall back to")
+                    agents.send(config, fallback, f"This could not be delivered to the agent of {task.name} ({error}); it comes to you as its manager. Handle it or get that agent working again.\n" + text)
+                except (agents.AgentError, OSError) as second:
+                    failed_at[task.name] = time.monotonic()
+                    log(f"fallback delivery for {task.name} failed too: {second}")
+                    tell_human_once(config, task, f"undelivered {block[0]}", f"Your message for {task.name} has not been delivered to anyone: its agent could not be reached ({error}), and neither could a manager. The watcher retries every 10 minutes.")
+                    break
+                log(f"delivered {block[0][:80]!r} in {task.name} to the manager at {fallback} instead")
+                tell_human_once(config, task, f"rerouted {block[0]}", f"Your message for {task.name} could not be delivered to its agent ({error}). I gave it to its manager instead, who is to handle it or get that agent working again.")
+            else:
+                log(f"delivered {block[0][:80]!r} in {task.name} to {target}")
+                if block[0].startswith(MAIL_SOURCE) and not orphan:
+                    with (config.state_dir / AWAITING).open("a", encoding="utf-8") as record:
+                        _ = record.write(f"{time.time():.0f} {task.name} {block[0].removeprefix(MAIL_SOURCE).rstrip(')')} 0\n")
             with taskfile.locked(config):
                 fresh = taskfile.load(config, task.name)
                 lines = fresh.body.split("\n")
@@ -127,6 +148,53 @@ def deliver_pending(config: Config, failed_at: dict[str, float]) -> None:
                 del lines[at]
                 fresh.body = "\n".join(lines)
                 taskfile.save(config, fresh)
+
+
+def tell_human_once(config: Config, task: Task, key: str, text: str) -> None:
+    """Email the human about one of their messages, at most once per `key`."""
+    # 🧑 "if I message an agent and somehow they are not whatever state they are, I should get some sort of response"
+    told = config.state_dir / "amh-told-human.txt"
+    key = f"{task.name} {key}"
+    if told.exists() and key in told.read_text(encoding="utf-8").splitlines():
+        return
+    try:
+        _ = mail.send(config, task.tag, "", text + "\n", mail.WATCHER)
+    except Exception as failure:
+        log(f"email to the human about {task.name} was not sent: {failure!r}")
+        return
+    with told.open("a", encoding="utf-8") as record:
+        _ = record.write(key + "\n")
+
+
+def chase_answers(config: Config) -> None:
+    """Make sure each delivered human email gets an answer: remind the agent after `ANSWER_S`, then tell its manager and the human."""
+    # 🧑 "if I message an agent and somehow they are not whatever state they are, I should get some sort of response"
+    path, sent_log = config.state_dir / AWAITING, config.state_dir / mail.SENT_LOG
+    if not path.exists():
+        return
+    sent = [line.split(" ", 1) for line in sent_log.read_text(encoding="utf-8").splitlines()] if sent_log.exists() else []
+    tasks = {task.name: task for task in taskfile.active_tasks(config)}
+    keep = []
+    for row in path.read_text(encoding="utf-8").splitlines():
+        at, name, mail_name, stage = row.split(" ")
+        task = tasks.get(name)
+        if task is None or any(tag == task.tag and float(when) >= float(at) for when, tag in sent):
+            continue
+        if time.time() - float(at) < ANSWER_S * (int(stage) + 1):
+            keep.append(row)
+            continue
+        given = time.strftime("%H:%M", time.localtime(float(at)))
+        try:
+            if stage == "0":
+                agents.send(config, task.address, f"The human's email manager_mail/{mail_name} was given to you at {given} and you have not emailed the human since. Email the human now with `amh tell human`, even if only to say you got it and what you are doing.")
+                keep.append(f"{at} {name} {mail_name} 1")
+                continue
+            agents.send(config, task.fields.get("managerat", ""), f"The agent of {name} was given the human's email manager_mail/{mail_name} at {given}, was reminded, and still has not emailed the human. Find out why and make sure the human gets an answer.")
+        except agents.AgentError as error:
+            log(f"chasing an answer from {name} failed: {error}")
+        if stage == "1":
+            tell_human_once(config, task, f"unanswered {mail_name}", f"The agent of {name} was given your message at {given} and was reminded once, but has not emailed you since. Its manager has been told to find out why.")
+    taskfile.write(path, "".join(f"{row}\n" for row in keep))
 
 
 def failure_text(config: Config, task: Task, problem: str, error: str) -> str:
@@ -205,6 +273,7 @@ def run() -> int:
             if time.monotonic() - last_nudge > 60:
                 last_nudge = time.monotonic()
                 nudge(config, told_at)
+                chase_answers(config)
         except (Exception, SystemExit) as error:
             log(f"task scan failed: {error!r}")
         time.sleep(MAIL_POLL_S)

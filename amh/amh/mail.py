@@ -9,6 +9,7 @@ from __future__ import annotations
 import imaplib
 import re
 import smtplib
+import time
 import subprocess
 from dataclasses import dataclass
 from email import message_from_bytes, policy
@@ -101,6 +102,10 @@ def deliver(config: Config, message: EmailMessage) -> str:
     return str(message["Message-ID"])
 
 
+WATCHER = "amh watcher"
+SENT_LOG = "amh-sent.txt"
+
+
 def send(config: Config, tag: str, subject: str, body: str, sender: str) -> str:
     """Email the human on the tag's thread and return the new Message-ID.
 
@@ -119,7 +124,11 @@ def send(config: Config, tag: str, subject: str, body: str, sender: str) -> str:
     last = thread[-1] if thread else Header("", "", "", "", "")
     message = compose(config, config.get("OMO_HUMAN_EMAIL_ADDRESS"), f"{'Re: ' if thread else ''}[{tag}] {title or (bare(last.subject) if thread else tag)}", body, last.message_id, last.references)
     message["X-AMH-From"] = sender
-    return deliver(config, message)
+    sent = deliver(config, message)
+    if sender != WATCHER:
+        with (config.state_dir / SENT_LOG).open("a", encoding="utf-8") as record:
+            _ = record.write(f"{time.time():.0f} {tag}\n")
+    return sent
 
 
 def unread(config: Config, tag: str, trash_ids: list[str]) -> list[Header]:
