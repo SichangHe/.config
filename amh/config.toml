@@ -1,0 +1,21 @@
+# Settings of amh that are the same on every machine; committed.
+# Machine-local settings (where the work logs are, addresses, passwords) live in env.toml under the state folder.
+
+# The model and effort each tool starts with. `manager_model` and `manager_effort` apply to managers when set.
+[launch.claude]
+model = "claude-opus-5-5"
+effort = "low"
+
+[launch.codex]
+model = "gpt-6.1-sol"
+effort = "low"
+manager_model = "gpt-6-luna"
+manager_effort = "high"
+
+[launch.cursor]
+model = "grok-4.7"
+effort = "high"
+
+[launch.antigravity]
+model = "gemini-3.8-flash-high"
+effort = "high"

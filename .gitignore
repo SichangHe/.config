@@ -197,6 +197,7 @@ google-chrome-for-testing/
 /browser-use-opencode/
 opencode/tui.json
 amh/local.env
+amh/.ruff_cache/
 agent_skills/.system/
 calibre/
 pb-browser-scripts.env
@@ -204,3 +205,4 @@ tokscale/
 
 # Secrets and machine-local paths for amh
 amh/local.env
+amh/.ruff_cache/
