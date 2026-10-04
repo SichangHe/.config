@@ -216,6 +216,11 @@ def test_transport() -> None:
     calls: list[tuple[str, str, object]] = []
     answer: dict[str, object] = {"queued": True}
     agents.api = lambda _config, method, path, body=None: calls.append((method, path, body)) or answer  # type: ignore[assignment]
+    answer.update(status="idle", runner_online=False, host_online=True)
+    check(agents.status(CONFIG, "omnigent://abc")[0] == "ready", "an idle session whose runner is parked is reachable", agents.status(CONFIG, "omnigent://abc"))
+    answer.update(host_online=False)
+    check(agents.status(CONFIG, "omnigent://abc")[0] == "missing", "a session on an offline host is missing")
+    calls.clear()
     agents.send(CONFIG, "omnigent://abc", "one line")
     check(len(calls) == 1 and calls[0][:2] == ("POST", "/v1/sessions/abc/events"), "single-line Omnigent message", calls)
     check(calls[0][2] == {"type": "message", "data": {"role": "user", "content": [{"type": "input_text", "text": "one line"}]}}, "message event", calls[0])
@@ -528,6 +533,11 @@ def test_intake_and_delivery() -> None:
     check(len(to("omnigent://s1")) and "m-13.txt" in to("omnigent://s1")[-1] and "(pending)" not in text_of("t_work.md"), "the manager's block is delivered too")
     watch.deliver_pending(CONFIG, failed_at)
     check(len(to("omnigent://s2")) == n + 2, "a delivered block is not sent again")
+    done = task("t_done.md")
+    done.body += "\n(pending)\nnote left in a closed task\n"
+    taskfile.save(CONFIG, done)
+    watch.deliver_pending(CONFIG, {})
+    check("note left in a closed task" in to("omnigent://s1")[-1] and "t_done.md" in to("omnigent://s1")[-1] and "(pending)" not in text_of("t_done.md"), "a block in a task with no agent goes to its manager", to("omnigent://s1")[-1:])
     random.random = lambda: 0.0
     check(watch.delivery_text(CONFIG, ["do it"]) == "do it" + watch.ADD_REMINDER, "the reminder is appended at random")
     random.random = lambda: 0.5

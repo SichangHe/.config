@@ -91,23 +91,31 @@ def delivery_text(config: Config, block: list[str]) -> str:
 
 
 def deliver_pending(config: Config, failed_at: dict[str, float]) -> None:
-    """Send every pending block to its task's agent, then delete the marker line."""
-    for task in taskfile.active_tasks(config):
-        if task.address == "retired" or time.monotonic() - failed_at.get(task.name, -RETRY_S) < RETRY_S:
+    """Send every pending block to its task's agent, then delete the marker line.
+
+    A block in a task that has no agent (done or retired) goes to that task's manager, else to the main manager.
+    """
+    tasks = taskfile.all_tasks(config)
+    agent_at = {task.address for task in tasks if task.fields["status"] != "done" and task.address != "retired"}
+    for task in tasks:
+        if MARKER not in task.body or time.monotonic() - failed_at.get(task.name, -RETRY_S) < RETRY_S:
             continue
+        orphan = task.address not in agent_at or task.fields["status"] == "done"
+        target = task.address if not orphan else task.fields.get("managerat") if task.fields.get("managerat") in agent_at else config.main_manager
         for _, block in taskfile.pending_blocks(task.body):
             if not block:
                 continue
             try:
-                state, evidence = agents.status(config, task.address)
+                text = (f"This was left in {task.name}, a task that has no agent; it comes to you as its manager.\n" if orphan else "") + delivery_text(config, block)
+                state, evidence = agents.status(config, target)
                 if state == "missing":
                     raise agents.AgentError(f"the agent is missing: {evidence}")
-                agents.send(config, task.address, delivery_text(config, block))
+                agents.send(config, target, text)
             except (agents.AgentError, OSError) as error:
                 failed_at[task.name] = time.monotonic()
-                log(f"delivery to {task.name} at {task.address} failed: {error}")
+                log(f"delivery of a block in {task.name} to {target} failed: {error}")
                 break
-            log(f"delivered {block[0][:80]!r} to {task.name} at {task.address}")
+            log(f"delivered {block[0][:80]!r} in {task.name} to {target}")
             with taskfile.locked(config):
                 fresh = taskfile.load(config, task.name)
                 lines = fresh.body.split("\n")

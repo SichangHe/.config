@@ -130,17 +130,20 @@ def pending_blocks(body: str) -> list[tuple[int, list[str]]]:
     return found
 
 
-def active_tasks(config: Config) -> list[Task]:
-    """Every task file in the root that is not done."""
+def all_tasks(config: Config) -> list[Task]:
+    """Every task file in the root."""
     tasks = []
     for path in sorted(config.root.glob("*.md")):
         try:
-            task = parse(path.name, path.read_text(encoding="utf-8"))
+            tasks.append(parse(path.name, path.read_text(encoding="utf-8")))
         except ValueError:
             continue
-        if task.fields["status"] in ("running", "long_running", "blocked"):
-            tasks.append(task)
     return tasks
+
+
+def active_tasks(config: Config) -> list[Task]:
+    """Every task file in the root that is not done."""
+    return [task for task in all_tasks(config) if task.fields["status"] in ("running", "long_running", "blocked")]
 
 
 def own_task(config: Config, named: str | None) -> Task:

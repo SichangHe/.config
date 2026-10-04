@@ -139,7 +139,9 @@ def status(config: Config, address: str) -> tuple[str, str]:
         evidence = f"session_status={state} harness={session.get('harness')} runner_online={session.get('runner_online')}"
         if state == "failed":
             return "error", f"{evidence} last_task_error={str(session.get('last_task_error'))[:300]}"
-        if session.get("runner_online") is not True:
+        # Omnigent takes an idle session's runner offline and brings it back on the next message, so that session is `ready`.
+        parked = state == "idle" and session.get("host_online") is True
+        if session.get("runner_online") is not True and not parked:
             return "missing", evidence
         return ("running" if state in ("running", "waiting") else "ready" if state == "idle" else "missing"), evidence
     text = pane_text(address)

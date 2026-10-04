@@ -40,6 +40,8 @@ modules
         - route: `[tag]` task; `for manager` at body edge -> its manager; done task -> its manager; else main manager
         - stored file exists = already taken in
     - delivery: each `(pending)` block -> the task's agent; then the marker line is deleted, the source line stays
+        - a block in a task with no agent (done or retired) goes to that task's manager, else the main manager
+        - an idle Omnigent session whose runner is offline is reachable: the next message brings the runner back
         - stored email is inlined verbatim in `<human_instruction>`
         - failed target retried after 10 min
     - nudges: idle agent with open items is reminded at most every 30 min
