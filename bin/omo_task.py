@@ -1,1 +1,1 @@
-../amh/bin/use-amh
+use-amh
