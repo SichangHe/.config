@@ -1,5 +1,5 @@
 return {
-	-- Email through the `himalaya` CLI; reads `~/.config/himalaya/config.toml`.
+	-- Email through the `himalaya` CLI v1 (not v2); reads `~/.config/himalaya/config.toml`.
 	{
 		"pimalaya/himalaya-vim",
 		cmd = "Himalaya",
