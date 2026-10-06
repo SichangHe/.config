@@ -19,3 +19,9 @@ effort = "high"
 [launch.antigravity]
 model = "gemini-3.8-flash-high"
 effort = "high"
+
+# Who compresses the human's mailbox, and when: more than unread_over unread agent emails (hourly), at once at unread_urgent.
+[compress]
+task = "human_mgr.md"
+unread_over = 16
+unread_urgent = 30
