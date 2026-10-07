@@ -25,3 +25,69 @@ effort = "high"
 task = "human_mgr.md"
 unread_over = 16
 unread_urgent = 30
+
+# Reloaded incoming notification routes; specific rules precede the general inbox dispatcher.
+[mail_route.gh_mac_ci]
+from = "notifications@github.com"
+subject = "[SichangHe/mac_stt] Run failed:"
+to = "mac_stt_cx.md"
+priority = 100
+disposition = "trash"
+
+[mail_route.gh_home_ci]
+from = "notifications@github.com"
+subject = "[SichangHe/sichanghe.github.io] Run failed:"
+to = "gh_mdbook_ci.md"
+priority = 100
+disposition = "trash"
+
+[mail_route.gh_binaries_ci]
+from = "notifications@github.com"
+subject = "[SichangHe/mdbook_binaries] Run failed:"
+to = "gh_mdbook_ci.md"
+priority = 100
+disposition = "trash"
+
+[mail_route.gh_katex_ci]
+from = "notifications@github.com"
+subject = "[SichangHe/mdbook_katex_css_download] Run failed:"
+to = "gh_mdbook_ci.md"
+priority = 100
+disposition = "trash"
+
+[mail_route.gh_release_ls]
+from = "notifications@github.com"
+subject = "[SichangHe/mdbook_ls]"
+to = "gh_mdbook_ci.md"
+priority = 50
+
+[mail_route.gh_release_footer]
+from = "notifications@github.com"
+subject = "[SichangHe/mdbook_header_footer]"
+to = "gh_mdbook_ci.md"
+priority = 50
+
+[mail_route.gh_other]
+from = "notifications@github.com"
+to = "human_mgr.md"
+
+[mail_route.gh_tlsrec_ci]
+from = "notifications@github.com"
+subject = "[SichangHe/rustls-tlsrec] Run failed:"
+to = "gh_mdbook_ci.md"
+priority = 100
+disposition = "trash"
+
+[mail_route.gh_ls_ci]
+from = "notifications@github.com"
+subject = "[SichangHe/mdbook_ls] Run failed:"
+to = "gh_mdbook_ci.md"
+priority = 100
+disposition = "trash"
+
+[mail_route.gh_footer_ci]
+from = "notifications@github.com"
+subject = "[SichangHe/mdbook_header_footer] Run failed:"
+to = "gh_mdbook_ci.md"
+priority = 100
+disposition = "trash"
