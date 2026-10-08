@@ -12,4 +12,12 @@ return {
 		event = "VeryLazy",
 		opts = {},
 	},
+
+	-- Zulip conversations; reads the account from `~/.zuliprc`.
+	{
+		"SichangHe/nvim_zulip",
+		cmd = "Zulip",
+		keys = { { "<leader>oz", desc = "Zulip conversations" } },
+		opts = {},
+	},
 }
