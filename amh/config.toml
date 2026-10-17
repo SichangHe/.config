@@ -1,6 +1,18 @@
 # Settings of amh that are the same on every machine; committed.
 # Machine-local settings (where the work logs are, addresses, passwords) live in env.toml under the state folder.
 
+[human]
+transport = "zulip"
+writers = "claude"
+
+[manager]
+tools = "claude"
+
+[zulip]
+env_file = "/home/sichangheagent/.config/amh/zulip.env"
+human_id = 1212497
+stream_id = 642517
+
 # The model and effort each tool starts with. `manager_model` and `manager_effort` apply to managers when set.
 [launch.claude]
 model = "claude-opus-5-5"
@@ -25,6 +37,11 @@ effort = "high"
 task = "human_mgr.md"
 unread_over = 16
 unread_urgent = 30
+
+# Seconds between reminders to an idle agent that has open items; default 1800. Codex workers stop after each small step, so they are reminded sooner.
+[remind]
+codex_idle_s = 300
+claude_idle_s = 14400
 
 # Reloaded incoming notification routes; specific rules precede the general inbox dispatcher.
 [mail_route.gh_mac_ci]
@@ -91,3 +108,25 @@ subject = "[SichangHe/mdbook_header_footer] Run failed:"
 to = "mdbook_ci_fix.md"
 priority = 100
 disposition = "trash"
+
+# 🧑 daily literature review, one paper per day; wakes its worker each morning.
+# Off since Oct 15 by decision of vl_catchup.md: automated Scholar searches stopped after three blocks in four days.
+# [job.vl_lit_review_daily]
+# at = "09:00"
+# tell = "vl_lit_review"
+# text = "Daily wake: run today's normal Scholar search; stop at once on a captcha or block and tell your manager."
+
+# Off since Oct 13 at the request of vl_catchup.md: the wider Scholar pass waits for a code review.
+# [job.vl_lit_review_widened]
+# at = "15:00"
+# tell = "vl_lit_review"
+# text = "Daily wake: if today's 09:00 search finished with no block, run the one small widened Scholar pass and log it in vlpw/widened_pass_log.md; otherwise skip it."
+# 🧑 "GScholar is good for related work search. Make it work as a secondary thing. Solve the CAPTCHA consistently. Notify me to solve it when needed." (approved by the main manager, Oct 17)
+[job.vl_paper_db_import_scholar]
+at = "15:00"
+tell = "vl_paper_db_import"
+text = "Daily wake: run today's one secondary Scholar pass (run-related-work, per .runtime/secondary-scholar-handoff.md in VeruLaw tools/verus_paper_db), then export, commit and push; let the code handle any CAPTCHA."
+# Reports of the workers of these tasks go to a file and do not wake the manager (asked by vl_catchup.md, Oct 13).
+[report_sink]
+vl_lit_dig = "/home/sichangheagent/.local/state/amh/report_sink_vl_lit_dig.md"
+research_study_mgr = "/home/sichangheagent/.local/state/amh/report_sink_research_study_mgr.md"
