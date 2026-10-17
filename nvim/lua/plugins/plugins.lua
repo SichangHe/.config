@@ -14,12 +14,7 @@ return {
 		end,
 	},
 
-	{
-		"CopilotC-Nvim/CopilotChat.nvim",
-		opts = {
-			context = "buffer",
-		},
-	},
+	{ "glacambre/firenvim", build = ":call firenvim#install(0)" },
 
 	{
 		"ibhagwan/fzf-lua",
@@ -34,7 +29,7 @@ return {
 		},
 	},
 
-    -- NOTE: broken after treesitter update
+	-- NOTE: broken after treesitter update
 	--[[ {
 		"SichangHe/robbielyman--latex.nvim",
 		branch = "fix-get-node-range-null",
@@ -107,7 +102,7 @@ return {
 
 	{
 		"ojroques/nvim-osc52",
-        event = "BufReadPost",
+		event = "BufReadPost",
 		opts = function()
 			require("osc52").setup({
 				tmux_passthrough = true,

@@ -1094,16 +1094,16 @@
                                 "type": "basic"
                             },
                             {
-                                "description": "shift then ' -> restart yabai",
+                                "description": "shift then shift then b -> restart yabai",
                                 "conditions": [
                                     {
                                         "type": "variable_if",
-                                        "name": "shift_tapped",
+                                        "name": "shift_tapped2",
                                         "value": 1
                                     }
                                 ],
                                 "from": {
-                                    "key_code": "quote"
+                                    "key_code": "b"
                                 },
                                 "to": [
                                     {
@@ -1612,7 +1612,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space next && EXCLUDE_APPS=eoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space next"
+                                        "shell_command": "/usr/local/bin/yabai -m window --space next && EXCLUDE_APPS=zoom.us,VoiceInk,Pindrop ~/.cargo/bin/yabaiswitch space next"
                                     }
                                 ],
                                 "type": "basic"
@@ -1694,7 +1694,7 @@
                                 "type": "basic"
                             },
                             {
-                                "description": "shift then shift then y -> yabai mirror on Y-axis",
+                                "description": "shift then shift then c -> yabai mirror on Y-axis",
                                 "conditions": [
                                     {
                                         "type": "variable_if",
@@ -1703,7 +1703,7 @@
                                     }
                                 ],
                                 "from": {
-                                    "key_code": "y"
+                                    "key_code": "c"
                                 },
                                 "to": [
                                     {
