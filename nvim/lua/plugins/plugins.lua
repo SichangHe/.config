@@ -2,9 +2,16 @@ U = require("util")
 
 return {
 	{
-		"teamtype/teamtype-nvim",
-		commit = "711eade8cd5d7d3efa9ec25ea0a390a954030222",
+		-- Plugin lives in nvim-plugin/ of the fork's live-multi-editor branch.
+		"SichangHe/teamtype--teamtype",
+		branch = "live-multi-editor",
+		name = "teamtype-nvim",
 		lazy = false,
+		config = function(plugin)
+			local dir = plugin.dir .. "/nvim-plugin"
+			vim.opt.rtp:append(dir)
+			vim.cmd.source(dir .. "/plugin/teamtype.lua")
+		end,
 	},
 
 	{
