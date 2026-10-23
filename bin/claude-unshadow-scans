@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+# (authored by agents unless marked 🧑)
+# Claude Code PreToolUse hook for Bash. Claude Code's shell snapshot defines
+# `grep` and `find` as functions running its own embedded ugrep and bfs, which
+# bypass the scan-guard wrappers in ~/.config/bin (on Oct 22 one such grep ran
+# 6 h 50 min over /hdd1). This drops those functions before each command, so
+# `grep` and `find` resolve on PATH to scan-guard. See ~/.config/scan-guard.md.
+import json
+import sys
+
+PREFIX = "unset -f grep find rg 2>/dev/null; "
+
+event = json.load(sys.stdin)
+tool_input = dict(event.get("tool_input") or {})
+command = tool_input.get("command")
+if not isinstance(command, str) or command.startswith(PREFIX):
+    sys.exit(0)
+tool_input["command"] = PREFIX + command
+print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": tool_input}}))
