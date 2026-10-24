@@ -109,6 +109,12 @@ to = "mdbook_ci_fix.md"
 priority = 100
 disposition = "trash"
 
+# 🧑 "There is a \"This Week in Rust\" email in my mailbox, which should have been automatically dispatched to pb agents to be converted to pb news as applicable and marked read"
+[mail_route.pb_twir]
+from = "twir@rust-lang.org"
+to = "stock_news_watch.md"
+disposition = "read"
+
 # 🧑 daily literature review, one paper per day; wakes its worker each morning.
 # Off since Oct 15 by decision of vl_catchup.md: automated Scholar searches stopped after three blocks in four days.
 # [job.vl_lit_review_daily]
