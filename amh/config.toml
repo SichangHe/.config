@@ -3,7 +3,7 @@
 
 [human]
 transport = "zulip"
-writers = "claude"
+writers = "claude,codex:astra"
 
 [manager]
 tools = "claude"
