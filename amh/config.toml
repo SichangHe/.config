@@ -19,9 +19,9 @@ model = "claude-opus-5-5"
 effort = "low"
 
 [launch.codex]
-model = "gpt-6.1-sol"
+model = "gpt-6-astra"
 effort = "low"
-manager_model = "gpt-6-luna"
+manager_model = "gpt-6-astra"
 manager_effort = "high"
 
 [launch.cursor]
