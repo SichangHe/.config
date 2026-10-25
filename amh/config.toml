@@ -6,7 +6,8 @@ transport = "zulip"
 writers = "claude,codex:astra"
 
 [manager]
-tools = "claude"
+# 🧑 "Allow Astra to message me, and shift management work from Claude to it" (Oct 24)
+tools = "claude,codex"
 
 [zulip]
 env_file = "/home/sichangheagent/.config/amh/zulip.env"
