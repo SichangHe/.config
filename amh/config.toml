@@ -6,7 +6,7 @@ transport = "zulip"
 writers = "claude,codex:astra"
 
 [human.writer_sessions]
-"357c9c02d5494e71b04a7834597f6a7c" = "terra_trial:codex:gpt-6.1-terra"
+"3242dca4d7374d1ea54bdffa87420157" = "terra_trial:codex:gpt-6.1-terra"
 1f23b2cf88054b02bbe4a9fcd70a0731 = "dw_paper_prune:codex:gpt-6-sol"
 
 [manager]
@@ -52,28 +52,28 @@ claude_idle_s = 14400
 [mail_route.gh_mac_ci]
 from = "notifications@github.com"
 subject = "[SichangHe/mac_stt] Run failed:"
-to = "mac_stt_cx.md"
+to = "mac_stt_push.md"
 priority = 100
 disposition = "trash"
 
 [mail_route.gh_home_ci]
 from = "notifications@github.com"
 subject = "[SichangHe/sichanghe.github.io] Run failed:"
-to = "mdbook_ci_fix.md"
+to = "gh_mdbook_ci.md"
 priority = 100
 disposition = "trash"
 
 [mail_route.gh_binaries_ci]
 from = "notifications@github.com"
 subject = "[SichangHe/mdbook_binaries] Run failed:"
-to = "mdbook_ci_fix.md"
+to = "gh_mdbook_ci.md"
 priority = 100
 disposition = "trash"
 
 [mail_route.gh_katex_ci]
 from = "notifications@github.com"
 subject = "[SichangHe/mdbook_katex_css_download] Run failed:"
-to = "mdbook_ci_fix.md"
+to = "gh_mdbook_ci.md"
 priority = 100
 disposition = "trash"
 
@@ -89,9 +89,11 @@ subject = "[SichangHe/mdbook_header_footer]"
 to = "gh_mdbook_ci.md"
 priority = 50
 
+# 🧑 "All GH emails should be handled by agents"; unowned GitHub mail goes to mail_route_infra.md (asked by human_mgr.md)
 [mail_route.gh_other]
 from = "notifications@github.com"
-to = "human_mgr.md"
+to = "mail_route_infra.md"
+disposition = "trash"
 
 [mail_route.gh_tlsrec_ci]
 from = "notifications@github.com"
@@ -103,14 +105,14 @@ disposition = "trash"
 [mail_route.gh_ls_ci]
 from = "notifications@github.com"
 subject = "[SichangHe/mdbook_ls] Run failed:"
-to = "mdbook_ci_fix.md"
+to = "gh_mdbook_ci.md"
 priority = 100
 disposition = "trash"
 
 [mail_route.gh_footer_ci]
 from = "notifications@github.com"
 subject = "[SichangHe/mdbook_header_footer] Run failed:"
-to = "mdbook_ci_fix.md"
+to = "gh_mdbook_ci.md"
 priority = 100
 disposition = "trash"
 
@@ -133,11 +135,10 @@ disposition = "read"
 # tell = "vl_lit_review"
 # text = "Daily wake: if today's 09:00 search finished with no block, run the one small widened Scholar pass and log it in vlpw/widened_pass_log.md; otherwise skip it."
 # 🧑 "GScholar is good for related work search. Make it work as a secondary thing. Solve the CAPTCHA consistently. Notify me to solve it when needed." (approved by the main manager, Oct 17)
-# Off at the human's request: quota conservative mode; worker already paused.
-# [job.vl_paper_db_import_scholar]
-# at = "15:00"
-# tell = "vl_paper_db_import"
-# text = "Daily wake: run today's one secondary Scholar pass (run-related-work, per .runtime/secondary-scholar-handoff.md in VeruLaw tools/verus_paper_db), then export, commit and push; let the code handle any CAPTCHA."
+[job.vl_paper_db_import_scholar]
+at = "15:00"
+tell = "vl_paper_db_import"
+text = "Daily wake: run today's one secondary Scholar pass (run-related-work, per .runtime/secondary-scholar-handoff.md in VeruLaw tools/verus_paper_db), then export, commit and push; let the code handle any CAPTCHA."
 # Reports of the workers of these tasks go to a file and do not wake the manager (asked by vl_catchup.md, Oct 13).
 [report_sink]
 vl_lit_dig = "/home/sichangheagent/.local/state/amh/report_sink_vl_lit_dig.md"
@@ -147,3 +148,11 @@ research_study_mgr = "/home/sichangheagent/.local/state/amh/report_sink_research
 [zulip.report_streams]
 "pb news" = "pb-news"
 "pb urgent" = "pb-urgent"
+
+# 🧑 "All GH emails should be handled by agents"; owner named by human_mgr.md on 2026-11-09
+[mail_route.gh_teamtypev]
+from = "notifications@github.com"
+subject = "[SichangHe/TeamTypeV]"
+to = "tt_steer.md"
+priority = 100
+disposition = "trash"
