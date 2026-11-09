@@ -6,7 +6,7 @@ transport = "zulip"
 writers = "claude,codex:astra"
 
 [human.writer_sessions]
-"3242dca4d7374d1ea54bdffa87420157" = "terra_trial:codex:gpt-6.1-terra"
+"df2dd6a3b10f4faba80b4d43e59cf398" = "terra_trial:codex:gpt-6.1-terra"
 1f23b2cf88054b02bbe4a9fcd70a0731 = "dw_paper_prune:codex:gpt-6-sol"
 
 [manager]
