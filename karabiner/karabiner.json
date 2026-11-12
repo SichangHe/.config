@@ -1284,6 +1284,25 @@
                                 "type": "basic"
                             },
                             {
+                                "description": "shift then shift then space -> toggle speak-to-text",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "spacebar"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "bash \"$HOME/.config/helper.sh/mac-stt-wrap.sh\""
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
                                 "description": "shift then shift then q -> yabai move window to space 1",
                                 "conditions": [
                                     {
