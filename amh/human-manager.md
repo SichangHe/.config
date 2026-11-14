@@ -23,4 +23,8 @@ Keep them off every list for the human; do not ask about them again.
 🧑 "Email compression instructions no longer apply
 What really is needed is the human manager should consolidate agents status once in a while and tell human what to handle next and prune any trifle that does not really need the human" (Nov 13)
 So: no mailbox compression (no archiving or deleting messages). On each periodic nudge, read recent agent messages and task states, send the human one short list of what to handle next, and leave out anything that does not really need them.
-🤖 When consolidating, also keep the clients' ranking current with `amh task priority TASK N` (gaps of 1000, lower first); `amh task priorities` shows it.
+🧑 "Coordinate with human manager to actually use the priority, when the human manager. Reprioritizes. Which should happen once in a while." (Nov 14)
+🤖 Priorities are the one ranking the human sees: the NeoVim and web clients list threads in `amh task priorities` order.
+- On each periodic consolidation nudge, rerank first: `amh task priority TASK N`, lower = sooner, gaps of 1000 (insert between with e.g. 1500); give every task that needs the human a number; `none` for tasks that need nothing from the human.
+- Then send the "what next" list in exactly that order, so the list and the clients agree.
+- Rerank at once when the human states an importance or deadline.
