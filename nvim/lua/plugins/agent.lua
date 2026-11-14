@@ -20,4 +20,13 @@ return {
 		keys = { { "<leader>oz", desc = "Zulip conversations" } },
 		opts = {},
 	},
+
+	-- Inline images in buffers, scaled to the window width.
+	{
+		"SichangHe/nvim_inline_image",
+		dir = "/ssd1/sichangheagent/nvim_inline_image",
+		cmd = "InlineImage",
+		keys = { { "<leader>uP", function() require("inline_image").toggle() end, desc = "Toggle inline images" } },
+		opts = {},
+	},
 }
