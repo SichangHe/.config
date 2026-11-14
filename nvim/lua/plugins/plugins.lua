@@ -8,9 +8,14 @@ return {
 	},
 	{
 		-- 🧑 "I tried VSCode on client and Nvim on server, and it does not work."
-		dir = vim.fn.stdpath("data") .. "/site/pack/plugins/start/teamtypev",
+		-- Plugin lives in nvim-plugin/ of the public TeamTypeV repo.
+		"SichangHe/TeamTypeV",
 		name = "teamtypev",
-		cond = vim.uv.fs_stat(vim.fn.stdpath("data") .. "/site/pack/plugins/start/teamtypev") ~= nil,
+		config = function(plugin)
+			local dir = plugin.dir .. "/nvim-plugin"
+			vim.opt.rtp:append(dir)
+			vim.cmd.source(dir .. "/plugin/teamtypev.lua")
+		end,
 		lazy = false,
 	},
 
