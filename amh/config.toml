@@ -50,73 +50,7 @@ codex_idle_s = 300
 claude_idle_s = 14400
 
 # Reloaded incoming notification routes; specific rules precede the general inbox dispatcher.
-[mail_route.gh_mac_ci]
-from = "notifications@github.com"
-subject = "[SichangHe/mac_stt] Run failed:"
-to = "mac_stt_push.md"
-priority = 100
-disposition = "trash"
-
-[mail_route.gh_home_ci]
-from = "notifications@github.com"
-subject = "[SichangHe/sichanghe.github.io] Run failed:"
-to = "gh_mdbook_ci.md"
-priority = 100
-disposition = "trash"
-
-[mail_route.gh_binaries_ci]
-from = "notifications@github.com"
-subject = "[SichangHe/mdbook_binaries] Run failed:"
-to = "gh_mdbook_ci.md"
-priority = 100
-disposition = "trash"
-
-[mail_route.gh_katex_ci]
-from = "notifications@github.com"
-subject = "[SichangHe/mdbook_katex_css_download] Run failed:"
-to = "gh_mdbook_ci.md"
-priority = 100
-disposition = "trash"
-
-[mail_route.gh_release_ls]
-from = "notifications@github.com"
-subject = "[SichangHe/mdbook_ls]"
-to = "gh_mdbook_ci.md"
-priority = 50
-
-[mail_route.gh_release_footer]
-from = "notifications@github.com"
-subject = "[SichangHe/mdbook_header_footer]"
-to = "gh_mdbook_ci.md"
-priority = 50
-
 # 🧑 "All GH emails should be handled by agents"; unowned GitHub mail goes to mail_route_infra.md (asked by human_mgr.md)
-[mail_route.gh_other]
-from = "notifications@github.com"
-to = "mail_route_infra.md"
-disposition = "trash"
-
-[mail_route.gh_tlsrec_ci]
-from = "notifications@github.com"
-subject = "[SichangHe/rustls-tlsrec] Run failed:"
-to = "gh_mdbook_ci.md"
-priority = 100
-disposition = "trash"
-
-[mail_route.gh_ls_ci]
-from = "notifications@github.com"
-subject = "[SichangHe/mdbook_ls] Run failed:"
-to = "gh_mdbook_ci.md"
-priority = 100
-disposition = "trash"
-
-[mail_route.gh_footer_ci]
-from = "notifications@github.com"
-subject = "[SichangHe/mdbook_header_footer] Run failed:"
-to = "gh_mdbook_ci.md"
-priority = 100
-disposition = "trash"
-
 # 🧑 "There is a \"This Week in Rust\" email in my mailbox, which should have been automatically dispatched to pb agents to be converted to pb news as applicable and marked read"
 [mail_route.pb_twir]
 from = "twir@rust-lang.org"
@@ -129,6 +63,12 @@ disposition = "read"
 # at = "09:00"
 # tell = "vl_lit_review"
 # text = "Daily wake: run today's normal Scholar search; stop at once on a captcha or block and tell your manager."
+
+# 🧑 "I don't see CAPTCHA now. Don't be a pussy. I'll know when we get banned. We are not visiting hundreds of pages per minute" (2026-11-12); requested by vl_catchup.md.
+[job.vl_paper_db_import_daily]
+at = "09:00"
+tell = "vl_paper_db_import"
+text = "Run today's 09:00 daily Google Scholar search per docs/literature-collection.md, then report."
 
 # Off since Oct 13 at the request of vl_catchup.md: the wider Scholar pass waits for a code review.
 # [job.vl_lit_review_widened]
@@ -151,9 +91,72 @@ research_study_mgr = "/home/sichangheagent/.local/state/amh/report_sink_research
 "pb urgent" = "pb-urgent"
 
 # 🧑 "All GH emails should be handled by agents"; owner named by human_mgr.md on 2026-11-09
-[mail_route.gh_teamtypev]
+
+# 🧑 "All GH emails should be handled by agents"; 🧑 "LGTM" (2026-11-09) to one GitHub route to a persistent router.
+# owners: personal_browser_setup/docs/github_mail_routing.md
+[mail_route.github]
 from = "notifications@github.com"
-subject = "[SichangHe/TeamTypeV]"
-to = "tt_steer.md"
+to = "mail_route_infra.md"
 priority = 100
+disposition = "trash"
+
+
+[mail_route.github_noreply]
+from = "noreply@github.com"
+to = "mail_route_infra.md"
+priority = 100
+disposition = "trash"
+
+# 🤖 main_manager_agy.md: TeamTypeV CI failures go straight to tt_steer.md instead of being relayed by human_mgr.md
+[mail_route.teamtypev_ci_failed]
+mailbox = "human"
+from = "notifications@github.com"
+subject = "[SichangHe/TeamTypeV] Run failed:"
+to = "tt_steer.md"
+priority = 200
+disposition = "trash"
+
+# 🤖 requested via main manager (omnigent://883e02f23b99408da8bc392842b89042): CI failures go straight to their owners
+[mail_route.mac_stt_ci_failed]
+mailbox = "human"
+from = "notifications@github.com"
+subject = "[SichangHe/mac_stt] Run failed:"
+to = "eng_tasks_mgr.md"
+priority = 200
+disposition = "trash"
+
+[mail_route.mdbook_katex_ci_failed]
+mailbox = "human"
+from = "notifications@github.com"
+subject = "[SichangHe/mdbook_katex_css_download] Run failed:"
+to = "gh_mdbook_ci.md"
+priority = 200
+disposition = "trash"
+
+[mail_route.site_ci_failed]
+mailbox = "human"
+from = "notifications@github.com"
+subject = "[SichangHe/sichanghe.github.io] Run failed:"
+to = "gh_mdbook_ci.md"
+priority = 200
+disposition = "trash"
+
+# 🤖 requested by mail_route_infra.md, confirmed by vl_catchup.md: SichangHe/*--* Verus experiment forks' CI failures go to vl_catchup.md.
+# Routes match substrings only; "--" in a github.com subject marks those fork names, e.g. "[SichangHe/hyperium--mime] Run failed: ...".
+[mail_route.vl_forks_ci_failed]
+mailbox = "human"
+from = "notifications@github.com"
+subject = "--"
+body = "Repository: SichangHe/"
+to = "vl_catchup.md"
+priority = 150
+disposition = "trash"
+
+# 🤖 requested by main manager: SichangHe/teamtype--teamtype is tt_steer.md's, not VL's; outranks vl_forks_ci_failed.
+[mail_route.teamtype_fork_github]
+mailbox = "human"
+from = "notifications@github.com"
+subject = "[SichangHe/teamtype--teamtype]"
+to = "tt_steer.md"
+priority = 180
 disposition = "trash"

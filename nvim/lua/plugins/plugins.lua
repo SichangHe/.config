@@ -2,16 +2,15 @@ U = require("util")
 
 return {
 	{
-		-- Plugin lives in nvim-plugin/ of the fork's live-multi-editor branch.
-		"SichangHe/teamtype--teamtype",
-		branch = "live-multi-editor",
+		"teamtype/teamtype-nvim",
 		name = "teamtype-nvim",
 		lazy = false,
-		config = function(plugin)
-			local dir = plugin.dir .. "/nvim-plugin"
-			vim.opt.rtp:append(dir)
-			vim.cmd.source(dir .. "/plugin/teamtype.lua")
-		end,
+	},
+	{
+		-- 🧑 "I tried VSCode on client and Nvim on server, and it does not work."
+		dir = vim.fn.stdpath("data") .. "/site/pack/plugins/start/teamtypev",
+		name = "teamtypev",
+		lazy = false,
 	},
 
 	{ "glacambre/firenvim", build = ":call firenvim#install(0)" },

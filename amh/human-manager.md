@@ -11,3 +11,16 @@ Keep blocked tasks off the list until unblocked.
 - 🧑 The auto autonomous research for web agents can proceed largely without me, but you should prioritize it when critical input is requested from me.
 - 🧑 Blocked tasks: don't bother me until unblocked
 - Before compiling a list for the human, use amh mail recent with a time range the agent judges sufficient and read relevant files. 🧑 "Maybe don't fix the hours to twenty-four, and let agents decide themselves."
+
+🧑 "Go back to your normal job of providing lists of threads for human to handle"
+🧑 "At least the UI team should be prioritized because the deadline is next month?" (MobiSys paper, due about Dec 2026)
+🧑 "I'm not by the computer. Route me to only things that I can do without it, and also. First, route me to things that are easy"
+Applies while the human is away from the computer; mark which items need it.
+🧑 "I think we should prioritize having good working environments. So the Zulib UI should be probably having higher priorities." (Zulip UI)
+🧑 "I don't remember why we need them. Ignore" (Nov 13, about the 9 quota-paused VL tasks: vl_filter_pvsfix, vl_wm_liverev, vl_wm_afp, vl_sat_hs, vl_sat_raymond, vl_sat_filter, vl_sat_weakmem, vl_anvil_steer, vl_study_audit)
+Keep them off every list for the human; do not ask about them again.
+
+🧑 "Email compression instructions no longer apply
+What really is needed is the human manager should consolidate agents status once in a while and tell human what to handle next and prune any trifle that does not really need the human" (Nov 13)
+So: no mailbox compression (no archiving or deleting messages). On each periodic nudge, read recent agent messages and task states, send the human one short list of what to handle next, and leave out anything that does not really need them.
+🤖 When consolidating, also keep the clients' ranking current with `amh task priority TASK N` (gaps of 1000, lower first); `amh task priorities` shows it.
