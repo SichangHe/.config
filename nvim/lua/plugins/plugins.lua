@@ -10,6 +10,7 @@ return {
 		-- 🧑 "I tried VSCode on client and Nvim on server, and it does not work."
 		dir = vim.fn.stdpath("data") .. "/site/pack/plugins/start/teamtypev",
 		name = "teamtypev",
+		cond = vim.uv.fs_stat(vim.fn.stdpath("data") .. "/site/pack/plugins/start/teamtypev") ~= nil,
 		lazy = false,
 	},
 
