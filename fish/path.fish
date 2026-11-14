@@ -1,5 +1,6 @@
 set -gx PATH ~/.config/bin $PATH
 set -gx PATH /usr/local/bin $PATH
+set -gx PATH /opt/homebrew/bin /opt/homebrew/sbin $PATH # native arm64 Homebrew first
 set -gx PATH ~/.local/bin $PATH
 set -gx PATH ~/.cargo/bin $PATH
 set -gx PATH ~/.pub-cache/bin $PATH
