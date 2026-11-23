@@ -3,7 +3,8 @@
 
 [human]
 transport = "zulip"
-writers = "claude,codex:astra"
+# 🧑 "Make Codex use Sol low by default now and allow directly messaging the human"
+writers = "claude,codex"
 
 # 🧑 (via the manager) "Pin the allowlist by task file, not session, so restarts don't break it"
 [human.writer_tasks]
@@ -15,9 +16,13 @@ dw_paper_prune = "codex:gpt-6-sol"
 tools = "claude,codex"
 
 [zulip]
-env_file = "/home/sichangheagent/.config/amh/zulip.env"
+# each machine names its own bot login in its env.toml (`zulip.env_file`); docs: agent_managers docs/machine-setup.md
+# the main machine takes the human's messages, email, and jobs
+main_bot = "a-bot@shagent.zulipchat.com"
 human_id = 1212497
 stream_id = 642517
+# 🧑 "I said I don't want it to go though SSH, but use Zulip": agents on other machines post here, topic = receiving task
+agent_stream = "amh-agents"
 
 # The model and effort each tool starts with. `manager_model` and `manager_effort` apply to managers when set.
 [launch.claude]
@@ -25,10 +30,11 @@ model = "claude-opus-5-5"
 effort = "low"
 
 [launch.codex]
-model = "gpt-6-astra"
+# 🧑 "Make Codex use Sol low by default now and allow directly messaging the human"
+model = "gpt-6.1-sol"
 effort = "low"
-manager_model = "gpt-6-astra"
-manager_effort = "high"
+manager_model = "gpt-6.1-sol"
+manager_effort = "low"
 
 [launch.cursor]
 model = "grok-4.7"
@@ -89,15 +95,38 @@ research_study_mgr = "/home/sichangheagent/.local/state/amh/report_sink_research
 [zulip.report_streams]
 "pb news" = "pb-news"
 "pb urgent" = "pb-urgent"
+"pb digest" = "pb-digest"
+
+# 🧑 "I want those threads to be monitored so that I can just directly reply back in those threads. To do certain tasks." (pb-digest, to pb_support)
+# Report topics not listed here go to stock_news_watch.md.
+[zulip.report_owners]
+"pb digest" = "inbox_triage.md"
 
 # 🧑 "All GH emails should be handled by agents"; owner named by human_mgr.md on 2026-11-09
 
 # 🧑 "All GH emails should be handled by agents"; 🧑 "LGTM" (2026-11-09) to one GitHub route to a persistent router.
 # owners: personal_browser_setup/docs/github_mail_routing.md
+# 🧑 "Things I should answer should remain." (2026-11-19, via main manager): people's GitHub mail stays in the inbox; bot/CI mail is still trashed.
 [mail_route.github]
 from = "notifications@github.com"
 to = "mail_route_infra.md"
 priority = 100
+disposition = "keep"
+
+# 🤖 bot comments (e.g. "github-actions[bot] left a comment") need no answer
+[mail_route.github_bot_comment]
+from = "notifications@github.com"
+body = "[bot] left a comment"
+to = "mail_route_infra.md"
+priority = 120
+disposition = "trash"
+
+# 🤖 CI failures of repos without a per-repo route
+[mail_route.github_ci_unowned]
+from = "notifications@github.com"
+subject = "Run failed:"
+to = "mail_route_infra.md"
+priority = 110
 disposition = "trash"
 
 
@@ -105,7 +134,7 @@ disposition = "trash"
 from = "noreply@github.com"
 to = "mail_route_infra.md"
 priority = 100
-disposition = "trash"
+disposition = "keep"
 
 # 🤖 main_manager_agy.md: TeamTypeV CI failures go straight to tt_steer.md instead of being relayed by human_mgr.md
 [mail_route.teamtypev_ci_failed]
@@ -122,6 +151,15 @@ mailbox = "human"
 from = "notifications@github.com"
 subject = "[SichangHe/mac_stt] Run failed:"
 to = "eng_tasks_mgr.md"
+priority = 200
+disposition = "trash"
+
+# 🤖 requested by mail_route_infra.md, retargeted by the main manager: terminal_viz.md owns SichangHe/mac_tts now (mac_tts.md is closed)
+[mail_route.mac_tts_ci_failed]
+mailbox = "human"
+from = "notifications@github.com"
+subject = "[SichangHe/mac_tts] Run failed:"
+to = "terminal_viz.md"
 priority = 200
 disposition = "trash"
 
@@ -159,4 +197,13 @@ from = "notifications@github.com"
 subject = "[SichangHe/teamtype--teamtype]"
 to = "tt_steer.md"
 priority = 180
+disposition = "keep"
+
+# 🤖 its CI failures are still trashed; people's mail on it stays (🧑 "Things I should answer should remain.")
+[mail_route.teamtype_fork_ci_failed]
+mailbox = "human"
+from = "notifications@github.com"
+subject = "[SichangHe/teamtype--teamtype] Run failed:"
+to = "tt_steer.md"
+priority = 190
 disposition = "trash"
