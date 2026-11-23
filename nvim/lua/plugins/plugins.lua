@@ -2,13 +2,6 @@ U = require("util")
 
 return {
 	{
-		"teamtype/teamtype-nvim",
-		name = "teamtype-nvim",
-		lazy = false,
-	},
-	{
-		-- 🧑 "I tried VSCode on client and Nvim on server, and it does not work."
-		-- Plugin lives in nvim-plugin/ of the public TeamTypeV repo.
 		"SichangHe/TeamTypeV",
 		name = "teamtypev",
 		config = function(plugin)

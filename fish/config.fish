@@ -106,3 +106,6 @@ fish_add_path /Users/sichanghe/.opencode/bin
 if test -e "$HOME/.swiftly/env.fish"
     source "$HOME/.swiftly/env.fish"
 end
+
+# Point $SHELL at fish on PATH (fixes stale SHELL inherited from login session)
+set -gx SHELL (command -s fish)
