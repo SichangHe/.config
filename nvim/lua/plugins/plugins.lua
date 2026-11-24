@@ -99,7 +99,12 @@ return {
 		-- Old: Help article: <https://www.ejmastnak.com/tutorials/vim-latex/pdf-reader/#refocus-nvim-macos-inverse>.
 		-- Sioyek documentation: <https://sioyek-documentation.readthedocs.io/en/latest/usage.html#synctex>.
 		init = function()
-			U.g.vimtex_view_method = "sioyek"
+			-- General viewer, not "sioyek": that one launches `sioyek` and drops the column in inverse search.
+			U.g.vimtex_view_method = "general"
+			U.g.vimtex_view_general_viewer = "shioyek"
+			U.g.vimtex_view_general_options = '--inverse-search "'
+				.. vim.v.progpath
+				.. [[ --headless -c \"VimtexInverseSearch %2:%3 '%1'\"" --forward-search-file @tex --forward-search-line @line @pdf]]
 		end,
 		-- VimTeX cannot be lazy-loaded: <https://github.com/lervag/vimtex?tab=readme-ov-file#installation>
 		lazy = false,
