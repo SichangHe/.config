@@ -95,7 +95,9 @@ return {
 			-- General viewer, not "sioyek": that one launches `sioyek` and drops the column in inverse search.
 			U.g.vimtex_view_method = "general"
 			U.g.vimtex_view_general_viewer = "shioyek"
-			U.g.vimtex_view_general_options = '--inverse-search "'
+			-- --reuse-instance: send to the running shioyek (prefs set should_launch_new_instance), which
+			-- shows the PDF in the window already open on it.
+			U.g.vimtex_view_general_options = '--reuse-instance --inverse-search "'
 				.. vim.v.progpath
 				.. [[ --headless -c \"VimtexInverseSearch %2:%3 '%1'\"" --forward-search-file @tex --forward-search-line @line @pdf]]
 		end,
